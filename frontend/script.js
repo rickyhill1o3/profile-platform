@@ -492,15 +492,24 @@ async function loadUsers() {
                 let actionHtml = `No action`;
 
                 if (u.role !== "admin") {
-                    actionHtml = u.revoked
-                        ? `<button onclick="restoreUser('${u.id}')">Restore</button>`
-                        : `<button onclick="revokeUser('${u.id}')">Revoke</button>`;
+                    if (u.revoked) {
+                        actionHtml = `
+              <button onclick="restoreUser('${u.id}')">Restore</button>
+              <button onclick="deleteUser('${u.id}', '${u.email}')">Delete</button>
+            `;
+                    } else {
+                        actionHtml = `
+              <button onclick="revokeUser('${u.id}')">Revoke</button>
+              <button onclick="deleteUser('${u.id}', '${u.email}')">Delete</button>
+            `;
+                    }
                 }
 
                 html += `
           <tr>
             <td>${u.email}</td>
             <td>${u.role}</td>
+            <td>${u.profile_count || 0}</td>
             <td>${userStatusBadge(u)}</td>
             <td>${new Date(u.created_at).toLocaleString()}</td>
             <td>${actionHtml}</td>
@@ -554,6 +563,29 @@ async function restoreUser(id) {
     }
 
     loadUsers();
+}
+
+async function deleteUser(id, email) {
+    const confirmed = confirm(
+        `Delete user ${email}? This will also delete all profiles created by this user.`
+    );
+
+    if (!confirmed) return;
+
+    const res = await fetch(API + "/admin/users/" + id, {
+        method: "DELETE",
+        headers: { Authorization: "Bearer " + token() },
+    });
+
+    const data = await res.json();
+
+    if (data.error) {
+        alert(data.error);
+        return;
+    }
+
+    loadUsers();
+    updateExportCount();
 }
 
 /* ================= EXPORT ================= */

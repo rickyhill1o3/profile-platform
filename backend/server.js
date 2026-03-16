@@ -485,16 +485,35 @@ app.delete("/profiles/:id", auth, async (req, res) => {
 /* ================= ADMIN USERS ================= */
 
 app.get("/admin/users", auth, admin, async (req, res) => {
-    const { data, error } = await supabase
+    const { data: users, error: usersError } = await supabase
         .from("users")
         .select("*")
         .order("created_at", { ascending: false });
 
-    if (error) {
-        return res.status(500).json({ error: error.message });
+    if (usersError) {
+        return res.status(500).json({ error: usersError.message });
     }
 
-    res.json(data);
+    const { data: profiles, error: profilesError } = await supabase
+        .from("profiles")
+        .select("id, user_id");
+
+    if (profilesError) {
+        return res.status(500).json({ error: profilesError.message });
+    }
+
+    const profileCounts = {};
+
+    (profiles || []).forEach((profile) => {
+        profileCounts[profile.user_id] = (profileCounts[profile.user_id] || 0) + 1;
+    });
+
+    const usersWithCounts = (users || []).map((user) => ({
+        ...user,
+        profile_count: profileCounts[user.id] || 0,
+    }));
+
+    res.json(usersWithCounts);
 });
 
 app.patch("/admin/users/:id/revoke", auth, admin, async (req, res) => {
@@ -546,6 +565,75 @@ app.patch("/admin/users/:id/restore", auth, admin, async (req, res) => {
 
     if (error) {
         return res.status(500).json({ error: error.message });
+    }
+
+    res.json({ success: true });
+});
+
+app.delete("/admin/users/:id", auth, admin, async (req, res) => {
+    const targetId = req.params.id;
+
+    const { data: targetUser, error: targetUserError } = await supabase
+        .from("users")
+        .select("*")
+        .eq("id", targetId)
+        .single();
+
+    if (targetUserError || !targetUser) {
+        return res.status(404).json({ error: "User not found" });
+    }
+
+    if (targetUser.role === "admin") {
+        return res.status(400).json({ error: "Admin account cannot be deleted" });
+    }
+
+    const { data: userProfiles, error: profilesError } = await supabase
+        .from("profiles")
+        .select("id")
+        .eq("user_id", targetId);
+
+    if (profilesError) {
+        return res.status(500).json({ error: profilesError.message });
+    }
+
+    const profileIds = (userProfiles || []).map((p) => p.id);
+
+    if (profileIds.length > 0) {
+        const { error: addressesError } = await supabase
+            .from("addresses")
+            .delete()
+            .in("profile_id", profileIds);
+
+        if (addressesError) {
+            return res.status(500).json({ error: addressesError.message });
+        }
+
+        const { error: paymentsError } = await supabase
+            .from("payments")
+            .delete()
+            .in("profile_id", profileIds);
+
+        if (paymentsError) {
+            return res.status(500).json({ error: paymentsError.message });
+        }
+
+        const { error: deleteProfilesError } = await supabase
+            .from("profiles")
+            .delete()
+            .in("id", profileIds);
+
+        if (deleteProfilesError) {
+            return res.status(500).json({ error: deleteProfilesError.message });
+        }
+    }
+
+    const { error: deleteUserError } = await supabase
+        .from("users")
+        .delete()
+        .eq("id", targetId);
+
+    if (deleteUserError) {
+        return res.status(500).json({ error: deleteUserError.message });
     }
 
     res.json({ success: true });
