@@ -1,0 +1,29 @@
+# Node
+node_modules/
+npm-debug.log
+
+# Environment secrets
+.env
+.env.local
+.env.production
+
+# Logs
+logs/
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# VS Code
+.vscode/
+
+# Build outputs
+dist/
+build/
+
+# Supabase local
+.supabase/
+
+# Mac
+.DS_Store"backend/node_modules/" 

@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <title>View Profile</title>
+</head>
+
+<body>
+
+    <h2>Profile Details</h2>
+
+    <pre id="profileData"></pre>
+
+    <br>
+    <a href="dashboard.html">Back to Dashboard</a>
+
+    <script src="script.js"></script>
+
+    <script>
+
+        async function loadProfile() {
+
+            const token = localStorage.getItem("token")
+
+            const id = localStorage.getItem("view_profile")
+
+            const res = await fetch("http://localhost:3000/profiles", {
+                headers: {
+                    Authorization: "Bearer " + token
+                }
+            })
+
+            const profiles = await res.json()
+
+            const profile = profiles.find(p => p.id === id)
+
+            document.getElementById("profileData").textContent =
+                JSON.stringify(profile, null, 2)
+
+        }
+
+        loadProfile()
+
+    </script>
+
+</body>
+
+</html>

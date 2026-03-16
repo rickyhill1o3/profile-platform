@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <title>Dashboard</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+
+<body>
+
+    <div class="header modern-header">
+        <div>
+            <h1>Profiles</h1>
+            <p class="subtle-text">Create and manage your saved profiles</p>
+        </div>
+
+        <div class="header-actions">
+            <button onclick="createProfile()">New Profile</button>
+            <button onclick="goToChangePassword()">Change Password</button>
+            <button id="adminPanelButton" style="display:none;" onclick="openAdminPanel()">Admin Panel</button>
+            <button onclick="logout()">Logout</button>
+        </div>
+    </div>
+
+    <div class="container" id="dashboard"></div>
+
+    <script src="script.js"></script>
+</body>
+
+</html>
