@@ -1,284 +1,289 @@
-const API = "http://localhost:3000"
+const API =
+    window.location.hostname === "localhost" ||
+        window.location.hostname === "127.0.0.1"
+        ? "http://localhost:3000"
+        : "https://profile-platform.onrender.com";
 
 function token() {
-    return localStorage.getItem("token")
+    return localStorage.getItem("token");
 }
 
 function currentUser() {
     try {
-        return JSON.parse(localStorage.getItem("user") || "null")
+        return JSON.parse(localStorage.getItem("user") || "null");
     } catch {
-        return null
+        return null;
     }
 }
 
 function logout() {
-    localStorage.clear()
-    location = "login.html"
+    localStorage.clear();
+    location = "login.html";
 }
 
 function openAdminPanel() {
-    location = "admin.html"
+    location = "admin.html";
 }
 
 function openUserDashboard() {
-    location = "dashboard.html"
+    location = "dashboard.html";
 }
 
 function goToChangePassword() {
-    location = "change-password.html"
+    location = "change-password.html";
 }
 
 function scrollToSection(id) {
-    const el = document.getElementById(id)
+    const el = document.getElementById(id);
     if (el) {
-        el.scrollIntoView({ behavior: "smooth", block: "start" })
+        el.scrollIntoView({ behavior: "smooth", block: "start" });
     }
 }
 
 function maskCard(cardNumber, fallbackLast4 = "") {
-    const digits = (cardNumber || "").replace(/\D/g, "")
-    const last4 = digits.slice(-4) || fallbackLast4 || "----"
-    return "**** **** **** " + last4
+    const digits = (cardNumber || "").replace(/\D/g, "");
+    const last4 = digits.slice(-4) || fallbackLast4 || "----";
+    return "**** **** **** " + last4;
 }
 
 /* ================= LOGIN ================= */
 
-const loginForm = document.getElementById("loginForm")
+const loginForm = document.getElementById("loginForm");
 
 if (loginForm) {
     loginForm.onsubmit = async (e) => {
-        e.preventDefault()
+        e.preventDefault();
 
-        const res = await fetch(API + "/auth/login", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-                email: email.value,
-                password: password.value
-            })
-        })
+        try {
+            const res = await fetch(API + "/auth/login", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    email: email.value,
+                    password: password.value,
+                }),
+            });
 
-        const data = await res.json()
+            const data = await res.json();
 
-        if (data.error) {
-            error.innerText = data.error
-            return
+            if (data.error) {
+                error.innerText = data.error;
+                return;
+            }
+
+            localStorage.token = data.token;
+            localStorage.user = JSON.stringify(data.user);
+
+            if (data.user.role === "admin") {
+                location = "admin.html";
+            } else {
+                location = "dashboard.html";
+            }
+        } catch {
+            error.innerText = "Could not connect to the server.";
         }
-
-        localStorage.token = data.token
-        localStorage.user = JSON.stringify(data.user)
-
-        if (data.user.role === "admin") {
-            location = "admin.html"
-        } else {
-            location = "dashboard.html"
-        }
-    }
+    };
 }
 
 /* ================= SIGNUP ================= */
 
-const signupForm = document.getElementById("signupForm")
+const signupForm = document.getElementById("signupForm");
 
 if (signupForm) {
     signupForm.onsubmit = async (e) => {
-        e.preventDefault()
+        e.preventDefault();
 
-        const res = await fetch(API + "/auth/signup", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-                email: email.value,
-                password: password.value,
-                invite_code: invite.value
-            })
-        })
+        try {
+            const res = await fetch(API + "/auth/signup", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    email: email.value,
+                    password: password.value,
+                    invite_code: invite.value,
+                }),
+            });
 
-        const data = await res.json()
+            const data = await res.json();
 
-        if (data.error) {
-            error.innerText = data.error
-            return
+            if (data.error) {
+                error.innerText = data.error;
+                return;
+            }
+
+            alert("Account created");
+            location = "login.html";
+        } catch {
+            error.innerText = "Could not connect to the server.";
         }
-
-        alert("Account created")
-        location = "login.html"
-    }
+    };
 }
 
 /* ================= DASHBOARD ================= */
 
 async function loadProfiles() {
-    if (!document.getElementById("dashboard")) return
+    if (!document.getElementById("dashboard")) return;
 
-    const user = currentUser()
-    const adminButton = document.getElementById("adminPanelButton")
+    const user = currentUser();
+    const adminButton = document.getElementById("adminPanelButton");
 
     if (user?.role === "admin" && adminButton) {
-        adminButton.style.display = "inline-block"
+        adminButton.style.display = "inline-block";
     }
 
-    const res = await fetch(API + "/profiles", {
-        headers: {
-            Authorization: "Bearer " + token()
+    try {
+        const res = await fetch(API + "/profiles", {
+            headers: { Authorization: "Bearer " + token() },
+        });
+
+        const profiles = await res.json();
+
+        if (!Array.isArray(profiles)) {
+            dashboard.innerHTML = `
+        <p>${profiles.error || "Could not load profiles."}</p>
+      `;
+            return;
         }
-    })
 
-    const profiles = await res.json()
+        const groups = {
+            general: [],
+            walmart: [],
+            target: [],
+            amazon: [],
+        };
 
-    if (!Array.isArray(profiles)) {
-        dashboard.innerHTML = `<p>${profiles.error || "Could not load profiles."}</p>`
-        return
-    }
+        profiles.forEach((p) => {
+            if (groups[p.account_type]) {
+                groups[p.account_type].push(p);
+            }
+        });
 
-    const groups = {
-        general: [],
-        walmart: [],
-        target: [],
-        amazon: []
-    }
+        let html = "";
 
-    profiles.forEach((p) => {
-        if (groups[p.account_type]) {
-            groups[p.account_type].push(p)
-        }
-    })
-
-    let html = ""
-
-    Object.keys(groups).forEach((g) => {
-        html += `
-      <div class="profile-group">
-        <h2>${g.toUpperCase()} PROFILES</h2>
-        <div class="profile-grid">
-    `
-
-        groups[g].forEach((p) => {
-            const address = p.addresses?.[0] || {}
-            const payment = p.payments?.[0] || {}
-            const profileEmail = address.email || ""
-            const profilePhone = address.phone || ""
-            const state = address.state || ""
-            const city = address.city || ""
-            const maskedCard = maskCard(payment.card_number, payment.card_last4)
-
+        Object.keys(groups).forEach((g) => {
             html += `
-        <div class="profile-card">
-          <h3>${p.profile_name}</h3>
-          <p><strong>Email:</strong> ${profileEmail}</p>
-          <p><strong>Phone:</strong> ${profilePhone}</p>
-          <p><strong>Card:</strong> ${maskedCard}</p>
-          <p><strong>Group:</strong> ${p.account_type}</p>
-          <p><strong>Location:</strong> ${city}${city && state ? ", " : ""}${state}</p>
+        <section style="margin-bottom: 2rem;">
+          <h2>${g.toUpperCase()} PROFILES</h2>
+      `;
 
-          <div class="card-actions">
+            groups[g].forEach((p) => {
+                const address = p.addresses?.[0] || {};
+                const payment = p.payments?.[0] || {};
+                const profileEmail = address.email || "";
+                const profilePhone = address.phone || "";
+                const state = address.state || "";
+                const city = address.city || "";
+                const maskedCard = maskCard(payment.card_number, payment.card_last4);
+
+                html += `
+          <div style="margin-bottom: 1rem; padding: 1rem; border: 1px solid #ddd; border-radius: 8px;">
+            <h3>${p.profile_name}</h3>
+            <p><strong>Email:</strong> ${profileEmail}</p>
+            <p><strong>Phone:</strong> ${profilePhone}</p>
+            <p><strong>Card:</strong> ${maskedCard}</p>
+            <p><strong>Group:</strong> ${p.account_type}</p>
+            <p><strong>Location:</strong> ${city}${city && state ? ", " : ""}${state}</p>
             <button onclick="edit('${p.id}')">Edit</button>
             <button onclick="del('${p.id}')">Delete</button>
           </div>
-        </div>
-      `
-        })
+        `;
+            });
 
-        if (groups[g].length === 0) {
-            html += `
-        <div class="profile-card">
-          <h3>No profiles yet</h3>
-          <p>Create your first ${g} profile.</p>
-          <div class="card-actions">
+            if (groups[g].length === 0) {
+                html += `
+          <div style="margin-bottom: 1rem;">
+            <h3>No profiles yet</h3>
+            <p>Create your first ${g} profile.</p>
             <button onclick="createProfile()">Create Profile</button>
           </div>
-        </div>
-      `
-        }
+        `;
+            }
 
-        html += `
-        </div>
-      </div>
-    `
-    })
+            html += `</section>`;
+        });
 
-    dashboard.innerHTML = html
+        dashboard.innerHTML = html;
+    } catch {
+        dashboard.innerHTML = `<p>Could not connect to the server.</p>`;
+    }
 }
 
-loadProfiles()
+loadProfiles();
 
 function createProfile() {
-    localStorage.removeItem("edit")
-    location = "profile.html"
+    localStorage.removeItem("edit");
+    location = "profile.html";
 }
 
 function edit(id) {
-    localStorage.edit = id
-    location = "profile.html"
+    localStorage.edit = id;
+    location = "profile.html";
 }
 
 async function del(id) {
     await fetch(API + "/profiles/" + id, {
         method: "DELETE",
-        headers: { Authorization: "Bearer " + token() }
-    })
+        headers: { Authorization: "Bearer " + token() },
+    });
 
-    location.reload()
+    location.reload();
 }
 
 /* ================= PROFILE FORM ================= */
 
 async function loadProfileEditor() {
-    const form = document.getElementById("profileForm")
-    if (!form) return
+    const form = document.getElementById("profileForm");
+    if (!form) return;
 
-    const user = currentUser()
-    const adminButton = document.getElementById("adminPanelButtonProfile")
+    const user = currentUser();
+    const adminButton = document.getElementById("adminPanelButtonProfile");
 
     if (user?.role === "admin" && adminButton) {
-        adminButton.style.display = "inline-block"
+        adminButton.style.display = "inline-block";
     }
 
-    const editId = localStorage.getItem("edit")
-    if (!editId) return
+    const editId = localStorage.getItem("edit");
+    if (!editId) return;
 
     const res = await fetch(API + "/profiles", {
-        headers: {
-            Authorization: "Bearer " + token()
-        }
-    })
+        headers: { Authorization: "Bearer " + token() },
+    });
 
-    const profiles = await res.json()
-    if (!Array.isArray(profiles)) return
+    const profiles = await res.json();
+    if (!Array.isArray(profiles)) return;
 
-    const profile = profiles.find((p) => p.id === editId)
-    if (!profile) return
+    const profile = profiles.find((p) => p.id === editId);
+    if (!profile) return;
 
-    const addr = profile.addresses?.[0] || {}
-    const pay = profile.payments?.[0] || {}
+    const addr = profile.addresses?.[0] || {};
+    const pay = profile.payments?.[0] || {};
 
-    profile_name.value = profile.profile_name || ""
-    account_type.value = profile.account_type || "general"
-    first_name.value = addr.first_name || ""
-    last_name.value = addr.last_name || ""
-    email.value = addr.email || ""
-    phone.value = addr.phone || ""
-    address1.value = addr.address1 || ""
-    city.value = addr.city || ""
-    state.value = addr.state || ""
-    zip.value = addr.zip || ""
-    card.value = pay.card_number || ""
-    exp_month.value = pay.exp_month || ""
-    exp_year.value = pay.exp_year || ""
-    cvv.value = pay.cvv || ""
+    profile_name.value = profile.profile_name || "";
+    account_type.value = profile.account_type || "general";
+    first_name.value = addr.first_name || "";
+    last_name.value = addr.last_name || "";
+    email.value = addr.email || "";
+    phone.value = addr.phone || "";
+    address1.value = addr.address1 || "";
+    city.value = addr.city || "";
+    state.value = addr.state || "";
+    zip.value = addr.zip || "";
+    card.value = pay.card_number || "";
+    exp_month.value = pay.exp_month || "";
+    exp_year.value = pay.exp_year || "";
+    cvv.value = pay.cvv || "";
 }
 
-loadProfileEditor()
+loadProfileEditor();
 
-const profileForm = document.getElementById("profileForm")
+const profileForm = document.getElementById("profileForm");
 
 if (profileForm) {
     profileForm.onsubmit = async (e) => {
-        e.preventDefault()
+        e.preventDefault();
 
-        const message = document.getElementById("profileMessage")
-        const editId = localStorage.getItem("edit")
+        const message = document.getElementById("profileMessage");
+        const editId = localStorage.getItem("edit");
 
         const payload = {
             profile_name: profile_name.value.trim(),
@@ -294,211 +299,202 @@ if (profileForm) {
             card: card.value.trim(),
             exp_month: exp_month.value.trim(),
             exp_year: exp_year.value.trim(),
-            cvv: cvv.value.trim()
-        }
+            cvv: cvv.value.trim(),
+        };
 
-        const url = editId ? API + "/profiles/" + editId : API + "/profiles"
-        const method = editId ? "PUT" : "POST"
+        const url = editId ? API + "/profiles/" + editId : API + "/profiles";
+        const method = editId ? "PUT" : "POST";
 
         const res = await fetch(url, {
             method,
             headers: {
                 "Content-Type": "application/json",
-                Authorization: "Bearer " + token()
+                Authorization: "Bearer " + token(),
             },
-            body: JSON.stringify(payload)
-        })
+            body: JSON.stringify(payload),
+        });
 
-        const data = await res.json()
+        const data = await res.json();
 
         if (data.error) {
-            message.textContent = data.error
-            message.style.color = "#b91c1c"
-            return
+            message.textContent = data.error;
+            message.style.color = "#b91c1c";
+            return;
         }
 
-        localStorage.removeItem("edit")
-        location = "dashboard.html"
-    }
+        localStorage.removeItem("edit");
+        location = "dashboard.html";
+    };
 }
 
 /* ================= ADMIN INVITES ================= */
 
 function inviteStatusBadge(invite) {
-    if (invite.canceled) {
-        return `<span class="status-badge status-canceled">Canceled</span>`
-    }
-
-    if (invite.used) {
-        return `<span class="status-badge status-used">Used</span>`
-    }
-
-    return `<span class="status-badge status-active">Active</span>`
+    if (invite.canceled) return "Canceled";
+    if (invite.used) return "Used";
+    return "Active";
 }
 
 function userStatusBadge(user) {
-    if (user.revoked) {
-        return `<span class="status-badge status-canceled">Revoked</span>`
-    }
-
-    return `<span class="status-badge status-active">Active</span>`
+    if (user.revoked) return "Revoked";
+    return "Active";
 }
 
 async function createInvite() {
-    const resultBox = document.getElementById("inviteResult")
-    if (!resultBox) return
+    const resultBox = document.getElementById("inviteResult");
+    if (!resultBox) return;
 
     const res = await fetch(API + "/admin/create-invite", {
         method: "POST",
-        headers: { Authorization: "Bearer " + token() }
-    })
+        headers: { Authorization: "Bearer " + token() },
+    });
 
-    const data = await res.json()
+    const data = await res.json();
 
     if (data.error) {
-        resultBox.innerText = data.error
-        return
+        resultBox.innerText = data.error;
+        return;
     }
 
-    resultBox.innerText = "Latest Invite Code: " + data.code
-    loadInvites()
+    resultBox.innerText = "Latest Invite Code: " + data.code;
+    loadInvites();
 }
 
 async function loadInvites() {
-    const tableBody = document.getElementById("inviteTableBody")
-    if (!tableBody) return
+    const tableBody = document.getElementById("inviteTableBody");
+    if (!tableBody) return;
 
     const res = await fetch(API + "/admin/invites", {
-        headers: { Authorization: "Bearer " + token() }
-    })
+        headers: { Authorization: "Bearer " + token() },
+    });
 
-    const invites = await res.json()
+    const invites = await res.json();
 
     if (!Array.isArray(invites)) {
-        tableBody.innerHTML = `<tr><td colspan="5">Could not load invite codes.</td></tr>`
-        return
+        tableBody.innerHTML = `Could not load invite codes.`;
+        return;
     }
 
-    const activeCount = invites.filter(i => !i.used && !i.canceled).length
-    const usedCount = invites.filter(i => i.used).length
-    const canceledCount = invites.filter(i => i.canceled).length
+    const activeCount = invites.filter((i) => !i.used && !i.canceled).length;
+    const usedCount = invites.filter((i) => i.used).length;
+    const canceledCount = invites.filter((i) => i.canceled).length;
 
-    const activeCounter = document.getElementById("activeInviteCount")
-    const usedCounter = document.getElementById("usedInviteCount")
-    const canceledCounter = document.getElementById("canceledInviteCount")
+    const activeCounter = document.getElementById("activeInviteCount");
+    const usedCounter = document.getElementById("usedInviteCount");
+    const canceledCounter = document.getElementById("canceledInviteCount");
 
-    if (activeCounter) activeCounter.textContent = activeCount
-    if (usedCounter) usedCounter.textContent = usedCount
-    if (canceledCounter) canceledCounter.textContent = canceledCount
+    if (activeCounter) activeCounter.textContent = activeCount;
+    if (usedCounter) usedCounter.textContent = usedCount;
+    if (canceledCounter) canceledCounter.textContent = canceledCount;
 
     if (invites.length === 0) {
-        tableBody.innerHTML = `<tr><td colspan="5">No invite codes yet.</td></tr>`
-        return
+        tableBody.innerHTML = `No invite codes yet.`;
+        return;
     }
 
-    let html = ""
+    let html = "";
 
     invites.forEach((invite) => {
-        const usedBy = invite.used_by || "-"
-        const createdAt = new Date(invite.created_at).toLocaleString()
+        const usedBy = invite.used_by || "-";
+        const createdAt = new Date(invite.created_at).toLocaleString();
 
-        let actionHtml = ""
-
+        let actionHtml = "";
         if (!invite.used && !invite.canceled) {
             actionHtml = `
         <button onclick="cancelInvite('${invite.id}')">Cancel</button>
-        <button class="danger-btn" onclick="deleteInvite('${invite.id}')">Delete</button>
-      `
+        <button onclick="deleteInvite('${invite.id}')">Delete</button>
+      `;
         } else {
             actionHtml = `
-        <button class="danger-btn" onclick="deleteInvite('${invite.id}')">Delete</button>
-      `
+        <button onclick="deleteInvite('${invite.id}')">Delete</button>
+      `;
         }
 
         html += `
       <tr>
-        <td><strong>${invite.code}</strong></td>
+        <td>${invite.code}</td>
         <td>${inviteStatusBadge(invite)}</td>
         <td>${createdAt}</td>
         <td>${usedBy}</td>
         <td>${actionHtml}</td>
       </tr>
-    `
-    })
+    `;
+    });
 
-    tableBody.innerHTML = html
+    tableBody.innerHTML = html;
 }
 
 async function cancelInvite(id) {
     const res = await fetch(API + "/admin/invites/" + id + "/cancel", {
         method: "PATCH",
-        headers: { Authorization: "Bearer " + token() }
-    })
+        headers: { Authorization: "Bearer " + token() },
+    });
 
-    const data = await res.json()
+    const data = await res.json();
 
     if (data.error) {
-        alert(data.error)
-        return
+        alert(data.error);
+        return;
     }
 
-    loadInvites()
+    loadInvites();
 }
 
 async function deleteInvite(id) {
     const res = await fetch(API + "/admin/invites/" + id, {
         method: "DELETE",
-        headers: { Authorization: "Bearer " + token() }
-    })
+        headers: { Authorization: "Bearer " + token() },
+    });
 
-    const data = await res.json()
+    const data = await res.json();
 
     if (data.error) {
-        alert(data.error)
-        return
+        alert(data.error);
+        return;
     }
 
-    loadInvites()
+    loadInvites();
 }
 
 /* ================= ADMIN USERS ================= */
 
 async function loadUsers() {
-    const tableBody = document.getElementById("usersTableBody")
-    const exportUserFilter = document.getElementById("exportUserFilter")
-    if (!tableBody && !exportUserFilter) return
+    const tableBody = document.getElementById("usersTableBody");
+    const exportUserFilter = document.getElementById("exportUserFilter");
+
+    if (!tableBody && !exportUserFilter) return;
 
     const res = await fetch(API + "/admin/users", {
-        headers: { Authorization: "Bearer " + token() }
-    })
+        headers: { Authorization: "Bearer " + token() },
+    });
 
-    const usersData = await res.json()
+    const usersData = await res.json();
 
     if (!Array.isArray(usersData)) {
         if (tableBody) {
-            tableBody.innerHTML = `<tr><td colspan="5">Could not load users.</td></tr>`
+            tableBody.innerHTML = `Could not load users.`;
         }
-        return
+        return;
     }
 
-    const userCounter = document.getElementById("userCount")
+    const userCounter = document.getElementById("userCount");
     if (userCounter) {
-        userCounter.textContent = usersData.length
+        userCounter.textContent = usersData.length;
     }
 
     if (tableBody) {
         if (usersData.length === 0) {
-            tableBody.innerHTML = `<tr><td colspan="5">No users found.</td></tr>`
+            tableBody.innerHTML = `No users found.`;
         } else {
-            let html = ""
+            let html = "";
 
             usersData.forEach((u) => {
-                let actionHtml = `<span class="subtle-text">No action</span>`
+                let actionHtml = `No action`;
 
                 if (u.role !== "admin") {
                     actionHtml = u.revoked
                         ? `<button onclick="restoreUser('${u.id}')">Restore</button>`
-                        : `<button class="danger-btn" onclick="revokeUser('${u.id}')">Revoke</button>`
+                        : `<button onclick="revokeUser('${u.id}')">Revoke</button>`;
                 }
 
                 html += `
@@ -509,189 +505,193 @@ async function loadUsers() {
             <td>${new Date(u.created_at).toLocaleString()}</td>
             <td>${actionHtml}</td>
           </tr>
-        `
-            })
+        `;
+            });
 
-            tableBody.innerHTML = html
+            tableBody.innerHTML = html;
         }
     }
 
     if (exportUserFilter) {
-        let options = `<option value="">All Users</option>`
+        let options = `<option value="">All Users</option>`;
+
         usersData.forEach((u) => {
-            options += `<option value="${u.id}">${u.email}</option>`
-        })
-        exportUserFilter.innerHTML = options
-        updateExportCount()
+            options += `<option value="${u.id}">${u.email}</option>`;
+        });
+
+        exportUserFilter.innerHTML = options;
+        updateExportCount();
     }
 }
 
 async function revokeUser(id) {
     const res = await fetch(API + "/admin/users/" + id + "/revoke", {
         method: "PATCH",
-        headers: { Authorization: "Bearer " + token() }
-    })
+        headers: { Authorization: "Bearer " + token() },
+    });
 
-    const data = await res.json()
+    const data = await res.json();
 
     if (data.error) {
-        alert(data.error)
-        return
+        alert(data.error);
+        return;
     }
 
-    loadUsers()
+    loadUsers();
 }
 
 async function restoreUser(id) {
     const res = await fetch(API + "/admin/users/" + id + "/restore", {
         method: "PATCH",
-        headers: { Authorization: "Bearer " + token() }
-    })
+        headers: { Authorization: "Bearer " + token() },
+    });
 
-    const data = await res.json()
+    const data = await res.json();
 
     if (data.error) {
-        alert(data.error)
-        return
+        alert(data.error);
+        return;
     }
 
-    loadUsers()
+    loadUsers();
 }
 
 /* ================= EXPORT ================= */
 
 async function updateExportCount() {
-    const banner = document.getElementById("exportCountBanner")
-    const userFilter = document.getElementById("exportUserFilter")
-    const groupFilter = document.getElementById("exportGroupFilter")
+    const banner = document.getElementById("exportCountBanner");
+    const userFilter = document.getElementById("exportUserFilter");
+    const groupFilter = document.getElementById("exportGroupFilter");
 
-    if (!banner) return
+    if (!banner) return;
 
-    const params = new URLSearchParams()
-
-    const selectedUserId = userFilter?.value || ""
-    const selectedGroup = groupFilter?.value || ""
+    const params = new URLSearchParams();
+    const selectedUserId = userFilter?.value || "";
+    const selectedGroup = groupFilter?.value || "";
 
     if (selectedUserId) {
-        params.append("user_id", selectedUserId)
+        params.append("user_id", selectedUserId);
     }
 
     if (selectedGroup) {
-        params.append("group", selectedGroup)
+        params.append("group", selectedGroup);
     }
 
-    const url = API + "/admin/export/count" + (params.toString() ? "?" + params.toString() : "")
+    const url =
+        API + "/admin/export/count" + (params.toString() ? "?" + params.toString() : "");
 
     const res = await fetch(url, {
-        headers: { Authorization: "Bearer " + token() }
-    })
+        headers: { Authorization: "Bearer " + token() },
+    });
 
-    const data = await res.json()
+    const data = await res.json();
 
     if (data.error) {
-        banner.textContent = data.error
-        return
+        banner.textContent = data.error;
+        return;
     }
 
-    const count = data.count || 0
+    const count = data.count || 0;
     const selectedUserText =
         userFilter && userFilter.selectedIndex > 0
             ? userFilter.options[userFilter.selectedIndex].text
-            : "all users"
-    const selectedGroupText = selectedGroup || "all groups"
+            : "all users";
+    const selectedGroupText = selectedGroup || "all groups";
 
     if (count === 1) {
-        banner.textContent = `1 profile will be exported for ${selectedUserText} in ${selectedGroupText}.`
+        banner.textContent = `1 profile will be exported for ${selectedUserText} in ${selectedGroupText}.`;
     } else {
-        banner.textContent = `${count} profiles will be exported for ${selectedUserText} in ${selectedGroupText}.`
+        banner.textContent = `${count} profiles will be exported for ${selectedUserText} in ${selectedGroupText}.`;
     }
 }
 
 function clearExportFilters() {
-    const userFilter = document.getElementById("exportUserFilter")
-    const groupFilter = document.getElementById("exportGroupFilter")
+    const userFilter = document.getElementById("exportUserFilter");
+    const groupFilter = document.getElementById("exportGroupFilter");
 
-    if (userFilter) userFilter.value = ""
-    if (groupFilter) groupFilter.value = ""
+    if (userFilter) userFilter.value = "";
+    if (groupFilter) groupFilter.value = "";
 
-    updateExportCount()
+    updateExportCount();
 }
 
 async function exportProfiles() {
-    const userFilter = document.getElementById("exportUserFilter")
-    const groupFilter = document.getElementById("exportGroupFilter")
-    const banner = document.getElementById("exportCountBanner")
+    const userFilter = document.getElementById("exportUserFilter");
+    const groupFilter = document.getElementById("exportGroupFilter");
+    const banner = document.getElementById("exportCountBanner");
 
-    const params = new URLSearchParams()
+    const params = new URLSearchParams();
 
     if (userFilter && userFilter.value) {
-        params.append("user_id", userFilter.value)
+        params.append("user_id", userFilter.value);
     }
 
     if (groupFilter && groupFilter.value) {
-        params.append("group", groupFilter.value)
+        params.append("group", groupFilter.value);
     }
 
-    const countUrl = API + "/admin/export/count" + (params.toString() ? "?" + params.toString() : "")
-    const countRes = await fetch(countUrl, {
-        headers: { Authorization: "Bearer " + token() }
-    })
+    const countUrl =
+        API + "/admin/export/count" + (params.toString() ? "?" + params.toString() : "");
 
-    const countData = await countRes.json()
+    const countRes = await fetch(countUrl, {
+        headers: { Authorization: "Bearer " + token() },
+    });
+
+    const countData = await countRes.json();
 
     if (countData.error) {
-        if (banner) banner.textContent = countData.error
-        return
+        if (banner) banner.textContent = countData.error;
+        return;
     }
 
     if (!countData.count) {
-        if (banner) banner.textContent = "0 profiles will be exported."
-        alert("No profiles match the selected filters.")
-        return
+        if (banner) banner.textContent = "0 profiles will be exported.";
+        alert("No profiles match the selected filters.");
+        return;
     }
 
-    const url = API + "/admin/export/aycd" + (params.toString() ? "?" + params.toString() : "")
+    const url =
+        API + "/admin/export/aycd" + (params.toString() ? "?" + params.toString() : "");
 
     const res = await fetch(url, {
-        headers: { Authorization: "Bearer " + token() }
-    })
+        headers: { Authorization: "Bearer " + token() },
+    });
 
-    const blob = await res.blob()
-    const downloadUrl = window.URL.createObjectURL(blob)
-    const a = document.createElement("a")
+    const blob = await res.blob();
+    const downloadUrl = window.URL.createObjectURL(blob);
+    const a = document.createElement("a");
 
-    a.href = downloadUrl
-    a.download = "profiles.json"
-    a.click()
+    a.href = downloadUrl;
+    a.download = "profiles.json";
+    a.click();
 }
 
 /* ================= CHANGE PASSWORD ================= */
 
-const passwordForm = document.getElementById("passwordForm")
+const passwordForm = document.getElementById("passwordForm");
 
 if (passwordForm) {
     passwordForm.onsubmit = async (e) => {
-        e.preventDefault()
+        e.preventDefault();
 
         const res = await fetch(API + "/change-password", {
             method: "POST",
             headers: {
                 "Content-Type": "application/json",
-                Authorization: "Bearer " + token()
+                Authorization: "Bearer " + token(),
             },
             body: JSON.stringify({
                 oldPassword: oldPassword.value,
-                newPassword: newPassword.value
-            })
-        })
+                newPassword: newPassword.value,
+            }),
+        });
 
-        const data = await res.json()
-
-        msg.innerText = data.error || "Password updated"
-    }
+        const data = await res.json();
+        msg.innerText = data.error || "Password updated";
+    };
 }
 
 /* ================= PAGE LOAD ================= */
 
-loadInvites()
-loadUsers()
+loadInvites();
+loadUsers();

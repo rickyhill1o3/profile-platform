@@ -1,48 +1,72 @@
-require("dotenv").config()
+require("dotenv").config();
 
-const express = require("express")
-const cors = require("cors")
-const bcrypt = require("bcryptjs")
-const jwt = require("jsonwebtoken")
-const { v4: uuidv4 } = require("uuid")
+const express = require("express");
+const cors = require("cors");
+const bcrypt = require("bcryptjs");
+const jwt = require("jsonwebtoken");
+const { v4: uuidv4 } = require("uuid");
 
-const supabase = require("./database")
-const { encrypt, decrypt } = require("./encryption")
+const supabase = require("./database");
+const { encrypt, decrypt } = require("./encryption");
 
-const app = express()
+const app = express();
 
-app.use(cors())
-app.use(express.json())
+const allowedOrigins = [
+    "http://localhost:5500",
+    "http://127.0.0.1:5500",
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "https://spontaneous-monstera-1b6376.netlify.app",
+];
 
-const phoneRegex = /^[0-9]{10}$/
+app.use(
+    cors({
+        origin(origin, callback) {
+            if (!origin) return callback(null, true);
+            if (allowedOrigins.includes(origin)) return callback(null, true);
+            return callback(new Error("Not allowed by CORS"));
+        },
+    })
+);
+
+app.use(express.json());
+
+const phoneRegex = /^[0-9]{10}$/;
+
+app.get("/", (req, res) => {
+    res.json({ ok: true, service: "profile-platform-api" });
+});
+
+app.get("/health", (req, res) => {
+    res.json({ ok: true });
+});
 
 /* ================= AUTH ================= */
 
 function auth(req, res, next) {
-    const header = req.headers.authorization
+    const header = req.headers.authorization;
 
     if (!header) {
-        return res.status(401).json({ error: "No token" })
+        return res.status(401).json({ error: "No token" });
     }
 
-    const token = header.split(" ")[1]
+    const token = header.split(" ")[1];
 
     try {
-        const decoded = jwt.verify(token, process.env.JWT_SECRET)
-        req.user_id = decoded.user_id
-        req.role = decoded.role
-        next()
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+        req.user_id = decoded.user_id;
+        req.role = decoded.role;
+        next();
     } catch {
-        return res.status(401).json({ error: "Invalid token" })
+        return res.status(401).json({ error: "Invalid token" });
     }
 }
 
 function admin(req, res, next) {
     if (req.role !== "admin") {
-        return res.status(403).json({ error: "Admin only" })
+        return res.status(403).json({ error: "Admin only" });
     }
-
-    next()
+    next();
 }
 
 async function getUserProfilesWithRelations(userId) {
@@ -55,13 +79,13 @@ async function getUserProfilesWithRelations(userId) {
       addresses(email, phone),
       payments(card_last4)
     `)
-        .eq("user_id", userId)
+        .eq("user_id", userId);
 
     if (error) {
-        throw new Error(error.message)
+        throw new Error(error.message);
     }
 
-    return data || []
+    return data || [];
 }
 
 function findDuplicateInSameGroup(
@@ -75,42 +99,42 @@ function findDuplicateInSameGroup(
 ) {
     for (const profile of profiles) {
         if (currentProfileId && profile.id === currentProfileId) {
-            continue
+            continue;
         }
 
         if (profile.account_type !== group) {
-            continue
+            continue;
         }
 
-        const existingProfileName = profile.profile_name || ""
-        const existingEmail = profile.addresses?.[0]?.email || ""
-        const existingPhone = profile.addresses?.[0]?.phone || ""
-        const existingCardLast4 = profile.payments?.[0]?.card_last4 || ""
+        const existingProfileName = profile.profile_name || "";
+        const existingEmail = profile.addresses?.[0]?.email || "";
+        const existingPhone = profile.addresses?.[0]?.phone || "";
+        const existingCardLast4 = profile.payments?.[0]?.card_last4 || "";
 
         if (profileName && existingProfileName === profileName) {
-            return "Profile name is already used in this group"
+            return "Profile name is already used in this group";
         }
 
         if (email && existingEmail === email) {
-            return "Email is already used in this group"
+            return "Email is already used in this group";
         }
 
         if (phone && existingPhone === phone) {
-            return "Phone is already used in this group"
+            return "Phone is already used in this group";
         }
 
         if (cardLast4 && existingCardLast4 === cardLast4) {
-            return "Card is already used in this group"
+            return "Card is already used in this group";
         }
     }
 
-    return null
+    return null;
 }
 
 /* ================= SIGNUP ================= */
 
 app.post("/auth/signup", async (req, res) => {
-    const { email, password, invite_code } = req.body
+    const { email, password, invite_code } = req.body;
 
     const { data: invite, error: inviteError } = await supabase
         .from("invite_codes")
@@ -118,13 +142,13 @@ app.post("/auth/signup", async (req, res) => {
         .eq("code", invite_code)
         .eq("used", false)
         .eq("canceled", false)
-        .single()
+        .single();
 
     if (inviteError || !invite) {
-        return res.status(400).json({ error: "Invalid invite code" })
+        return res.status(400).json({ error: "Invalid invite code" });
     }
 
-    const hash = await bcrypt.hash(password, 10)
+    const hash = await bcrypt.hash(password, 10);
 
     const { data: user, error } = await supabase
         .from("users")
@@ -132,56 +156,56 @@ app.post("/auth/signup", async (req, res) => {
             email,
             password_hash: hash,
             role: "user",
-            revoked: false
+            revoked: false,
         })
         .select()
-        .single()
+        .single();
 
     if (error) {
-        return res.status(400).json({ error: error.message })
+        return res.status(400).json({ error: error.message });
     }
 
     await supabase
         .from("invite_codes")
-        .update({
-            used: true,
-            used_by: user.id
-        })
-        .eq("id", invite.id)
+        .update({ used: true, used_by: user.id })
+        .eq("id", invite.id);
 
-    res.json({ success: true })
-})
+    res.json({ success: true });
+});
 
 /* ================= LOGIN ================= */
 
 app.post("/auth/login", async (req, res) => {
-    const { email, password } = req.body
+    const { email, password } = req.body;
 
     const { data: user } = await supabase
         .from("users")
         .select("*")
         .eq("email", email)
-        .single()
+        .single();
 
     if (!user) {
-        return res.status(401).json({ error: "Wrong password" })
+        return res.status(401).json({ error: "Wrong password" });
     }
 
     if (user.revoked) {
-        return res.status(403).json({ error: "This account has been revoked" })
+        return res.status(403).json({ error: "This account has been revoked" });
     }
 
-    const valid = await bcrypt.compare(password, user.password_hash)
+    const valid = await bcrypt.compare(password, user.password_hash);
 
     if (!valid) {
-        return res.status(401).json({ error: "Wrong password" })
+        return res.status(401).json({ error: "Wrong password" });
     }
 
     const token = jwt.sign(
-        { user_id: user.id, role: user.role },
+        {
+            user_id: user.id,
+            role: user.role,
+        },
         process.env.JWT_SECRET,
         { expiresIn: "7d" }
-    )
+    );
 
     res.json({
         token,
@@ -189,41 +213,41 @@ app.post("/auth/login", async (req, res) => {
             id: user.id,
             email: user.email,
             role: user.role,
-            revoked: !!user.revoked
-        }
-    })
-})
+            revoked: !!user.revoked,
+        },
+    });
+});
 
 /* ================= CHANGE PASSWORD ================= */
 
 app.post("/change-password", auth, async (req, res) => {
-    const { oldPassword, newPassword } = req.body
+    const { oldPassword, newPassword } = req.body;
 
     const { data: user } = await supabase
         .from("users")
         .select("*")
         .eq("id", req.user_id)
-        .single()
+        .single();
 
     if (user.revoked) {
-        return res.status(403).json({ error: "This account has been revoked" })
+        return res.status(403).json({ error: "This account has been revoked" });
     }
 
-    const valid = await bcrypt.compare(oldPassword, user.password_hash)
+    const valid = await bcrypt.compare(oldPassword, user.password_hash);
 
     if (!valid) {
-        return res.status(400).json({ error: "Wrong password" })
+        return res.status(400).json({ error: "Wrong password" });
     }
 
-    const hash = await bcrypt.hash(newPassword, 10)
+    const hash = await bcrypt.hash(newPassword, 10);
 
     await supabase
         .from("users")
         .update({ password_hash: hash })
-        .eq("id", req.user_id)
+        .eq("id", req.user_id);
 
-    res.json({ success: true })
-})
+    res.json({ success: true });
+});
 
 /* ================= GET PROFILES ================= */
 
@@ -232,64 +256,60 @@ app.get("/profiles", auth, async (req, res) => {
         .from("users")
         .select("revoked")
         .eq("id", req.user_id)
-        .single()
+        .single();
 
     if (user?.revoked) {
-        return res.status(403).json({ error: "This account has been revoked" })
+        return res.status(403).json({ error: "This account has been revoked" });
     }
 
     const { data, error } = await supabase
         .from("profiles")
-        .select(`
-      *,
-      addresses(*),
-      payments(*)
-    `)
-        .eq("user_id", req.user_id)
+        .select(`*, addresses(*), payments(*)`)
+        .eq("user_id", req.user_id);
 
     if (error) {
-        return res.status(500).json({ error: error.message })
+        return res.status(500).json({ error: error.message });
     }
 
     data.forEach((profile) => {
         if (profile.payments?.length) {
-            const payment = profile.payments[0]
+            const payment = profile.payments[0];
 
             try {
-                payment.card_number = decrypt(payment.card_encrypted)
-                payment.cvv = decrypt(payment.cvv_encrypted)
+                payment.card_number = decrypt(payment.card_encrypted);
+                payment.cvv = decrypt(payment.cvv_encrypted);
             } catch {
-                payment.card_number = ""
-                payment.cvv = ""
+                payment.card_number = "";
+                payment.cvv = "";
             }
         }
-    })
+    });
 
-    res.json(data)
-})
+    res.json(data);
+});
 
 /* ================= CREATE PROFILE ================= */
 
 app.post("/profiles", auth, async (req, res) => {
     try {
-        const data = req.body
-        const cardLast4 = (data.card || "").slice(-4)
+        const data = req.body;
+        const cardLast4 = (data.card || "").slice(-4);
 
         const { data: user } = await supabase
             .from("users")
             .select("revoked")
             .eq("id", req.user_id)
-            .single()
+            .single();
 
         if (user?.revoked) {
-            return res.status(403).json({ error: "This account has been revoked" })
+            return res.status(403).json({ error: "This account has been revoked" });
         }
 
         if (!phoneRegex.test(data.phone || "")) {
-            return res.status(400).json({ error: "Phone must be xxxxxxxxxx" })
+            return res.status(400).json({ error: "Phone must be xxxxxxxxxx" });
         }
 
-        const existingProfiles = await getUserProfilesWithRelations(req.user_id)
+        const existingProfiles = await getUserProfilesWithRelations(req.user_id);
 
         const duplicateError = findDuplicateInSameGroup(
             existingProfiles,
@@ -299,27 +319,27 @@ app.post("/profiles", auth, async (req, res) => {
             data.email,
             data.phone,
             cardLast4
-        )
+        );
 
         if (duplicateError) {
-            return res.status(400).json({ error: duplicateError })
+            return res.status(400).json({ error: duplicateError });
         }
 
-        const encryptedCard = encrypt(data.card)
-        const encryptedCVV = encrypt(data.cvv)
+        const encryptedCard = encrypt(data.card);
+        const encryptedCVV = encrypt(data.cvv);
 
         const { data: profile, error: profileError } = await supabase
             .from("profiles")
             .insert({
                 user_id: req.user_id,
                 profile_name: data.profile_name,
-                account_type: data.account_type
+                account_type: data.account_type,
             })
             .select()
-            .single()
+            .single();
 
         if (profileError) {
-            return res.status(500).json({ error: profileError.message })
+            return res.status(500).json({ error: profileError.message });
         }
 
         const { error: addressError } = await supabase.from("addresses").insert({
@@ -331,11 +351,11 @@ app.post("/profiles", auth, async (req, res) => {
             address1: data.address1,
             city: data.city,
             state: data.state,
-            zip: data.zip
-        })
+            zip: data.zip,
+        });
 
         if (addressError) {
-            return res.status(500).json({ error: addressError.message })
+            return res.status(500).json({ error: addressError.message });
         }
 
         const { error: paymentError } = await supabase.from("payments").insert({
@@ -344,42 +364,42 @@ app.post("/profiles", auth, async (req, res) => {
             cvv_encrypted: encryptedCVV,
             exp_month: data.exp_month,
             exp_year: data.exp_year,
-            card_last4: cardLast4
-        })
+            card_last4: cardLast4,
+        });
 
         if (paymentError) {
-            return res.status(500).json({ error: paymentError.message })
+            return res.status(500).json({ error: paymentError.message });
         }
 
-        res.json({ success: true })
+        res.json({ success: true });
     } catch (err) {
-        res.status(500).json({ error: err.message || "Profile creation failed" })
+        res.status(500).json({ error: err.message || "Profile creation failed" });
     }
-})
+});
 
 /* ================= UPDATE PROFILE ================= */
 
 app.put("/profiles/:id", auth, async (req, res) => {
     try {
-        const id = req.params.id
-        const data = req.body
-        const cardLast4 = (data.card || "").slice(-4)
+        const id = req.params.id;
+        const data = req.body;
+        const cardLast4 = (data.card || "").slice(-4);
 
         const { data: user } = await supabase
             .from("users")
             .select("revoked")
             .eq("id", req.user_id)
-            .single()
+            .single();
 
         if (user?.revoked) {
-            return res.status(403).json({ error: "This account has been revoked" })
+            return res.status(403).json({ error: "This account has been revoked" });
         }
 
         if (!phoneRegex.test(data.phone || "")) {
-            return res.status(400).json({ error: "Phone must be xxxxxxxxxx" })
+            return res.status(400).json({ error: "Phone must be xxxxxxxxxx" });
         }
 
-        const existingProfiles = await getUserProfilesWithRelations(req.user_id)
+        const existingProfiles = await getUserProfilesWithRelations(req.user_id);
 
         const duplicateError = findDuplicateInSameGroup(
             existingProfiles,
@@ -389,26 +409,26 @@ app.put("/profiles/:id", auth, async (req, res) => {
             data.email,
             data.phone,
             cardLast4
-        )
+        );
 
         if (duplicateError) {
-            return res.status(400).json({ error: duplicateError })
+            return res.status(400).json({ error: duplicateError });
         }
 
-        const encryptedCard = encrypt(data.card)
-        const encryptedCVV = encrypt(data.cvv)
+        const encryptedCard = encrypt(data.card);
+        const encryptedCVV = encrypt(data.cvv);
 
         const { error: profileError } = await supabase
             .from("profiles")
             .update({
                 profile_name: data.profile_name,
-                account_type: data.account_type
+                account_type: data.account_type,
             })
             .eq("id", id)
-            .eq("user_id", req.user_id)
+            .eq("user_id", req.user_id);
 
         if (profileError) {
-            return res.status(500).json({ error: profileError.message })
+            return res.status(500).json({ error: profileError.message });
         }
 
         const { error: addressError } = await supabase
@@ -421,12 +441,12 @@ app.put("/profiles/:id", auth, async (req, res) => {
                 address1: data.address1,
                 city: data.city,
                 state: data.state,
-                zip: data.zip
+                zip: data.zip,
             })
-            .eq("profile_id", id)
+            .eq("profile_id", id);
 
         if (addressError) {
-            return res.status(500).json({ error: addressError.message })
+            return res.status(500).json({ error: addressError.message });
         }
 
         const { error: paymentError } = await supabase
@@ -436,19 +456,19 @@ app.put("/profiles/:id", auth, async (req, res) => {
                 cvv_encrypted: encryptedCVV,
                 exp_month: data.exp_month,
                 exp_year: data.exp_year,
-                card_last4: cardLast4
+                card_last4: cardLast4,
             })
-            .eq("profile_id", id)
+            .eq("profile_id", id);
 
         if (paymentError) {
-            return res.status(500).json({ error: paymentError.message })
+            return res.status(500).json({ error: paymentError.message });
         }
 
-        res.json({ success: true })
+        res.json({ success: true });
     } catch (err) {
-        res.status(500).json({ error: err.message || "Profile update failed" })
+        res.status(500).json({ error: err.message || "Profile update failed" });
     }
-})
+});
 
 /* ================= DELETE PROFILE ================= */
 
@@ -457,10 +477,10 @@ app.delete("/profiles/:id", auth, async (req, res) => {
         .from("profiles")
         .delete()
         .eq("id", req.params.id)
-        .eq("user_id", req.user_id)
+        .eq("user_id", req.user_id);
 
-    res.json({ success: true })
-})
+    res.json({ success: true });
+});
 
 /* ================= ADMIN USERS ================= */
 
@@ -468,199 +488,188 @@ app.get("/admin/users", auth, admin, async (req, res) => {
     const { data, error } = await supabase
         .from("users")
         .select("*")
-        .order("created_at", { ascending: false })
+        .order("created_at", { ascending: false });
 
     if (error) {
-        return res.status(500).json({ error: error.message })
+        return res.status(500).json({ error: error.message });
     }
 
-    res.json(data)
-})
+    res.json(data);
+});
 
 app.patch("/admin/users/:id/revoke", auth, admin, async (req, res) => {
-    const targetId = req.params.id
+    const targetId = req.params.id;
 
     const { data: targetUser } = await supabase
         .from("users")
         .select("*")
         .eq("id", targetId)
-        .single()
+        .single();
 
     if (!targetUser) {
-        return res.status(404).json({ error: "User not found" })
+        return res.status(404).json({ error: "User not found" });
     }
 
     if (targetUser.role === "admin") {
-        return res.status(400).json({ error: "Admin account cannot be revoked" })
+        return res.status(400).json({ error: "Admin account cannot be revoked" });
     }
 
     const { error } = await supabase
         .from("users")
         .update({ revoked: true })
-        .eq("id", targetId)
+        .eq("id", targetId);
 
     if (error) {
-        return res.status(500).json({ error: error.message })
+        return res.status(500).json({ error: error.message });
     }
 
-    res.json({ success: true })
-})
+    res.json({ success: true });
+});
 
 app.patch("/admin/users/:id/restore", auth, admin, async (req, res) => {
-    const targetId = req.params.id
+    const targetId = req.params.id;
 
     const { data: targetUser } = await supabase
         .from("users")
         .select("*")
         .eq("id", targetId)
-        .single()
+        .single();
 
     if (!targetUser) {
-        return res.status(404).json({ error: "User not found" })
+        return res.status(404).json({ error: "User not found" });
     }
 
     const { error } = await supabase
         .from("users")
         .update({ revoked: false })
-        .eq("id", targetId)
+        .eq("id", targetId);
 
     if (error) {
-        return res.status(500).json({ error: error.message })
+        return res.status(500).json({ error: error.message });
     }
 
-    res.json({ success: true })
-})
+    res.json({ success: true });
+});
 
 /* ================= ADMIN INVITES ================= */
 
 app.post("/admin/create-invite", auth, admin, async (req, res) => {
-    const code = uuidv4().slice(0, 8)
+    const code = uuidv4().slice(0, 8);
 
-    const { error } = await supabase
-        .from("invite_codes")
-        .insert({
-            code,
-            used: false,
-            canceled: false
-        })
+    const { error } = await supabase.from("invite_codes").insert({
+        code,
+        used: false,
+        canceled: false,
+    });
 
     if (error) {
-        return res.status(500).json({ error: error.message })
+        return res.status(500).json({ error: error.message });
     }
 
-    res.json({ code })
-})
+    res.json({ code });
+});
 
 app.get("/admin/invites", auth, admin, async (req, res) => {
     const { data, error } = await supabase
         .from("invite_codes")
         .select("*")
-        .order("created_at", { ascending: false })
+        .order("created_at", { ascending: false });
 
     if (error) {
-        return res.status(500).json({ error: error.message })
+        return res.status(500).json({ error: error.message });
     }
 
-    res.json(data)
-})
+    res.json(data);
+});
 
 app.patch("/admin/invites/:id/cancel", auth, admin, async (req, res) => {
     const { error } = await supabase
         .from("invite_codes")
         .update({ canceled: true })
         .eq("id", req.params.id)
-        .eq("used", false)
+        .eq("used", false);
 
     if (error) {
-        return res.status(500).json({ error: error.message })
+        return res.status(500).json({ error: error.message });
     }
 
-    res.json({ success: true })
-})
+    res.json({ success: true });
+});
 
 app.delete("/admin/invites/:id", auth, admin, async (req, res) => {
     const { error } = await supabase
         .from("invite_codes")
         .delete()
-        .eq("id", req.params.id)
+        .eq("id", req.params.id);
 
     if (error) {
-        return res.status(500).json({ error: error.message })
+        return res.status(500).json({ error: error.message });
     }
 
-    res.json({ success: true })
-})
+    res.json({ success: true });
+});
 
 /* ================= EXPORT COUNT ================= */
 
 app.get("/admin/export/count", auth, admin, async (req, res) => {
-    const { user_id, group } = req.query
+    const { user_id, group } = req.query;
 
     let query = supabase
         .from("profiles")
-        .select("id", { count: "exact", head: true })
+        .select("id", { count: "exact", head: true });
 
     if (user_id) {
-        query = query.eq("user_id", user_id)
+        query = query.eq("user_id", user_id);
     }
 
     if (group) {
-        query = query.eq("account_type", group)
+        query = query.eq("account_type", group);
     }
 
-    const { count, error } = await query
+    const { count, error } = await query;
 
     if (error) {
-        return res.status(500).json({ error: error.message })
+        return res.status(500).json({ error: error.message });
     }
 
-    res.json({ count: count || 0 })
-})
+    res.json({ count: count || 0 });
+});
 
 /* ================= AYCD EXPORT ================= */
 
 app.get("/admin/export/aycd", auth, admin, async (req, res) => {
-    const { user_id, group } = req.query
+    const { user_id, group } = req.query;
 
-    let query = supabase
-        .from("profiles")
-        .select(`
-      *,
-      addresses(*),
-      payments(*)
-    `)
+    let query = supabase.from("profiles").select(`*, addresses(*), payments(*)`);
 
     if (user_id) {
-        query = query.eq("user_id", user_id)
+        query = query.eq("user_id", user_id);
     }
 
     if (group) {
-        query = query.eq("account_type", group)
+        query = query.eq("account_type", group);
     }
 
-    const { data, error } = await query
+    const { data, error } = await query;
 
     if (error) {
-        return res.status(500).json({ error: error.message })
+        return res.status(500).json({ error: error.message });
     }
 
     const exportProfiles = (data || [])
         .map((p) => {
-            const addr = p.addresses?.[0]
-            const pay = p.payments?.[0]
+            const addr = p.addresses?.[0];
+            const pay = p.payments?.[0];
 
-            if (!addr || !pay) return null
+            if (!addr || !pay) return null;
 
             return {
                 id: "prf-" + uuidv4(),
                 createdAt: Date.now(),
                 updatedAt: Date.now(),
-
                 name: p.profile_name,
                 email: addr.email,
-
                 oneTimeUse: false,
-
                 shipping: {
                     firstName: addr.first_name,
                     lastName: addr.last_name,
@@ -670,9 +679,8 @@ app.get("/admin/export/aycd", auth, admin, async (req, res) => {
                     province: addr.state,
                     postalCode: addr.zip,
                     country: "United States",
-                    phone: addr.phone
+                    phone: addr.phone,
                 },
-
                 billing: {
                     sameAsShipping: true,
                     firstName: "",
@@ -683,64 +691,71 @@ app.get("/admin/export/aycd", auth, admin, async (req, res) => {
                     province: null,
                     postalCode: "",
                     country: null,
-                    phone: ""
+                    phone: "",
                 },
-
                 payment: {
                     name: addr.first_name + " " + addr.last_name,
                     num: decrypt(pay.card_encrypted),
                     year: pay.exp_year,
                     month: pay.exp_month,
-                    cvv: decrypt(pay.cvv_encrypted)
-                }
-            }
+                    cvv: decrypt(pay.cvv_encrypted),
+                },
+            };
         })
-        .filter(Boolean)
+        .filter(Boolean);
 
-    res.json(exportProfiles)
-})
+    res.json(exportProfiles);
+});
 
-/* ================= ADMIN AUTO SEED ================= */
+/* ================= OPTIONAL ADMIN SEED ================= */
 
 async function ensureAdmin() {
-    const email = "theshoreshacktcg@gmail.com"
-    const password = "password123"
+    const email = process.env.ADMIN_EMAIL;
+    const password = process.env.ADMIN_PASSWORD;
+
+    if (!email || !password) {
+        console.log("Skipping admin seed");
+        return;
+    }
 
     const { data: user } = await supabase
         .from("users")
         .select("*")
         .eq("email", email)
-        .single()
+        .single();
 
-    const hash = await bcrypt.hash(password, 10)
+    const hash = await bcrypt.hash(password, 10);
 
     if (!user) {
-        await supabase
-            .from("users")
-            .insert({
-                email,
-                password_hash: hash,
-                role: "admin",
-                revoked: false
-            })
-
-        console.log("Admin account created")
+        await supabase.from("users").insert({
+            email,
+            password_hash: hash,
+            role: "admin",
+            revoked: false,
+        });
+        console.log("Admin account created");
     } else {
         await supabase
             .from("users")
             .update({
                 password_hash: hash,
                 role: "admin",
-                revoked: false
+                revoked: false,
             })
-            .eq("email", email)
-
-        console.log("Admin password reset")
+            .eq("email", email);
+        console.log("Admin password reset");
     }
 }
 
-ensureAdmin().then(() => {
-    app.listen(3000, () => {
-        console.log("Server running on port 3000")
+const PORT = process.env.PORT || 3000;
+
+ensureAdmin()
+    .then(() => {
+        app.listen(PORT, () => {
+            console.log(`Server running on port ${PORT}`);
+        });
     })
-})
+    .catch((err) => {
+        console.error("Startup failed:", err);
+        process.exit(1);
+    });
