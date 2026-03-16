@@ -122,7 +122,8 @@ if (signupForm) {
 /* ================= DASHBOARD ================= */
 
 async function loadProfiles() {
-    if (!document.getElementById("dashboard")) return;
+    const dashboardEl = document.getElementById("dashboard");
+    if (!dashboardEl) return;
 
     const user = currentUser();
     const adminButton = document.getElementById("adminPanelButton");
@@ -139,9 +140,7 @@ async function loadProfiles() {
         const profiles = await res.json();
 
         if (!Array.isArray(profiles)) {
-            dashboard.innerHTML = `
-        <p>${profiles.error || "Could not load profiles."}</p>
-      `;
+            dashboardEl.innerHTML = `<p>${profiles.error || "Could not load profiles."}</p>`;
             return;
         }
 
@@ -202,9 +201,9 @@ async function loadProfiles() {
             html += `</section>`;
         });
 
-        dashboard.innerHTML = html;
+        dashboardEl.innerHTML = html;
     } catch {
-        dashboard.innerHTML = `<p>Could not connect to the server.</p>`;
+        dashboardEl.innerHTML = `<p>Could not connect to the server.</p>`;
     }
 }
 
@@ -317,8 +316,10 @@ if (profileForm) {
         const data = await res.json();
 
         if (data.error) {
-            message.textContent = data.error;
-            message.style.color = "#b91c1c";
+            if (message) {
+                message.textContent = data.error;
+                message.style.color = "#b91c1c";
+            }
             return;
         }
 
@@ -492,17 +493,9 @@ async function loadUsers() {
                 let actionHtml = `No action`;
 
                 if (u.role !== "admin") {
-                    if (u.revoked) {
-                        actionHtml = `
-              <button onclick="restoreUser('${u.id}')">Restore</button>
-              <button onclick="deleteUser('${u.id}', '${u.email}')">Delete</button>
-            `;
-                    } else {
-                        actionHtml = `
-              <button onclick="revokeUser('${u.id}')">Revoke</button>
-              <button onclick="deleteUser('${u.id}', '${u.email}')">Delete</button>
-            `;
-                    }
+                    actionHtml = u.revoked
+                        ? `<button onclick="restoreUser('${u.id}')">Restore</button> <button onclick="deleteUser('${u.id}', '${u.email}')">Delete</button>`
+                        : `<button onclick="revokeUser('${u.id}')">Revoke</button> <button onclick="deleteUser('${u.id}', '${u.email}')">Delete</button>`;
                 }
 
                 html += `
