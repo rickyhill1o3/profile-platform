@@ -186,11 +186,6 @@ async function loadProfiles() {
     const refreshedUser = await refreshCurrentUserFromServer();
     const user = refreshedUser || currentUser();
 
-    if (isAdminRole(user?.role) && !window.location.pathname.endsWith("admin.html")) {
-        location = "admin.html";
-        return;
-    }
-
     const adminButton = document.getElementById("adminPanelButton");
     if (isAdminRole(user?.role) && adminButton) {
         adminButton.style.display = "inline-block";
