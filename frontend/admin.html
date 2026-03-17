@@ -17,8 +17,6 @@
 
             <nav class="sidebar-nav">
                 <button class="nav-btn" onclick="scrollToSection('inviteCreatorCard')">Create Invite</button>
-                <button class="nav-btn" onclick="scrollToSection('superAdminCard')" id="superAdminNavBtn"
-                    style="display:none;">Super Admin</button>
                 <button class="nav-btn" onclick="scrollToSection('inviteListCard')">Invite Codes</button>
                 <button class="nav-btn" onclick="scrollToSection('exportCard')">Export Profiles</button>
                 <button class="nav-btn" onclick="scrollToSection('usersCard')">Users</button>
@@ -36,7 +34,7 @@
 
                 <div class="topbar-actions">
                     <button onclick="openUserDashboard()">User Dashboard</button>
-                    <button onclick="createUserInvite()">Quick Create Invite</button>
+                    <button onclick="submitInviteCreation()">Quick Create Invite</button>
                 </div>
             </header>
 
@@ -68,23 +66,34 @@
                         <h2>Create Invite Code</h2>
                         <p class="subtle-text">Generate one-time codes for signup access</p>
                     </div>
-                    <button onclick="createUserInvite()">Create Invite</button>
                 </div>
 
-                <div class="result-banner" id="inviteResult">No invite created yet.</div>
-            </section>
+                <div class="form-grid" style="margin-top:16px;">
+                    <select id="inviteRoleSelect" onchange="handleInviteRoleChange()">
+                        <option value="user">User Invite</option>
+                        <option value="admin">Admin Invite</option>
+                    </select>
 
-            <section class="admin-card" id="superAdminCard" style="display:none;">
-                <div class="card-header-row">
-                    <div>
-                        <h2>Super Admin Tools</h2>
-                        <p class="subtle-text">Create admin invites for new Discord group owners</p>
-                    </div>
-                    <button onclick="createAdminInvite()">Create Admin Invite</button>
+                    <select id="inviteQuantitySelect">
+                        <option value="1">1 Invite</option>
+                        <option value="2">2 Invites</option>
+                        <option value="3">3 Invites</option>
+                        <option value="4">4 Invites</option>
+                        <option value="5">5 Invites</option>
+                        <option value="6">6 Invites</option>
+                        <option value="7">7 Invites</option>
+                        <option value="8">8 Invites</option>
+                        <option value="9">9 Invites</option>
+                        <option value="10">10 Invites</option>
+                    </select>
                 </div>
 
-                <div class="result-banner" id="superAdminInviteResult">
-                    Only super admin can create admin invites.
+                <div class="card-actions" style="margin-top:16px;">
+                    <button onclick="submitInviteCreation()">Create Invite</button>
+                </div>
+
+                <div class="result-banner" id="inviteResult" style="margin-top:16px;">
+                    No invite created yet.
                 </div>
             </section>
 

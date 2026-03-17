@@ -42,13 +42,6 @@ function admin(req, res, next) {
     next();
 }
 
-function superAdmin(req, res, next) {
-    if (req.role !== "super_admin") {
-        return res.status(403).json({ error: "Super admin only" });
-    }
-    next();
-}
-
 async function getCurrentUser(req) {
     const { data: user, error } = await supabase
         .from("users")
@@ -785,35 +778,51 @@ app.delete("/admin/users/:id", auth, admin, async (req, res) => {
 app.post("/admin/create-invite", auth, admin, async (req, res) => {
     try {
         const currentUser = await getCurrentUser(req);
-        const code = uuidv4().slice(0, 8);
+
         const requestedRole = req.body?.invite_role || "user";
+        const quantityRaw = Number(req.body?.quantity || 1);
+        const quantity = Number.isInteger(quantityRaw) ? quantityRaw : 1;
 
         if (!["user", "admin"].includes(requestedRole)) {
             return res.status(400).json({ error: "Invalid invite role" });
         }
 
-        if (currentUser.role !== "super_admin" && requestedRole !== "user") {
-            return res.status(403).json({ error: "Only super admin can create admin invites" });
+        if (quantity < 1 || quantity > 10) {
+            return res.status(400).json({ error: "Quantity must be between 1 and 10" });
         }
 
-        const { error } = await supabase
+        if (requestedRole === "admin") {
+            if (currentUser.role !== "super_admin") {
+                return res.status(403).json({ error: "Only super admin can create admin invites" });
+            }
+
+            if (quantity !== 1) {
+                return res.status(400).json({ error: "Admin invites can only be created one at a time" });
+            }
+        }
+
+        const inviteRows = Array.from({ length: quantity }, () => ({
+            code: uuidv4().slice(0, 8),
+            used: false,
+            canceled: false,
+            created_by_admin_id: currentUser.id,
+            invite_role: requestedRole
+        }));
+
+        const { data, error } = await supabase
             .from("invite_codes")
-            .insert({
-                code,
-                used: false,
-                canceled: false,
-                created_by_admin_id: currentUser.id,
-                invite_role: requestedRole
-            });
+            .insert(inviteRows)
+            .select();
 
         if (error) {
             return res.status(500).json({ error: error.message });
         }
 
         res.json({
-            code,
+            success: true,
             invite_role: requestedRole,
-            owner_email: currentUser.email
+            quantity,
+            codes: (data || []).map((row) => row.code)
         });
     } catch (err) {
         res.status(500).json({ error: err.message });

@@ -414,9 +414,45 @@ function userStatusBadge(user) {
     return "Active";
 }
 
-async function createInvite(inviteRole = "user") {
+function handleInviteRoleChange() {
+    const roleSelect = document.getElementById("inviteRoleSelect");
+    const quantitySelect = document.getElementById("inviteQuantitySelect");
+
+    if (!roleSelect || !quantitySelect) return;
+
+    const selectedRole = roleSelect.value;
+    const superAdmin = isSuperAdmin();
+
+    if (!superAdmin && selectedRole === "admin") {
+        roleSelect.value = "user";
+        quantitySelect.disabled = false;
+        return;
+    }
+
+    if (selectedRole === "admin") {
+        quantitySelect.value = "1";
+        quantitySelect.disabled = true;
+    } else {
+        quantitySelect.disabled = false;
+    }
+}
+
+function setupInviteControls() {
+    const roleSelect = document.getElementById("inviteRoleSelect");
+    const quantitySelect = document.getElementById("inviteQuantitySelect");
+
+    if (!roleSelect || !quantitySelect) return;
+
+    if (!isSuperAdmin()) {
+        roleSelect.innerHTML = `<option value="user">User Invite</option>`;
+    }
+
+    handleInviteRoleChange();
+}
+
+async function createInvite(inviteRole = "user", quantity = 1) {
     const resultBox = document.getElementById("inviteResult");
-    const superAdminResultBox = document.getElementById("superAdminInviteResult");
+    if (!resultBox) return;
 
     const res = await fetch(API + "/admin/create-invite", {
         method: "POST",
@@ -424,40 +460,46 @@ async function createInvite(inviteRole = "user") {
             "Content-Type": "application/json",
             Authorization: "Bearer " + token()
         },
-        body: JSON.stringify({ invite_role: inviteRole })
+        body: JSON.stringify({
+            invite_role: inviteRole,
+            quantity
+        })
     });
 
     const data = await res.json();
 
     if (data.error) {
-        if (inviteRole === "admin" && superAdminResultBox) {
-            superAdminResultBox.innerText = data.error;
-        } else if (resultBox) {
-            resultBox.innerText = data.error;
-        }
+        resultBox.innerText = data.error;
         return;
     }
 
-    const text =
-        inviteRole === "admin"
-            ? `Admin invite created: ${data.code}`
-            : `User invite created: ${data.code}`;
+    const codes = Array.isArray(data.codes) ? data.codes : [];
 
-    if (inviteRole === "admin" && superAdminResultBox) {
-        superAdminResultBox.innerText = text;
-    } else if (resultBox) {
-        resultBox.innerText = text;
+    if (codes.length === 1) {
+        resultBox.innerText = `${inviteRole === "admin" ? "Admin" : "User"} invite created: ${codes[0]}`;
+    } else {
+        resultBox.innerText = `${inviteRole === "admin" ? "Admin" : "User"} invites created: ${codes.join(", ")}`;
     }
 
     loadInvites();
 }
 
+async function submitInviteCreation() {
+    const roleSelect = document.getElementById("inviteRoleSelect");
+    const quantitySelect = document.getElementById("inviteQuantitySelect");
+
+    const inviteRole = roleSelect ? roleSelect.value : "user";
+    const quantity = quantitySelect ? Number(quantitySelect.value || 1) : 1;
+
+    return createInvite(inviteRole, quantity);
+}
+
 async function createUserInvite() {
-    return createInvite("user");
+    return createInvite("user", 1);
 }
 
 async function createAdminInvite() {
-    return createInvite("admin");
+    return createInvite("admin", 1);
 }
 
 async function loadInvites() {
@@ -791,17 +833,7 @@ if (passwordForm) {
 /* ================= PAGE LOAD ================= */
 
 document.addEventListener("DOMContentLoaded", () => {
-    const superAdminCard = document.getElementById("superAdminCard");
-    const superAdminNavBtn = document.getElementById("superAdminNavBtn");
-
-    if (superAdminCard) {
-        superAdminCard.style.display = isSuperAdmin() ? "block" : "none";
-    }
-
-    if (superAdminNavBtn) {
-        superAdminNavBtn.style.display = isSuperAdmin() ? "inline-block" : "none";
-    }
-
+    setupInviteControls();
     loadInvites();
     loadUsers();
 });
