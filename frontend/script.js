@@ -416,7 +416,7 @@ function userStatusBadge(user) {
 
 async function createInvite(inviteRole = "user") {
     const resultBox = document.getElementById("inviteResult");
-    if (!resultBox) return;
+    const superAdminResultBox = document.getElementById("superAdminInviteResult");
 
     const res = await fetch(API + "/admin/create-invite", {
         method: "POST",
@@ -430,14 +430,25 @@ async function createInvite(inviteRole = "user") {
     const data = await res.json();
 
     if (data.error) {
-        resultBox.innerText = data.error;
+        if (inviteRole === "admin" && superAdminResultBox) {
+            superAdminResultBox.innerText = data.error;
+        } else if (resultBox) {
+            resultBox.innerText = data.error;
+        }
         return;
     }
 
-    const ownerLabel =
-        inviteRole === "admin" ? "Admin invite" : "User invite";
+    const text =
+        inviteRole === "admin"
+            ? `Admin invite created: ${data.code}`
+            : `User invite created: ${data.code}`;
 
-    resultBox.innerText = `${ownerLabel}: ${data.code}`;
+    if (inviteRole === "admin" && superAdminResultBox) {
+        superAdminResultBox.innerText = text;
+    } else if (resultBox) {
+        resultBox.innerText = text;
+    }
+
     loadInvites();
 }
 
@@ -780,9 +791,15 @@ if (passwordForm) {
 /* ================= PAGE LOAD ================= */
 
 document.addEventListener("DOMContentLoaded", () => {
-    const superAdminTools = document.getElementById("superAdminTools");
-    if (superAdminTools) {
-        superAdminTools.style.display = isSuperAdmin() ? "block" : "none";
+    const superAdminCard = document.getElementById("superAdminCard");
+    const superAdminNavBtn = document.getElementById("superAdminNavBtn");
+
+    if (superAdminCard) {
+        superAdminCard.style.display = isSuperAdmin() ? "block" : "none";
+    }
+
+    if (superAdminNavBtn) {
+        superAdminNavBtn.style.display = isSuperAdmin() ? "inline-block" : "none";
     }
 
     loadInvites();
