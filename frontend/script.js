@@ -133,11 +133,11 @@ if (loginForm) {
             localStorage.token = data.token;
             localStorage.user = JSON.stringify(data.user);
 
-            if (isAdminRole(data.user.role)) {
-                location = "admin.html";
-            } else {
-                location = "dashboard.html";
-            }
+            // Everyone lands on the user dashboard.
+            // Admins and super admins will still see the Admin Panel button there.
+            location = "dashboard.html";
+
+
         } catch {
             error.innerText = "Could not connect to the server.";
         }
