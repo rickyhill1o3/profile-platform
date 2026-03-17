@@ -2,107 +2,203 @@
 <html>
 
 <head>
-    <title>Create / Edit Profile</title>
+    <title>Profile Editor</title>
     <link rel="stylesheet" href="styles.css">
 </head>
 
 <body>
-    <div class="container">
-        <h1>Create / Edit Profile</h1>
 
-        <div style="margin-bottom: 1rem;">
-            <button onclick="location='dashboard.html'">Back to Dashboard</button>
-            <button id="adminPanelButtonProfile" onclick="openAdminPanel()" style="display:none;">Admin Panel</button>
-            <button onclick="goToChangePassword()">Change Password</button>
-            <button onclick="logout()">Logout</button>
+    <div class="header modern-header">
+        <div>
+            <h1>Profile Editor</h1>
+            <p class="subtle-text">Create or update a profile</p>
         </div>
 
-        <form id="profileForm">
-            <h2>Profile Info</h2>
+        <div class="header-actions">
+            <button onclick="openUserDashboard()">Back to Dashboard</button>
+            <button id="adminPanelButtonProfile" style="display:none;" onclick="openAdminPanel()">Admin Panel</button>
+            <button onclick="logout()">Logout</button>
+        </div>
+    </div>
 
-            <label>Profile Name</label>
-            <input id="profile_name" required>
+    <div class="page-shell">
+        <div class="form-card">
 
-            <label>Account Type</label>
-            <select id="account_type" required>
-                <option value="general">General</option>
-                <option value="walmart">Walmart</option>
-                <option value="target">Target</option>
-                <option value="amazon">Amazon</option>
-            </select>
+            <form id="profileForm">
 
-            <div id="accountCredentialsSection" style="display:none; margin-top: 1.5rem;">
-                <h3>Account Credentials</h3>
+                <h2>Profile Details</h2>
+                <p class="subtle-text">Billing address is always the same as shipping.</p>
 
-                <div id="gmailAccountFields" style="display:none;">
-                    <label>Login Email</label>
-                    <input id="account_login_email" type="email" placeholder="name@gmail.com">
+                <!-- PROFILE -->
+                <div class="form-section-title">Profile</div>
 
-                    <label>Login Password</label>
-                    <input id="account_login_password" type="text" placeholder="Account password">
+                <div class="form-grid">
+                    <div class="full-width">
+                        <input id="profile_name" placeholder="Profile Name" required>
+                    </div>
 
-                    <label>Gmail App Password</label>
-                    <input id="gmail_app_password" type="text" placeholder="16-character Gmail app password">
+                    <div class="full-width">
+                        <select id="account_type" required>
+                            <option value="general">General</option>
+                            <option value="walmart">Walmart</option>
+                            <option value="target">Target</option>
+                            <option value="amazon">Amazon</option>
+                        </select>
+                    </div>
                 </div>
 
-                <div id="amazonAccountFields" style="display:none;">
-                    <label>Amazon Account Email</label>
-                    <input id="amazon_login_email" type="email" placeholder="Amazon email">
 
-                    <label>Amazon Account Password</label>
-                    <input id="amazon_login_password" type="text" placeholder="Amazon password">
+                <!-- ACCOUNT LOGIN DETAILS -->
+                <div id="accountCredentialsSection" style="display:none;">
 
-                    <label>Amazon Authenticator Secret</label>
-                    <input id="amazon_2fa_secret" type="text" placeholder="Authenticator setup secret">
+                    <div class="form-section-title">Account Login Details</div>
+
+                    <!-- Walmart / Target -->
+                    <div id="gmailAccountFields" class="form-grid" style="display:none;">
+
+                        <div class="full-width">
+                            <input id="account_login_email" placeholder="Login Email (must be Gmail)">
+                        </div>
+
+                        <div class="full-width">
+                            <input id="account_login_password" placeholder="Account Password">
+                        </div>
+
+                        <div class="full-width">
+                            <input id="gmail_app_password" placeholder="Gmail App Password">
+                        </div>
+
+                    </div>
+
+
+                    <!-- Amazon -->
+                    <div id="amazonAccountFields" class="form-grid" style="display:none;">
+
+                        <div class="full-width">
+                            <input id="amazon_login_email" placeholder="Amazon Account Email">
+                        </div>
+
+                        <div class="full-width">
+                            <input id="amazon_login_password" placeholder="Amazon Account Password">
+                        </div>
+
+                        <div class="full-width">
+                            <input id="amazon_2fa_secret" placeholder="Amazon Authenticator Secret">
+                        </div>
+
+                    </div>
+
                 </div>
-            </div>
 
-            <h2 style="margin-top: 1.5rem;">Shipping / Billing</h2>
 
-            <label>First Name</label>
-            <input id="first_name" required>
+                <!-- SHIPPING -->
+                <div class="form-section-title">Shipping</div>
 
-            <label>Last Name</label>
-            <input id="last_name" required>
+                <div class="form-grid">
+                    <input id="first_name" placeholder="First Name" required>
+                    <input id="last_name" placeholder="Last Name" required>
 
-            <label>Email</label>
-            <input id="email" type="email" required>
+                    <div class="full-width">
+                        <input id="email" placeholder="Email" required>
+                    </div>
 
-            <label>Phone</label>
-            <input id="phone" required placeholder="10 digit phone number">
+                    <div class="full-width">
+                        <input id="phone" placeholder="Phone (xxxxxxxxxx)" maxlength="10" required>
+                    </div>
 
-            <label>Address 1</label>
-            <input id="address1" required>
+                    <div class="full-width">
+                        <input id="address1" placeholder="Address" required>
+                    </div>
 
-            <label>City</label>
-            <input id="city" required>
+                    <input id="city" placeholder="City" required>
 
-            <label>State</label>
-            <input id="state" required>
+                    <select id="state" required>
+                        <option value="">Select State</option>
+                        <option>Alabama</option>
+                        <option>Alaska</option>
+                        <option>Arizona</option>
+                        <option>Arkansas</option>
+                        <option>California</option>
+                        <option>Colorado</option>
+                        <option>Connecticut</option>
+                        <option>Delaware</option>
+                        <option>Florida</option>
+                        <option>Georgia</option>
+                        <option>Hawaii</option>
+                        <option>Idaho</option>
+                        <option>Illinois</option>
+                        <option>Indiana</option>
+                        <option>Iowa</option>
+                        <option>Kansas</option>
+                        <option>Kentucky</option>
+                        <option>Louisiana</option>
+                        <option>Maine</option>
+                        <option>Maryland</option>
+                        <option>Massachusetts</option>
+                        <option>Michigan</option>
+                        <option>Minnesota</option>
+                        <option>Mississippi</option>
+                        <option>Missouri</option>
+                        <option>Montana</option>
+                        <option>Nebraska</option>
+                        <option>Nevada</option>
+                        <option>New Hampshire</option>
+                        <option>New Jersey</option>
+                        <option>New Mexico</option>
+                        <option>New York</option>
+                        <option>North Carolina</option>
+                        <option>North Dakota</option>
+                        <option>Ohio</option>
+                        <option>Oklahoma</option>
+                        <option>Oregon</option>
+                        <option>Pennsylvania</option>
+                        <option>Rhode Island</option>
+                        <option>South Carolina</option>
+                        <option>South Dakota</option>
+                        <option>Tennessee</option>
+                        <option>Texas</option>
+                        <option>Utah</option>
+                        <option>Vermont</option>
+                        <option>Virginia</option>
+                        <option>Washington</option>
+                        <option>West Virginia</option>
+                        <option>Wisconsin</option>
+                        <option>Wyoming</option>
+                    </select>
 
-            <label>Zip</label>
-            <input id="zip" required>
+                    <input id="zip" placeholder="Zip" required>
+                </div>
 
-            <h2 style="margin-top: 1.5rem;">Payment</h2>
 
-            <label>Card Number</label>
-            <input id="card" required>
+                <!-- PAYMENT -->
+                <div class="form-section-title">Payment</div>
 
-            <label>Exp Month</label>
-            <input id="exp_month" required>
+                <div class="form-grid">
 
-            <label>Exp Year</label>
-            <input id="exp_year" required>
+                    <div class="full-width">
+                        <input id="card" placeholder="Card Number" required>
+                    </div>
 
-            <label>CVV</label>
-            <input id="cvv" required>
+                    <input id="exp_month" placeholder="Exp Month (MM)" required>
+                    <input id="exp_year" placeholder="Exp Year (YYYY)" required>
 
-            <p id="profileMessage" style="margin-top: 1rem;"></p>
+                    <div class="full-width">
+                        <input id="cvv" placeholder="CVV" required>
+                    </div>
 
-            <div style="margin-top: 1rem;">
-                <button type="submit">Save Profile</button>
-            </div>
-        </form>
+                </div>
+
+
+                <div class="card-actions" style="margin-top:20px;">
+                    <button type="submit">Save Profile</button>
+                    <button type="button" onclick="openUserDashboard()">Cancel</button>
+                </div>
+
+                <p id="profileMessage" class="subtle-text" style="margin-top:14px;"></p>
+
+            </form>
+
+        </div>
     </div>
 
     <script src="script.js"></script>
