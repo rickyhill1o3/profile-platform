@@ -544,13 +544,15 @@ async function loadInvites(page = invitePage) {
     });
     const payload = await res.json();
 
-    if (!payload.items || !Array.isArray(payload.items)) {
+    const invites = Array.isArray(payload) ? payload : (payload.items || []);
+    const currentPage = Array.isArray(payload) ? 1 : (payload.page || 1);
+    const totalPages = Array.isArray(payload) ? 1 : (payload.total_pages || 1);
+
+    if (!Array.isArray(invites)) {
         tableBody.innerHTML = `Could not load invite codes.`;
         if (pager) pager.innerHTML = "";
         return;
     }
-
-    const invites = payload.items;
 
     const activeCount = invites.filter((i) => !i.used && !i.canceled).length;
     const usedCount = invites.filter((i) => i.used).length;
@@ -600,11 +602,15 @@ async function loadInvites(page = invitePage) {
     }
 
     if (pager) {
-        pager.innerHTML = `
-            <button onclick="loadInvites(${Math.max(1, payload.page - 1)})" ${payload.page <= 1 ? "disabled" : ""}>Previous</button>
-            <span>Page ${payload.page} of ${payload.total_pages || 1}</span>
-            <button onclick="loadInvites(${payload.page + 1})" ${payload.page >= payload.total_pages ? "disabled" : ""}>Next</button>
-        `;
+        if (totalPages > 1) {
+            pager.innerHTML = `
+                <button onclick="loadInvites(${Math.max(1, currentPage - 1)})" ${currentPage <= 1 ? "disabled" : ""}>Previous</button>
+                <span>Page ${currentPage} of ${totalPages}</span>
+                <button onclick="loadInvites(${currentPage + 1})" ${currentPage >= totalPages ? "disabled" : ""}>Next</button>
+            `;
+        } else {
+            pager.innerHTML = "";
+        }
     }
 }
 
@@ -695,17 +701,20 @@ async function loadUsers(page = usersPage) {
     });
     const payload = await res.json();
 
-    if (!payload.items || !Array.isArray(payload.items)) {
+    const usersData = Array.isArray(payload) ? payload : (payload.items || []);
+    const currentPage = Array.isArray(payload) ? 1 : (payload.page || 1);
+    const totalPages = Array.isArray(payload) ? 1 : (payload.total_pages || 1);
+    const totalCount = Array.isArray(payload) ? usersData.length : (payload.total || usersData.length);
+
+    if (!Array.isArray(usersData)) {
         tableBody.innerHTML = `Could not load users.`;
         if (pager) pager.innerHTML = "";
         return;
     }
 
-    const usersData = payload.items;
-
     const userCounter = document.getElementById("userCount");
     if (userCounter) {
-        userCounter.textContent = payload.total || usersData.length;
+        userCounter.textContent = totalCount;
     }
 
     if (usersData.length === 0) {
@@ -757,11 +766,15 @@ async function loadUsers(page = usersPage) {
     }
 
     if (pager) {
-        pager.innerHTML = `
-            <button onclick="loadUsers(${Math.max(1, payload.page - 1)})" ${payload.page <= 1 ? "disabled" : ""}>Previous</button>
-            <span>Page ${payload.page} of ${payload.total_pages || 1}</span>
-            <button onclick="loadUsers(${payload.page + 1})" ${payload.page >= payload.total_pages ? "disabled" : ""}>Next</button>
-        `;
+        if (totalPages > 1) {
+            pager.innerHTML = `
+                <button onclick="loadUsers(${Math.max(1, currentPage - 1)})" ${currentPage <= 1 ? "disabled" : ""}>Previous</button>
+                <span>Page ${currentPage} of ${totalPages}</span>
+                <button onclick="loadUsers(${currentPage + 1})" ${currentPage >= totalPages ? "disabled" : ""}>Next</button>
+            `;
+        } else {
+            pager.innerHTML = "";
+        }
     }
 }
 
@@ -862,22 +875,41 @@ async function loadExportAccounts() {
     const exportUserFilter = document.getElementById("exportUserFilter");
     if (!exportUserFilter) return;
 
-    const res = await fetch(API + "/admin/export/accounts", {
-        headers: { Authorization: "Bearer " + token() }
-    });
-    const accounts = await res.json();
+    try {
+        const res = await fetch(API + "/admin/export/accounts", {
+            headers: { Authorization: "Bearer " + token() }
+        });
 
-    if (!Array.isArray(accounts)) {
-        return;
-    }
+        const accounts = await res.json();
 
-    let options = `<option value="">All Accounts</option>`;
-    accounts.forEach((u) => {
-        options += `<option value="${u.id}">${u.email} (${u.role})</option>`;
-    });
+        if (Array.isArray(accounts)) {
+            let options = `<option value="">All Accounts</option>`;
+            accounts.forEach((u) => {
+                options += `<option value="${u.id}">${u.email} (${u.role})</option>`;
+            });
+            exportUserFilter.innerHTML = options;
+            updateExportCount();
+            return;
+        }
+    } catch { }
 
-    exportUserFilter.innerHTML = options;
-    updateExportCount();
+    try {
+        const res = await fetch(API + "/admin/users?page=1&limit=100", {
+            headers: { Authorization: "Bearer " + token() }
+        });
+        const payload = await res.json();
+        const users = Array.isArray(payload) ? payload : (payload.items || []);
+
+        let options = `<option value="">All Accounts</option>`;
+        users
+            .filter((u) => u.role === "user" || u.role === "admin" || u.role === "super_admin")
+            .forEach((u) => {
+                options += `<option value="${u.id}">${u.email} (${u.role})</option>`;
+            });
+
+        exportUserFilter.innerHTML = options;
+        updateExportCount();
+    } catch { }
 }
 
 async function updateExportCount() {
