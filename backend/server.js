@@ -1249,28 +1249,25 @@ app.get("/admin/export/count", auth, admin, async (req, res) => {
     }
 });
 
-app.get("/admin/export/aycd", auth, admin, async (req, res) => {
+app.get("/admin/export/profiles-json", auth, admin, async (req, res) => {
     try {
         const currentUser = await getCurrentUser(req);
         const { user_id, group } = req.query;
+        const filename = (req.query.filename || "profiles").replace(/[^a-zA-Z0-9-_]/g, "");
 
         let query = supabase
             .from("profiles")
             .select(`
-        *,
-        addresses(*),
-        payments(*),
-        accounts(*)
-      `)
+                *,
+                addresses(*),
+                payments(*),
+                accounts(*)
+            `)
             .order("created_at", { ascending: false });
 
         if (currentUser.role === "super_admin") {
-            if (user_id) {
-                query = query.eq("user_id", user_id);
-            }
-            if (group) {
-                query = query.eq("account_type", group);
-            }
+            if (user_id) query = query.eq("user_id", user_id);
+            if (group) query = query.eq("account_type", group);
         } else {
             const ownedUserIds = await getScopeUserIdsForAdmin(currentUser);
 
@@ -1280,13 +1277,8 @@ app.get("/admin/export/aycd", auth, admin, async (req, res) => {
 
             query = query.in("user_id", safeIn(ownedUserIds));
 
-            if (user_id) {
-                query = query.eq("user_id", user_id);
-            }
-
-            if (group) {
-                query = query.eq("account_type", group);
-            }
+            if (user_id) query = query.eq("user_id", user_id);
+            if (group) query = query.eq("account_type", group);
         }
 
         const { data: profiles, error } = await query;
@@ -1298,7 +1290,6 @@ app.get("/admin/export/aycd", auth, admin, async (req, res) => {
         const rows = (profiles || []).map((profile) => {
             const address = profile.addresses?.[0] || {};
             const payment = profile.payments?.[0] || {};
-            const account = profile.accounts?.[0] || {};
 
             let cardNumber = "";
             let cardCvv = "";
@@ -1311,33 +1302,118 @@ app.get("/admin/export/aycd", auth, admin, async (req, res) => {
                 cardCvv = payment.cvv_encrypted ? decrypt(payment.cvv_encrypted) : "";
             } catch { }
 
+            const billingSameAsShipping =
+                !address.billing_first_name &&
+                !address.billing_last_name &&
+                !address.billing_address1 &&
+                !address.billing_city &&
+                !address.billing_state &&
+                !address.billing_zip &&
+                !address.billing_phone;
+
             return {
-                profile_name: profile.profile_name || "",
-                account_type: profile.account_type || "",
-                first_name: address.first_name || "",
-                last_name: address.last_name || "",
+                id: profile.id,
+                createdAt: profile.created_at ? new Date(profile.created_at).getTime() : Date.now(),
+                updatedAt: profile.updated_at ? new Date(profile.updated_at).getTime() : Date.now(),
+                name: profile.profile_name || "",
                 email: address.email || "",
-                phone: address.phone || "",
-                address1: address.address1 || "",
-                city: address.city || "",
-                state: address.state || "",
-                zip: address.zip || "",
-                card_number: cardNumber,
-                exp_month: payment.exp_month || "",
-                exp_year: payment.exp_year || "",
-                cvv: cardCvv,
-                card_last4: payment.card_last4 || "",
-                login_email: account.login_email || "",
-                login_password: account.login_password || "",
-                gmail_app_password: account.gmail_app_password || "",
-                amazon_2fa_secret: account.amazon_2fa_secret || "",
-                user_id: profile.user_id || ""
+                oneTimeUse: false,
+                shipping: {
+                    firstName: address.first_name || "",
+                    lastName: address.last_name || "",
+                    address1: address.address1 || "",
+                    address2: address.address2 || "",
+                    city: address.city || "",
+                    province: address.state || "",
+                    postalCode: address.zip || "",
+                    country: address.country || "United States",
+                    phone: address.phone || ""
+                },
+                billing: {
+                    sameAsShipping: billingSameAsShipping,
+                    firstName: address.billing_first_name || "",
+                    lastName: address.billing_last_name || "",
+                    address1: address.billing_address1 || "",
+                    address2: address.billing_address2 || "",
+                    city: address.billing_city || "",
+                    province: address.billing_state || null,
+                    postalCode: address.billing_zip || "",
+                    country: address.billing_country || null,
+                    phone: address.billing_phone || ""
+                },
+                payment: {
+                    name: payment.card_name || `${address.first_name || ""} ${address.last_name || ""}`.trim(),
+                    num: cardNumber,
+                    year: payment.exp_year || "",
+                    month: payment.exp_month || "",
+                    cvv: cardCvv
+                }
             };
         });
 
         res.setHeader("Content-Type", "application/json");
-        res.setHeader("Content-Disposition", 'attachment; filename="profiles.json"');
+        res.setHeader("Content-Disposition", `attachment; filename="${filename}.json"`);
         res.send(JSON.stringify(rows, null, 2));
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.get("/admin/export/accounts-txt", auth, admin, async (req, res) => {
+    try {
+        const currentUser = await getCurrentUser(req);
+        const { user_id, group } = req.query;
+        const filename = (req.query.filename || "accounts").replace(/[^a-zA-Z0-9-_]/g, "");
+
+        let query = supabase
+            .from("profiles")
+            .select(`
+                id,
+                user_id,
+                account_type,
+                created_at,
+                accounts(*)
+            `)
+            .order("created_at", { ascending: false });
+
+        if (currentUser.role === "super_admin") {
+            if (user_id) query = query.eq("user_id", user_id);
+            if (group) query = query.eq("account_type", group);
+        } else {
+            const ownedUserIds = await getScopeUserIdsForAdmin(currentUser);
+
+            if (user_id && !ownedUserIds.includes(user_id)) {
+                return res.status(403).json({ error: "Cannot export that account" });
+            }
+
+            query = query.in("user_id", safeIn(ownedUserIds));
+
+            if (user_id) query = query.eq("user_id", user_id);
+            if (group) query = query.eq("account_type", group);
+        }
+
+        const { data: profiles, error } = await query;
+
+        if (error) {
+            return res.status(500).json({ error: error.message });
+        }
+
+        const lines = (profiles || [])
+            .map((profile) => {
+                const account = profile.accounts?.[0] || {};
+                const email = account.login_email || "";
+                const password = account.login_password || "";
+                const secret = account.amazon_2fa_secret || account.gmail_app_password || "";
+
+                if (!email && !password && !secret) return null;
+
+                return `${email}:${password}:${secret}`;
+            })
+            .filter(Boolean);
+
+        res.setHeader("Content-Type", "text/plain; charset=utf-8");
+        res.setHeader("Content-Disposition", `attachment; filename="${filename}.txt"`);
+        res.send(lines.join("\\n"));
     } catch (err) {
         res.status(500).json({ error: err.message });
     }

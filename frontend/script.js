@@ -1009,7 +1009,7 @@ function clearExportFilters() {
     updateExportCount();
 }
 
-async function exportProfiles() {
+async function getExportCountAndParams() {
     const userFilter = document.getElementById("exportUserFilter");
     const groupFilter = document.getElementById("exportGroupFilter");
     const banner = document.getElementById("exportCountBanner");
@@ -1030,26 +1030,77 @@ async function exportProfiles() {
 
     if (countData.error) {
         if (banner) banner.textContent = countData.error;
-        return;
+        throw new Error(countData.error);
     }
 
     if (!countData.count) {
         if (banner) banner.textContent = "0 profiles will be exported.";
-        alert("No profiles match the selected filters.");
-        return;
+        throw new Error("No profiles match the selected filters.");
     }
 
-    const url = API + "/admin/export/aycd" + (params.toString() ? "?" + params.toString() : "");
+    return { params, count: countData.count };
+}
+
+function promptForExportFilename(defaultName) {
+    const value = prompt("Enter export file name:", defaultName);
+    if (value === null) return null;
+    const cleaned = value.trim().replace(/[^a-zA-Z0-9-_]/g, "");
+    return cleaned || defaultName;
+}
+
+async function downloadExportFile(url, fallbackName) {
     const res = await fetch(url, {
         headers: { Authorization: "Bearer " + token() }
     });
+
+    if (!res.ok) {
+        let message = "Export failed.";
+        try {
+            const data = await res.json();
+            if (data.error) message = data.error;
+        } catch { }
+        throw new Error(message);
+    }
 
     const blob = await res.blob();
     const downloadUrl = window.URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = downloadUrl;
-    a.download = "profiles.json";
+    a.download = fallbackName;
+    document.body.appendChild(a);
     a.click();
+    a.remove();
+    window.URL.revokeObjectURL(downloadUrl);
+}
+
+async function exportProfilesJson() {
+    try {
+        const { params } = await getExportCountAndParams();
+        const filename = promptForExportFilename("profiles");
+        if (!filename) return;
+
+        params.append("filename", filename);
+
+        const url = API + "/admin/export/profiles-json" + (params.toString() ? "?" + params.toString() : "");
+        await downloadExportFile(url, filename + ".json");
+    } catch (err) {
+        if (err.message) alert(err.message);
+    }
+}
+
+async function exportAccountsTxt() {
+    try {
+        const { params } = await getExportCountAndParams();
+        const filename = promptForExportFilename("accounts");
+        if (!filename) return;
+
+        params.append("filename", filename);
+
+        const url = API + "/admin/export/accounts-txt" + (params.toString() ? "?" + params.toString() : "");
+        await downloadExportFile(url, filename + ".txt");
+    } catch (err) {
+        if (err.message) alert(err.message);
+    }
 }
 
 /* ================= CHANGE PASSWORD ================= */

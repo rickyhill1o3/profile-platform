@@ -128,8 +128,9 @@
             <section class="admin-card" id="exportCard">
                 <div class="card-header-row">
                     <div>
-                        <h2>Export Profiles</h2>
-                        <p class="subtle-text">Export all profiles, by account, by group, or both</p>
+                        <h2>Export Profiles / Accounts</h2>
+                        <p class="subtle-text">Export profile JSON separately from account login exports, with a custom
+                            file name</p>
                     </div>
                 </div>
 
@@ -152,12 +153,14 @@
                 </div>
 
                 <div class="card-actions" style="margin-top:16px;">
-                    <button onclick="exportProfiles()">Export Filtered Profiles</button>
+                    <button onclick="exportProfilesJson()">Export Profile JSON</button>
+                    <button onclick="exportAccountsTxt()">Export Account Logins</button>
                     <button onclick="clearExportFilters()">Clear Filters</button>
                 </div>
 
                 <p class="subtle-text" style="margin-top:12px;">
-                    You’ll see exactly how many profiles match before exporting.
+                    Profile export downloads JSON. Account export downloads one line per profile in the format
+                    email:password:2fa-or-app-password.
                 </p>
             </section>
 
