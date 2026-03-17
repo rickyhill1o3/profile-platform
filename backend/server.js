@@ -96,8 +96,11 @@ async function ensureUserNotRevoked(userId) {
     return user;
 }
 
-function isAdminRole(role) {
-    return role === "admin" || role === "super_admin";
+function safeIn(values) {
+    if (!values || values.length === 0) {
+        return ["00000000-0000-0000-0000-000000000000"];
+    }
+    return values;
 }
 
 async function canManageTarget(currentUser, targetUser) {
@@ -120,13 +123,6 @@ async function canManageTarget(currentUser, targetUser) {
     return targetUser.owner_admin_id === currentUser.id;
 }
 
-function safeIn(values) {
-    if (!values || values.length === 0) {
-        return ["00000000-0000-0000-0000-000000000000"];
-    }
-    return values;
-}
-
 async function getScopeUserIdsForAdmin(currentUser) {
     if (currentUser.role === "super_admin") {
         return null;
@@ -141,7 +137,8 @@ async function getScopeUserIdsForAdmin(currentUser) {
         throw new Error(error.message);
     }
 
-    return (ownedUsers || []).map((user) => user.id);
+    const ids = (ownedUsers || []).map((user) => user.id);
+    return [...new Set([currentUser.id, ...ids])];
 }
 
 async function getUserProfilesWithRelations(userId) {
@@ -627,16 +624,40 @@ app.get("/admin/users", auth, admin, async (req, res) => {
     try {
         const currentUser = await getCurrentUser(req);
 
+        const page = Math.max(parseInt(req.query.page || "1", 10), 1);
+        const limit = Math.min(Math.max(parseInt(req.query.limit || "10", 10), 1), 10);
+        const from = (page - 1) * limit;
+        const to = from + limit - 1;
+
+        const ownerAdminId = req.query.owner_admin_id || "";
+        const roleFilter = req.query.role || "";
+        const createdAfter = req.query.created_after || "";
+        const createdBefore = req.query.created_before || "";
+
         let usersQuery = supabase
             .from("users")
-            .select("*")
-            .order("created_at", { ascending: false });
+            .select("*", { count: "exact" })
+            .order("created_at", { ascending: false })
+            .range(from, to);
 
         if (currentUser.role !== "super_admin") {
             usersQuery = usersQuery.eq("owner_admin_id", currentUser.id);
+        } else {
+            if (ownerAdminId) {
+                usersQuery = usersQuery.eq("owner_admin_id", ownerAdminId);
+            }
+            if (roleFilter) {
+                usersQuery = usersQuery.eq("role", roleFilter);
+            }
+            if (createdAfter) {
+                usersQuery = usersQuery.gte("created_at", createdAfter);
+            }
+            if (createdBefore) {
+                usersQuery = usersQuery.lte("created_at", createdBefore);
+            }
         }
 
-        const { data: users, error } = await usersQuery;
+        const { data: users, error, count } = await usersQuery;
 
         if (error) {
             return res.status(500).json({ error: error.message });
@@ -674,7 +695,37 @@ app.get("/admin/users", auth, admin, async (req, res) => {
             owner_admin_email: u.owner_admin_id ? ownerMap[u.owner_admin_id] || "" : ""
         }));
 
-        res.json(output);
+        res.json({
+            items: output,
+            page,
+            limit,
+            total: count || 0,
+            total_pages: Math.ceil((count || 0) / limit)
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.get("/admin/admin-owners", auth, admin, async (req, res) => {
+    try {
+        const currentUser = await getCurrentUser(req);
+
+        if (currentUser.role !== "super_admin") {
+            return res.json([{ id: currentUser.id, email: currentUser.email }]);
+        }
+
+        const { data, error } = await supabase
+            .from("users")
+            .select("id, email")
+            .in("role", ["admin", "super_admin"])
+            .order("email", { ascending: true });
+
+        if (error) {
+            return res.status(500).json({ error: error.message });
+        }
+
+        res.json(data || []);
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
@@ -690,13 +741,18 @@ app.patch("/admin/users/:id/revoke", auth, admin, async (req, res) => {
             return res.status(404).json({ error: "User not found" });
         }
 
-        if (targetUser.role === "admin" || targetUser.role === "super_admin") {
-            return res.status(400).json({ error: "Admin account cannot be revoked" });
+        if (targetUser.role === "super_admin") {
+            return res.status(400).json({ error: "Super admin account cannot be revoked" });
         }
 
-        const allowed = await canManageTarget(currentUser, targetUser);
-        if (!allowed) {
-            return res.status(403).json({ error: "You can only manage users in your own admin tree" });
+        if (currentUser.role !== "super_admin") {
+            const allowed = await canManageTarget(currentUser, targetUser);
+            if (!allowed) {
+                return res.status(403).json({ error: "You can only manage users in your own admin tree" });
+            }
+            if (targetUser.role === "admin") {
+                return res.status(403).json({ error: "Only super admin can revoke admins" });
+            }
         }
 
         const { error } = await supabase
@@ -724,9 +780,18 @@ app.patch("/admin/users/:id/restore", auth, admin, async (req, res) => {
             return res.status(404).json({ error: "User not found" });
         }
 
-        const allowed = await canManageTarget(currentUser, targetUser);
-        if (!allowed) {
-            return res.status(403).json({ error: "You can only manage users in your own admin tree" });
+        if (targetUser.role === "super_admin") {
+            return res.status(400).json({ error: "Super admin account cannot be restored here" });
+        }
+
+        if (currentUser.role !== "super_admin") {
+            const allowed = await canManageTarget(currentUser, targetUser);
+            if (!allowed) {
+                return res.status(403).json({ error: "You can only manage users in your own admin tree" });
+            }
+            if (targetUser.role === "admin") {
+                return res.status(403).json({ error: "Only super admin can restore admins" });
+            }
         }
 
         const { error } = await supabase
@@ -848,13 +913,25 @@ app.delete("/admin/users/:id", auth, admin, async (req, res) => {
             return res.status(404).json({ error: "User not found" });
         }
 
-        if (targetUser.role === "admin" || targetUser.role === "super_admin") {
-            return res.status(400).json({ error: "Admin account cannot be deleted here" });
+        if (targetUser.role === "super_admin") {
+            return res.status(400).json({ error: "Super admin account cannot be deleted" });
         }
 
-        const allowed = await canManageTarget(currentUser, targetUser);
-        if (!allowed) {
-            return res.status(403).json({ error: "You can only delete users in your own admin tree" });
+        if (currentUser.role !== "super_admin") {
+            const allowed = await canManageTarget(currentUser, targetUser);
+            if (!allowed) {
+                return res.status(403).json({ error: "You can only delete users in your own admin tree" });
+            }
+            if (targetUser.role === "admin") {
+                return res.status(403).json({ error: "Only super admin can delete admins" });
+            }
+        }
+
+        if (currentUser.role === "super_admin" && targetUser.role === "admin") {
+            await supabase
+                .from("users")
+                .update({ owner_admin_id: currentUser.id })
+                .eq("owner_admin_id", targetUser.id);
         }
 
         const { data: profiles, error: profilesError } = await supabase
@@ -952,16 +1029,22 @@ app.get("/admin/invites", auth, admin, async (req, res) => {
     try {
         const currentUser = await getCurrentUser(req);
 
+        const page = Math.max(parseInt(req.query.page || "1", 10), 1);
+        const limit = Math.min(Math.max(parseInt(req.query.limit || "10", 10), 1), 10);
+        const from = (page - 1) * limit;
+        const to = from + limit - 1;
+
         let inviteQuery = supabase
             .from("invite_codes")
-            .select("*")
-            .order("created_at", { ascending: false });
+            .select("*", { count: "exact" })
+            .order("created_at", { ascending: false })
+            .range(from, to);
 
         if (currentUser.role !== "super_admin") {
             inviteQuery = inviteQuery.eq("created_by_admin_id", currentUser.id);
         }
 
-        const { data: invites, error } = await inviteQuery;
+        const { data: invites, error, count } = await inviteQuery;
 
         if (error) {
             return res.status(500).json({ error: error.message });
@@ -987,7 +1070,13 @@ app.get("/admin/invites", auth, admin, async (req, res) => {
             created_by_admin_email: invite.created_by_admin_id ? emailMap[invite.created_by_admin_id] || "" : ""
         }));
 
-        res.json(output);
+        res.json({
+            items: output,
+            page,
+            limit,
+            total: count || 0,
+            total_pages: Math.ceil((count || 0) / limit)
+        });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
@@ -1061,7 +1150,34 @@ app.delete("/admin/invites/:id", auth, admin, async (req, res) => {
     }
 });
 
-/* ================= EXPORT COUNT ================= */
+/* ================= EXPORT ================= */
+
+app.get("/admin/export/accounts", auth, admin, async (req, res) => {
+    try {
+        const currentUser = await getCurrentUser(req);
+
+        let query = supabase
+            .from("users")
+            .select("id, email, role")
+            .order("email", { ascending: true });
+
+        if (currentUser.role !== "super_admin") {
+            const ownedIds = await getScopeUserIdsForAdmin(currentUser);
+            query = query.in("id", safeIn(ownedIds));
+        }
+
+        const { data, error } = await query;
+
+        if (error) {
+            return res.status(500).json({ error: error.message });
+        }
+
+        const items = (data || []).filter((u) => u.role === "user" || u.role === "admin");
+        res.json(items);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
 
 app.get("/admin/export/count", auth, admin, async (req, res) => {
     try {
@@ -1083,7 +1199,7 @@ app.get("/admin/export/count", auth, admin, async (req, res) => {
             const ownedUserIds = await getScopeUserIdsForAdmin(currentUser);
 
             if (user_id && !ownedUserIds.includes(user_id)) {
-                return res.status(403).json({ error: "Cannot export that user" });
+                return res.status(403).json({ error: "Cannot export that account" });
             }
 
             query = query.in("user_id", safeIn(ownedUserIds));
@@ -1108,8 +1224,6 @@ app.get("/admin/export/count", auth, admin, async (req, res) => {
         res.status(500).json({ error: err.message });
     }
 });
-
-/* ================= AYCD EXPORT ================= */
 
 app.get("/admin/export/aycd", auth, admin, async (req, res) => {
     try {
@@ -1137,7 +1251,7 @@ app.get("/admin/export/aycd", auth, admin, async (req, res) => {
             const ownedUserIds = await getScopeUserIdsForAdmin(currentUser);
 
             if (user_id && !ownedUserIds.includes(user_id)) {
-                return res.status(403).json({ error: "Cannot export that user" });
+                return res.status(403).json({ error: "Cannot export that account" });
             }
 
             query = query.in("user_id", safeIn(ownedUserIds));

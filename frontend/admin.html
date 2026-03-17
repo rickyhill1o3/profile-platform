@@ -121,19 +121,21 @@
                         <tbody id="inviteTableBody"></tbody>
                     </table>
                 </div>
+
+                <div class="card-actions" id="invitePagination" style="margin-top:16px;"></div>
             </section>
 
             <section class="admin-card" id="exportCard">
                 <div class="card-header-row">
                     <div>
                         <h2>Export Profiles</h2>
-                        <p class="subtle-text">Export all profiles, by user, by group, or both</p>
+                        <p class="subtle-text">Export all profiles, by account, by group, or both</p>
                     </div>
                 </div>
 
                 <div class="form-grid">
                     <select id="exportUserFilter" onchange="updateExportCount()">
-                        <option value="">All Users</option>
+                        <option value="">All Accounts</option>
                     </select>
 
                     <select id="exportGroupFilter" onchange="updateExportCount()">
@@ -163,9 +165,24 @@
                 <div class="card-header-row">
                     <div>
                         <h2>Users</h2>
-                        <p class="subtle-text">View ownership, profile counts, and manage revoke, restore, or delete
-                            actions</p>
+                        <p class="subtle-text">View ownership, profile counts, and manage promote, demote, revoke,
+                            restore, or delete actions</p>
                     </div>
+                </div>
+
+                <div class="form-grid" style="margin-bottom:16px;">
+                    <select id="usersOwnerFilter" onchange="applyUserFilters()">
+                        <option value="">All Admin Owners</option>
+                    </select>
+
+                    <select id="usersRoleFilter" onchange="applyUserFilters()">
+                        <option value="">All Roles</option>
+                        <option value="user">Users</option>
+                        <option value="admin">Admins</option>
+                    </select>
+
+                    <input type="date" id="usersCreatedAfter" onchange="applyUserFilters()">
+                    <input type="date" id="usersCreatedBefore" onchange="applyUserFilters()">
                 </div>
 
                 <div class="table-wrap">
@@ -184,6 +201,8 @@
                         <tbody id="usersTableBody"></tbody>
                     </table>
                 </div>
+
+                <div class="card-actions" id="usersPagination" style="margin-top:16px;"></div>
             </section>
         </main>
     </div>

@@ -3,6 +3,10 @@ const API =
         ? "http://localhost:3000"
         : "https://profile-platform.onrender.com";
 
+let invitePage = 1;
+let usersPage = 1;
+const PAGE_SIZE = 10;
+
 function token() {
     return localStorage.getItem("token");
 }
@@ -10,6 +14,30 @@ function token() {
 function currentUser() {
     try {
         return JSON.parse(localStorage.getItem("user") || "null");
+    } catch {
+        return null;
+    }
+}
+
+async function refreshCurrentUserFromServer() {
+    const savedToken = token();
+    if (!savedToken) return null;
+
+    try {
+        const res = await fetch(API + "/auth/me", {
+            headers: {
+                Authorization: "Bearer " + savedToken
+            }
+        });
+
+        const data = await res.json();
+
+        if (data.error || !data.user) {
+            return null;
+        }
+
+        localStorage.user = JSON.stringify(data.user);
+        return data.user;
     } catch {
         return null;
     }
@@ -155,7 +183,14 @@ async function loadProfiles() {
     const dashboardEl = document.getElementById("dashboard");
     if (!dashboardEl) return;
 
-    const user = currentUser();
+    const refreshedUser = await refreshCurrentUserFromServer();
+    const user = refreshedUser || currentUser();
+
+    if (isAdminRole(user?.role) && !window.location.pathname.endsWith("admin.html")) {
+        location = "admin.html";
+        return;
+    }
+
     const adminButton = document.getElementById("adminPanelButton");
     if (isAdminRole(user?.role) && adminButton) {
         adminButton.style.display = "inline-block";
@@ -256,7 +291,9 @@ async function loadProfileEditor() {
     const form = document.getElementById("profileForm");
     if (!form) return;
 
-    const user = currentUser();
+    const refreshedUser = await refreshCurrentUserFromServer();
+    const user = refreshedUser || currentUser();
+
     const adminButton = document.getElementById("adminPanelButtonProfile");
     if (isAdminRole(user?.role) && adminButton) {
         adminButton.style.display = "inline-block";
@@ -481,7 +518,8 @@ async function createInvite(inviteRole = "user", quantity = 1) {
         resultBox.innerText = `${inviteRole === "admin" ? "Admin" : "User"} invites created: ${codes.join(", ")}`;
     }
 
-    loadInvites();
+    invitePage = 1;
+    loadInvites(1);
 }
 
 async function submitInviteCreation() {
@@ -494,27 +532,25 @@ async function submitInviteCreation() {
     return createInvite(inviteRole, quantity);
 }
 
-async function createUserInvite() {
-    return createInvite("user", 1);
-}
-
-async function createAdminInvite() {
-    return createInvite("admin", 1);
-}
-
-async function loadInvites() {
+async function loadInvites(page = invitePage) {
     const tableBody = document.getElementById("inviteTableBody");
+    const pager = document.getElementById("invitePagination");
     if (!tableBody) return;
 
-    const res = await fetch(API + "/admin/invites", {
+    invitePage = page;
+
+    const res = await fetch(API + `/admin/invites?page=${invitePage}&limit=${PAGE_SIZE}`, {
         headers: { Authorization: "Bearer " + token() }
     });
-    const invites = await res.json();
+    const payload = await res.json();
 
-    if (!Array.isArray(invites)) {
+    if (!payload.items || !Array.isArray(payload.items)) {
         tableBody.innerHTML = `Could not load invite codes.`;
+        if (pager) pager.innerHTML = "";
         return;
     }
+
+    const invites = payload.items;
 
     const activeCount = invites.filter((i) => !i.used && !i.canceled).length;
     const usedCount = invites.filter((i) => i.used).length;
@@ -530,40 +566,46 @@ async function loadInvites() {
 
     if (invites.length === 0) {
         tableBody.innerHTML = `No invite codes yet.`;
-        return;
+    } else {
+        let html = "";
+        invites.forEach((invite) => {
+            const usedBy = invite.used_by_email || "-";
+            const createdBy = invite.created_by_admin_email || "-";
+            const role = invite.invite_role || "user";
+            const createdAt = invite.created_at ? new Date(invite.created_at).toLocaleString() : "-";
+
+            let actionHtml = "";
+            if (!invite.used && !invite.canceled) {
+                actionHtml = `
+                    <button onclick="cancelInvite('${invite.id}')">Cancel</button>
+                    <button onclick="deleteInvite('${invite.id}')">Delete</button>
+                `;
+            } else {
+                actionHtml = `<button onclick="deleteInvite('${invite.id}')">Delete</button>`;
+            }
+
+            html += `
+                <tr>
+                    <td>${invite.code}</td>
+                    <td>${role}</td>
+                    <td>${createdBy}</td>
+                    <td>${inviteStatusBadge(invite)}</td>
+                    <td>${createdAt}</td>
+                    <td>${usedBy}</td>
+                    <td>${actionHtml}</td>
+                </tr>
+            `;
+        });
+        tableBody.innerHTML = html;
     }
 
-    let html = "";
-    invites.forEach((invite) => {
-        const usedBy = invite.used_by_email || "-";
-        const createdBy = invite.created_by_admin_email || "-";
-        const role = invite.invite_role || "user";
-        const createdAt = invite.created_at ? new Date(invite.created_at).toLocaleString() : "-";
-
-        let actionHtml = "";
-        if (!invite.used && !invite.canceled) {
-            actionHtml = `
-        <button onclick="cancelInvite('${invite.id}')">Cancel</button>
-        <button onclick="deleteInvite('${invite.id}')">Delete</button>
-      `;
-        } else {
-            actionHtml = `<button onclick="deleteInvite('${invite.id}')">Delete</button>`;
-        }
-
-        html += `
-      <tr>
-        <td>${invite.code}</td>
-        <td>${role}</td>
-        <td>${createdBy}</td>
-        <td>${inviteStatusBadge(invite)}</td>
-        <td>${createdAt}</td>
-        <td>${usedBy}</td>
-        <td>${actionHtml}</td>
-      </tr>
-    `;
-    });
-
-    tableBody.innerHTML = html;
+    if (pager) {
+        pager.innerHTML = `
+            <button onclick="loadInvites(${Math.max(1, payload.page - 1)})" ${payload.page <= 1 ? "disabled" : ""}>Previous</button>
+            <span>Page ${payload.page} of ${payload.total_pages || 1}</span>
+            <button onclick="loadInvites(${payload.page + 1})" ${payload.page >= payload.total_pages ? "disabled" : ""}>Next</button>
+        `;
+    }
 }
 
 async function cancelInvite(id) {
@@ -578,7 +620,7 @@ async function cancelInvite(id) {
         return;
     }
 
-    loadInvites();
+    loadInvites(invitePage);
 }
 
 async function deleteInvite(id) {
@@ -593,72 +635,133 @@ async function deleteInvite(id) {
         return;
     }
 
-    loadInvites();
+    loadInvites(invitePage);
+}
+
+/* ================= ADMIN FILTERS ================= */
+
+async function loadOwnerAdminFilter() {
+    const ownerFilter = document.getElementById("usersOwnerFilter");
+    if (!ownerFilter) return;
+
+    const res = await fetch(API + "/admin/admin-owners", {
+        headers: { Authorization: "Bearer " + token() }
+    });
+    const admins = await res.json();
+
+    if (!Array.isArray(admins)) return;
+
+    let options = `<option value="">All Admin Owners</option>`;
+    admins.forEach((a) => {
+        options += `<option value="${a.id}">${a.email}</option>`;
+    });
+
+    ownerFilter.innerHTML = options;
+}
+
+function applyUserFilters() {
+    usersPage = 1;
+    loadUsers(1);
 }
 
 /* ================= ADMIN USERS ================= */
 
-async function loadUsers() {
+async function loadUsers(page = usersPage) {
     const tableBody = document.getElementById("usersTableBody");
-    const exportUserFilter = document.getElementById("exportUserFilter");
-    if (!tableBody && !exportUserFilter) return;
+    const pager = document.getElementById("usersPagination");
+    if (!tableBody) return;
 
-    const res = await fetch(API + "/admin/users", {
+    usersPage = page;
+
+    const refreshedUser = await refreshCurrentUserFromServer();
+    const activeUser = refreshedUser || currentUser();
+
+    const ownerFilter = document.getElementById("usersOwnerFilter")?.value || "";
+    const roleFilter = document.getElementById("usersRoleFilter")?.value || "";
+    const createdAfter = document.getElementById("usersCreatedAfter")?.value || "";
+    const createdBefore = document.getElementById("usersCreatedBefore")?.value || "";
+
+    const params = new URLSearchParams();
+    params.append("page", usersPage);
+    params.append("limit", PAGE_SIZE);
+
+    if (ownerFilter) params.append("owner_admin_id", ownerFilter);
+    if (roleFilter) params.append("role", roleFilter);
+    if (createdAfter) params.append("created_after", createdAfter);
+    if (createdBefore) params.append("created_before", createdBefore);
+
+    const res = await fetch(API + "/admin/users?" + params.toString(), {
         headers: { Authorization: "Bearer " + token() }
     });
-    const usersData = await res.json();
+    const payload = await res.json();
 
-    if (!Array.isArray(usersData)) {
-        if (tableBody) {
-            tableBody.innerHTML = `Could not load users.`;
-        }
+    if (!payload.items || !Array.isArray(payload.items)) {
+        tableBody.innerHTML = `Could not load users.`;
+        if (pager) pager.innerHTML = "";
         return;
     }
 
+    const usersData = payload.items;
+
     const userCounter = document.getElementById("userCount");
     if (userCounter) {
-        userCounter.textContent = usersData.length;
+        userCounter.textContent = payload.total || usersData.length;
     }
 
-    if (tableBody) {
-        if (usersData.length === 0) {
-            tableBody.innerHTML = `No users found.`;
-        } else {
-            let html = "";
-            usersData.forEach((u) => {
-                let actionHtml = `No action`;
-                if (!isAdminRole(u.role)) {
+    if (usersData.length === 0) {
+        tableBody.innerHTML = `No users found.`;
+    } else {
+        let html = "";
+        usersData.forEach((u) => {
+            let actionHtml = `No action`;
+
+            if (u.role === "admin") {
+                if (activeUser?.role === "super_admin") {
+                    actionHtml = `
+                        <button onclick="demoteAdmin('${u.id}', '${u.email}')">Demote</button>
+                        ${u.revoked
+                            ? `<button onclick="restoreUser('${u.id}')">Restore</button>`
+                            : `<button onclick="revokeUser('${u.id}')">Revoke</button>`}
+                        <button onclick="deleteUser('${u.id}', '${u.email}')">Delete</button>
+                    `;
+                }
+            } else if (u.role === "user") {
+                if (activeUser?.role === "super_admin") {
+                    actionHtml = `
+                        <button onclick="promoteUserToAdmin('${u.id}', '${u.email}')">Promote</button>
+                        ${u.revoked
+                            ? `<button onclick="restoreUser('${u.id}')">Restore</button>`
+                            : `<button onclick="revokeUser('${u.id}')">Revoke</button>`}
+                        <button onclick="deleteUser('${u.id}', '${u.email}')">Delete</button>
+                    `;
+                } else {
                     actionHtml = u.revoked
                         ? `<button onclick="restoreUser('${u.id}')">Restore</button> <button onclick="deleteUser('${u.id}', '${u.email}')">Delete</button>`
                         : `<button onclick="revokeUser('${u.id}')">Revoke</button> <button onclick="deleteUser('${u.id}', '${u.email}')">Delete</button>`;
                 }
+            }
 
-                html += `
-          <tr>
-            <td>${u.email}</td>
-            <td>${u.role}</td>
-            <td>${u.owner_admin_email || (u.owner_admin_id ? u.owner_admin_id : "-")}</td>
-            <td>${u.profile_count || 0}</td>
-            <td>${userStatusBadge(u)}</td>
-            <td>${u.created_at ? new Date(u.created_at).toLocaleString() : "-"}</td>
-            <td>${actionHtml}</td>
-          </tr>
-        `;
-            });
-            tableBody.innerHTML = html;
-        }
+            html += `
+                <tr>
+                    <td>${u.email}</td>
+                    <td>${u.role}</td>
+                    <td>${u.owner_admin_email || (u.owner_admin_id ? u.owner_admin_id : "-")}</td>
+                    <td>${u.profile_count || 0}</td>
+                    <td>${userStatusBadge(u)}</td>
+                    <td>${u.created_at ? new Date(u.created_at).toLocaleString() : "-"}</td>
+                    <td>${actionHtml}</td>
+                </tr>
+            `;
+        });
+        tableBody.innerHTML = html;
     }
 
-    if (exportUserFilter) {
-        let options = `<option value="">All Users</option>`;
-        usersData
-            .filter((u) => u.role === "user")
-            .forEach((u) => {
-                options += `<option value="${u.id}">${u.email}</option>`;
-            });
-
-        exportUserFilter.innerHTML = options;
-        updateExportCount();
+    if (pager) {
+        pager.innerHTML = `
+            <button onclick="loadUsers(${Math.max(1, payload.page - 1)})" ${payload.page <= 1 ? "disabled" : ""}>Previous</button>
+            <span>Page ${payload.page} of ${payload.total_pages || 1}</span>
+            <button onclick="loadUsers(${payload.page + 1})" ${payload.page >= payload.total_pages ? "disabled" : ""}>Next</button>
+        `;
     }
 }
 
@@ -674,7 +777,7 @@ async function revokeUser(id) {
         return;
     }
 
-    loadUsers();
+    loadUsers(usersPage);
 }
 
 async function restoreUser(id) {
@@ -689,11 +792,52 @@ async function restoreUser(id) {
         return;
     }
 
-    loadUsers();
+    loadUsers(usersPage);
+}
+
+async function promoteUserToAdmin(id, email) {
+    const confirmed = confirm(`Promote user ${email} to admin?`);
+    if (!confirmed) return;
+
+    const res = await fetch(API + "/admin/users/" + id + "/promote", {
+        method: "PATCH",
+        headers: { Authorization: "Bearer " + token() }
+    });
+    const data = await res.json();
+
+    if (data.error) {
+        alert(data.error);
+        return;
+    }
+
+    loadUsers(usersPage);
+    loadExportAccounts();
+}
+
+async function demoteAdmin(id, email) {
+    const confirmed = confirm(
+        `Demote admin ${email} to user? All users under this admin will be moved to the super admin account.`
+    );
+    if (!confirmed) return;
+
+    const res = await fetch(API + "/admin/users/" + id + "/demote", {
+        method: "PATCH",
+        headers: { Authorization: "Bearer " + token() }
+    });
+
+    const data = await res.json();
+
+    if (data.error) {
+        alert(data.error);
+        return;
+    }
+
+    loadUsers(usersPage);
+    loadExportAccounts();
 }
 
 async function deleteUser(id, email) {
-    const confirmed = confirm(`Delete user ${email}? This will also delete all profiles created by this user.`);
+    const confirmed = confirm(`Delete account ${email}? This will also delete all profiles created by this account.`);
     if (!confirmed) return;
 
     const res = await fetch(API + "/admin/users/" + id, {
@@ -707,11 +851,34 @@ async function deleteUser(id, email) {
         return;
     }
 
-    loadUsers();
+    loadUsers(usersPage);
+    loadExportAccounts();
     updateExportCount();
 }
 
 /* ================= EXPORT ================= */
+
+async function loadExportAccounts() {
+    const exportUserFilter = document.getElementById("exportUserFilter");
+    if (!exportUserFilter) return;
+
+    const res = await fetch(API + "/admin/export/accounts", {
+        headers: { Authorization: "Bearer " + token() }
+    });
+    const accounts = await res.json();
+
+    if (!Array.isArray(accounts)) {
+        return;
+    }
+
+    let options = `<option value="">All Accounts</option>`;
+    accounts.forEach((u) => {
+        options += `<option value="${u.id}">${u.email} (${u.role})</option>`;
+    });
+
+    exportUserFilter.innerHTML = options;
+    updateExportCount();
+}
 
 async function updateExportCount() {
     const banner = document.getElementById("exportCountBanner");
@@ -745,7 +912,7 @@ async function updateExportCount() {
     const selectedUserText =
         userFilter && userFilter.selectedIndex > 0
             ? userFilter.options[userFilter.selectedIndex].text
-            : "all users";
+            : "all accounts";
     const selectedGroupText = selectedGroup || "all groups";
 
     if (count === 1) {
@@ -832,8 +999,11 @@ if (passwordForm) {
 
 /* ================= PAGE LOAD ================= */
 
-document.addEventListener("DOMContentLoaded", () => {
+document.addEventListener("DOMContentLoaded", async () => {
+    await refreshCurrentUserFromServer();
     setupInviteControls();
-    loadInvites();
-    loadUsers();
+    await loadOwnerAdminFilter();
+    await loadExportAccounts();
+    loadInvites(1);
+    loadUsers(1);
 });
