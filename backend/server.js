@@ -17,7 +17,7 @@ const SUPER_ADMIN_EMAIL = "theshoreshacktcg@gmail.com";
 
 /* ================= AUTH HELPERS ================= */
 
-function auth(req, res, next) {
+async function auth(req, res, next) {
     const header = req.headers.authorization;
     if (!header) {
         return res.status(401).json({ error: "No token" });
@@ -27,8 +27,21 @@ function auth(req, res, next) {
 
     try {
         const decoded = jwt.verify(token, process.env.JWT_SECRET);
-        req.user_id = decoded.user_id;
-        req.role = decoded.role;
+
+        const { data: user, error } = await supabase
+            .from("users")
+            .select("*")
+            .eq("id", decoded.user_id)
+            .single();
+
+        if (error || !user) {
+            return res.status(401).json({ error: "User not found" });
+        }
+
+        req.user_id = user.id;
+        req.role = user.role;
+        req.currentUser = user;
+
         next();
     } catch {
         return res.status(401).json({ error: "Invalid token" });
@@ -43,6 +56,8 @@ function admin(req, res, next) {
 }
 
 async function getCurrentUser(req) {
+    if (req.currentUser) return req.currentUser;
+
     const { data: user, error } = await supabase
         .from("users")
         .select("*")
@@ -308,7 +323,7 @@ async function upsertProfileRelations(profileId, payload) {
     }
 }
 
-/* ================= SIGNUP ================= */
+/* ================= AUTH ROUTES ================= */
 
 app.post("/auth/signup", async (req, res) => {
     const { email, password, invite_code } = req.body;
@@ -357,8 +372,6 @@ app.post("/auth/signup", async (req, res) => {
     res.json({ success: true });
 });
 
-/* ================= LOGIN ================= */
-
 app.post("/auth/login", async (req, res) => {
     const { email, password } = req.body;
 
@@ -400,6 +413,24 @@ app.post("/auth/login", async (req, res) => {
     });
 });
 
+app.get("/auth/me", auth, async (req, res) => {
+    try {
+        const user = req.currentUser || await getCurrentUser(req);
+
+        res.json({
+            user: {
+                id: user.id,
+                email: user.email,
+                role: user.role,
+                owner_admin_id: user.owner_admin_id || null,
+                revoked: !!user.revoked
+            }
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
 /* ================= CHANGE PASSWORD ================= */
 
 app.post("/change-password", auth, async (req, res) => {
@@ -426,7 +457,7 @@ app.post("/change-password", auth, async (req, res) => {
     }
 });
 
-/* ================= GET PROFILES ================= */
+/* ================= USER PROFILES ================= */
 
 app.get("/profiles", auth, async (req, res) => {
     try {
@@ -466,8 +497,6 @@ app.get("/profiles", auth, async (req, res) => {
         res.status(status).json({ error: err.message });
     }
 });
-
-/* ================= CREATE PROFILE ================= */
 
 app.post("/profiles", auth, async (req, res) => {
     try {
@@ -517,8 +546,6 @@ app.post("/profiles", auth, async (req, res) => {
     }
 });
 
-/* ================= UPDATE PROFILE ================= */
-
 app.put("/profiles/:id", auth, async (req, res) => {
     try {
         const id = req.params.id;
@@ -566,8 +593,6 @@ app.put("/profiles/:id", auth, async (req, res) => {
         res.status(500).json({ error: err.message || "Profile update failed" });
     }
 });
-
-/* ================= DELETE PROFILE ================= */
 
 app.delete("/profiles/:id", auth, async (req, res) => {
     try {
@@ -714,6 +739,100 @@ app.patch("/admin/users/:id/restore", auth, admin, async (req, res) => {
         }
 
         res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.patch("/admin/users/:id/promote", auth, admin, async (req, res) => {
+    try {
+        const currentUser = await getCurrentUser(req);
+
+        if (currentUser.role !== "super_admin") {
+            return res.status(403).json({ error: "Only super admin can promote users to admin" });
+        }
+
+        const targetId = req.params.id;
+        const targetUser = await getUserById(targetId);
+
+        if (!targetUser) {
+            return res.status(404).json({ error: "User not found" });
+        }
+
+        if (targetUser.role !== "user") {
+            return res.status(400).json({ error: "Only user accounts can be promoted" });
+        }
+
+        const { error } = await supabase
+            .from("users")
+            .update({
+                role: "admin",
+                owner_admin_id: null,
+                revoked: false
+            })
+            .eq("id", targetId);
+
+        if (error) {
+            return res.status(500).json({ error: error.message });
+        }
+
+        res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.patch("/admin/users/:id/demote", auth, admin, async (req, res) => {
+    try {
+        const currentUser = await getCurrentUser(req);
+
+        if (currentUser.role !== "super_admin") {
+            return res.status(403).json({ error: "Only super admin can demote admins" });
+        }
+
+        const targetId = req.params.id;
+        const targetUser = await getUserById(targetId);
+
+        if (!targetUser) {
+            return res.status(404).json({ error: "User not found" });
+        }
+
+        if (targetUser.role !== "admin") {
+            return res.status(400).json({ error: "Only admin accounts can be demoted" });
+        }
+
+        if (targetUser.email === SUPER_ADMIN_EMAIL) {
+            return res.status(400).json({ error: "Super admin cannot be demoted" });
+        }
+
+        const superAdminId = currentUser.id;
+
+        const { error: reassignError } = await supabase
+            .from("users")
+            .update({ owner_admin_id: superAdminId })
+            .eq("owner_admin_id", targetUser.id);
+
+        if (reassignError) {
+            return res.status(500).json({ error: reassignError.message });
+        }
+
+        const { error: demoteError } = await supabase
+            .from("users")
+            .update({
+                role: "user",
+                owner_admin_id: superAdminId,
+                revoked: false
+            })
+            .eq("id", targetUser.id);
+
+        if (demoteError) {
+            return res.status(500).json({ error: demoteError.message });
+        }
+
+        res.json({
+            success: true,
+            message: "Admin demoted and all owned users moved to super admin"
+        });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
@@ -1089,8 +1208,7 @@ app.get("/admin/export/aycd", auth, admin, async (req, res) => {
 /* ================= SUPER ADMIN BOOTSTRAP ================= */
 
 async function ensureSuperAdmin() {
-    const password = process.env.SUPER_ADMIN_PASSWORD || "change-this-now";
-    const hash = await bcrypt.hash(password, 10);
+    const password = process.env.SUPER_ADMIN_PASSWORD;
 
     const { data: user } = await supabase
         .from("users")
@@ -1099,6 +1217,12 @@ async function ensureSuperAdmin() {
         .maybeSingle();
 
     if (!user) {
+        if (!password) {
+            throw new Error("SUPER_ADMIN_PASSWORD is required to create the initial super admin");
+        }
+
+        const hash = await bcrypt.hash(password, 10);
+
         const { error } = await supabase
             .from("users")
             .insert({
@@ -1120,7 +1244,6 @@ async function ensureSuperAdmin() {
     const { error } = await supabase
         .from("users")
         .update({
-            password_hash: hash,
             role: "super_admin",
             revoked: false,
             owner_admin_id: null
