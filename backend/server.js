@@ -281,6 +281,7 @@ async function upsertProfileRelations(profileId, payload) {
 
     const accountPayload = {
         profile_id: profileId,
+        provider: payload.account_type || null,
         login_email: payload.account_login_email || null,
         login_password: payload.account_login_password || null,
         gmail_app_password: payload.gmail_app_password || null,
