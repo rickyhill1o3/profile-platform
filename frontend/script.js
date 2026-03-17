@@ -824,6 +824,7 @@ async function promoteUserToAdmin(id, email) {
     }
 
     loadUsers(usersPage);
+    loadOwnerAdminFilter();
     loadExportAccounts();
 }
 
@@ -846,6 +847,7 @@ async function demoteAdmin(id, email) {
     }
 
     loadUsers(usersPage);
+    loadOwnerAdminFilter();
     loadExportAccounts();
 }
 
@@ -865,6 +867,7 @@ async function deleteUser(id, email) {
     }
 
     loadUsers(usersPage);
+    loadOwnerAdminFilter();
     loadExportAccounts();
     updateExportCount();
 }
@@ -875,6 +878,8 @@ async function loadExportAccounts() {
     const exportUserFilter = document.getElementById("exportUserFilter");
     if (!exportUserFilter) return;
 
+    const current = currentUser();
+
     try {
         const res = await fetch(API + "/admin/export/accounts", {
             headers: { Authorization: "Bearer " + token() }
@@ -883,8 +888,32 @@ async function loadExportAccounts() {
         const accounts = await res.json();
 
         if (Array.isArray(accounts)) {
+            let normalized = [...accounts];
+
+            const hasCurrentSuperAdmin =
+                current &&
+                current.role === "super_admin" &&
+                normalized.some((u) => u.id === current.id);
+
+            if (current && current.role === "super_admin" && !hasCurrentSuperAdmin) {
+                normalized.unshift({
+                    id: current.id,
+                    email: current.email,
+                    role: current.role
+                });
+            }
+
+            const deduped = [];
+            const seen = new Set();
+
+            normalized.forEach((u) => {
+                if (!u || !u.id || seen.has(u.id)) return;
+                seen.add(u.id);
+                deduped.push(u);
+            });
+
             let options = `<option value="">All Accounts</option>`;
-            accounts.forEach((u) => {
+            deduped.forEach((u) => {
                 options += `<option value="${u.id}">${u.email} (${u.role})</option>`;
             });
             exportUserFilter.innerHTML = options;
@@ -900,12 +929,35 @@ async function loadExportAccounts() {
         const payload = await res.json();
         const users = Array.isArray(payload) ? payload : (payload.items || []);
 
-        let options = `<option value="">All Accounts</option>`;
-        users
-            .filter((u) => u.role === "user" || u.role === "admin" || u.role === "super_admin")
-            .forEach((u) => {
-                options += `<option value="${u.id}">${u.email} (${u.role})</option>`;
+        let normalized = users
+            .filter((u) => u.role === "user" || u.role === "admin" || u.role === "super_admin");
+
+        const hasCurrentSuperAdmin =
+            current &&
+            current.role === "super_admin" &&
+            normalized.some((u) => u.id === current.id);
+
+        if (current && current.role === "super_admin" && !hasCurrentSuperAdmin) {
+            normalized.unshift({
+                id: current.id,
+                email: current.email,
+                role: current.role
             });
+        }
+
+        const deduped = [];
+        const seen = new Set();
+
+        normalized.forEach((u) => {
+            if (!u || !u.id || seen.has(u.id)) return;
+            seen.add(u.id);
+            deduped.push(u);
+        });
+
+        let options = `<option value="">All Accounts</option>`;
+        deduped.forEach((u) => {
+            options += `<option value="${u.id}">${u.email} (${u.role})</option>`;
+        });
 
         exportUserFilter.innerHTML = options;
         updateExportCount();

@@ -1172,8 +1172,31 @@ app.get("/admin/export/accounts", auth, admin, async (req, res) => {
             return res.status(500).json({ error: error.message });
         }
 
-        const items = (data || []).filter((u) => u.role === "user" || u.role === "admin");
-        res.json(items);
+        let items = (data || []).filter(
+            (u) => u.role === "user" || u.role === "admin" || u.role === "super_admin"
+        );
+
+        if (
+            currentUser.role === "super_admin" &&
+            !items.some((u) => u.id === currentUser.id)
+        ) {
+            items.unshift({
+                id: currentUser.id,
+                email: currentUser.email,
+                role: currentUser.role
+            });
+        }
+
+        const deduped = [];
+        const seen = new Set();
+
+        items.forEach((u) => {
+            if (!u || !u.id || seen.has(u.id)) return;
+            seen.add(u.id);
+            deduped.push(u);
+        });
+
+        res.json(deduped);
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
