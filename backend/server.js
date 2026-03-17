@@ -131,6 +131,40 @@ function findDuplicateInSameGroup(
     return null;
 }
 
+function validateAccountCredentials(body) {
+    const type = body.account_type;
+    const loginEmail = (body.account_login_email || "").trim();
+    const loginPassword = (body.account_login_password || "").trim();
+    const gmailAppPassword = (body.gmail_app_password || "").trim();
+    const amazon2FASecret = (body.amazon_2fa_secret || "").trim();
+
+    if (type === "general") {
+        return null;
+    }
+
+    if (type === "walmart" || type === "target") {
+        if (!loginEmail || !loginPassword || !gmailAppPassword) {
+            return `${type} account email, password, and Gmail app password are required`;
+        }
+
+        if (!loginEmail.toLowerCase().endsWith("@gmail.com")) {
+            return `${type} account email must be a Gmail address`;
+        }
+
+        return null;
+    }
+
+    if (type === "amazon") {
+        if (!loginEmail || !loginPassword || !amazon2FASecret) {
+            return "Amazon email, password, and authenticator secret are required";
+        }
+
+        return null;
+    }
+
+    return null;
+}
+
 /* ================= SIGNUP ================= */
 
 app.post("/auth/signup", async (req, res) => {
@@ -264,7 +298,7 @@ app.get("/profiles", auth, async (req, res) => {
 
     const { data, error } = await supabase
         .from("profiles")
-        .select(`*, addresses(*), payments(*)`)
+        .select(`*, addresses(*), payments(*), accounts(*)`)
         .eq("user_id", req.user_id);
 
     if (error) {
@@ -281,6 +315,34 @@ app.get("/profiles", auth, async (req, res) => {
             } catch {
                 payment.card_number = "";
                 payment.cvv = "";
+            }
+        }
+
+        if (profile.accounts?.length) {
+            const account = profile.accounts[0];
+
+            try {
+                account.login_password = account.login_password_encrypted
+                    ? decrypt(account.login_password_encrypted)
+                    : "";
+            } catch {
+                account.login_password = "";
+            }
+
+            try {
+                account.gmail_app_password = account.gmail_app_password_encrypted
+                    ? decrypt(account.gmail_app_password_encrypted)
+                    : "";
+            } catch {
+                account.gmail_app_password = "";
+            }
+
+            try {
+                account.amazon_2fa_secret = account.amazon_2fa_secret_encrypted
+                    ? decrypt(account.amazon_2fa_secret_encrypted)
+                    : "";
+            } catch {
+                account.amazon_2fa_secret = "";
             }
         }
     });
@@ -307,6 +369,11 @@ app.post("/profiles", auth, async (req, res) => {
 
         if (!phoneRegex.test(data.phone || "")) {
             return res.status(400).json({ error: "Phone must be xxxxxxxxxx" });
+        }
+
+        const accountValidationError = validateAccountCredentials(data);
+        if (accountValidationError) {
+            return res.status(400).json({ error: accountValidationError });
         }
 
         const existingProfiles = await getUserProfilesWithRelations(req.user_id);
@@ -371,6 +438,27 @@ app.post("/profiles", auth, async (req, res) => {
             return res.status(500).json({ error: paymentError.message });
         }
 
+        if (data.account_type !== "general") {
+            const { error: accountError } = await supabase.from("accounts").insert({
+                profile_id: profile.id,
+                provider: data.account_type,
+                login_email: data.account_login_email || null,
+                login_password_encrypted: data.account_login_password
+                    ? encrypt(data.account_login_password)
+                    : null,
+                gmail_app_password_encrypted: data.gmail_app_password
+                    ? encrypt(data.gmail_app_password)
+                    : null,
+                amazon_2fa_secret_encrypted: data.amazon_2fa_secret
+                    ? encrypt(data.amazon_2fa_secret)
+                    : null,
+            });
+
+            if (accountError) {
+                return res.status(500).json({ error: accountError.message });
+            }
+        }
+
         res.json({ success: true });
     } catch (err) {
         res.status(500).json({ error: err.message || "Profile creation failed" });
@@ -397,6 +485,11 @@ app.put("/profiles/:id", auth, async (req, res) => {
 
         if (!phoneRegex.test(data.phone || "")) {
             return res.status(400).json({ error: "Phone must be xxxxxxxxxx" });
+        }
+
+        const accountValidationError = validateAccountCredentials(data);
+        if (accountValidationError) {
+            return res.status(400).json({ error: accountValidationError });
         }
 
         const existingProfiles = await getUserProfilesWithRelations(req.user_id);
@@ -462,6 +555,29 @@ app.put("/profiles/:id", auth, async (req, res) => {
 
         if (paymentError) {
             return res.status(500).json({ error: paymentError.message });
+        }
+
+        await supabase.from("accounts").delete().eq("profile_id", id);
+
+        if (data.account_type !== "general") {
+            const { error: accountError } = await supabase.from("accounts").insert({
+                profile_id: id,
+                provider: data.account_type,
+                login_email: data.account_login_email || null,
+                login_password_encrypted: data.account_login_password
+                    ? encrypt(data.account_login_password)
+                    : null,
+                gmail_app_password_encrypted: data.gmail_app_password
+                    ? encrypt(data.gmail_app_password)
+                    : null,
+                amazon_2fa_secret_encrypted: data.amazon_2fa_secret
+                    ? encrypt(data.amazon_2fa_secret)
+                    : null,
+            });
+
+            if (accountError) {
+                return res.status(500).json({ error: accountError.message });
+            }
         }
 
         res.json({ success: true });
@@ -615,6 +731,15 @@ app.delete("/admin/users/:id", auth, admin, async (req, res) => {
 
         if (paymentsError) {
             return res.status(500).json({ error: paymentsError.message });
+        }
+
+        const { error: accountsError } = await supabase
+            .from("accounts")
+            .delete()
+            .in("profile_id", profileIds);
+
+        if (accountsError) {
+            return res.status(500).json({ error: accountsError.message });
         }
 
         const { error: deleteProfilesError } = await supabase

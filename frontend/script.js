@@ -46,6 +46,33 @@ function maskCard(cardNumber, fallbackLast4 = "") {
     return "**** **** **** " + last4;
 }
 
+function selectedAccountType() {
+    const el = document.getElementById("account_type");
+    return el ? el.value : "";
+}
+
+function toggleAccountCredentialFields() {
+    const section = document.getElementById("accountCredentialsSection");
+    const gmailFields = document.getElementById("gmailAccountFields");
+    const amazonFields = document.getElementById("amazonAccountFields");
+
+    if (!section || !gmailFields || !amazonFields) return;
+
+    const type = selectedAccountType();
+
+    section.style.display = "none";
+    gmailFields.style.display = "none";
+    amazonFields.style.display = "none";
+
+    if (type === "walmart" || type === "target") {
+        section.style.display = "block";
+        gmailFields.style.display = "block";
+    } else if (type === "amazon") {
+        section.style.display = "block";
+        amazonFields.style.display = "block";
+    }
+}
+
 /* ================= LOGIN ================= */
 
 const loginForm = document.getElementById("loginForm");
@@ -168,8 +195,6 @@ async function loadProfiles() {
             groups[g].forEach((p) => {
                 const address = p.addresses?.[0] || {};
                 const payment = p.payments?.[0] || {};
-                const profileEmail = address.email || "";
-                const profilePhone = address.phone || "";
                 const state = address.state || "";
                 const city = address.city || "";
                 const maskedCard = maskCard(payment.card_number, payment.card_last4);
@@ -177,8 +202,8 @@ async function loadProfiles() {
                 html += `
           <div style="margin-bottom: 1rem; padding: 1rem; border: 1px solid #ddd; border-radius: 8px;">
             <h3>${p.profile_name}</h3>
-            <p><strong>Email:</strong> ${profileEmail}</p>
-            <p><strong>Phone:</strong> ${profilePhone}</p>
+            <p><strong>Email:</strong> ${address.email || ""}</p>
+            <p><strong>Phone:</strong> ${address.phone || ""}</p>
             <p><strong>Card:</strong> ${maskedCard}</p>
             <p><strong>Group:</strong> ${p.account_type}</p>
             <p><strong>Location:</strong> ${city}${city && state ? ", " : ""}${state}</p>
@@ -241,8 +266,17 @@ async function loadProfileEditor() {
         adminButton.style.display = "inline-block";
     }
 
+    const accountTypeSelect = document.getElementById("account_type");
+    if (accountTypeSelect) {
+        accountTypeSelect.addEventListener("change", toggleAccountCredentialFields);
+    }
+
     const editId = localStorage.getItem("edit");
-    if (!editId) return;
+
+    if (!editId) {
+        toggleAccountCredentialFields();
+        return;
+    }
 
     const res = await fetch(API + "/profiles", {
         headers: { Authorization: "Bearer " + token() },
@@ -252,10 +286,14 @@ async function loadProfileEditor() {
     if (!Array.isArray(profiles)) return;
 
     const profile = profiles.find((p) => p.id === editId);
-    if (!profile) return;
+    if (!profile) {
+        toggleAccountCredentialFields();
+        return;
+    }
 
     const addr = profile.addresses?.[0] || {};
     const pay = profile.payments?.[0] || {};
+    const account = profile.accounts?.[0] || {};
 
     profile_name.value = profile.profile_name || "";
     account_type.value = profile.account_type || "general";
@@ -271,6 +309,28 @@ async function loadProfileEditor() {
     exp_month.value = pay.exp_month || "";
     exp_year.value = pay.exp_year || "";
     cvv.value = pay.cvv || "";
+
+    toggleAccountCredentialFields();
+
+    if (profile.account_type === "walmart" || profile.account_type === "target") {
+        const gmailEmailEl = document.getElementById("account_login_email");
+        const gmailPasswordEl = document.getElementById("account_login_password");
+        const gmailAppPasswordEl = document.getElementById("gmail_app_password");
+
+        if (gmailEmailEl) gmailEmailEl.value = account.login_email || "";
+        if (gmailPasswordEl) gmailPasswordEl.value = account.login_password || "";
+        if (gmailAppPasswordEl) gmailAppPasswordEl.value = account.gmail_app_password || "";
+    }
+
+    if (profile.account_type === "amazon") {
+        const amazonEmailEl = document.getElementById("amazon_login_email");
+        const amazonPasswordEl = document.getElementById("amazon_login_password");
+        const amazonSecretEl = document.getElementById("amazon_2fa_secret");
+
+        if (amazonEmailEl) amazonEmailEl.value = account.login_email || "";
+        if (amazonPasswordEl) amazonPasswordEl.value = account.login_password || "";
+        if (amazonSecretEl) amazonSecretEl.value = account.amazon_2fa_secret || "";
+    }
 }
 
 loadProfileEditor();
@@ -283,6 +343,24 @@ if (profileForm) {
 
         const message = document.getElementById("profileMessage");
         const editId = localStorage.getItem("edit");
+        const type = account_type.value;
+
+        let accountLoginEmail = "";
+        let accountLoginPassword = "";
+        let gmailAppPassword = "";
+        let amazon2FASecret = "";
+
+        if (type === "walmart" || type === "target") {
+            accountLoginEmail = document.getElementById("account_login_email")?.value.trim() || "";
+            accountLoginPassword = document.getElementById("account_login_password")?.value.trim() || "";
+            gmailAppPassword = document.getElementById("gmail_app_password")?.value.trim() || "";
+        }
+
+        if (type === "amazon") {
+            accountLoginEmail = document.getElementById("amazon_login_email")?.value.trim() || "";
+            accountLoginPassword = document.getElementById("amazon_login_password")?.value.trim() || "";
+            amazon2FASecret = document.getElementById("amazon_2fa_secret")?.value.trim() || "";
+        }
 
         const payload = {
             profile_name: profile_name.value.trim(),
@@ -299,6 +377,10 @@ if (profileForm) {
             exp_month: exp_month.value.trim(),
             exp_year: exp_year.value.trim(),
             cvv: cvv.value.trim(),
+            account_login_email: accountLoginEmail,
+            account_login_password: accountLoginPassword,
+            gmail_app_password: gmailAppPassword,
+            amazon_2fa_secret: amazon2FASecret,
         };
 
         const url = editId ? API + "/profiles/" + editId : API + "/profiles";
