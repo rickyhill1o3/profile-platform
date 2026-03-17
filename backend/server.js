@@ -1,5 +1,3 @@
-require("dotenv").config();
-
 const express = require("express");
 const cors = require("cors");
 const bcrypt = require("bcryptjs");
@@ -11,41 +9,16 @@ const { encrypt, decrypt } = require("./encryption");
 
 const app = express();
 
-const allowedOrigins = [
-    "http://localhost:5500",
-    "http://127.0.0.1:5500",
-    "http://localhost:3000",
-    "http://127.0.0.1:3000",
-    "https://spontaneous-monstera-1b6376.netlify.app",
-];
-
-app.use(
-    cors({
-        origin(origin, callback) {
-            if (!origin) return callback(null, true);
-            if (allowedOrigins.includes(origin)) return callback(null, true);
-            return callback(new Error("Not allowed by CORS"));
-        },
-    })
-);
-
+app.use(cors());
 app.use(express.json());
 
 const phoneRegex = /^[0-9]{10}$/;
+const SUPER_ADMIN_EMAIL = "theshoreshacktcg@gmail.com";
 
-app.get("/", (req, res) => {
-    res.json({ ok: true, service: "profile-platform-api" });
-});
-
-app.get("/health", (req, res) => {
-    res.json({ ok: true });
-});
-
-/* ================= AUTH ================= */
+/* ================= AUTH HELPERS ================= */
 
 function auth(req, res, next) {
     const header = req.headers.authorization;
-
     if (!header) {
         return res.status(401).json({ error: "No token" });
     }
@@ -63,10 +36,104 @@ function auth(req, res, next) {
 }
 
 function admin(req, res, next) {
-    if (req.role !== "admin") {
+    if (req.role !== "admin" && req.role !== "super_admin") {
         return res.status(403).json({ error: "Admin only" });
     }
     next();
+}
+
+function superAdmin(req, res, next) {
+    if (req.role !== "super_admin") {
+        return res.status(403).json({ error: "Super admin only" });
+    }
+    next();
+}
+
+async function getCurrentUser(req) {
+    const { data: user, error } = await supabase
+        .from("users")
+        .select("*")
+        .eq("id", req.user_id)
+        .single();
+
+    if (error || !user) {
+        throw new Error("User not found");
+    }
+
+    return user;
+}
+
+async function getUserById(userId) {
+    const { data: user, error } = await supabase
+        .from("users")
+        .select("*")
+        .eq("id", userId)
+        .single();
+
+    if (error || !user) {
+        return null;
+    }
+
+    return user;
+}
+
+async function ensureUserNotRevoked(userId) {
+    const user = await getUserById(userId);
+    if (!user) {
+        throw new Error("User not found");
+    }
+    if (user.revoked) {
+        throw new Error("This account has been revoked");
+    }
+    return user;
+}
+
+function isAdminRole(role) {
+    return role === "admin" || role === "super_admin";
+}
+
+async function canManageTarget(currentUser, targetUser) {
+    if (currentUser.role === "super_admin") {
+        return true;
+    }
+
+    if (!targetUser) {
+        return false;
+    }
+
+    if (targetUser.role === "super_admin") {
+        return false;
+    }
+
+    if (targetUser.role === "admin") {
+        return false;
+    }
+
+    return targetUser.owner_admin_id === currentUser.id;
+}
+
+function safeIn(values) {
+    if (!values || values.length === 0) {
+        return ["00000000-0000-0000-0000-000000000000"];
+    }
+    return values;
+}
+
+async function getScopeUserIdsForAdmin(currentUser) {
+    if (currentUser.role === "super_admin") {
+        return null;
+    }
+
+    const { data: ownedUsers, error } = await supabase
+        .from("users")
+        .select("id")
+        .eq("owner_admin_id", currentUser.id);
+
+    if (error) {
+        throw new Error(error.message);
+    }
+
+    return (ownedUsers || []).map((user) => user.id);
 }
 
 async function getUserProfilesWithRelations(userId) {
@@ -131,38 +198,121 @@ function findDuplicateInSameGroup(
     return null;
 }
 
-function validateAccountCredentials(body) {
-    const type = body.account_type;
-    const loginEmail = (body.account_login_email || "").trim();
-    const loginPassword = (body.account_login_password || "").trim();
-    const gmailAppPassword = (body.gmail_app_password || "").trim();
-    const amazon2FASecret = (body.amazon_2fa_secret || "").trim();
+async function upsertProfileRelations(profileId, payload) {
+    const encryptedCard = encrypt(payload.card || "");
+    const encryptedCVV = encrypt(payload.cvv || "");
+    const cardLast4 = (payload.card || "").slice(-4);
 
-    if (type === "general") {
-        return null;
+    const { data: existingAddress } = await supabase
+        .from("addresses")
+        .select("id")
+        .eq("profile_id", profileId)
+        .maybeSingle();
+
+    const addressPayload = {
+        profile_id: profileId,
+        first_name: payload.first_name,
+        last_name: payload.last_name,
+        email: payload.email,
+        phone: payload.phone,
+        address1: payload.address1,
+        city: payload.city,
+        state: payload.state,
+        zip: payload.zip
+    };
+
+    if (existingAddress?.id) {
+        const { error } = await supabase
+            .from("addresses")
+            .update(addressPayload)
+            .eq("id", existingAddress.id);
+
+        if (error) {
+            throw new Error(error.message);
+        }
+    } else {
+        const { error } = await supabase
+            .from("addresses")
+            .insert(addressPayload);
+
+        if (error) {
+            throw new Error(error.message);
+        }
     }
 
-    if (type === "walmart" || type === "target") {
-        if (!loginEmail || !loginPassword || !gmailAppPassword) {
-            return `${type} account email, password, and Gmail app password are required`;
-        }
+    const { data: existingPayment } = await supabase
+        .from("payments")
+        .select("id")
+        .eq("profile_id", profileId)
+        .maybeSingle();
 
-        if (!loginEmail.toLowerCase().endsWith("@gmail.com")) {
-            return `${type} account email must be a Gmail address`;
-        }
+    const paymentPayload = {
+        profile_id: profileId,
+        card_encrypted: encryptedCard,
+        cvv_encrypted: encryptedCVV,
+        card_last4: cardLast4,
+        exp_month: payload.exp_month,
+        exp_year: payload.exp_year
+    };
 
-        return null;
+    if (existingPayment?.id) {
+        const { error } = await supabase
+            .from("payments")
+            .update(paymentPayload)
+            .eq("id", existingPayment.id);
+
+        if (error) {
+            throw new Error(error.message);
+        }
+    } else {
+        const { error } = await supabase
+            .from("payments")
+            .insert(paymentPayload);
+
+        if (error) {
+            throw new Error(error.message);
+        }
     }
 
-    if (type === "amazon") {
-        if (!loginEmail || !loginPassword || !amazon2FASecret) {
-            return "Amazon email, password, and authenticator secret are required";
+    const accountPayload = {
+        profile_id: profileId,
+        login_email: payload.account_login_email || null,
+        login_password: payload.account_login_password || null,
+        gmail_app_password: payload.gmail_app_password || null,
+        amazon_2fa_secret: payload.amazon_2fa_secret || null
+    };
+
+    const { data: existingAccount } = await supabase
+        .from("accounts")
+        .select("id")
+        .eq("profile_id", profileId)
+        .maybeSingle();
+
+    const hasAnyAccountField = !!(
+        accountPayload.login_email ||
+        accountPayload.login_password ||
+        accountPayload.gmail_app_password ||
+        accountPayload.amazon_2fa_secret
+    );
+
+    if (existingAccount?.id) {
+        const { error } = await supabase
+            .from("accounts")
+            .update(accountPayload)
+            .eq("id", existingAccount.id);
+
+        if (error) {
+            throw new Error(error.message);
         }
+    } else if (hasAnyAccountField) {
+        const { error } = await supabase
+            .from("accounts")
+            .insert(accountPayload);
 
-        return null;
+        if (error) {
+            throw new Error(error.message);
+        }
     }
-
-    return null;
 }
 
 /* ================= SIGNUP ================= */
@@ -183,15 +333,19 @@ app.post("/auth/signup", async (req, res) => {
     }
 
     const hash = await bcrypt.hash(password, 10);
+    const inviteRole = invite.invite_role || "user";
+
+    const insertPayload = {
+        email,
+        password_hash: hash,
+        role: inviteRole,
+        revoked: false,
+        owner_admin_id: inviteRole === "user" ? invite.created_by_admin_id || null : null
+    };
 
     const { data: user, error } = await supabase
         .from("users")
-        .insert({
-            email,
-            password_hash: hash,
-            role: "user",
-            revoked: false,
-        })
+        .insert(insertPayload)
         .select()
         .single();
 
@@ -201,7 +355,10 @@ app.post("/auth/signup", async (req, res) => {
 
     await supabase
         .from("invite_codes")
-        .update({ used: true, used_by: user.id })
+        .update({
+            used: true,
+            used_by: user.id
+        })
         .eq("id", invite.id);
 
     res.json({ success: true });
@@ -233,10 +390,7 @@ app.post("/auth/login", async (req, res) => {
     }
 
     const token = jwt.sign(
-        {
-            user_id: user.id,
-            role: user.role,
-        },
+        { user_id: user.id, role: user.role },
         process.env.JWT_SECRET,
         { expiresIn: "7d" }
     );
@@ -247,107 +401,77 @@ app.post("/auth/login", async (req, res) => {
             id: user.id,
             email: user.email,
             role: user.role,
-            revoked: !!user.revoked,
-        },
+            owner_admin_id: user.owner_admin_id || null,
+            revoked: !!user.revoked
+        }
     });
 });
 
 /* ================= CHANGE PASSWORD ================= */
 
 app.post("/change-password", auth, async (req, res) => {
-    const { oldPassword, newPassword } = req.body;
+    try {
+        const { oldPassword, newPassword } = req.body;
+        const user = await ensureUserNotRevoked(req.user_id);
 
-    const { data: user } = await supabase
-        .from("users")
-        .select("*")
-        .eq("id", req.user_id)
-        .single();
+        const valid = await bcrypt.compare(oldPassword, user.password_hash);
+        if (!valid) {
+            return res.status(400).json({ error: "Wrong password" });
+        }
 
-    if (user.revoked) {
-        return res.status(403).json({ error: "This account has been revoked" });
+        const hash = await bcrypt.hash(newPassword, 10);
+
+        await supabase
+            .from("users")
+            .update({ password_hash: hash })
+            .eq("id", req.user_id);
+
+        res.json({ success: true });
+    } catch (err) {
+        const status = err.message === "This account has been revoked" ? 403 : 500;
+        res.status(status).json({ error: err.message });
     }
-
-    const valid = await bcrypt.compare(oldPassword, user.password_hash);
-
-    if (!valid) {
-        return res.status(400).json({ error: "Wrong password" });
-    }
-
-    const hash = await bcrypt.hash(newPassword, 10);
-
-    await supabase
-        .from("users")
-        .update({ password_hash: hash })
-        .eq("id", req.user_id);
-
-    res.json({ success: true });
 });
 
 /* ================= GET PROFILES ================= */
 
 app.get("/profiles", auth, async (req, res) => {
-    const { data: user } = await supabase
-        .from("users")
-        .select("revoked")
-        .eq("id", req.user_id)
-        .single();
+    try {
+        await ensureUserNotRevoked(req.user_id);
 
-    if (user?.revoked) {
-        return res.status(403).json({ error: "This account has been revoked" });
-    }
+        const { data, error } = await supabase
+            .from("profiles")
+            .select(`
+        *,
+        addresses(*),
+        payments(*),
+        accounts(*)
+      `)
+            .eq("user_id", req.user_id)
+            .order("created_at", { ascending: false });
 
-    const { data, error } = await supabase
-        .from("profiles")
-        .select(`*, addresses(*), payments(*), accounts(*)`)
-        .eq("user_id", req.user_id);
-
-    if (error) {
-        return res.status(500).json({ error: error.message });
-    }
-
-    data.forEach((profile) => {
-        if (profile.payments?.length) {
-            const payment = profile.payments[0];
-
-            try {
-                payment.card_number = decrypt(payment.card_encrypted);
-                payment.cvv = decrypt(payment.cvv_encrypted);
-            } catch {
-                payment.card_number = "";
-                payment.cvv = "";
-            }
+        if (error) {
+            return res.status(500).json({ error: error.message });
         }
 
-        if (profile.accounts?.length) {
-            const account = profile.accounts[0];
-
-            try {
-                account.login_password = account.login_password_encrypted
-                    ? decrypt(account.login_password_encrypted)
-                    : "";
-            } catch {
-                account.login_password = "";
+        (data || []).forEach((profile) => {
+            if (profile.payments?.length) {
+                const payment = profile.payments[0];
+                try {
+                    payment.card_number = decrypt(payment.card_encrypted);
+                    payment.cvv = decrypt(payment.cvv_encrypted);
+                } catch {
+                    payment.card_number = "";
+                    payment.cvv = "";
+                }
             }
+        });
 
-            try {
-                account.gmail_app_password = account.gmail_app_password_encrypted
-                    ? decrypt(account.gmail_app_password_encrypted)
-                    : "";
-            } catch {
-                account.gmail_app_password = "";
-            }
-
-            try {
-                account.amazon_2fa_secret = account.amazon_2fa_secret_encrypted
-                    ? decrypt(account.amazon_2fa_secret_encrypted)
-                    : "";
-            } catch {
-                account.amazon_2fa_secret = "";
-            }
-        }
-    });
-
-    res.json(data);
+        res.json(data || []);
+    } catch (err) {
+        const status = err.message === "This account has been revoked" ? 403 : 500;
+        res.status(status).json({ error: err.message });
+    }
 });
 
 /* ================= CREATE PROFILE ================= */
@@ -357,27 +481,13 @@ app.post("/profiles", auth, async (req, res) => {
         const data = req.body;
         const cardLast4 = (data.card || "").slice(-4);
 
-        const { data: user } = await supabase
-            .from("users")
-            .select("revoked")
-            .eq("id", req.user_id)
-            .single();
-
-        if (user?.revoked) {
-            return res.status(403).json({ error: "This account has been revoked" });
-        }
+        await ensureUserNotRevoked(req.user_id);
 
         if (!phoneRegex.test(data.phone || "")) {
             return res.status(400).json({ error: "Phone must be xxxxxxxxxx" });
         }
 
-        const accountValidationError = validateAccountCredentials(data);
-        if (accountValidationError) {
-            return res.status(400).json({ error: accountValidationError });
-        }
-
         const existingProfiles = await getUserProfilesWithRelations(req.user_id);
-
         const duplicateError = findDuplicateInSameGroup(
             existingProfiles,
             null,
@@ -392,72 +502,21 @@ app.post("/profiles", auth, async (req, res) => {
             return res.status(400).json({ error: duplicateError });
         }
 
-        const encryptedCard = encrypt(data.card);
-        const encryptedCVV = encrypt(data.cvv);
-
-        const { data: profile, error: profileError } = await supabase
+        const { data: createdProfile, error: profileError } = await supabase
             .from("profiles")
             .insert({
                 user_id: req.user_id,
                 profile_name: data.profile_name,
-                account_type: data.account_type,
+                account_type: data.account_type
             })
             .select()
             .single();
 
-        if (profileError) {
-            return res.status(500).json({ error: profileError.message });
+        if (profileError || !createdProfile) {
+            return res.status(500).json({ error: profileError?.message || "Profile creation failed" });
         }
 
-        const { error: addressError } = await supabase.from("addresses").insert({
-            profile_id: profile.id,
-            first_name: data.first_name,
-            last_name: data.last_name,
-            email: data.email,
-            phone: data.phone,
-            address1: data.address1,
-            city: data.city,
-            state: data.state,
-            zip: data.zip,
-        });
-
-        if (addressError) {
-            return res.status(500).json({ error: addressError.message });
-        }
-
-        const { error: paymentError } = await supabase.from("payments").insert({
-            profile_id: profile.id,
-            card_encrypted: encryptedCard,
-            cvv_encrypted: encryptedCVV,
-            exp_month: data.exp_month,
-            exp_year: data.exp_year,
-            card_last4: cardLast4,
-        });
-
-        if (paymentError) {
-            return res.status(500).json({ error: paymentError.message });
-        }
-
-        if (data.account_type !== "general") {
-            const { error: accountError } = await supabase.from("accounts").insert({
-                profile_id: profile.id,
-                provider: data.account_type,
-                login_email: data.account_login_email || null,
-                login_password_encrypted: data.account_login_password
-                    ? encrypt(data.account_login_password)
-                    : null,
-                gmail_app_password_encrypted: data.gmail_app_password
-                    ? encrypt(data.gmail_app_password)
-                    : null,
-                amazon_2fa_secret_encrypted: data.amazon_2fa_secret
-                    ? encrypt(data.amazon_2fa_secret)
-                    : null,
-            });
-
-            if (accountError) {
-                return res.status(500).json({ error: accountError.message });
-            }
-        }
+        await upsertProfileRelations(createdProfile.id, data);
 
         res.json({ success: true });
     } catch (err) {
@@ -473,27 +532,13 @@ app.put("/profiles/:id", auth, async (req, res) => {
         const data = req.body;
         const cardLast4 = (data.card || "").slice(-4);
 
-        const { data: user } = await supabase
-            .from("users")
-            .select("revoked")
-            .eq("id", req.user_id)
-            .single();
-
-        if (user?.revoked) {
-            return res.status(403).json({ error: "This account has been revoked" });
-        }
+        await ensureUserNotRevoked(req.user_id);
 
         if (!phoneRegex.test(data.phone || "")) {
             return res.status(400).json({ error: "Phone must be xxxxxxxxxx" });
         }
 
-        const accountValidationError = validateAccountCredentials(data);
-        if (accountValidationError) {
-            return res.status(400).json({ error: accountValidationError });
-        }
-
         const existingProfiles = await getUserProfilesWithRelations(req.user_id);
-
         const duplicateError = findDuplicateInSameGroup(
             existingProfiles,
             id,
@@ -508,14 +553,11 @@ app.put("/profiles/:id", auth, async (req, res) => {
             return res.status(400).json({ error: duplicateError });
         }
 
-        const encryptedCard = encrypt(data.card);
-        const encryptedCVV = encrypt(data.cvv);
-
         const { error: profileError } = await supabase
             .from("profiles")
             .update({
                 profile_name: data.profile_name,
-                account_type: data.account_type,
+                account_type: data.account_type
             })
             .eq("id", id)
             .eq("user_id", req.user_id);
@@ -524,61 +566,7 @@ app.put("/profiles/:id", auth, async (req, res) => {
             return res.status(500).json({ error: profileError.message });
         }
 
-        const { error: addressError } = await supabase
-            .from("addresses")
-            .update({
-                first_name: data.first_name,
-                last_name: data.last_name,
-                email: data.email,
-                phone: data.phone,
-                address1: data.address1,
-                city: data.city,
-                state: data.state,
-                zip: data.zip,
-            })
-            .eq("profile_id", id);
-
-        if (addressError) {
-            return res.status(500).json({ error: addressError.message });
-        }
-
-        const { error: paymentError } = await supabase
-            .from("payments")
-            .update({
-                card_encrypted: encryptedCard,
-                cvv_encrypted: encryptedCVV,
-                exp_month: data.exp_month,
-                exp_year: data.exp_year,
-                card_last4: cardLast4,
-            })
-            .eq("profile_id", id);
-
-        if (paymentError) {
-            return res.status(500).json({ error: paymentError.message });
-        }
-
-        await supabase.from("accounts").delete().eq("profile_id", id);
-
-        if (data.account_type !== "general") {
-            const { error: accountError } = await supabase.from("accounts").insert({
-                profile_id: id,
-                provider: data.account_type,
-                login_email: data.account_login_email || null,
-                login_password_encrypted: data.account_login_password
-                    ? encrypt(data.account_login_password)
-                    : null,
-                gmail_app_password_encrypted: data.gmail_app_password
-                    ? encrypt(data.gmail_app_password)
-                    : null,
-                amazon_2fa_secret_encrypted: data.amazon_2fa_secret
-                    ? encrypt(data.amazon_2fa_secret)
-                    : null,
-            });
-
-            if (accountError) {
-                return res.status(500).json({ error: accountError.message });
-            }
-        }
+        await upsertProfileRelations(id, data);
 
         res.json({ success: true });
     } catch (err) {
@@ -589,386 +577,561 @@ app.put("/profiles/:id", auth, async (req, res) => {
 /* ================= DELETE PROFILE ================= */
 
 app.delete("/profiles/:id", auth, async (req, res) => {
-    await supabase
-        .from("profiles")
-        .delete()
-        .eq("id", req.params.id)
-        .eq("user_id", req.user_id);
+    try {
+        await ensureUserNotRevoked(req.user_id);
 
-    res.json({ success: true });
+        const id = req.params.id;
+
+        await supabase.from("accounts").delete().eq("profile_id", id);
+        await supabase.from("payments").delete().eq("profile_id", id);
+        await supabase.from("addresses").delete().eq("profile_id", id);
+
+        const { error } = await supabase
+            .from("profiles")
+            .delete()
+            .eq("id", id)
+            .eq("user_id", req.user_id);
+
+        if (error) {
+            return res.status(500).json({ error: error.message });
+        }
+
+        res.json({ success: true });
+    } catch (err) {
+        const status = err.message === "This account has been revoked" ? 403 : 500;
+        res.status(status).json({ error: err.message });
+    }
 });
 
 /* ================= ADMIN USERS ================= */
 
 app.get("/admin/users", auth, admin, async (req, res) => {
-    const { data: users, error: usersError } = await supabase
-        .from("users")
-        .select("*")
-        .order("created_at", { ascending: false });
+    try {
+        const currentUser = await getCurrentUser(req);
 
-    if (usersError) {
-        return res.status(500).json({ error: usersError.message });
+        let usersQuery = supabase
+            .from("users")
+            .select("*")
+            .order("created_at", { ascending: false });
+
+        if (currentUser.role !== "super_admin") {
+            usersQuery = usersQuery.eq("owner_admin_id", currentUser.id);
+        }
+
+        const { data: users, error } = await usersQuery;
+
+        if (error) {
+            return res.status(500).json({ error: error.message });
+        }
+
+        const ownerIds = [...new Set((users || []).map((u) => u.owner_admin_id).filter(Boolean))];
+        let ownerMap = {};
+
+        if (ownerIds.length) {
+            const { data: owners } = await supabase
+                .from("users")
+                .select("id, email")
+                .in("id", ownerIds);
+
+            ownerMap = Object.fromEntries((owners || []).map((o) => [o.id, o.email]));
+        }
+
+        const userIds = (users || []).map((u) => u.id);
+        let profileCountMap = {};
+
+        if (userIds.length) {
+            const { data: profiles } = await supabase
+                .from("profiles")
+                .select("id, user_id")
+                .in("user_id", userIds);
+
+            for (const p of profiles || []) {
+                profileCountMap[p.user_id] = (profileCountMap[p.user_id] || 0) + 1;
+            }
+        }
+
+        const output = (users || []).map((u) => ({
+            ...u,
+            profile_count: profileCountMap[u.id] || 0,
+            owner_admin_email: u.owner_admin_id ? ownerMap[u.owner_admin_id] || "" : ""
+        }));
+
+        res.json(output);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
     }
-
-    const { data: profiles, error: profilesError } = await supabase
-        .from("profiles")
-        .select("id, user_id");
-
-    if (profilesError) {
-        return res.status(500).json({ error: profilesError.message });
-    }
-
-    const profileCounts = {};
-
-    (profiles || []).forEach((profile) => {
-        profileCounts[profile.user_id] = (profileCounts[profile.user_id] || 0) + 1;
-    });
-
-    const usersWithCounts = (users || []).map((user) => ({
-        ...user,
-        profile_count: profileCounts[user.id] || 0,
-    }));
-
-    res.json(usersWithCounts);
 });
 
 app.patch("/admin/users/:id/revoke", auth, admin, async (req, res) => {
-    const targetId = req.params.id;
+    try {
+        const currentUser = await getCurrentUser(req);
+        const targetId = req.params.id;
+        const targetUser = await getUserById(targetId);
 
-    const { data: targetUser } = await supabase
-        .from("users")
-        .select("*")
-        .eq("id", targetId)
-        .single();
+        if (!targetUser) {
+            return res.status(404).json({ error: "User not found" });
+        }
 
-    if (!targetUser) {
-        return res.status(404).json({ error: "User not found" });
+        if (targetUser.role === "admin" || targetUser.role === "super_admin") {
+            return res.status(400).json({ error: "Admin account cannot be revoked" });
+        }
+
+        const allowed = await canManageTarget(currentUser, targetUser);
+        if (!allowed) {
+            return res.status(403).json({ error: "You can only manage users in your own admin tree" });
+        }
+
+        const { error } = await supabase
+            .from("users")
+            .update({ revoked: true })
+            .eq("id", targetId);
+
+        if (error) {
+            return res.status(500).json({ error: error.message });
+        }
+
+        res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
     }
-
-    if (targetUser.role === "admin") {
-        return res.status(400).json({ error: "Admin account cannot be revoked" });
-    }
-
-    const { error } = await supabase
-        .from("users")
-        .update({ revoked: true })
-        .eq("id", targetId);
-
-    if (error) {
-        return res.status(500).json({ error: error.message });
-    }
-
-    res.json({ success: true });
 });
 
 app.patch("/admin/users/:id/restore", auth, admin, async (req, res) => {
-    const targetId = req.params.id;
+    try {
+        const currentUser = await getCurrentUser(req);
+        const targetId = req.params.id;
+        const targetUser = await getUserById(targetId);
 
-    const { data: targetUser } = await supabase
-        .from("users")
-        .select("*")
-        .eq("id", targetId)
-        .single();
+        if (!targetUser) {
+            return res.status(404).json({ error: "User not found" });
+        }
 
-    if (!targetUser) {
-        return res.status(404).json({ error: "User not found" });
+        const allowed = await canManageTarget(currentUser, targetUser);
+        if (!allowed) {
+            return res.status(403).json({ error: "You can only manage users in your own admin tree" });
+        }
+
+        const { error } = await supabase
+            .from("users")
+            .update({ revoked: false })
+            .eq("id", targetId);
+
+        if (error) {
+            return res.status(500).json({ error: error.message });
+        }
+
+        res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
     }
-
-    const { error } = await supabase
-        .from("users")
-        .update({ revoked: false })
-        .eq("id", targetId);
-
-    if (error) {
-        return res.status(500).json({ error: error.message });
-    }
-
-    res.json({ success: true });
 });
 
 app.delete("/admin/users/:id", auth, admin, async (req, res) => {
-    const targetId = req.params.id;
+    try {
+        const currentUser = await getCurrentUser(req);
+        const targetId = req.params.id;
+        const targetUser = await getUserById(targetId);
 
-    const { data: targetUser, error: targetUserError } = await supabase
-        .from("users")
-        .select("*")
-        .eq("id", targetId)
-        .single();
-
-    if (targetUserError || !targetUser) {
-        return res.status(404).json({ error: "User not found" });
-    }
-
-    if (targetUser.role === "admin") {
-        return res.status(400).json({ error: "Admin account cannot be deleted" });
-    }
-
-    const { data: userProfiles, error: profilesError } = await supabase
-        .from("profiles")
-        .select("id")
-        .eq("user_id", targetId);
-
-    if (profilesError) {
-        return res.status(500).json({ error: profilesError.message });
-    }
-
-    const profileIds = (userProfiles || []).map((p) => p.id);
-
-    if (profileIds.length > 0) {
-        const { error: addressesError } = await supabase
-            .from("addresses")
-            .delete()
-            .in("profile_id", profileIds);
-
-        if (addressesError) {
-            return res.status(500).json({ error: addressesError.message });
+        if (!targetUser) {
+            return res.status(404).json({ error: "User not found" });
         }
 
-        const { error: paymentsError } = await supabase
-            .from("payments")
-            .delete()
-            .in("profile_id", profileIds);
-
-        if (paymentsError) {
-            return res.status(500).json({ error: paymentsError.message });
+        if (targetUser.role === "admin" || targetUser.role === "super_admin") {
+            return res.status(400).json({ error: "Admin account cannot be deleted here" });
         }
 
-        const { error: accountsError } = await supabase
-            .from("accounts")
-            .delete()
-            .in("profile_id", profileIds);
-
-        if (accountsError) {
-            return res.status(500).json({ error: accountsError.message });
+        const allowed = await canManageTarget(currentUser, targetUser);
+        if (!allowed) {
+            return res.status(403).json({ error: "You can only delete users in your own admin tree" });
         }
 
-        const { error: deleteProfilesError } = await supabase
+        const { data: profiles, error: profilesError } = await supabase
             .from("profiles")
-            .delete()
-            .in("id", profileIds);
+            .select("id")
+            .eq("user_id", targetId);
 
-        if (deleteProfilesError) {
-            return res.status(500).json({ error: deleteProfilesError.message });
+        if (profilesError) {
+            return res.status(500).json({ error: profilesError.message });
         }
+
+        const profileIds = (profiles || []).map((profile) => profile.id);
+
+        if (profileIds.length) {
+            await supabase.from("accounts").delete().in("profile_id", profileIds);
+            await supabase.from("payments").delete().in("profile_id", profileIds);
+            await supabase.from("addresses").delete().in("profile_id", profileIds);
+            await supabase.from("profiles").delete().in("id", profileIds);
+        }
+
+        await supabase.from("invite_codes").delete().eq("used_by", targetId);
+
+        const { error: deleteError } = await supabase
+            .from("users")
+            .delete()
+            .eq("id", targetId);
+
+        if (deleteError) {
+            return res.status(500).json({ error: deleteError.message });
+        }
+
+        res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
     }
-
-    const { error: deleteUserError } = await supabase
-        .from("users")
-        .delete()
-        .eq("id", targetId);
-
-    if (deleteUserError) {
-        return res.status(500).json({ error: deleteUserError.message });
-    }
-
-    res.json({ success: true });
 });
 
 /* ================= ADMIN INVITES ================= */
 
 app.post("/admin/create-invite", auth, admin, async (req, res) => {
-    const code = uuidv4().slice(0, 8);
+    try {
+        const currentUser = await getCurrentUser(req);
+        const code = uuidv4().slice(0, 8);
+        const requestedRole = req.body?.invite_role || "user";
 
-    const { error } = await supabase.from("invite_codes").insert({
-        code,
-        used: false,
-        canceled: false,
-    });
+        if (!["user", "admin"].includes(requestedRole)) {
+            return res.status(400).json({ error: "Invalid invite role" });
+        }
 
-    if (error) {
-        return res.status(500).json({ error: error.message });
+        if (currentUser.role !== "super_admin" && requestedRole !== "user") {
+            return res.status(403).json({ error: "Only super admin can create admin invites" });
+        }
+
+        const { error } = await supabase
+            .from("invite_codes")
+            .insert({
+                code,
+                used: false,
+                canceled: false,
+                created_by_admin_id: currentUser.id,
+                invite_role: requestedRole
+            });
+
+        if (error) {
+            return res.status(500).json({ error: error.message });
+        }
+
+        res.json({
+            code,
+            invite_role: requestedRole,
+            owner_email: currentUser.email
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
     }
-
-    res.json({ code });
 });
 
 app.get("/admin/invites", auth, admin, async (req, res) => {
-    const { data, error } = await supabase
-        .from("invite_codes")
-        .select("*")
-        .order("created_at", { ascending: false });
+    try {
+        const currentUser = await getCurrentUser(req);
 
-    if (error) {
-        return res.status(500).json({ error: error.message });
+        let inviteQuery = supabase
+            .from("invite_codes")
+            .select("*")
+            .order("created_at", { ascending: false });
+
+        if (currentUser.role !== "super_admin") {
+            inviteQuery = inviteQuery.eq("created_by_admin_id", currentUser.id);
+        }
+
+        const { data: invites, error } = await inviteQuery;
+
+        if (error) {
+            return res.status(500).json({ error: error.message });
+        }
+
+        const usedByIds = [...new Set((invites || []).map((i) => i.used_by).filter(Boolean))];
+        const createdByIds = [...new Set((invites || []).map((i) => i.created_by_admin_id).filter(Boolean))];
+        const allLookupIds = [...new Set([...usedByIds, ...createdByIds])];
+
+        let emailMap = {};
+        if (allLookupIds.length) {
+            const { data: users } = await supabase
+                .from("users")
+                .select("id, email")
+                .in("id", allLookupIds);
+
+            emailMap = Object.fromEntries((users || []).map((u) => [u.id, u.email]));
+        }
+
+        const output = (invites || []).map((invite) => ({
+            ...invite,
+            used_by_email: invite.used_by ? emailMap[invite.used_by] || "" : "",
+            created_by_admin_email: invite.created_by_admin_id ? emailMap[invite.created_by_admin_id] || "" : ""
+        }));
+
+        res.json(output);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
     }
-
-    res.json(data);
 });
 
 app.patch("/admin/invites/:id/cancel", auth, admin, async (req, res) => {
-    const { error } = await supabase
-        .from("invite_codes")
-        .update({ canceled: true })
-        .eq("id", req.params.id)
-        .eq("used", false);
+    try {
+        const currentUser = await getCurrentUser(req);
 
-    if (error) {
-        return res.status(500).json({ error: error.message });
+        let lookup = supabase
+            .from("invite_codes")
+            .select("*")
+            .eq("id", req.params.id);
+
+        if (currentUser.role !== "super_admin") {
+            lookup = lookup.eq("created_by_admin_id", currentUser.id);
+        }
+
+        const { data: invite, error: inviteError } = await lookup.single();
+
+        if (inviteError || !invite) {
+            return res.status(404).json({ error: "Invite not found" });
+        }
+
+        const { error } = await supabase
+            .from("invite_codes")
+            .update({ canceled: true })
+            .eq("id", req.params.id);
+
+        if (error) {
+            return res.status(500).json({ error: error.message });
+        }
+
+        res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
     }
-
-    res.json({ success: true });
 });
 
 app.delete("/admin/invites/:id", auth, admin, async (req, res) => {
-    const { error } = await supabase
-        .from("invite_codes")
-        .delete()
-        .eq("id", req.params.id);
+    try {
+        const currentUser = await getCurrentUser(req);
 
-    if (error) {
-        return res.status(500).json({ error: error.message });
+        let lookup = supabase
+            .from("invite_codes")
+            .select("*")
+            .eq("id", req.params.id);
+
+        if (currentUser.role !== "super_admin") {
+            lookup = lookup.eq("created_by_admin_id", currentUser.id);
+        }
+
+        const { data: invite, error: inviteError } = await lookup.single();
+
+        if (inviteError || !invite) {
+            return res.status(404).json({ error: "Invite not found" });
+        }
+
+        const { error } = await supabase
+            .from("invite_codes")
+            .delete()
+            .eq("id", req.params.id);
+
+        if (error) {
+            return res.status(500).json({ error: error.message });
+        }
+
+        res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
     }
-
-    res.json({ success: true });
 });
 
 /* ================= EXPORT COUNT ================= */
 
 app.get("/admin/export/count", auth, admin, async (req, res) => {
-    const { user_id, group } = req.query;
+    try {
+        const currentUser = await getCurrentUser(req);
+        const { user_id, group } = req.query;
 
-    let query = supabase
-        .from("profiles")
-        .select("id", { count: "exact", head: true });
+        let query = supabase
+            .from("profiles")
+            .select("id, user_id, account_type");
 
-    if (user_id) {
-        query = query.eq("user_id", user_id);
+        if (currentUser.role === "super_admin") {
+            if (user_id) {
+                query = query.eq("user_id", user_id);
+            }
+            if (group) {
+                query = query.eq("account_type", group);
+            }
+        } else {
+            const ownedUserIds = await getScopeUserIdsForAdmin(currentUser);
+
+            if (user_id && !ownedUserIds.includes(user_id)) {
+                return res.status(403).json({ error: "Cannot export that user" });
+            }
+
+            query = query.in("user_id", safeIn(ownedUserIds));
+
+            if (user_id) {
+                query = query.eq("user_id", user_id);
+            }
+
+            if (group) {
+                query = query.eq("account_type", group);
+            }
+        }
+
+        const { data, error } = await query;
+
+        if (error) {
+            return res.status(500).json({ error: error.message });
+        }
+
+        res.json({ count: (data || []).length });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
     }
-
-    if (group) {
-        query = query.eq("account_type", group);
-    }
-
-    const { count, error } = await query;
-
-    if (error) {
-        return res.status(500).json({ error: error.message });
-    }
-
-    res.json({ count: count || 0 });
 });
 
 /* ================= AYCD EXPORT ================= */
 
 app.get("/admin/export/aycd", auth, admin, async (req, res) => {
-    const { user_id, group } = req.query;
+    try {
+        const currentUser = await getCurrentUser(req);
+        const { user_id, group } = req.query;
 
-    let query = supabase.from("profiles").select(`*, addresses(*), payments(*)`);
+        let query = supabase
+            .from("profiles")
+            .select(`
+        *,
+        addresses(*),
+        payments(*),
+        accounts(*)
+      `)
+            .order("created_at", { ascending: false });
 
-    if (user_id) {
-        query = query.eq("user_id", user_id);
-    }
+        if (currentUser.role === "super_admin") {
+            if (user_id) {
+                query = query.eq("user_id", user_id);
+            }
+            if (group) {
+                query = query.eq("account_type", group);
+            }
+        } else {
+            const ownedUserIds = await getScopeUserIdsForAdmin(currentUser);
 
-    if (group) {
-        query = query.eq("account_type", group);
-    }
+            if (user_id && !ownedUserIds.includes(user_id)) {
+                return res.status(403).json({ error: "Cannot export that user" });
+            }
 
-    const { data, error } = await query;
+            query = query.in("user_id", safeIn(ownedUserIds));
 
-    if (error) {
-        return res.status(500).json({ error: error.message });
-    }
+            if (user_id) {
+                query = query.eq("user_id", user_id);
+            }
 
-    const exportProfiles = (data || [])
-        .map((p) => {
-            const addr = p.addresses?.[0];
-            const pay = p.payments?.[0];
+            if (group) {
+                query = query.eq("account_type", group);
+            }
+        }
 
-            if (!addr || !pay) return null;
+        const { data: profiles, error } = await query;
+
+        if (error) {
+            return res.status(500).json({ error: error.message });
+        }
+
+        const rows = (profiles || []).map((profile) => {
+            const address = profile.addresses?.[0] || {};
+            const payment = profile.payments?.[0] || {};
+            const account = profile.accounts?.[0] || {};
+
+            let cardNumber = "";
+            let cardCvv = "";
+
+            try {
+                cardNumber = payment.card_encrypted ? decrypt(payment.card_encrypted) : "";
+            } catch { }
+
+            try {
+                cardCvv = payment.cvv_encrypted ? decrypt(payment.cvv_encrypted) : "";
+            } catch { }
 
             return {
-                id: "prf-" + uuidv4(),
-                createdAt: Date.now(),
-                updatedAt: Date.now(),
-                name: p.profile_name,
-                email: addr.email,
-                oneTimeUse: false,
-                shipping: {
-                    firstName: addr.first_name,
-                    lastName: addr.last_name,
-                    address1: addr.address1,
-                    address2: "",
-                    city: addr.city,
-                    province: addr.state,
-                    postalCode: addr.zip,
-                    country: "United States",
-                    phone: addr.phone,
-                },
-                billing: {
-                    sameAsShipping: true,
-                    firstName: "",
-                    lastName: "",
-                    address1: "",
-                    address2: "",
-                    city: "",
-                    province: null,
-                    postalCode: "",
-                    country: null,
-                    phone: "",
-                },
-                payment: {
-                    name: addr.first_name + " " + addr.last_name,
-                    num: decrypt(pay.card_encrypted),
-                    year: pay.exp_year,
-                    month: pay.exp_month,
-                    cvv: decrypt(pay.cvv_encrypted),
-                },
+                profile_name: profile.profile_name || "",
+                account_type: profile.account_type || "",
+                first_name: address.first_name || "",
+                last_name: address.last_name || "",
+                email: address.email || "",
+                phone: address.phone || "",
+                address1: address.address1 || "",
+                city: address.city || "",
+                state: address.state || "",
+                zip: address.zip || "",
+                card_number: cardNumber,
+                exp_month: payment.exp_month || "",
+                exp_year: payment.exp_year || "",
+                cvv: cardCvv,
+                card_last4: payment.card_last4 || "",
+                login_email: account.login_email || "",
+                login_password: account.login_password || "",
+                gmail_app_password: account.gmail_app_password || "",
+                amazon_2fa_secret: account.amazon_2fa_secret || "",
+                user_id: profile.user_id || ""
             };
-        })
-        .filter(Boolean);
+        });
 
-    res.json(exportProfiles);
+        res.setHeader("Content-Type", "application/json");
+        res.setHeader("Content-Disposition", 'attachment; filename="profiles.json"');
+        res.send(JSON.stringify(rows, null, 2));
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
-/* ================= OPTIONAL ADMIN SEED ================= */
+/* ================= SUPER ADMIN BOOTSTRAP ================= */
 
-async function ensureAdmin() {
-    const email = process.env.ADMIN_EMAIL;
-    const password = process.env.ADMIN_PASSWORD;
-
-    if (!email || !password) {
-        console.log("Skipping admin seed");
-        return;
-    }
+async function ensureSuperAdmin() {
+    const password = process.env.SUPER_ADMIN_PASSWORD || "change-this-now";
+    const hash = await bcrypt.hash(password, 10);
 
     const { data: user } = await supabase
         .from("users")
         .select("*")
-        .eq("email", email)
-        .single();
-
-    const hash = await bcrypt.hash(password, 10);
+        .eq("email", SUPER_ADMIN_EMAIL)
+        .maybeSingle();
 
     if (!user) {
-        await supabase.from("users").insert({
-            email,
-            password_hash: hash,
-            role: "admin",
-            revoked: false,
-        });
-        console.log("Admin account created");
-    } else {
-        await supabase
+        const { error } = await supabase
             .from("users")
-            .update({
+            .insert({
+                email: SUPER_ADMIN_EMAIL,
                 password_hash: hash,
-                role: "admin",
+                role: "super_admin",
                 revoked: false,
-            })
-            .eq("email", email);
-        console.log("Admin password reset");
+                owner_admin_id: null
+            });
+
+        if (error) {
+            throw new Error(error.message);
+        }
+
+        console.log("Super admin account created");
+        return;
     }
+
+    const { error } = await supabase
+        .from("users")
+        .update({
+            password_hash: hash,
+            role: "super_admin",
+            revoked: false,
+            owner_admin_id: null
+        })
+        .eq("email", SUPER_ADMIN_EMAIL);
+
+    if (error) {
+        throw new Error(error.message);
+    }
+
+    console.log("Super admin account ensured");
 }
 
-const PORT = process.env.PORT || 3000;
-
-ensureAdmin()
+ensureSuperAdmin()
     .then(() => {
-        app.listen(PORT, () => {
-            console.log(`Server running on port ${PORT}`);
+        app.listen(3000, () => {
+            console.log("Server running on port 3000");
         });
     })
     .catch((err) => {
-        console.error("Startup failed:", err);
+        console.error("Failed to start server:", err.message);
         process.exit(1);
     });

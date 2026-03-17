@@ -1,6 +1,5 @@
 const API =
-    window.location.hostname === "localhost" ||
-        window.location.hostname === "127.0.0.1"
+    window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1"
         ? "http://localhost:3000"
         : "https://profile-platform.onrender.com";
 
@@ -14,6 +13,14 @@ function currentUser() {
     } catch {
         return null;
     }
+}
+
+function isAdminRole(role) {
+    return role === "admin" || role === "super_admin";
+}
+
+function isSuperAdmin() {
+    return currentUser()?.role === "super_admin";
 }
 
 function logout() {
@@ -55,11 +62,9 @@ function toggleAccountCredentialFields() {
     const section = document.getElementById("accountCredentialsSection");
     const gmailFields = document.getElementById("gmailAccountFields");
     const amazonFields = document.getElementById("amazonAccountFields");
-
     if (!section || !gmailFields || !amazonFields) return;
 
     const type = selectedAccountType();
-
     section.style.display = "none";
     gmailFields.style.display = "none";
     amazonFields.style.display = "none";
@@ -76,7 +81,6 @@ function toggleAccountCredentialFields() {
 /* ================= LOGIN ================= */
 
 const loginForm = document.getElementById("loginForm");
-
 if (loginForm) {
     loginForm.onsubmit = async (e) => {
         e.preventDefault();
@@ -87,8 +91,8 @@ if (loginForm) {
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
                     email: email.value,
-                    password: password.value,
-                }),
+                    password: password.value
+                })
             });
 
             const data = await res.json();
@@ -101,7 +105,7 @@ if (loginForm) {
             localStorage.token = data.token;
             localStorage.user = JSON.stringify(data.user);
 
-            if (data.user.role === "admin") {
+            if (isAdminRole(data.user.role)) {
                 location = "admin.html";
             } else {
                 location = "dashboard.html";
@@ -115,7 +119,6 @@ if (loginForm) {
 /* ================= SIGNUP ================= */
 
 const signupForm = document.getElementById("signupForm");
-
 if (signupForm) {
     signupForm.onsubmit = async (e) => {
         e.preventDefault();
@@ -127,8 +130,8 @@ if (signupForm) {
                 body: JSON.stringify({
                     email: email.value,
                     password: password.value,
-                    invite_code: invite.value,
-                }),
+                    invite_code: invite.value
+                })
             });
 
             const data = await res.json();
@@ -154,20 +157,19 @@ async function loadProfiles() {
 
     const user = currentUser();
     const adminButton = document.getElementById("adminPanelButton");
-
-    if (user?.role === "admin" && adminButton) {
+    if (isAdminRole(user?.role) && adminButton) {
         adminButton.style.display = "inline-block";
     }
 
     try {
         const res = await fetch(API + "/profiles", {
-            headers: { Authorization: "Bearer " + token() },
+            headers: { Authorization: "Bearer " + token() }
         });
 
         const profiles = await res.json();
 
         if (!Array.isArray(profiles)) {
-            dashboardEl.innerHTML = `<p>${profiles.error || "Could not load profiles."}</p>`;
+            dashboardEl.innerHTML = `${profiles.error || "Could not load profiles."}`;
             return;
         }
 
@@ -175,7 +177,7 @@ async function loadProfiles() {
             general: [],
             walmart: [],
             target: [],
-            amazon: [],
+            amazon: []
         };
 
         profiles.forEach((p) => {
@@ -185,12 +187,8 @@ async function loadProfiles() {
         });
 
         let html = "";
-
         Object.keys(groups).forEach((g) => {
-            html += `
-        <section style="margin-bottom: 2rem;">
-          <h2>${g.toUpperCase()} PROFILES</h2>
-      `;
+            html += `<h2>${g.toUpperCase()} PROFILES</h2>`;
 
             groups[g].forEach((p) => {
                 const address = p.addresses?.[0] || {};
@@ -200,30 +198,30 @@ async function loadProfiles() {
                 const maskedCard = maskCard(payment.card_number, payment.card_last4);
 
                 html += `
-          <div style="margin-bottom: 1rem; padding: 1rem; border: 1px solid #ddd; border-radius: 8px;">
+          <div class="profile-card">
             <h3>${p.profile_name}</h3>
             <p><strong>Email:</strong> ${address.email || ""}</p>
             <p><strong>Phone:</strong> ${address.phone || ""}</p>
             <p><strong>Card:</strong> ${maskedCard}</p>
             <p><strong>Group:</strong> ${p.account_type}</p>
             <p><strong>Location:</strong> ${city}${city && state ? ", " : ""}${state}</p>
-            <button onclick="edit('${p.id}')">Edit</button>
-            <button onclick="del('${p.id}')">Delete</button>
+            <div class="row-actions">
+              <button onclick="edit('${p.id}')">Edit</button>
+              <button onclick="del('${p.id}')">Delete</button>
+            </div>
           </div>
         `;
             });
 
             if (groups[g].length === 0) {
                 html += `
-          <div style="margin-bottom: 1rem;">
+          <div class="empty-card">
             <h3>No profiles yet</h3>
             <p>Create your first ${g} profile.</p>
             <button onclick="createProfile()">Create Profile</button>
           </div>
         `;
             }
-
-            html += `</section>`;
         });
 
         dashboardEl.innerHTML = html;
@@ -231,7 +229,6 @@ async function loadProfiles() {
         dashboardEl.innerHTML = `<p>Could not connect to the server.</p>`;
     }
 }
-
 loadProfiles();
 
 function createProfile() {
@@ -247,7 +244,7 @@ function edit(id) {
 async function del(id) {
     await fetch(API + "/profiles/" + id, {
         method: "DELETE",
-        headers: { Authorization: "Bearer " + token() },
+        headers: { Authorization: "Bearer " + token() }
     });
 
     location.reload();
@@ -261,8 +258,7 @@ async function loadProfileEditor() {
 
     const user = currentUser();
     const adminButton = document.getElementById("adminPanelButtonProfile");
-
-    if (user?.role === "admin" && adminButton) {
+    if (isAdminRole(user?.role) && adminButton) {
         adminButton.style.display = "inline-block";
     }
 
@@ -272,17 +268,16 @@ async function loadProfileEditor() {
     }
 
     const editId = localStorage.getItem("edit");
-
     if (!editId) {
         toggleAccountCredentialFields();
         return;
     }
 
     const res = await fetch(API + "/profiles", {
-        headers: { Authorization: "Bearer " + token() },
+        headers: { Authorization: "Bearer " + token() }
     });
-
     const profiles = await res.json();
+
     if (!Array.isArray(profiles)) return;
 
     const profile = profiles.find((p) => p.id === editId);
@@ -316,7 +311,6 @@ async function loadProfileEditor() {
         const gmailEmailEl = document.getElementById("account_login_email");
         const gmailPasswordEl = document.getElementById("account_login_password");
         const gmailAppPasswordEl = document.getElementById("gmail_app_password");
-
         if (gmailEmailEl) gmailEmailEl.value = account.login_email || "";
         if (gmailPasswordEl) gmailPasswordEl.value = account.login_password || "";
         if (gmailAppPasswordEl) gmailAppPasswordEl.value = account.gmail_app_password || "";
@@ -326,17 +320,14 @@ async function loadProfileEditor() {
         const amazonEmailEl = document.getElementById("amazon_login_email");
         const amazonPasswordEl = document.getElementById("amazon_login_password");
         const amazonSecretEl = document.getElementById("amazon_2fa_secret");
-
         if (amazonEmailEl) amazonEmailEl.value = account.login_email || "";
         if (amazonPasswordEl) amazonPasswordEl.value = account.login_password || "";
         if (amazonSecretEl) amazonSecretEl.value = account.amazon_2fa_secret || "";
     }
 }
-
 loadProfileEditor();
 
 const profileForm = document.getElementById("profileForm");
-
 if (profileForm) {
     profileForm.onsubmit = async (e) => {
         e.preventDefault();
@@ -380,7 +371,7 @@ if (profileForm) {
             account_login_email: accountLoginEmail,
             account_login_password: accountLoginPassword,
             gmail_app_password: gmailAppPassword,
-            amazon_2fa_secret: amazon2FASecret,
+            amazon_2fa_secret: amazon2FASecret
         };
 
         const url = editId ? API + "/profiles/" + editId : API + "/profiles";
@@ -390,9 +381,9 @@ if (profileForm) {
             method,
             headers: {
                 "Content-Type": "application/json",
-                Authorization: "Bearer " + token(),
+                Authorization: "Bearer " + token()
             },
-            body: JSON.stringify(payload),
+            body: JSON.stringify(payload)
         });
 
         const data = await res.json();
@@ -423,13 +414,17 @@ function userStatusBadge(user) {
     return "Active";
 }
 
-async function createInvite() {
+async function createInvite(inviteRole = "user") {
     const resultBox = document.getElementById("inviteResult");
     if (!resultBox) return;
 
     const res = await fetch(API + "/admin/create-invite", {
         method: "POST",
-        headers: { Authorization: "Bearer " + token() },
+        headers: {
+            "Content-Type": "application/json",
+            Authorization: "Bearer " + token()
+        },
+        body: JSON.stringify({ invite_role: inviteRole })
     });
 
     const data = await res.json();
@@ -439,8 +434,19 @@ async function createInvite() {
         return;
     }
 
-    resultBox.innerText = "Latest Invite Code: " + data.code;
+    const ownerLabel =
+        inviteRole === "admin" ? "Admin invite" : "User invite";
+
+    resultBox.innerText = `${ownerLabel}: ${data.code}`;
     loadInvites();
+}
+
+async function createUserInvite() {
+    return createInvite("user");
+}
+
+async function createAdminInvite() {
+    return createInvite("admin");
 }
 
 async function loadInvites() {
@@ -448,9 +454,8 @@ async function loadInvites() {
     if (!tableBody) return;
 
     const res = await fetch(API + "/admin/invites", {
-        headers: { Authorization: "Bearer " + token() },
+        headers: { Authorization: "Bearer " + token() }
     });
-
     const invites = await res.json();
 
     if (!Array.isArray(invites)) {
@@ -476,10 +481,11 @@ async function loadInvites() {
     }
 
     let html = "";
-
     invites.forEach((invite) => {
-        const usedBy = invite.used_by || "-";
-        const createdAt = new Date(invite.created_at).toLocaleString();
+        const usedBy = invite.used_by_email || "-";
+        const createdBy = invite.created_by_admin_email || "-";
+        const role = invite.invite_role || "user";
+        const createdAt = invite.created_at ? new Date(invite.created_at).toLocaleString() : "-";
 
         let actionHtml = "";
         if (!invite.used && !invite.canceled) {
@@ -488,14 +494,14 @@ async function loadInvites() {
         <button onclick="deleteInvite('${invite.id}')">Delete</button>
       `;
         } else {
-            actionHtml = `
-        <button onclick="deleteInvite('${invite.id}')">Delete</button>
-      `;
+            actionHtml = `<button onclick="deleteInvite('${invite.id}')">Delete</button>`;
         }
 
         html += `
       <tr>
         <td>${invite.code}</td>
+        <td>${role}</td>
+        <td>${createdBy}</td>
         <td>${inviteStatusBadge(invite)}</td>
         <td>${createdAt}</td>
         <td>${usedBy}</td>
@@ -510,9 +516,8 @@ async function loadInvites() {
 async function cancelInvite(id) {
     const res = await fetch(API + "/admin/invites/" + id + "/cancel", {
         method: "PATCH",
-        headers: { Authorization: "Bearer " + token() },
+        headers: { Authorization: "Bearer " + token() }
     });
-
     const data = await res.json();
 
     if (data.error) {
@@ -526,9 +531,8 @@ async function cancelInvite(id) {
 async function deleteInvite(id) {
     const res = await fetch(API + "/admin/invites/" + id, {
         method: "DELETE",
-        headers: { Authorization: "Bearer " + token() },
+        headers: { Authorization: "Bearer " + token() }
     });
-
     const data = await res.json();
 
     if (data.error) {
@@ -544,13 +548,11 @@ async function deleteInvite(id) {
 async function loadUsers() {
     const tableBody = document.getElementById("usersTableBody");
     const exportUserFilter = document.getElementById("exportUserFilter");
-
     if (!tableBody && !exportUserFilter) return;
 
     const res = await fetch(API + "/admin/users", {
-        headers: { Authorization: "Bearer " + token() },
+        headers: { Authorization: "Bearer " + token() }
     });
-
     const usersData = await res.json();
 
     if (!Array.isArray(usersData)) {
@@ -570,11 +572,9 @@ async function loadUsers() {
             tableBody.innerHTML = `No users found.`;
         } else {
             let html = "";
-
             usersData.forEach((u) => {
                 let actionHtml = `No action`;
-
-                if (u.role !== "admin") {
+                if (!isAdminRole(u.role)) {
                     actionHtml = u.revoked
                         ? `<button onclick="restoreUser('${u.id}')">Restore</button> <button onclick="deleteUser('${u.id}', '${u.email}')">Delete</button>`
                         : `<button onclick="revokeUser('${u.id}')">Revoke</button> <button onclick="deleteUser('${u.id}', '${u.email}')">Delete</button>`;
@@ -584,24 +584,25 @@ async function loadUsers() {
           <tr>
             <td>${u.email}</td>
             <td>${u.role}</td>
+            <td>${u.owner_admin_email || (u.owner_admin_id ? u.owner_admin_id : "-")}</td>
             <td>${u.profile_count || 0}</td>
             <td>${userStatusBadge(u)}</td>
-            <td>${new Date(u.created_at).toLocaleString()}</td>
+            <td>${u.created_at ? new Date(u.created_at).toLocaleString() : "-"}</td>
             <td>${actionHtml}</td>
           </tr>
         `;
             });
-
             tableBody.innerHTML = html;
         }
     }
 
     if (exportUserFilter) {
         let options = `<option value="">All Users</option>`;
-
-        usersData.forEach((u) => {
-            options += `<option value="${u.id}">${u.email}</option>`;
-        });
+        usersData
+            .filter((u) => u.role === "user")
+            .forEach((u) => {
+                options += `<option value="${u.id}">${u.email}</option>`;
+            });
 
         exportUserFilter.innerHTML = options;
         updateExportCount();
@@ -611,9 +612,8 @@ async function loadUsers() {
 async function revokeUser(id) {
     const res = await fetch(API + "/admin/users/" + id + "/revoke", {
         method: "PATCH",
-        headers: { Authorization: "Bearer " + token() },
+        headers: { Authorization: "Bearer " + token() }
     });
-
     const data = await res.json();
 
     if (data.error) {
@@ -627,9 +627,8 @@ async function revokeUser(id) {
 async function restoreUser(id) {
     const res = await fetch(API + "/admin/users/" + id + "/restore", {
         method: "PATCH",
-        headers: { Authorization: "Bearer " + token() },
+        headers: { Authorization: "Bearer " + token() }
     });
-
     const data = await res.json();
 
     if (data.error) {
@@ -641,17 +640,13 @@ async function restoreUser(id) {
 }
 
 async function deleteUser(id, email) {
-    const confirmed = confirm(
-        `Delete user ${email}? This will also delete all profiles created by this user.`
-    );
-
+    const confirmed = confirm(`Delete user ${email}? This will also delete all profiles created by this user.`);
     if (!confirmed) return;
 
     const res = await fetch(API + "/admin/users/" + id, {
         method: "DELETE",
-        headers: { Authorization: "Bearer " + token() },
+        headers: { Authorization: "Bearer " + token() }
     });
-
     const data = await res.json();
 
     if (data.error) {
@@ -669,7 +664,6 @@ async function updateExportCount() {
     const banner = document.getElementById("exportCountBanner");
     const userFilter = document.getElementById("exportUserFilter");
     const groupFilter = document.getElementById("exportGroupFilter");
-
     if (!banner) return;
 
     const params = new URLSearchParams();
@@ -679,18 +673,14 @@ async function updateExportCount() {
     if (selectedUserId) {
         params.append("user_id", selectedUserId);
     }
-
     if (selectedGroup) {
         params.append("group", selectedGroup);
     }
 
-    const url =
-        API + "/admin/export/count" + (params.toString() ? "?" + params.toString() : "");
-
+    const url = API + "/admin/export/count" + (params.toString() ? "?" + params.toString() : "");
     const res = await fetch(url, {
-        headers: { Authorization: "Bearer " + token() },
+        headers: { Authorization: "Bearer " + token() }
     });
-
     const data = await res.json();
 
     if (data.error) {
@@ -715,10 +705,8 @@ async function updateExportCount() {
 function clearExportFilters() {
     const userFilter = document.getElementById("exportUserFilter");
     const groupFilter = document.getElementById("exportGroupFilter");
-
     if (userFilter) userFilter.value = "";
     if (groupFilter) groupFilter.value = "";
-
     updateExportCount();
 }
 
@@ -728,22 +716,17 @@ async function exportProfiles() {
     const banner = document.getElementById("exportCountBanner");
 
     const params = new URLSearchParams();
-
     if (userFilter && userFilter.value) {
         params.append("user_id", userFilter.value);
     }
-
     if (groupFilter && groupFilter.value) {
         params.append("group", groupFilter.value);
     }
 
-    const countUrl =
-        API + "/admin/export/count" + (params.toString() ? "?" + params.toString() : "");
-
+    const countUrl = API + "/admin/export/count" + (params.toString() ? "?" + params.toString() : "");
     const countRes = await fetch(countUrl, {
-        headers: { Authorization: "Bearer " + token() },
+        headers: { Authorization: "Bearer " + token() }
     });
-
     const countData = await countRes.json();
 
     if (countData.error) {
@@ -757,17 +740,14 @@ async function exportProfiles() {
         return;
     }
 
-    const url =
-        API + "/admin/export/aycd" + (params.toString() ? "?" + params.toString() : "");
-
+    const url = API + "/admin/export/aycd" + (params.toString() ? "?" + params.toString() : "");
     const res = await fetch(url, {
-        headers: { Authorization: "Bearer " + token() },
+        headers: { Authorization: "Bearer " + token() }
     });
 
     const blob = await res.blob();
     const downloadUrl = window.URL.createObjectURL(blob);
     const a = document.createElement("a");
-
     a.href = downloadUrl;
     a.download = "profiles.json";
     a.click();
@@ -776,7 +756,6 @@ async function exportProfiles() {
 /* ================= CHANGE PASSWORD ================= */
 
 const passwordForm = document.getElementById("passwordForm");
-
 if (passwordForm) {
     passwordForm.onsubmit = async (e) => {
         e.preventDefault();
@@ -785,12 +764,12 @@ if (passwordForm) {
             method: "POST",
             headers: {
                 "Content-Type": "application/json",
-                Authorization: "Bearer " + token(),
+                Authorization: "Bearer " + token()
             },
             body: JSON.stringify({
                 oldPassword: oldPassword.value,
-                newPassword: newPassword.value,
-            }),
+                newPassword: newPassword.value
+            })
         });
 
         const data = await res.json();
@@ -800,5 +779,12 @@ if (passwordForm) {
 
 /* ================= PAGE LOAD ================= */
 
-loadInvites();
-loadUsers();
+document.addEventListener("DOMContentLoaded", () => {
+    const superAdminTools = document.getElementById("superAdminTools");
+    if (superAdminTools) {
+        superAdminTools.style.display = isSuperAdmin() ? "block" : "none";
+    }
+
+    loadInvites();
+    loadUsers();
+});

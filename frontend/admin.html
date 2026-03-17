@@ -1,163 +1,131 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 
 <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Admin Panel</title>
-    <link rel="stylesheet" href="styles.css">
+    <link rel="stylesheet" href="style.css" />
 </head>
 
 <body>
+    <header class="topbar">
+        <div>
+            <h1>Profile Platform</h1>
+            <p>Admin Panel</p>
+        </div>
+        <div class="topbar-actions">
+            <button onclick="openUserDashboard()">Open User Dashboard</button>
+            <button onclick="logout()">Logout</button>
+        </div>
+    </header>
 
-    <div class="app-shell">
-        <aside class="sidebar">
-            <div class="sidebar-brand">
-                <h2>Admin Panel</h2>
-                <p>Profile Platform</p>
+    <main class="container">
+        <section class="hero-card">
+            <h2>Admin Dashboard</h2>
+            <p>Manage invites, users, exports, and access.</p>
+        </section>
+
+        <section class="stats-grid">
+            <div class="stat-card">
+                <h3>Active Invites</h3>
+                <p id="activeInviteCount">0</p>
             </div>
+            <div class="stat-card">
+                <h3>Used Invites</h3>
+                <p id="usedInviteCount">0</p>
+            </div>
+            <div class="stat-card">
+                <h3>Canceled Invites</h3>
+                <p id="canceledInviteCount">0</p>
+            </div>
+            <div class="stat-card">
+                <h3>Users</h3>
+                <p id="userCount">0</p>
+            </div>
+        </section>
 
-            <nav class="sidebar-nav">
-                <button class="nav-btn" onclick="scrollToSection('inviteCreatorCard')">Create Invite</button>
-                <button class="nav-btn" onclick="scrollToSection('inviteListCard')">Invite Codes</button>
-                <button class="nav-btn" onclick="scrollToSection('exportCard')">Export Profiles</button>
-                <button class="nav-btn" onclick="scrollToSection('usersCard')">Users</button>
-                <button class="nav-btn" onclick="openUserDashboard()">Open User Dashboard</button>
-                <button class="nav-btn danger-btn" onclick="logout()">Logout</button>
-            </nav>
-        </aside>
+        <section class="card">
+            <h2>Create Invite Code</h2>
+            <p>Generate one-time signup codes for users under your admin tree.</p>
+            <div class="row-actions">
+                <button onclick="createUserInvite()">Create User Invite</button>
+            </div>
+            <p id="inviteResult">No invite created yet.</p>
+        </section>
 
-        <main class="main-panel">
-            <header class="topbar">
-                <div>
-                    <h1>Admin Dashboard</h1>
-                    <p class="subtle-text">Manage invites, users, exports, and access</p>
-                </div>
+        <section class="card" id="superAdminTools" style="display:none;">
+            <h2>Super Admin Tools</h2>
+            <p>Create admin invites. Admins created from these invites can manage and export only their own users.</p>
+            <div class="row-actions">
+                <button onclick="createAdminInvite()">Create Admin Invite</button>
+            </div>
+        </section>
 
-                <div class="topbar-actions">
-                    <button onclick="openUserDashboard()">User Dashboard</button>
-                    <button onclick="createInvite()">Quick Create Invite</button>
-                </div>
-            </header>
+        <section class="card">
+            <h2>All Invite Codes</h2>
+            <p>View, cancel, and delete invite codes.</p>
+            <div class="table-wrap">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Code</th>
+                            <th>Role</th>
+                            <th>Created By</th>
+                            <th>Status</th>
+                            <th>Created</th>
+                            <th>Used By</th>
+                            <th>Action</th>
+                        </tr>
+                    </thead>
+                    <tbody id="inviteTableBody"></tbody>
+                </table>
+            </div>
+        </section>
 
-            <section class="stats-grid">
-                <div class="stat-card">
-                    <div class="stat-label">Active Invites</div>
-                    <div class="stat-value" id="activeInviteCount">0</div>
-                </div>
+        <section class="card">
+            <h2>Export Profiles</h2>
+            <p>Export all profiles, by user, by group, or both.</p>
+            <div class="row-actions">
+                <select id="exportUserFilter" onchange="updateExportCount()">
+                    <option value="">All Users</option>
+                </select>
 
-                <div class="stat-card">
-                    <div class="stat-label">Used Invites</div>
-                    <div class="stat-value" id="usedInviteCount">0</div>
-                </div>
+                <select id="exportGroupFilter" onchange="updateExportCount()">
+                    <option value="">All Groups</option>
+                    <option value="general">General</option>
+                    <option value="walmart">Walmart</option>
+                    <option value="target">Target</option>
+                    <option value="amazon">Amazon</option>
+                </select>
 
-                <div class="stat-card">
-                    <div class="stat-label">Canceled Invites</div>
-                    <div class="stat-value" id="canceledInviteCount">0</div>
-                </div>
+                <button onclick="exportProfiles()">Export Filtered Profiles</button>
+                <button onclick="clearExportFilters()">Clear Filters</button>
+            </div>
+            <p id="exportCountBanner">Checking export count...</p>
+        </section>
 
-                <div class="stat-card">
-                    <div class="stat-label">Users</div>
-                    <div class="stat-value" id="userCount">0</div>
-                </div>
-            </section>
-
-            <section class="admin-card" id="inviteCreatorCard">
-                <div class="card-header-row">
-                    <div>
-                        <h2>Create Invite Code</h2>
-                        <p class="subtle-text">Generate one-time codes for signup access</p>
-                    </div>
-                    <button onclick="createInvite()">Create Invite</button>
-                </div>
-
-                <div class="result-banner" id="inviteResult">No invite created yet.</div>
-            </section>
-
-            <section class="admin-card" id="inviteListCard">
-                <div class="card-header-row">
-                    <div>
-                        <h2>All Invite Codes</h2>
-                        <p class="subtle-text">View, cancel, and delete invite codes</p>
-                    </div>
-                </div>
-
-                <div class="table-wrap">
-                    <table class="admin-table">
-                        <thead>
-                            <tr>
-                                <th>Code</th>
-                                <th>Status</th>
-                                <th>Created</th>
-                                <th>Used By</th>
-                                <th>Action</th>
-                            </tr>
-                        </thead>
-                        <tbody id="inviteTableBody"></tbody>
-                    </table>
-                </div>
-            </section>
-
-            <section class="admin-card" id="exportCard">
-                <div class="card-header-row">
-                    <div>
-                        <h2>Export Profiles</h2>
-                        <p class="subtle-text">Export all profiles, by user, by group, or both</p>
-                    </div>
-                </div>
-
-                <div class="form-grid">
-                    <select id="exportUserFilter" onchange="updateExportCount()">
-                        <option value="">All Users</option>
-                    </select>
-
-                    <select id="exportGroupFilter" onchange="updateExportCount()">
-                        <option value="">All Groups</option>
-                        <option value="general">General</option>
-                        <option value="walmart">Walmart</option>
-                        <option value="target">Target</option>
-                        <option value="amazon">Amazon</option>
-                    </select>
-                </div>
-
-                <div class="result-banner" id="exportCountBanner" style="margin-top:16px;">
-                    Checking export count...
-                </div>
-
-                <div class="card-actions" style="margin-top:16px;">
-                    <button onclick="exportProfiles()">Export Filtered Profiles</button>
-                    <button onclick="clearExportFilters()">Clear Filters</button>
-                </div>
-
-                <p class="subtle-text" style="margin-top:12px;">
-                    You’ll see exactly how many profiles match before exporting.
-                </p>
-            </section>
-
-            <section class="admin-card" id="usersCard">
-                <div class="card-header-row">
-                    <div>
-                        <h2>Users</h2>
-                        <p class="subtle-text">View profile counts and manage revoke, restore, or delete actions</p>
-                    </div>
-                </div>
-
-                <div class="table-wrap">
-                    <table class="admin-table">
-                        <thead>
-                            <tr>
-                                <th>Email</th>
-                                <th>Role</th>
-                                <th>Profiles</th>
-                                <th>Status</th>
-                                <th>Created</th>
-                                <th>Action</th>
-                            </tr>
-                        </thead>
-                        <tbody id="usersTableBody"></tbody>
-                    </table>
-                </div>
-            </section>
-        </main>
-    </div>
+        <section class="card">
+            <h2>Users</h2>
+            <p>View ownership, profile counts, and revoke, restore, or delete actions.</p>
+            <div class="table-wrap">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Email</th>
+                            <th>Role</th>
+                            <th>Owned By</th>
+                            <th>Profiles</th>
+                            <th>Status</th>
+                            <th>Created</th>
+                            <th>Action</th>
+                        </tr>
+                    </thead>
+                    <tbody id="usersTableBody"></tbody>
+                </table>
+            </div>
+        </section>
+    </main>
 
     <script src="script.js"></script>
 </body>
