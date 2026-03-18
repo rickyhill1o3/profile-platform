@@ -3,35 +3,44 @@
 
 <head>
     <title>Login</title>
+    <link rel="stylesheet" href="app-theme.css">
     <link rel="stylesheet" href="styles.css">
 </head>
 
-<body>
+<body class="auth-page">
 
-    <div class="container">
+    <div class="auth-wrap">
+        <div class="auth-card-modern">
+            <p class="page-eyebrow">Profile Platform</p>
+            <h1 class="auth-title">Welcome back</h1>
+            <p class="auth-subtitle">Sign in to manage profiles, products, and admin tools.</p>
 
-        <h1>Login</h1>
+            <form id="loginForm" class="form-stack">
+                <div class="input-shell">
+                    <label for="email">Email</label>
+                    <input id="email" placeholder="you@example.com" required>
+                </div>
 
-        <form id="loginForm">
+                <div class="input-shell">
+                    <label for="password">Password</label>
+                    <div class="password-row">
+                        <input id="password" type="password" placeholder="Enter your password" required>
+                        <button type="button" onclick="togglePasswordVisibility('password', this)">Show</button>
+                    </div>
+                </div>
 
-            <input id="email" placeholder="Email" required>
+                <button type="submit" class="primary-action">Login</button>
+            </form>
 
-            <input id="password" type="password" placeholder="Password" required>
+            <p id="error" class="auth-error"></p>
 
-            <button type="submit">Login</button>
-
-        </form>
-
-        <p id="error" style="color:red"></p>
-
-        <p>
-            Need an account? <a href="signup.html">Signup</a>
-        </p>
-
+            <p class="auth-footer">
+                Need an account? <a href="signup.html">Signup</a>
+            </p>
+        </div>
     </div>
 
     <script src="script.js"></script>
-
 </body>
 
 </html>

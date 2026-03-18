@@ -12,11 +12,7 @@
                 const user = JSON.parse(localStorage.getItem("user") || "null");
 
                 if (token && user) {
-                    if (user.role === "admin") {
-                        window.location.replace("admin.html");
-                    } else {
-                        window.location.replace("dashboard.html");
-                    }
+                    window.location.replace("dashboard.html");
                 } else {
                     window.location.replace("login.html");
                 }

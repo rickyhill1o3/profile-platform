@@ -3,62 +3,48 @@
 
 <head>
     <title>Admin Panel</title>
+    <link rel="stylesheet" href="app-theme.css" />
     <link rel="stylesheet" href="products.css" />
     <link rel="stylesheet" href="styles.css">
 </head>
 
-<body>
+<body class="admin-page">
 
-    <div class="app-shell">
-        <aside class="sidebar">
-            <div class="sidebar-brand">
-                <h2>Admin Panel</h2>
-                <p>Profile Platform</p>
+    <div class="admin-shell-modern">
+        <header class="admin-topbar-modern">
+            <div>
+                <p class="page-eyebrow">Profile Platform</p>
+                <h1>Admin Dashboard</h1>
+                <p class="page-subtitle">Manage invites, users, exports, and product selections.</p>
             </div>
 
-            <nav class="sidebar-nav">
-                <button class="nav-btn" onclick="scrollToSection('inviteCreatorCard')">Create Invite</button>
-                <button class="nav-btn" onclick="scrollToSection('inviteListCard')">Invite Codes</button>
-                <button class="nav-btn" onclick="scrollToSection('exportCard')">Export Profiles</button>
-                <button class="nav-btn" onclick="scrollToSection('usersCard')">Users</button>
-                <button class="nav-btn" onclick="openUserDashboard()">Open User Dashboard</button>
-                <button class="nav-btn danger-btn" onclick="logout()">Logout</button>
-            </nav>
-        </aside>
+            <div class="admin-topbar-actions">
+                <button onclick="openUserDashboard()">User Dashboard</button>
+                <button onclick="submitInviteCreation()">Quick Create Invite</button>
+                <button class="danger-action" onclick="logout()">Logout</button>
+            </div>
+        </header>
 
-        <main class="main-panel">
-            <header class="topbar">
-                <div>
-                    <h1>Admin Dashboard</h1>
-                    <p class="subtle-text">Manage invites, users, exports, and access</p>
-                </div>
+        <div class="admin-section-grid">
+            <div class="stat-card">
+                <div class="stat-label">Active Invites</div>
+                <div class="stat-value" id="activeInviteCount">0</div>
+            </div>
 
-                <div class="topbar-actions">
-                    <button onclick="openUserDashboard()">User Dashboard</button>
-                    <button onclick="submitInviteCreation()">Quick Create Invite</button>
-                </div>
-            </header>
+            <div class="stat-card">
+                <div class="stat-label">Used Invites</div>
+                <div class="stat-value" id="usedInviteCount">0</div>
+            </div>
 
-            <section class="stats-grid">
-                <div class="stat-card">
-                    <div class="stat-label">Active Invites</div>
-                    <div class="stat-value" id="activeInviteCount">0</div>
-                </div>
+            <div class="stat-card">
+                <div class="stat-label">Canceled Invites</div>
+                <div class="stat-value" id="canceledInviteCount">0</div>
+            </div>
 
-                <div class="stat-card">
-                    <div class="stat-label">Used Invites</div>
-                    <div class="stat-value" id="usedInviteCount">0</div>
-                </div>
-
-                <div class="stat-card">
-                    <div class="stat-label">Canceled Invites</div>
-                    <div class="stat-value" id="canceledInviteCount">0</div>
-                </div>
-
-                <div class="stat-card">
-                    <div class="stat-label">Users</div>
-                    <div class="stat-value" id="userCount">0</div>
-                </div>
+            <div class="stat-card">
+                <div class="stat-label">Users</div>
+                <div class="stat-value" id="userCount">0</div>
+            </div>
             </section>
 
             <section class="admin-card" id="inviteCreatorCard">
@@ -246,11 +232,12 @@
 
                 <div class="card-actions" id="usersPagination" style="margin-top:16px;"></div>
             </section>
-        </main>
-    </div>
+            </main>
+        </div>
 
-    <script src="products.js" defer></script>
-    <script src="script.js"></script>
+        <script src="products.js" defer></script>
+        <script src="script.js"></script>
+    </div>
 </body>
 
 </html>

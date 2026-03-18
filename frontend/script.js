@@ -68,6 +68,18 @@ function goToChangePassword() {
     location = "change-password.html";
 }
 
+function togglePasswordVisibility(inputId, buttonEl) {
+    const input = document.getElementById(inputId);
+    if (!input) return;
+
+    const isPassword = input.type === "password";
+    input.type = isPassword ? "text" : "password";
+
+    if (buttonEl) {
+        buttonEl.textContent = isPassword ? "Hide" : "Show";
+    }
+}
+
 function scrollToSection(id) {
     const el = document.getElementById(id);
     if (el) {
