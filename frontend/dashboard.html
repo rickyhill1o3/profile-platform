@@ -15,38 +15,6 @@
             <p class="subtle-text">Create and manage your saved profiles</p>
         </div>
 
-        <section class="product-dashboard-card" id="productRunnerSection">
-            <h2>Product Runner Preferences</h2>
-            <p>Select the products you want run, choose Current or Next, and set your max price.</p>
-
-            <div class="product-toolbar">
-                <button type="button" class="product-site-tab" data-product-site="amazon">Amazon</button>
-                <button type="button" class="product-site-tab" data-product-site="target">Target</button>
-                <input id="productSearch" type="search" placeholder="Search by name or SKU" />
-                <span id="productSelectionSummary"></span>
-            </div>
-
-            <table class="product-grid-table">
-                <thead>
-                    <tr>
-                        <th>Run</th>
-                        <th>Image</th>
-                        <th>Name</th>
-                        <th>SKU</th>
-                        <th>Default Max</th>
-                        <th>Your Max</th>
-                        <th>Mode</th>
-                    </tr>
-                </thead>
-                <tbody id="productSelectionTableBody"></tbody>
-            </table>
-
-            <div class="product-footer-actions">
-                <button id="saveProductPreferencesButton" type="button">Save Product Preferences</button>
-                <span id="productSaveMessage"></span>
-            </div>
-        </section>
-
         <div class="header-actions">
             <button onclick="createProfile()">New Profile</button>
             <button onclick="goToChangePassword()">Change Password</button>
@@ -54,6 +22,38 @@
             <button onclick="logout()">Logout</button>
         </div>
     </div>
+
+    <section class="product-dashboard-card" id="productRunnerSection">
+        <h2>Product Runner Preferences</h2>
+        <p>Select the products you want run, choose Current or Next, and set your max price.</p>
+
+        <div class="product-toolbar">
+            <button type="button" class="product-site-tab" data-product-site="amazon">Amazon</button>
+            <button type="button" class="product-site-tab" data-product-site="target">Target</button>
+            <input id="productSearch" type="search" placeholder="Search by name or SKU" />
+            <span id="productSelectionSummary"></span>
+        </div>
+
+        <table class="product-grid-table">
+            <thead>
+                <tr>
+                    <th>Run</th>
+                    <th>Image</th>
+                    <th>Name</th>
+                    <th>SKU</th>
+                    <th>Default Max</th>
+                    <th>Your Max</th>
+                    <th>Mode</th>
+                </tr>
+            </thead>
+            <tbody id="productSelectionTableBody"></tbody>
+        </table>
+
+        <div class="product-footer-actions">
+            <button id="saveProductPreferencesButton" type="button">Save Product Preferences</button>
+            <span id="productSaveMessage"></span>
+        </div>
+    </section>
 
     <div class="container" id="dashboard"></div>
 
