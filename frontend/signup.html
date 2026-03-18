@@ -1,46 +1,40 @@
 <!DOCTYPE html>
 <html>
+
 <head>
-  <title>Signup</title>
-  <link rel="stylesheet" href="styles.css">
+    <title>Signup</title>
+    <link rel="stylesheet" href="styles.css">
 </head>
-<body class="auth-page">
-  <div class="auth-wrap">
-    <div class="auth-card-modern">
-      <p class="page-eyebrow">Profile Platform</p>
-      <h1 class="auth-title">Create account</h1>
-      <p class="auth-subtitle">Use your invite code to create a new account.</p>
 
-      <form id="signupForm" class="form-stack">
-        <div class="input-shell">
-          <label for="email">Email</label>
-          <input id="email" placeholder="you@example.com" required>
-        </div>
+<body>
 
-        <div class="input-shell">
-          <label for="password">Password</label>
-          <div class="password-row">
-            <input id="password" type="password" placeholder="Create a password" required>
-            <button type="button" onclick="togglePasswordVisibility('password', this)">Show</button>
-          </div>
-        </div>
+    <div class="container">
 
-        <div class="input-shell">
-          <label for="invite">Invite Code</label>
-          <input id="invite" placeholder="Enter your invite code" required>
-        </div>
+        <h1>Create Account</h1>
 
-        <button type="submit" class="primary-action">Create Account</button>
-      </form>
+        <form id="signupForm">
 
-      <p id="error" class="auth-error"></p>
+            <input id="email" placeholder="Email" required>
 
-      <p class="auth-footer">
-        Already have an account? <a href="login.html">Login</a>
-      </p>
+            <input id="password" type="password" placeholder="Password" required>
+
+            <input id="invite" placeholder="Invite Code" required>
+
+            <button type="submit">Signup</button>
+
+        </form>
+
+        <p id="error" style="color:red"></p>
+
+        <p>
+            Already have an account?
+            <a href="login.html">Login</a>
+        </p>
+
     </div>
-  </div>
 
-  <script src="script.js"></script>
+    <script src="script.js"></script>
+
 </body>
+
 </html>

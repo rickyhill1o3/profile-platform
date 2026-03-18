@@ -438,7 +438,6 @@ async function loadProfileEditor() {
         if (amazonSecretEl) amazonSecretEl.value = account.amazon_2fa_secret || "";
     }
 }
-loadProfileEditor();
 
 const profileForm = document.getElementById("profileForm");
 if (profileForm) {
@@ -1214,23 +1213,19 @@ if (passwordForm) {
 document.addEventListener("DOMContentLoaded", async () => {
     await refreshCurrentUserFromServer();
 
-    if (document.getElementById("inviteRoleSelect")) {
+    if (document.getElementById("dashboard")) {
+        await loadProfiles();
+    }
+
+    if (document.getElementById("profileForm")) {
+        await loadProfileEditor();
+    }
+
+    if (document.getElementById("inviteRoleSelect") || document.getElementById("usersTableBody")) {
         setupInviteControls();
-    }
-
-    if (document.getElementById("usersOwnerFilter")) {
         await loadOwnerAdminFilter();
-    }
-
-    if (document.getElementById("exportUserFilter")) {
         await loadExportAccounts();
-    }
-
-    if (document.getElementById("inviteTableBody")) {
         loadInvites(1);
-    }
-
-    if (document.getElementById("usersTableBody")) {
         loadUsers(1);
     }
 });

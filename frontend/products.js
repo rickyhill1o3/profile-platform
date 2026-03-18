@@ -619,7 +619,7 @@
                 await loadProducts();
             }
 
-            if (document.getElementById("adminProductSelectionsTableBody")) {
+            if (document.getElementById("adminProductSelectionsSection")) {
                 await loadAdminSelections();
             }
         } catch (err) {

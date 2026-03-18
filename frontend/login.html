@@ -1,41 +1,37 @@
 <!DOCTYPE html>
 <html>
+
 <head>
-  <title>Login</title>
-  <link rel="stylesheet" href="styles.css">
+    <title>Login</title>
+    <link rel="stylesheet" href="styles.css">
 </head>
-<body class="auth-page">
-  <div class="auth-wrap">
-    <div class="auth-card-modern">
-      <p class="page-eyebrow">Profile Platform</p>
-      <h1 class="auth-title">Welcome back</h1>
-      <p class="auth-subtitle">Sign in to manage profiles, products, and admin tools.</p>
 
-      <form id="loginForm" class="form-stack">
-        <div class="input-shell">
-          <label for="email">Email</label>
-          <input id="email" placeholder="you@example.com" required>
-        </div>
+<body>
 
-        <div class="input-shell">
-          <label for="password">Password</label>
-          <div class="password-row">
-            <input id="password" type="password" placeholder="Enter your password" required>
-            <button type="button" onclick="togglePasswordVisibility('password', this)">Show</button>
-          </div>
-        </div>
+    <div class="container">
 
-        <button type="submit" class="primary-action">Login</button>
-      </form>
+        <h1>Login</h1>
 
-      <p id="error" class="auth-error"></p>
+        <form id="loginForm">
 
-      <p class="auth-footer">
-        Need an account? <a href="signup.html">Signup</a>
-      </p>
+            <input id="email" placeholder="Email" required>
+
+            <input id="password" type="password" placeholder="Password" required>
+
+            <button type="submit">Login</button>
+
+        </form>
+
+        <p id="error" style="color:red"></p>
+
+        <p>
+            Need an account? <a href="signup.html">Signup</a>
+        </p>
+
     </div>
-  </div>
 
-  <script src="script.js"></script>
+    <script src="script.js"></script>
+
 </body>
+
 </html>
