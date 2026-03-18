@@ -1,232 +1,226 @@
 <!DOCTYPE html>
 <html>
+
 <head>
-  <title>Admin Panel</title>
-  <link rel="stylesheet" href="styles.css">
+    <title>Admin Panel</title>
+    <link rel="stylesheet" href="styles.css">
 </head>
+
 <body class="admin-page">
-  <div class="admin-shell-modern">
-    <header class="admin-topbar-modern">
-      <div>
-        <p class="page-eyebrow">Profile Platform</p>
-        <h1>Admin Dashboard</h1>
-        <p class="page-subtitle">Manage invites, users, exports, and product selections.</p>
-      </div>
+    <div class="admin-shell-modern">
+        <header class="admin-topbar-modern">
+            <div>
+                <p class="page-eyebrow">Profile Platform</p>
+                <h1>Admin Dashboard</h1>
+                <p class="page-subtitle">Manage invites, users, exports, and product selections.</p>
+            </div>
 
-      <div class="admin-topbar-actions">
-        <button onclick="openUserDashboard()">User Dashboard</button>
-        <button onclick="submitInviteCreation()">Quick Create Invite</button>
-        <button class="danger-action" onclick="logout()">Logout</button>
-      </div>
-    </header>
+            <div class="admin-topbar-actions">
+                <button onclick="openUserDashboard()">User Dashboard</button>
+                <button onclick="submitInviteCreation()">Quick Create Invite</button>
+                <button class="danger-action" onclick="logout()">Logout</button>
+            </div>
+        </header>
 
-    <div class="admin-section-grid">
-      <section class="admin-stats-grid">
-        <div class="stat-card">
-          <div class="stat-label">Active Invites</div>
-          <div class="stat-value" id="activeInviteCount">0</div>
-        </div>
-        <div class="stat-card">
-          <div class="stat-label">Used Invites</div>
-          <div class="stat-value" id="usedInviteCount">0</div>
-        </div>
-        <div class="stat-card">
-          <div class="stat-label">Canceled Invites</div>
-          <div class="stat-value" id="canceledInviteCount">0</div>
-        </div>
-        <div class="stat-card">
-          <div class="stat-label">Users</div>
-          <div class="stat-value" id="userCount">0</div>
-        </div>
-      </section>
+        <div class="admin-section-grid">
+            <section class="admin-stats-grid">
+                <div class="stat-card">
+                    <div class="stat-label">Active Invites</div>
+                    <div class="stat-value" id="activeInviteCount">0</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">Used Invites</div>
+                    <div class="stat-value" id="usedInviteCount">0</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">Canceled Invites</div>
+                    <div class="stat-value" id="canceledInviteCount">0</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">Users</div>
+                    <div class="stat-value" id="userCount">0</div>
+                </div>
+            </section>
 
-      <section class="admin-card" id="inviteCreatorCard">
-        <div class="card-header-row">
-          <div>
-            <h2>Create Invite Code</h2>
-            <p class="subtle-text">Generate one-time codes for signup access.</p>
-          </div>
-        </div>
+            <section class="admin-card" id="inviteCreatorCard">
+                <div class="card-header-row">
+                    <div>
+                        <h2>Create Invite Code</h2>
+                        <p class="subtle-text">Generate one-time codes for signup access.</p>
+                    </div>
+                </div>
 
-        <div class="form-grid">
-          <select id="inviteRoleSelect" onchange="handleInviteRoleChange()">
-            <option value="user">User Invite</option>
-            <option value="admin">Admin Invite</option>
-          </select>
+                <div class="form-grid">
+                    <select id="inviteRoleSelect" onchange="handleInviteRoleChange()">
+                        <option value="user">User Invite</option>
+                        <option value="admin">Admin Invite</option>
+                    </select>
 
-          <select id="inviteQuantitySelect">
-            <option value="1">1 Invite</option>
-            <option value="2">2 Invites</option>
-            <option value="3">3 Invites</option>
-            <option value="4">4 Invites</option>
-            <option value="5">5 Invites</option>
-            <option value="6">6 Invites</option>
-            <option value="7">7 Invites</option>
-            <option value="8">8 Invites</option>
-            <option value="9">9 Invites</option>
-            <option value="10">10 Invites</option>
-          </select>
-        </div>
+                    <select id="inviteQuantitySelect">
+                        <option value="1">1 Invite</option>
+                        <option value="2">2 Invites</option>
+                        <option value="3">3 Invites</option>
+                        <option value="4">4 Invites</option>
+                        <option value="5">5 Invites</option>
+                        <option value="6">6 Invites</option>
+                        <option value="7">7 Invites</option>
+                        <option value="8">8 Invites</option>
+                        <option value="9">9 Invites</option>
+                        <option value="10">10 Invites</option>
+                    </select>
+                </div>
 
-        <div class="card-actions" style="margin-top:16px;">
-          <button onclick="submitInviteCreation()">Create Invite</button>
-        </div>
+                <div class="card-actions" style="margin-top:16px;">
+                    <button onclick="submitInviteCreation()">Create Invite</button>
+                </div>
 
-        <div class="result-banner" id="inviteResult" style="margin-top:16px;">No invite created yet.</div>
-      </section>
+                <div class="result-banner" id="inviteResult" style="margin-top:16px;">No invite created yet.</div>
+            </section>
 
-      <section class="admin-card" id="inviteListCard">
-        <div class="card-header-row">
-          <div>
-            <h2>All Invite Codes</h2>
-            <p class="subtle-text">View, cancel, and delete invite codes.</p>
-          </div>
-        </div>
+            <section class="admin-card" id="inviteListCard">
+                <div class="card-header-row">
+                    <div>
+                        <h2>All Invite Codes</h2>
+                        <p class="subtle-text">View, cancel, and delete invite codes.</p>
+                    </div>
+                </div>
 
-        <div class="table-wrap">
-          <table class="admin-table">
-            <thead>
-              <tr>
-                <th>Code</th>
-                <th>Role</th>
-                <th>Created By</th>
-                <th>Status</th>
-                <th>Created</th>
-                <th>Used By</th>
-                <th>Action</th>
-              </tr>
-            </thead>
-            <tbody id="inviteTableBody"></tbody>
-          </table>
-        </div>
+                <div class="table-wrap">
+                    <table class="admin-table">
+                        <thead>
+                            <tr>
+                                <th>Code</th>
+                                <th>Role</th>
+                                <th>Created By</th>
+                                <th>Status</th>
+                                <th>Created</th>
+                                <th>Used By</th>
+                                <th>Action</th>
+                            </tr>
+                        </thead>
+                        <tbody id="inviteTableBody"></tbody>
+                    </table>
+                </div>
 
-        <div class="card-actions" id="invitePagination" style="margin-top:16px;"></div>
-      </section>
+                <div class="card-actions" id="invitePagination" style="margin-top:16px;"></div>
+            </section>
 
-      <section class="admin-card" id="exportCard">
-        <div class="card-header-row">
-          <div>
-            <h2>Export Profiles / Accounts</h2>
-            <p class="subtle-text">Export profile JSON or account logins with a custom file name.</p>
-          </div>
-        </div>
+            <section class="admin-card" id="exportCard">
+                <div class="card-header-row">
+                    <div>
+                        <h2>Export Profiles / Accounts</h2>
+                        <p class="subtle-text">Export profile JSON or account logins with a custom file name.</p>
+                    </div>
+                </div>
 
-        <div class="form-grid">
-          <select id="exportUserFilter" onchange="updateExportCount()">
-            <option value="">All Accounts</option>
-          </select>
+                <div class="form-grid">
+                    <select id="exportUserFilter" onchange="updateExportCount()">
+                        <option value="">All Accounts</option>
+                    </select>
 
-          <select id="exportGroupFilter" onchange="updateExportCount()">
-            <option value="">All Groups</option>
-            <option value="general">General</option>
-            <option value="walmart">Walmart</option>
-            <option value="target">Target</option>
-            <option value="amazon">Amazon</option>
-          </select>
-        </div>
+                    <select id="exportGroupFilter" onchange="updateExportCount()">
+                        <option value="">All Groups</option>
+                        <option value="general">General</option>
+                        <option value="walmart">Walmart</option>
+                        <option value="target">Target</option>
+                        <option value="amazon">Amazon</option>
+                    </select>
+                </div>
 
-        <div class="result-banner" id="exportCountBanner" style="margin-top:16px;">Checking export count...</div>
+                <div class="result-banner" id="exportCountBanner" style="margin-top:16px;">Checking export count...
+                </div>
 
-        <div class="card-actions" style="margin-top:16px;">
-          <button onclick="exportProfilesJson()">Export Profile JSON</button>
-          <button onclick="exportAccountsTxt()">Export Account Logins</button>
-          <button onclick="clearExportFilters()">Clear Filters</button>
-        </div>
+                <div class="card-actions" style="margin-top:16px;">
+                    <button onclick="exportProfilesJson()">Export Profile JSON</button>
+                    <button onclick="exportAccountsTxt()">Export Account Logins</button>
+                    <button onclick="clearExportFilters()">Clear Filters</button>
+                </div>
 
-        <p class="subtle-text" style="margin-top:12px;">
-          Account export downloads one line per profile in the format email:password:2fa-or-app-password.
-        </p>
-      </section>
+                <p class="subtle-text" style="margin-top:12px;">
+                    Account export downloads one line per profile in the format email:password:2fa-or-app-password.
+                </p>
+            </section>
 
-      <section class="admin-product-card" id="adminProductSelectionsSection" style="display:none;">
-        <h2>User Product Selections</h2>
-        <p class="subtle-text">Admins can see what their users picked. Super admin can see everyone.</p>
+            <section class="admin-product-card" id="adminProductSelectionsSection" style="display:none;">
+                <h2>User Product Selections</h2>
+                <p>Select a user first, then view only that user’s saved product picks.</p>
 
-        <div class="admin-product-toolbar">
-          <span id="adminProductSelectionsMessage"></span>
-        </div>
+                <div class="admin-product-toolbar">
+                    <select id="adminProductUserSelect">
+                        <option value="">Select a user</option>
+                    </select>
+                    <button type="button" id="adminLoadUserProductsButton">Load User Products</button>
+                    <span id="adminProductSelectionsMessage"></span>
+                </div>
 
-        <div class="table-wrap">
-          <table class="admin-product-grid-table">
-            <thead>
-              <tr>
-                <th>User</th>
-                <th>Site</th>
-                <th>Product</th>
-                <th>SKU</th>
-                <th>Mode</th>
-                <th>Max Price</th>
-                <th>Action</th>
-              </tr>
-            </thead>
-            <tbody id="adminProductSelectionsTableBody"></tbody>
-          </table>
-        </div>
+                <div id="adminSelectedUserSummary" style="margin: 12px 0; color: var(--muted, #94a3b8);"></div>
 
-        <h3 style="margin-top:24px;">Selected user details</h3>
+                <table class="admin-product-grid-table">
+                    <thead>
+                        <tr>
+                            <th>Site</th>
+                            <th>Product</th>
+                            <th>SKU</th>
+                            <th>Mode</th>
+                            <th>Max Price</th>
+                        </tr>
+                    </thead>
+                    <tbody id="adminUserProductDetailBody">
+                        <tr>
+                            <td colspan="5">Choose a user to view product selections.</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </section>
 
-        <div class="table-wrap">
-          <table class="admin-product-grid-table">
-            <thead>
-              <tr>
-                <th>Site</th>
-                <th>Product</th>
-                <th>SKU</th>
-                <th>Mode</th>
-                <th>Max Price</th>
-              </tr>
-            </thead>
-            <tbody id="adminUserProductDetailBody"></tbody>
-          </table>
-        </div>
-      </section>
+            <section class="admin-card" id="usersCard">
+                <div class="card-header-row">
+                    <div>
+                        <h2>Users</h2>
+                        <p class="subtle-text">View ownership, profile counts, and manage promote, demote, revoke,
+                            restore, or delete actions.</p>
+                    </div>
+                </div>
 
-      <section class="admin-card" id="usersCard">
-        <div class="card-header-row">
-          <div>
-            <h2>Users</h2>
-            <p class="subtle-text">View ownership, profile counts, and manage promote, demote, revoke, restore, or delete actions.</p>
-          </div>
-        </div>
+                <div class="form-grid" style="margin-bottom:16px;">
+                    <select id="usersOwnerFilter" onchange="applyUserFilters()">
+                        <option value="">All Admin Owners</option>
+                    </select>
 
-        <div class="form-grid" style="margin-bottom:16px;">
-          <select id="usersOwnerFilter" onchange="applyUserFilters()">
-            <option value="">All Admin Owners</option>
-          </select>
+                    <select id="usersRoleFilter" onchange="applyUserFilters()">
+                        <option value="">All Roles</option>
+                        <option value="user">Users</option>
+                        <option value="admin">Admins</option>
+                    </select>
 
-          <select id="usersRoleFilter" onchange="applyUserFilters()">
-            <option value="">All Roles</option>
-            <option value="user">Users</option>
-            <option value="admin">Admins</option>
-          </select>
+                    <input type="date" id="usersCreatedAfter" onchange="applyUserFilters()">
+                    <input type="date" id="usersCreatedBefore" onchange="applyUserFilters()">
+                </div>
 
-          <input type="date" id="usersCreatedAfter" onchange="applyUserFilters()">
-          <input type="date" id="usersCreatedBefore" onchange="applyUserFilters()">
-        </div>
+                <div class="table-wrap">
+                    <table class="admin-table">
+                        <thead>
+                            <tr>
+                                <th>Email</th>
+                                <th>Role</th>
+                                <th>Owner Admin</th>
+                                <th>Profiles</th>
+                                <th>Status</th>
+                                <th>Created</th>
+                                <th>Action</th>
+                            </tr>
+                        </thead>
+                        <tbody id="usersTableBody"></tbody>
+                    </table>
+                </div>
 
-        <div class="table-wrap">
-          <table class="admin-table">
-            <thead>
-              <tr>
-                <th>Email</th>
-                <th>Role</th>
-                <th>Owner Admin</th>
-                <th>Profiles</th>
-                <th>Status</th>
-                <th>Created</th>
-                <th>Action</th>
-              </tr>
-            </thead>
-            <tbody id="usersTableBody"></tbody>
-          </table>
+                <div class="card-actions" id="usersPagination" style="margin-top:16px;"></div>
+            </section>
         </div>
 
-        <div class="card-actions" id="usersPagination" style="margin-top:16px;"></div>
-      </section>
+        <script src="products.js" defer></script>
+        <script src="script.js"></script>
     </div>
-
-    <script src="products.js" defer></script>
-    <script src="script.js"></script>
-  </div>
 </body>
+
 </html>

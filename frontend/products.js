@@ -506,9 +506,13 @@
 
     async function loadAdminSelections() {
         const section = document.getElementById("adminProductSelectionsSection");
-        const tableBody = document.getElementById("adminProductSelectionsTableBody");
+        const userSelect = document.getElementById("adminProductUserSelect");
+        const loadButton = document.getElementById("adminLoadUserProductsButton");
         const detailBody = document.getElementById("adminUserProductDetailBody");
-        if (!section || !tableBody) return;
+        const message = document.getElementById("adminProductSelectionsMessage");
+        const summary = document.getElementById("adminSelectedUserSummary");
+
+        if (!section || !userSelect || !detailBody) return;
 
         const user = currentUser();
         if (!isAdminRole(user?.role)) {
@@ -522,47 +526,90 @@
             headers: authHeaders()
         });
 
-        tableBody.innerHTML = (data.items || [])
-            .map((row) => {
-                return `
-          <tr data-user-id="${escapeHTML(row.user_id)}">
-            <td>${escapeHTML(row.user_email)}</td>
-            <td>${escapeHTML(row.site)}</td>
-            <td>${escapeHTML(row.product_name)}</td>
-            <td>${escapeHTML(row.sku)}</td>
-            <td>${escapeHTML(row.run_mode)}</td>
-            <td>${formatPrice(row.max_price)}</td>
-            <td><button class="open-admin-user-products-button">Open user</button></td>
-          </tr>
-        `;
-            })
-            .join("");
+        const items = Array.isArray(data.items) ? data.items : [];
 
-        tableBody.querySelectorAll(".open-admin-user-products-button").forEach((button) => {
-            button.addEventListener("click", async (event) => {
-                const tr = event.target.closest("tr");
-                const userId = tr?.dataset.userId;
-                if (!userId || !detailBody) return;
+        const usersMap = new Map();
 
-                const detail = await fetchJSON(API + `/admin/users/${userId}/product-preferences`, {
-                    headers: authHeaders()
+        items.forEach((row) => {
+            if (!row.user_id) return;
+            if (!usersMap.has(row.user_id)) {
+                usersMap.set(row.user_id, {
+                    user_id: row.user_id,
+                    user_email: row.user_email || row.user_id,
+                    selection_count: 0
                 });
+            }
+            usersMap.get(row.user_id).selection_count += 1;
+        });
 
-                detailBody.innerHTML = (detail.items || [])
-                    .map((row) => {
-                        return `
-              <tr>
+        const users = [...usersMap.values()].sort((a, b) =>
+            (a.user_email || "").localeCompare(b.user_email || "")
+        );
+
+        userSelect.innerHTML = `
+        <option value="">Select a user</option>
+        ${users.map((entry) => `
+            <option value="${escapeHTML(entry.user_id)}">
+                ${escapeHTML(entry.user_email)} (${entry.selection_count})
+            </option>
+        `).join("")}
+    `;
+
+        if (!users.length) {
+            if (message) message.textContent = "No users have selected products yet.";
+            detailBody.innerHTML = `<tr><td colspan="5">No saved product selections yet.</td></tr>`;
+            return;
+        }
+
+        async function loadSelectedUserProducts() {
+            const userId = userSelect.value;
+
+            if (!userId) {
+                if (message) message.textContent = "Choose a user first.";
+                if (summary) summary.textContent = "";
+                detailBody.innerHTML = `<tr><td colspan="5">Choose a user to view product selections.</td></tr>`;
+                return;
+            }
+
+            const selectedUser = users.find((entry) => entry.user_id === userId);
+            if (summary && selectedUser) {
+                summary.textContent = `${selectedUser.user_email} • ${selectedUser.selection_count} selected products`;
+            }
+
+            const detail = await fetchJSON(API + `/admin/users/${userId}/product-preferences`, {
+                headers: authHeaders()
+            });
+
+            const rows = Array.isArray(detail.items) ? detail.items : [];
+
+            if (!rows.length) {
+                detailBody.innerHTML = `<tr><td colspan="5">This user has no saved product selections.</td></tr>`;
+                if (message) message.textContent = "";
+                return;
+            }
+
+            detailBody.innerHTML = rows.map((row) => `
+            <tr>
                 <td>${escapeHTML(row.product.site)}</td>
                 <td>${escapeHTML(row.product.product_name || row.product.sku)}</td>
                 <td>${escapeHTML(row.product.sku)}</td>
                 <td>${escapeHTML(row.run_mode)}</td>
                 <td>${formatPrice(row.max_price)}</td>
-              </tr>
-            `;
-                    })
-                    .join("");
-            });
-        });
+            </tr>
+        `).join("");
+
+            if (message) message.textContent = "";
+        }
+
+        if (loadButton) {
+            loadButton.onclick = loadSelectedUserProducts;
+        }
+
+        userSelect.onchange = () => {
+            if (message) message.textContent = "";
+        };
+
+        detailBody.innerHTML = `<tr><td colspan="5">Choose a user to view product selections.</td></tr>`;
     }
 
     document.addEventListener("DOMContentLoaded", async () => {

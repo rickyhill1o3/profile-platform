@@ -195,12 +195,21 @@ async function loadProfiles() {
     const dashboardEl = document.getElementById("dashboard");
     if (!dashboardEl) return;
 
-    const refreshedUser = await refreshCurrentUserFromServer();
-    const user = refreshedUser || currentUser();
-
     const adminButton = document.getElementById("adminPanelButton");
-    if (isAdminRole(user?.role) && adminButton) {
-        adminButton.style.display = "inline-block";
+
+    let user = currentUser();
+
+    try {
+        const refreshedUser = await refreshCurrentUserFromServer();
+        user = refreshedUser || user;
+    } catch (_) { }
+
+    if (adminButton) {
+        if (isAdminRole(user?.role)) {
+            adminButton.style.display = "inline-flex";
+        } else {
+            adminButton.style.display = "none";
+        }
     }
 
     try {
