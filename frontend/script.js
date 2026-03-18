@@ -1196,6 +1196,7 @@ if (passwordForm) {
 
         const data = await res.json();
         msg.innerText = data.error || "Password updated";
+        msg.className = data.error ? "auth-error" : "success-text";
     };
 }
 
@@ -1203,9 +1204,24 @@ if (passwordForm) {
 
 document.addEventListener("DOMContentLoaded", async () => {
     await refreshCurrentUserFromServer();
-    setupInviteControls();
-    await loadOwnerAdminFilter();
-    await loadExportAccounts();
-    loadInvites(1);
-    loadUsers(1);
+
+    if (document.getElementById("inviteRoleSelect")) {
+        setupInviteControls();
+    }
+
+    if (document.getElementById("usersOwnerFilter")) {
+        await loadOwnerAdminFilter();
+    }
+
+    if (document.getElementById("exportUserFilter")) {
+        await loadExportAccounts();
+    }
+
+    if (document.getElementById("inviteTableBody")) {
+        loadInvites(1);
+    }
+
+    if (document.getElementById("usersTableBody")) {
+        loadUsers(1);
+    }
 });
