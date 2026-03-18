@@ -3,6 +3,7 @@ const cors = require("cors");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const { v4: uuidv4 } = require("uuid");
+const registerProductCatalogRoutes = require("./product-catalog-routes");
 
 const supabase = require("./database");
 const { encrypt, decrypt } = require("./encryption");
@@ -1470,6 +1471,15 @@ async function ensureSuperAdmin() {
 
     console.log("Super admin account ensured");
 }
+
+registerProductCatalogRoutes({
+    app,
+    supabase,
+    auth,
+    admin,
+    getCurrentUser,
+    ensureUserNotRevoked
+});
 
 ensureSuperAdmin()
     .then(() => {
