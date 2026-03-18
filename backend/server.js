@@ -13,8 +13,13 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+app.get("/health", (_req, res) => {
+    res.json({ ok: true });
+});
+
 const phoneRegex = /^[0-9]{10}$/;
 const SUPER_ADMIN_EMAIL = "theshoreshacktcg@gmail.com";
+const PORT = Number(process.env.PORT || 3000);
 
 /* ================= AUTH HELPERS ================= */
 
@@ -1483,8 +1488,8 @@ registerProductCatalogRoutes({
 
 ensureSuperAdmin()
     .then(() => {
-        app.listen(3000, () => {
-            console.log("Server running on port 3000");
+        app.listen(PORT, () => {
+            console.log(`Server running on port ${PORT}`);
         });
     })
     .catch((err) => {

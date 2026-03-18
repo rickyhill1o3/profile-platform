@@ -1,42 +1,46 @@
-const crypto = require("crypto")
+const crypto = require("crypto");
 
-const algorithm = "aes-256-cbc"
+const algorithm = "aes-256-cbc";
+
+if (!process.env.ENCRYPTION_KEY) {
+    throw new Error("Missing ENCRYPTION_KEY");
+}
 
 const key = crypto
     .createHash("sha256")
     .update(process.env.ENCRYPTION_KEY)
-    .digest()
+    .digest();
 
 function encrypt(text) {
+    if (!text) return "";
 
-    if (!text) return ""
+    const iv = crypto.randomBytes(16);
+    const cipher = crypto.createCipheriv(algorithm, key, iv);
 
-    const iv = crypto.randomBytes(16)
+    let encrypted = cipher.update(String(text), "utf8", "hex");
+    encrypted += cipher.final("hex");
 
-    const cipher = crypto.createCipheriv(algorithm, key, iv)
-
-    let encrypted = cipher.update(text, "utf8", "hex")
-    encrypted += cipher.final("hex")
-
-    return iv.toString("hex") + ":" + encrypted
+    return iv.toString("hex") + ":" + encrypted;
 }
 
 function decrypt(text) {
+    if (!text) return "";
 
-    if (!text) return ""
+    const parts = String(text).split(":");
+    if (parts.length < 2) return "";
 
-    const parts = text.split(":")
+    const ivHex = parts.shift();
+    const encryptedText = parts.join(":");
 
-    const iv = Buffer.from(parts.shift(), "hex")
+    if (!ivHex || !encryptedText) return "";
 
-    const encryptedText = parts.join(":")
+    const iv = Buffer.from(ivHex, "hex");
+    const decipher = crypto.createDecipheriv(algorithm, key, iv);
 
-    const decipher = crypto.createDecipheriv(algorithm, key, iv)
+    let decrypted = decipher.update(encryptedText, "hex", "utf8");
+    decrypted += decipher.final("utf8");
 
-    let decrypted = decipher.update(encryptedText, "hex", "utf8")
-    decrypted += decipher.final("utf8")
-
-    return decrypted
+    return decrypted;
 }
 
-module.exports = { encrypt, decrypt }
+module.exports = { encrypt, decrypt };
