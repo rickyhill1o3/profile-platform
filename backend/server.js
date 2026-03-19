@@ -4,6 +4,8 @@ const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const { v4: uuidv4 } = require("uuid");
 const registerProductCatalogRoutes = require("./product-catalog-routes");
+const nodemailer = require("nodemailer");
+const crypto = require("crypto");
 
 const supabase = require("./database");
 const { encrypt, decrypt } = require("./encryption");
@@ -20,6 +22,148 @@ app.get("/health", (_req, res) => {
 const phoneRegex = /^[0-9]{10}$/;
 const SUPER_ADMIN_EMAIL = "theshoreshacktcg@gmail.com";
 const PORT = Number(process.env.PORT || 3000);
+
+const MAIL_FROM = process.env.MAIL_FROM || process.env.SMTP_FROM || "Profile Platform <no-reply@example.com>";
+
+function normalizeEmail(email) {
+    return String(email || "").trim().toLowerCase();
+}
+
+function escapeHtml(value) {
+    return String(value || "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;");
+}
+
+function getAppBaseUrl() {
+    return (process.env.APP_BASE_URL || "http://localhost:3000").replace(/\/$/, "");
+}
+
+let mailerPromise = null;
+
+async function getMailer() {
+    if (mailerPromise) return mailerPromise;
+
+    const host = process.env.SMTP_HOST || "";
+    const port = Number(process.env.SMTP_PORT || 587);
+    const user = process.env.SMTP_USER || "";
+    const pass = process.env.SMTP_PASS || "";
+    const secure = String(process.env.SMTP_SECURE || "").toLowerCase() === "true" || port === 465;
+
+    if (!host || !user || !pass) {
+        mailerPromise = Promise.resolve(null);
+        return mailerPromise;
+    }
+
+    const transporter = nodemailer.createTransport({
+        host,
+        port,
+        secure,
+        auth: { user, pass }
+    });
+
+    mailerPromise = Promise.resolve(transporter);
+    return mailerPromise;
+}
+
+async function sendEmailMessage({ to, subject, text, html }) {
+    const transporter = await getMailer();
+    if (!transporter) {
+        console.log("[mail] SMTP not configured, skipped email:", subject, "->", to);
+        return { skipped: true };
+    }
+
+    return transporter.sendMail({
+        from: MAIL_FROM,
+        to,
+        subject,
+        text,
+        html
+    });
+}
+
+async function sendWelcomeEmail({ email }) {
+    const appBaseUrl = getAppBaseUrl();
+    const safeEmail = escapeHtml(email);
+
+    return sendEmailMessage({
+        to: email,
+        subject: "Welcome to Profile Platform",
+        text: [
+            "Thanks for joining Profile Platform.",
+            "",
+            `Login email: ${email}`,
+            `Login here: ${appBaseUrl}/login.html`,
+            "",
+            "For security, your password is not included in email. Use the password you created at signup."
+        ].join("\n"),
+        html: `
+            <div style="font-family:Arial,Helvetica,sans-serif;line-height:1.6;color:#111827">
+                <h2 style="margin:0 0 12px">Welcome to Profile Platform</h2>
+                <p>Thanks for joining.</p>
+                <p><strong>Login email:</strong> ${safeEmail}</p>
+                <p><a href="${appBaseUrl}/login.html">Log in to your account</a></p>
+                <p>For security, your password is not included in email. Use the password you created at signup.</p>
+            </div>
+        `
+    });
+}
+
+function createResetPasswordToken(user) {
+    return jwt.sign(
+        { purpose: "reset_password", user_id: user.id, email: normalizeEmail(user.email) },
+        process.env.JWT_SECRET,
+        { expiresIn: "1h" }
+    );
+}
+
+async function sendResetPasswordEmail({ user }) {
+    const appBaseUrl = getAppBaseUrl();
+    const token = createResetPasswordToken(user);
+    const resetUrl = `${appBaseUrl}/reset-password.html?token=${encodeURIComponent(token)}`;
+    const safeEmail = escapeHtml(user.email);
+
+    return sendEmailMessage({
+        to: user.email,
+        subject: "Reset your Profile Platform password",
+        text: [
+            "We received a request to reset your password.",
+            "",
+            `Reset password: ${resetUrl}`,
+            "",
+            "This link expires in 1 hour. If you did not request this, you can ignore this email."
+        ].join("\n"),
+        html: `
+            <div style="font-family:Arial,Helvetica,sans-serif;line-height:1.6;color:#111827">
+                <h2 style="margin:0 0 12px">Reset your password</h2>
+                <p>We received a request to reset the password for <strong>${safeEmail}</strong>.</p>
+                <p><a href="${resetUrl}">Click here to reset your password</a></p>
+                <p>This link expires in 1 hour. If you did not request this, you can ignore this email.</p>
+            </div>
+        `
+    });
+}
+
+async function findUserByEmailInsensitive(email) {
+    const normalized = normalizeEmail(email);
+    if (!normalized) return null;
+
+    const { data, error } = await supabase
+        .from("users")
+        .select("*")
+        .ilike("email", normalized)
+        .limit(1);
+
+    if (error) {
+        throw new Error(error.message);
+    }
+
+    return (data || [])[0] || null;
+}
+
+
 
 /* ================= AUTH HELPERS ================= */
 
@@ -327,94 +471,180 @@ async function upsertProfileRelations(profileId, payload) {
     }
 }
 
+
 /* ================= AUTH ROUTES ================= */
 
 app.post("/auth/signup", async (req, res) => {
-    const { email, password, invite_code } = req.body;
+    try {
+        const email = normalizeEmail(req.body.email);
+        const password = String(req.body.password || "");
+        const invite_code = String(req.body.invite_code || "").trim();
 
-    const { data: invite, error: inviteError } = await supabase
-        .from("invite_codes")
-        .select("*")
-        .eq("code", invite_code)
-        .eq("used", false)
-        .eq("canceled", false)
-        .single();
+        if (!email || !password || !invite_code) {
+            return res.status(400).json({ error: "Email, password, and invite code are required" });
+        }
 
-    if (inviteError || !invite) {
-        return res.status(400).json({ error: "Invalid invite code" });
+        const { data: invite, error: inviteError } = await supabase
+            .from("invite_codes")
+            .select("*")
+            .eq("code", invite_code)
+            .eq("used", false)
+            .eq("canceled", false)
+            .single();
+
+        if (inviteError || !invite) {
+            return res.status(400).json({ error: "Invalid invite code" });
+        }
+
+        const existingUser = await findUserByEmailInsensitive(email);
+        if (existingUser) {
+            return res.status(400).json({ error: "An account with that email already exists" });
+        }
+
+        const hash = await bcrypt.hash(password, 10);
+        const inviteRole = invite.invite_role || "user";
+
+        const insertPayload = {
+            email,
+            password_hash: hash,
+            role: inviteRole,
+            revoked: false,
+            owner_admin_id: inviteRole === "user" ? invite.created_by_admin_id || null : null
+        };
+
+        const { data: user, error } = await supabase
+            .from("users")
+            .insert(insertPayload)
+            .select()
+            .single();
+
+        if (error) {
+            return res.status(400).json({ error: error.message });
+        }
+
+        await supabase
+            .from("invite_codes")
+            .update({
+                used: true,
+                used_by: user.id
+            })
+            .eq("id", invite.id);
+
+        try {
+            await sendWelcomeEmail({ email: user.email });
+        } catch (mailErr) {
+            console.error("welcome email failed:", mailErr.message);
+        }
+
+        res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ error: err.message || "Signup failed" });
     }
-
-    const hash = await bcrypt.hash(password, 10);
-    const inviteRole = invite.invite_role || "user";
-
-    const insertPayload = {
-        email,
-        password_hash: hash,
-        role: inviteRole,
-        revoked: false,
-        owner_admin_id: inviteRole === "user" ? invite.created_by_admin_id || null : null
-    };
-
-    const { data: user, error } = await supabase
-        .from("users")
-        .insert(insertPayload)
-        .select()
-        .single();
-
-    if (error) {
-        return res.status(400).json({ error: error.message });
-    }
-
-    await supabase
-        .from("invite_codes")
-        .update({
-            used: true,
-            used_by: user.id
-        })
-        .eq("id", invite.id);
-
-    res.json({ success: true });
 });
 
 app.post("/auth/login", async (req, res) => {
-    const { email, password } = req.body;
+    try {
+        const email = normalizeEmail(req.body.email);
+        const password = String(req.body.password || "");
 
-    const { data: user } = await supabase
-        .from("users")
-        .select("*")
-        .eq("email", email)
-        .single();
+        const user = await findUserByEmailInsensitive(email);
 
-    if (!user) {
-        return res.status(401).json({ error: "Wrong password" });
-    }
-
-    if (user.revoked) {
-        return res.status(403).json({ error: "This account has been revoked" });
-    }
-
-    const valid = await bcrypt.compare(password, user.password_hash);
-
-    if (!valid) {
-        return res.status(401).json({ error: "Wrong password" });
-    }
-
-    const token = jwt.sign(
-        { user_id: user.id, role: user.role },
-        process.env.JWT_SECRET,
-        { expiresIn: "7d" }
-    );
-
-    res.json({
-        token,
-        user: {
-            id: user.id,
-            email: user.email,
-            role: user.role,
-            owner_admin_id: user.owner_admin_id || null,
-            revoked: !!user.revoked
+        if (!user) {
+            return res.status(401).json({ error: "Wrong password" });
         }
-    });
+
+        if (user.revoked) {
+            return res.status(403).json({ error: "This account has been revoked" });
+        }
+
+        const valid = await bcrypt.compare(password, user.password_hash);
+
+        if (!valid) {
+            return res.status(401).json({ error: "Wrong password" });
+        }
+
+        const token = jwt.sign(
+            { user_id: user.id, role: user.role },
+            process.env.JWT_SECRET,
+            { expiresIn: "7d" }
+        );
+
+        res.json({
+            token,
+            user: {
+                id: user.id,
+                email: user.email,
+                role: user.role,
+                owner_admin_id: user.owner_admin_id || null,
+                revoked: !!user.revoked
+            }
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message || "Login failed" });
+    }
+});
+
+app.post("/auth/forgot-password", async (req, res) => {
+    try {
+        const email = normalizeEmail(req.body.email);
+        if (!email) {
+            return res.json({ success: true });
+        }
+
+        const user = await findUserByEmailInsensitive(email);
+        if (user && !user.revoked) {
+            try {
+                await sendResetPasswordEmail({ user });
+            } catch (mailErr) {
+                console.error("reset email failed:", mailErr.message);
+            }
+        }
+
+        res.json({
+            success: true,
+            message: "If that email exists, a reset link has been sent."
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message || "Could not process reset request" });
+    }
+});
+
+app.post("/auth/reset-password", async (req, res) => {
+    try {
+        const tokenValue = String(req.body.token || "");
+        const newPassword = String(req.body.newPassword || "");
+
+        if (!tokenValue || !newPassword) {
+            return res.status(400).json({ error: "Token and new password are required" });
+        }
+
+        const decoded = jwt.verify(tokenValue, process.env.JWT_SECRET);
+
+        if (decoded.purpose !== "reset_password" || !decoded.user_id) {
+            return res.status(400).json({ error: "Invalid reset token" });
+        }
+
+        const user = await getUserById(decoded.user_id);
+        if (!user) {
+            return res.status(404).json({ error: "User not found" });
+        }
+
+        const hash = await bcrypt.hash(newPassword, 10);
+
+        const { error } = await supabase
+            .from("users")
+            .update({ password_hash: hash })
+            .eq("id", user.id);
+
+        if (error) {
+            return res.status(500).json({ error: error.message });
+        }
+
+        res.json({ success: true, message: "Password updated" });
+    } catch (err) {
+        const msg = /expired/i.test(String(err.message || "")) ? "Reset link expired" : "Invalid reset link";
+        res.status(400).json({ error: msg });
+    }
 });
 
 app.get("/auth/me", auth, async (req, res) => {
@@ -436,6 +666,7 @@ app.get("/auth/me", auth, async (req, res) => {
 });
 
 /* ================= CHANGE PASSWORD ================= */
+
 
 app.post("/change-password", auth, async (req, res) => {
     try {

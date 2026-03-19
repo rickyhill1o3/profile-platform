@@ -3,22 +3,20 @@
   "version": "1.0.0",
   "description": "Profile Platform backend",
   "main": "server.js",
-  "type": "commonjs",
   "scripts": {
     "start": "node server.js",
-    "import:amazon": "node import-products.js \"./all.json\" amazon",
-    "import:target": "node import-products.js \"./all target.json\" target",
-    "enrich:amazon": "node enrich-products.js --site=amazon",
-    "enrich:target": "node enrich-products.js --site=target"
+    "dev": "node server.js"
   },
+  "type": "commonjs",
   "dependencies": {
     "@supabase/supabase-js": "^2.98.0",
     "bcryptjs": "^3.0.3",
     "cheerio": "^1.2.0",
-    "cors": "^2.8.6",
+    "cors": "^2.8.5",
     "dotenv": "^17.3.1",
     "express": "^5.2.1",
     "jsonwebtoken": "^9.0.3",
+    "nodemailer": "^6.10.1",
     "playwright": "^1.58.2",
     "uuid": "^13.0.0"
   }

@@ -130,7 +130,7 @@ if (loginForm) {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
-                    email: email.value,
+                    email: email.value.trim().toLowerCase(),
                     password: password.value
                 })
             });
@@ -168,7 +168,7 @@ if (signupForm) {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
-                    email: email.value,
+                    email: email.value.trim().toLowerCase(),
                     password: password.value,
                     invite_code: invite.value
                 })
@@ -438,6 +438,7 @@ async function loadProfileEditor() {
         if (amazonSecretEl) amazonSecretEl.value = account.amazon_2fa_secret || "";
     }
 }
+loadProfileEditor();
 
 const profileForm = document.getElementById("profileForm");
 if (profileForm) {
@@ -1208,6 +1209,57 @@ if (passwordForm) {
     };
 }
 
+
+/* ================= FORGOT / RESET PASSWORD ================= */
+
+const forgotPasswordForm = document.getElementById("forgotPasswordForm");
+if (forgotPasswordForm) {
+    forgotPasswordForm.onsubmit = async (e) => {
+        e.preventDefault();
+
+        const res = await fetch(API + "/auth/forgot-password", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                email: forgotEmail.value.trim().toLowerCase()
+            })
+        });
+
+        const data = await res.json();
+        forgotMsg.innerText = data.error || data.message || "If that email exists, a reset link has been sent.";
+    };
+}
+
+const resetPasswordForm = document.getElementById("resetPasswordForm");
+if (resetPasswordForm) {
+    resetPasswordForm.onsubmit = async (e) => {
+        e.preventDefault();
+
+        const params = new URLSearchParams(window.location.search);
+        const tokenValue = params.get("token") || "";
+
+        const res = await fetch(API + "/auth/reset-password", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                token: tokenValue,
+                newPassword: resetNewPassword.value
+            })
+        });
+
+        const data = await res.json();
+        resetMsg.innerText = data.error || data.message || "Password updated";
+
+        if (!data.error) {
+            setTimeout(() => {
+                location = "login.html";
+            }, 1200);
+        }
+    };
+}
+
+
+
 /* ================= PAGE LOAD ================= */
 
 document.addEventListener("DOMContentLoaded", async () => {
@@ -1225,7 +1277,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         setupInviteControls();
         await loadOwnerAdminFilter();
         await loadExportAccounts();
-        loadInvites(1);
-        loadUsers(1);
+        await loadInvites(1);
+        await loadUsers(1);
     }
 });
