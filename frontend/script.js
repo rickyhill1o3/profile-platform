@@ -1088,6 +1088,7 @@ async function exportProfilesJson() {
     }
 }
 
+
 async function exportAccountsTxt() {
     try {
         const { params } = await getExportCountAndParams();
@@ -1095,16 +1096,13 @@ async function exportAccountsTxt() {
         if (!filename) return;
 
         params.append("filename", filename);
-
-        const selectedGroup = document.getElementById("exportGroupFilter")?.value || "";
-        const isWalmart = selectedGroup.toLowerCase() === "walmart";
-
         const url = API + "/admin/export/accounts-txt" + (params.toString() ? "?" + params.toString() : "");
-        await downloadExportFile(url, filename + (isWalmart ? ".csv" : ".txt"));
+        await downloadExportFile(url, filename + ".txt");
     } catch (err) {
         if (err.message) alert(err.message);
     }
 }
+
 
 /* ================= CHANGE PASSWORD ================= */
 
@@ -1130,13 +1128,29 @@ if (passwordForm) {
     };
 }
 
+
 /* ================= PAGE LOAD ================= */
 
 document.addEventListener("DOMContentLoaded", async () => {
-    await refreshCurrentUserFromServer();
-    setupInviteControls();
-    await loadOwnerAdminFilter();
-    await loadExportAccounts();
-    loadInvites(1);
-    loadUsers(1);
+    try {
+        await refreshCurrentUserFromServer();
+
+        if (document.getElementById("dashboard")) {
+            await loadProfiles();
+        }
+
+        if (document.getElementById("profileForm")) {
+            await loadProfileEditor();
+        }
+
+        if (document.getElementById("inviteTableBody")) {
+            setupInviteControls();
+            await loadOwnerAdminFilter();
+            await loadExportAccounts();
+            await loadInvites(1);
+            await loadUsers(1);
+        }
+    } catch (err) {
+        console.error(err);
+    }
 });

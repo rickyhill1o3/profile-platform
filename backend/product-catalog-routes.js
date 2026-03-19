@@ -329,7 +329,6 @@ module.exports = function registerProductCatalogRoutes({
           )
         `)
         .eq("user_id", targetUserId)
-        .eq("selected", true)
         .order("updated_at", { ascending: false });
 
       if (error) {

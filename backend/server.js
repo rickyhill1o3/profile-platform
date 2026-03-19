@@ -1360,6 +1360,7 @@ app.get("/admin/export/profiles-json", auth, admin, async (req, res) => {
     }
 });
 
+
 app.get("/admin/export/accounts-txt", auth, admin, async (req, res) => {
     try {
         const currentUser = await getCurrentUser(req);
@@ -1372,7 +1373,6 @@ app.get("/admin/export/accounts-txt", auth, admin, async (req, res) => {
                 id,
                 user_id,
                 account_type,
-                profile_name,
                 created_at,
                 accounts(*)
             `)
@@ -1400,96 +1400,29 @@ app.get("/admin/export/accounts-txt", auth, admin, async (req, res) => {
             return res.status(500).json({ error: error.message });
         }
 
-        const rows = (profiles || []).map((profile) => {
-            const account = profile.accounts?.[0] || {};
-            return {
-                profile_name: profile.profile_name || "",
-                account_type: profile.account_type || "",
-                email: account.login_email || "",
-                password: account.login_password || "",
-                secret: account.amazon_2fa_secret || account.gmail_app_password || ""
-            };
-        }).filter((row) => row.email || row.password || row.secret);
+        const rows = (profiles || [])
+            .map((profile) => {
+                const account = profile.accounts?.[0] || {};
+                const email = (account.login_email || "").trim();
+                const password = (account.login_password || "").trim();
 
-        // WALMART EXPORT → CSV
-        if ((group || "").toLowerCase() === "walmart") {
+                if (!email && !password) return null;
 
-            const escapeCsv = (value) => {
-                const csvValue = String(value ?? "");
-                if (
-                    csvValue.includes(",") ||
-                    csvValue.includes('"') ||
-                    csvValue.includes("\n")
-                ) {
-                    return `"${csvValue.replace(/"/g, '""')}"`;
-                }
-                return csvValue;
-            };
+                return `${email}:::${password}:::proxie`;
+            })
+            .filter(Boolean);
 
-            const header = [
-                "Category",
-                "Type",
-                "Username",
-                "Password",
-                "Login Method",
-                "Creation State",
-                "Forwards To",
-                "Profile Name",
-                "2FA Secret",
-                "Recover Email",
-                "Notes",
-                "Browser Type",
-                "Proxy",
-                "Account History",
-                "Email Aliases",
-                "walmartAccountCreatedDate",
-                "walmartOrders"
-            ];
-
-            const csvRows = [
-                header.join(","),
-                ...rows.map((row) =>
-                    [
-                        "All Walmart Accounts",
-                        "Walmart",
-                        row.email,
-                        row.password,
-                        "Password",
-                        "Not Created",
-                        "",
-                        row.profile_name,
-                        row.secret,
-                        "",
-                        "",
-                        "Google Chrome",
-                        "",
-                        "",
-                        "",
-                        "",
-                        ""
-                    ].map(escapeCsv).join(",")
-                )
-            ];
-
-            const csvText = csvRows.join("\n");
-
-            res.setHeader("Content-Type", "text/csv; charset=utf-8");
-            res.setHeader("Content-Disposition", `attachment; filename="${filename}.csv"`);
-            return res.send(csvText);
-        }
-
-        // DEFAULT EXPORT → TXT (FIXED NEWLINES)
-        const lines = rows.map((row) => `${row.email}:${row.password}:${row.secret}`);
+        const output = ["account email:account password", ...rows].join("\n");
 
         res.setHeader("Content-Type", "text/plain; charset=utf-8");
         res.setHeader("Content-Disposition", `attachment; filename="${filename}.txt"`);
-        res.send(lines.join("\n"));
-
+        res.send(output);
     } catch (err) {
         console.error(err);
         res.status(500).json({ error: err.message });
     }
 });
+
 
 /* ================= SUPER ADMIN BOOTSTRAP ================= */
 
