@@ -1260,6 +1260,7 @@ if (resetPasswordForm) {
 
 
 
+
 /* ================= PAGE LOAD ================= */
 
 document.addEventListener("DOMContentLoaded", async () => {
@@ -1273,11 +1274,23 @@ document.addEventListener("DOMContentLoaded", async () => {
         await loadProfileEditor();
     }
 
-    if (document.getElementById("inviteRoleSelect") || document.getElementById("usersTableBody")) {
+    if (document.getElementById("inviteRoleSelect")) {
         setupInviteControls();
+    }
+
+    if (document.getElementById("usersOwnerFilter")) {
         await loadOwnerAdminFilter();
+    }
+
+    if (document.getElementById("exportUserFilter")) {
         await loadExportAccounts();
-        await loadInvites(1);
-        await loadUsers(1);
+    }
+
+    if (document.getElementById("inviteTableBody")) {
+        loadInvites(1);
+    }
+
+    if (document.getElementById("usersTableBody")) {
+        loadUsers(1);
     }
 });

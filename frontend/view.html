@@ -1,48 +1,48 @@
 <!DOCTYPE html>
 <html>
-
 <head>
     <title>View Profile</title>
+    <link rel="stylesheet" href="styles.css">
 </head>
+<body class="profile-page">
+    <div class="page-shell-modern">
+        <header class="page-topbar-modern">
+            <div>
+                <p class="page-eyebrow">Profile Platform</p>
+                <h1>Profile Details</h1>
+                <p class="page-subtitle">Read-only view of the saved profile record.</p>
+            </div>
+            <div class="page-topbar-actions">
+                <button onclick="openUserDashboard()">Back to Dashboard</button>
+            </div>
+        </header>
 
-<body>
-
-    <h2>Profile Details</h2>
-
-    <pre id="profileData"></pre>
-
-    <br>
-    <a href="dashboard.html">Back to Dashboard</a>
+        <div class="profile-form-panel" style="margin-top:20px;">
+            <pre id="profileData" style="white-space:pre-wrap;word-break:break-word;margin:0;"></pre>
+        </div>
+    </div>
 
     <script src="script.js"></script>
-
     <script>
-
         async function loadProfile() {
+            const token = localStorage.getItem("token");
+            const id = localStorage.getItem("view_profile");
+            const API = window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1"
+                ? "http://localhost:3000"
+                : "https://profile-platform.onrender.com";
 
-            const token = localStorage.getItem("token")
-
-            const id = localStorage.getItem("view_profile")
-
-            const res = await fetch(""+(window.location.hostname==="localhost"||window.location.hostname==="127.0.0.1"?"http://localhost:3000":"https://profile-platform.onrender.com")+"/profiles", {
+            const res = await fetch(API + "/profiles", {
                 headers: {
                     Authorization: "Bearer " + token
                 }
-            })
+            });
 
-            const profiles = await res.json()
-
-            const profile = profiles.find(p => p.id === id)
-
-            document.getElementById("profileData").textContent =
-                JSON.stringify(profile, null, 2)
-
+            const profiles = await res.json();
+            const profile = Array.isArray(profiles) ? profiles.find(p => p.id === id) : null;
+            document.getElementById("profileData").textContent = JSON.stringify(profile || {}, null, 2);
         }
 
-        loadProfile()
-
+        loadProfile();
     </script>
-
 </body>
-
 </html>
