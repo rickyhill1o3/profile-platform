@@ -68,18 +68,6 @@ function goToChangePassword() {
     location = "change-password.html";
 }
 
-function togglePasswordVisibility(inputId, buttonEl) {
-    const input = document.getElementById(inputId);
-    if (!input) return;
-
-    const isPassword = input.type === "password";
-    input.type = isPassword ? "text" : "password";
-
-    if (buttonEl) {
-        buttonEl.textContent = isPassword ? "Hide" : "Show";
-    }
-}
-
 function scrollToSection(id) {
     const el = document.getElementById(id);
     if (el) {
@@ -130,7 +118,7 @@ if (loginForm) {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
-                    email: email.value.trim().toLowerCase(),
+                    email: email.value,
                     password: password.value
                 })
             });
@@ -168,7 +156,7 @@ if (signupForm) {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
-                    email: email.value.trim().toLowerCase(),
+                    email: email.value,
                     password: password.value,
                     invite_code: invite.value
                 })
@@ -195,21 +183,12 @@ async function loadProfiles() {
     const dashboardEl = document.getElementById("dashboard");
     if (!dashboardEl) return;
 
+    const refreshedUser = await refreshCurrentUserFromServer();
+    const user = refreshedUser || currentUser();
+
     const adminButton = document.getElementById("adminPanelButton");
-
-    let user = currentUser();
-
-    try {
-        const refreshedUser = await refreshCurrentUserFromServer();
-        user = refreshedUser || user;
-    } catch (_) { }
-
-    if (adminButton) {
-        if (isAdminRole(user?.role)) {
-            adminButton.style.display = "inline-flex";
-        } else {
-            adminButton.style.display = "none";
-        }
+    if (isAdminRole(user?.role) && adminButton) {
+        adminButton.style.display = "inline-block";
     }
 
     try {
@@ -237,103 +216,42 @@ async function loadProfiles() {
             }
         });
 
-        const stat = (id, value) => {
-            const el = document.getElementById(id);
-            if (el) el.textContent = value;
-        };
-
-        stat("profileCountStat", profiles.length);
-        stat("amazonProfileCountStat", groups.amazon.length);
-        stat("retailProfileCountStat", groups.target.length + groups.walmart.length);
-        stat("generalProfileCountStat", groups.general.length);
-
-        const labels = {
-            general: "General Profiles",
-            walmart: "Walmart Profiles",
-            target: "Target Profiles",
-            amazon: "Amazon Profiles"
-        };
-
-        const descriptions = {
-            general: "Flexible profiles for general checkouts.",
-            walmart: "Profiles configured for Walmart accounts.",
-            target: "Profiles configured for Target accounts.",
-            amazon: "Profiles configured for Amazon accounts."
-        };
-
         let html = "";
+        Object.keys(groups).forEach((g) => {
+            html += `<h2>${g.toUpperCase()} PROFILES</h2>`;
 
-        Object.keys(groups).forEach((groupKey) => {
-            const items = groups[groupKey];
+            groups[g].forEach((p) => {
+                const address = p.addresses?.[0] || {};
+                const payment = p.payments?.[0] || {};
+                const state = address.state || "";
+                const city = address.city || "";
+                const maskedCard = maskCard(payment.card_number, payment.card_last4);
 
-            html += `
-                <section class="profile-group-section">
-                    <div class="profile-group-header">
-                        <div>
-                            <h3 class="profile-group-title">${labels[groupKey]}</h3>
-                            <div class="profile-group-subtitle">${descriptions[groupKey]}</div>
-                        </div>
-                        <span class="profile-card-badge">${items.length} saved</span>
-                    </div>
-            `;
-
-            if (!items.length) {
                 html += `
-                    <div class="profile-empty-card">
-                        <h4>No profiles yet</h4>
-                        <p>Create your first ${groupKey} profile.</p>
-                        <div class="profile-actions">
-                            <button class="profile-action-button primary-action" onclick="createProfile()">Create Profile</button>
-                        </div>
-                    </div>
-                `;
-            } else {
-                html += `<div class="profile-card-grid">`;
+          <div class="profile-card">
+            <h3>${p.profile_name}</h3>
+            <p><strong>Email:</strong> ${address.email || ""}</p>
+            <p><strong>Phone:</strong> ${address.phone || ""}</p>
+            <p><strong>Card:</strong> ${maskedCard}</p>
+            <p><strong>Group:</strong> ${p.account_type}</p>
+            <p><strong>Location:</strong> ${city}${city && state ? ", " : ""}${state}</p>
+            <div class="row-actions">
+              <button onclick="edit('${p.id}')">Edit</button>
+              <button onclick="del('${p.id}')">Delete</button>
+            </div>
+          </div>
+        `;
+            });
 
-                items.forEach((p) => {
-                    const address = p.addresses?.[0] || {};
-                    const payment = p.payments?.[0] || {};
-                    const state = address.state || "";
-                    const city = address.city || "";
-                    const maskedCard = maskCard(payment.card_number, payment.card_last4);
-
-                    html += `
-                        <article class="profile-card-modern">
-                            <div class="profile-card-top">
-                                <div>
-                                    <h4 class="profile-card-title">${p.profile_name}</h4>
-                                    <div class="profile-group-subtitle">${city}${city && state ? ", " : ""}${state || "No location set"}</div>
-                                </div>
-                                <span class="profile-card-badge">${p.account_type}</span>
-                            </div>
-
-                            <div class="profile-detail-list">
-                                <div class="profile-detail-row">
-                                    <span class="profile-detail-label">Email</span>
-                                    <span>${address.email || "-"}</span>
-                                </div>
-                                <div class="profile-detail-row">
-                                    <span class="profile-detail-label">Phone</span>
-                                    <span>${address.phone || "-"}</span>
-                                </div>
-                                <div class="profile-detail-row">
-                                    <span class="profile-detail-label">Card</span>
-                                    <span>${maskedCard}</span>
-                                </div>
-                            </div>
-
-                            <div class="profile-actions">
-                                <button class="profile-action-button" onclick="edit('${p.id}')">Edit</button>
-                                <button class="profile-action-button" onclick="del('${p.id}')">Delete</button>
-                            </div>
-                        </article>
-                    `;
-                });
-
-                html += `</div>`;
+            if (groups[g].length === 0) {
+                html += `
+          <div class="empty-card">
+            <h3>No profiles yet</h3>
+            <p>Create your first ${g} profile.</p>
+            <button onclick="createProfile()">Create Profile</button>
+          </div>
+        `;
             }
-
-            html += `</section>`;
         });
 
         dashboardEl.innerHTML = html;
@@ -341,6 +259,7 @@ async function loadProfiles() {
         dashboardEl.innerHTML = `<p>Could not connect to the server.</p>`;
     }
 }
+loadProfiles();
 
 function createProfile() {
     localStorage.removeItem("edit");
@@ -1177,8 +1096,11 @@ async function exportAccountsTxt() {
 
         params.append("filename", filename);
 
+        const selectedGroup = document.getElementById("exportGroupFilter")?.value || "";
+        const isWalmart = selectedGroup.toLowerCase() === "walmart";
+
         const url = API + "/admin/export/accounts-txt" + (params.toString() ? "?" + params.toString() : "");
-        await downloadExportFile(url, filename + ".txt");
+        await downloadExportFile(url, filename + (isWalmart ? ".csv" : ".txt"));
     } catch (err) {
         if (err.message) alert(err.message);
     }
@@ -1205,92 +1127,16 @@ if (passwordForm) {
 
         const data = await res.json();
         msg.innerText = data.error || "Password updated";
-        msg.className = data.error ? "auth-error" : "success-text";
     };
 }
-
-
-/* ================= FORGOT / RESET PASSWORD ================= */
-
-const forgotPasswordForm = document.getElementById("forgotPasswordForm");
-if (forgotPasswordForm) {
-    forgotPasswordForm.onsubmit = async (e) => {
-        e.preventDefault();
-
-        const res = await fetch(API + "/auth/forgot-password", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-                email: forgotEmail.value.trim().toLowerCase()
-            })
-        });
-
-        const data = await res.json();
-        forgotMsg.innerText = data.error || data.message || "If that email exists, a reset link has been sent.";
-    };
-}
-
-const resetPasswordForm = document.getElementById("resetPasswordForm");
-if (resetPasswordForm) {
-    resetPasswordForm.onsubmit = async (e) => {
-        e.preventDefault();
-
-        const params = new URLSearchParams(window.location.search);
-        const tokenValue = params.get("token") || "";
-
-        const res = await fetch(API + "/auth/reset-password", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-                token: tokenValue,
-                newPassword: resetNewPassword.value
-            })
-        });
-
-        const data = await res.json();
-        resetMsg.innerText = data.error || data.message || "Password updated";
-
-        if (!data.error) {
-            setTimeout(() => {
-                location = "login.html";
-            }, 1200);
-        }
-    };
-}
-
-
-
 
 /* ================= PAGE LOAD ================= */
 
 document.addEventListener("DOMContentLoaded", async () => {
     await refreshCurrentUserFromServer();
-
-    if (document.getElementById("dashboard")) {
-        await loadProfiles();
-    }
-
-    if (document.getElementById("profileForm")) {
-        await loadProfileEditor();
-    }
-
-    if (document.getElementById("inviteRoleSelect")) {
-        setupInviteControls();
-    }
-
-    if (document.getElementById("usersOwnerFilter")) {
-        await loadOwnerAdminFilter();
-    }
-
-    if (document.getElementById("exportUserFilter")) {
-        await loadExportAccounts();
-    }
-
-    if (document.getElementById("inviteTableBody")) {
-        loadInvites(1);
-    }
-
-    if (document.getElementById("usersTableBody")) {
-        loadUsers(1);
-    }
+    setupInviteControls();
+    await loadOwnerAdminFilter();
+    await loadExportAccounts();
+    loadInvites(1);
+    loadUsers(1);
 });
