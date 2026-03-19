@@ -1,40 +1,12 @@
-<!DOCTYPE html>
-<html>
 
-<head>
-    <title>Signup</title>
-    <link rel="stylesheet" href="styles.css">
-</head>
-
-<body>
-
-    <div class="container">
-
-        <h1>Create Account</h1>
-
-        <form id="signupForm">
-
-            <input id="email" placeholder="Email" required>
-
-            <input id="password" type="password" placeholder="Password" required>
-
-            <input id="invite" placeholder="Invite Code" required>
-
-            <button type="submit">Signup</button>
-
-        </form>
-
-        <p id="error" style="color:red"></p>
-
-        <p>
-            Already have an account?
-            <a href="login.html">Login</a>
-        </p>
-
-    </div>
-
-    <script src="script.js"></script>
-
-</body>
-
-</html>
+<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/><title>Signup</title><link rel="stylesheet" href="styles.css"/></head>
+<body class="auth-page"><div class="auth-shell"><div class="auth-card">
+<p class="eyebrow">Profile Platform</p><h1>Create account</h1><p class="subtle-text">Use an invite code to join.</p>
+<form id="signupForm" class="form-stack">
+<div class="field"><label for="email">Email</label><input class="input" id="email" required /></div>
+<div class="field"><label for="password">Password</label><div class="password-row"><input class="input" id="password" type="password" required /><button class="btn" type="button" onclick="togglePasswordVisibility('password', this)">Show</button></div></div>
+<div class="field"><label for="invite">Invite Code</label><input class="input" id="invite" required /></div>
+<button class="btn btn-primary" type="submit">Create Account</button></form>
+<p id="error" class="error-text"></p>
+<p class="subtle-text">Already have an account? <a href="login.html">Login</a></p>
+</div></div><script src="script.js"></script></body></html>

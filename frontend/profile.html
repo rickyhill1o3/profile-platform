@@ -1,207 +1,159 @@
+
 <!DOCTYPE html>
-<html>
-
+<html lang="en">
 <head>
-    <title>Profile Editor</title>
-    <link rel="stylesheet" href="styles.css">
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Profile Editor</title>
+  <link rel="stylesheet" href="styles.css" />
 </head>
+<body class="app-page">
+  <div class="app-shell">
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">Profile Platform</p>
+        <h1>Profile Editor</h1>
+        <p class="subtle-text">Create or update a profile with shipping, payment, and account details.</p>
+      </div>
+      <div class="topbar-actions">
+        <button class="btn" onclick="openUserDashboard()">Back to Dashboard</button>
+        <button class="btn" id="adminPanelButtonProfile" style="display:none;" onclick="openAdminPanel()">Admin Panel</button>
+        <button class="btn btn-danger" onclick="logout()">Logout</button>
+      </div>
+    </header>
 
-<body>
+    <div class="page-grid">
+      <section class="panel">
+        <form id="profileForm" class="form-stack">
+          <div class="panel-header">
+            <div>
+              <h2>Profile Details</h2>
+              <p class="subtle-text">Billing address is the same as shipping in your current flow.</p>
+            </div>
+          </div>
 
-    <div class="header modern-header">
-        <div>
-            <h1>Profile Editor</h1>
-            <p class="subtle-text">Create or update a profile</p>
+          <div class="form-grid">
+            <div class="field field--full">
+              <label for="profile_name">Profile Name</label>
+              <input class="input" id="profile_name" placeholder="Profile Name" required />
+            </div>
+            <div class="field field--full">
+              <label for="account_type">Account Type</label>
+              <select class="input" id="account_type" required>
+                <option value="general">General</option>
+                <option value="walmart">Walmart</option>
+                <option value="target">Target</option>
+                <option value="amazon">Amazon</option>
+              </select>
+            </div>
+          </div>
+
+          <section id="accountCredentialsSection" style="display:none;">
+            <h3 class="section-title">Account Login Details</h3>
+
+            <div id="gmailAccountFields" class="form-grid" style="display:none;">
+              <div class="field field--full">
+                <label for="account_login_email">Login Email</label>
+                <input class="input" id="account_login_email" placeholder="Login Email (must be Gmail)" />
+              </div>
+              <div class="field">
+                <label for="account_login_password">Account Password</label>
+                <input class="input" id="account_login_password" type="password" placeholder="Account Password" />
+              </div>
+              <div class="field field-actions">
+                <label>&nbsp;</label>
+                <button class="btn" type="button" onclick="togglePasswordVisibility('account_login_password', this)">Show</button>
+              </div>
+              <div class="field field--full">
+                <label for="gmail_app_password">Gmail App Password</label>
+                <input class="input" id="gmail_app_password" type="password" placeholder="Gmail App Password" />
+              </div>
+            </div>
+
+            <div id="amazonAccountFields" class="form-grid" style="display:none;">
+              <div class="field field--full">
+                <label for="amazon_login_email">Amazon Account Email</label>
+                <input class="input" id="amazon_login_email" placeholder="Amazon Account Email" />
+              </div>
+              <div class="field">
+                <label for="amazon_login_password">Amazon Password</label>
+                <input class="input" id="amazon_login_password" type="password" placeholder="Amazon Password" />
+              </div>
+              <div class="field field-actions">
+                <label>&nbsp;</label>
+                <button class="btn" type="button" onclick="togglePasswordVisibility('amazon_login_password', this)">Show</button>
+              </div>
+              <div class="field field--full">
+                <label for="amazon_2fa_secret">Amazon Authenticator Secret</label>
+                <input class="input" id="amazon_2fa_secret" placeholder="Amazon Authenticator Secret" />
+              </div>
+            </div>
+          </section>
+
+          <section>
+            <h3 class="section-title">Shipping</h3>
+            <div class="form-grid">
+              <div class="field"><label for="first_name">First Name</label><input class="input" id="first_name" required /></div>
+              <div class="field"><label for="last_name">Last Name</label><input class="input" id="last_name" required /></div>
+              <div class="field field--full"><label for="email">Email</label><input class="input" id="email" required /></div>
+              <div class="field field--full"><label for="phone">Phone</label><input class="input" id="phone" maxlength="10" placeholder="xxxxxxxxxx" required /></div>
+              <div class="field field--full"><label for="address1">Address</label><input class="input" id="address1" required /></div>
+              <div class="field"><label for="city">City</label><input class="input" id="city" required /></div>
+              <div class="field">
+                <label for="state">State</label>
+                <select class="input" id="state" required>
+                  <option value="">Select State</option>
+                  <option>Alabama</option><option>Alaska</option><option>Arizona</option><option>Arkansas</option><option>California</option>
+                  <option>Colorado</option><option>Connecticut</option><option>Delaware</option><option>Florida</option><option>Georgia</option>
+                  <option>Hawaii</option><option>Idaho</option><option>Illinois</option><option>Indiana</option><option>Iowa</option>
+                  <option>Kansas</option><option>Kentucky</option><option>Louisiana</option><option>Maine</option><option>Maryland</option>
+                  <option>Massachusetts</option><option>Michigan</option><option>Minnesota</option><option>Mississippi</option><option>Missouri</option>
+                  <option>Montana</option><option>Nebraska</option><option>Nevada</option><option>New Hampshire</option><option>New Jersey</option>
+                  <option>New Mexico</option><option>New York</option><option>North Carolina</option><option>North Dakota</option><option>Ohio</option>
+                  <option>Oklahoma</option><option>Oregon</option><option>Pennsylvania</option><option>Rhode Island</option><option>South Carolina</option>
+                  <option>South Dakota</option><option>Tennessee</option><option>Texas</option><option>Utah</option><option>Vermont</option>
+                  <option>Virginia</option><option>Washington</option><option>West Virginia</option><option>Wisconsin</option><option>Wyoming</option>
+                </select>
+              </div>
+              <div class="field field--full"><label for="zip">ZIP Code</label><input class="input" id="zip" required /></div>
+            </div>
+          </section>
+
+          <section>
+            <h3 class="section-title">Payment</h3>
+            <div class="form-grid">
+              <div class="field field--full"><label for="card">Card Number</label><input class="input" id="card" required /></div>
+              <div class="field"><label for="exp_month">Exp Month</label><input class="input" id="exp_month" placeholder="MM" required /></div>
+              <div class="field"><label for="exp_year">Exp Year</label><input class="input" id="exp_year" placeholder="YYYY" required /></div>
+              <div class="field"><label for="cvv">CVV</label><input class="input" id="cvv" type="password" required /></div>
+              <div class="field field-actions">
+                <label>&nbsp;</label>
+                <button class="btn" type="button" onclick="togglePasswordVisibility('cvv', this)">Show</button>
+              </div>
+            </div>
+          </section>
+
+          <button class="btn btn-primary" type="submit">Save Profile</button>
+          <p id="profileMessage" class="error-text"></p>
+        </form>
+      </section>
+
+      <aside class="panel tips-panel">
+        <div class="panel-header">
+          <div>
+            <h2>Setup Tips</h2>
+            <p class="subtle-text">Use clear names and match account type to the site you plan to run.</p>
+          </div>
         </div>
-
-        <div class="header-actions">
-            <button onclick="openUserDashboard()">Back to Dashboard</button>
-            <button id="adminPanelButtonProfile" style="display:none;" onclick="openAdminPanel()">Admin Panel</button>
-            <button onclick="logout()">Logout</button>
+        <div class="tip-stack">
+          <div class="tip-card"><strong>General</strong><p>Flexible profiles for general checkout flows.</p></div>
+          <div class="tip-card"><strong>Target / Walmart</strong><p>Uses Gmail login flow fields and app password where needed.</p></div>
+          <div class="tip-card"><strong>Amazon</strong><p>Store Amazon login and 2FA secret only when required by your flow.</p></div>
         </div>
+      </aside>
     </div>
+  </div>
 
-    <div class="page-shell">
-        <div class="form-card">
-
-            <form id="profileForm">
-
-                <h2>Profile Details</h2>
-                <p class="subtle-text">Billing address is always the same as shipping.</p>
-
-                <!-- PROFILE -->
-                <div class="form-section-title">Profile</div>
-
-                <div class="form-grid">
-                    <div class="full-width">
-                        <input id="profile_name" placeholder="Profile Name" required>
-                    </div>
-
-                    <div class="full-width">
-                        <select id="account_type" required>
-                            <option value="general">General</option>
-                            <option value="walmart">Walmart</option>
-                            <option value="target">Target</option>
-                            <option value="amazon">Amazon</option>
-                        </select>
-                    </div>
-                </div>
-
-
-                <!-- ACCOUNT LOGIN DETAILS -->
-                <div id="accountCredentialsSection" style="display:none;">
-
-                    <div class="form-section-title">Account Login Details</div>
-
-                    <!-- Walmart / Target -->
-                    <div id="gmailAccountFields" class="form-grid" style="display:none;">
-
-                        <div class="full-width">
-                            <input id="account_login_email" placeholder="Login Email (must be Gmail)">
-                        </div>
-
-                        <div class="full-width">
-                            <input id="account_login_password" placeholder="Account Password">
-                        </div>
-
-                        <div class="full-width">
-                            <input id="gmail_app_password" placeholder="Gmail App Password">
-                        </div>
-
-                    </div>
-
-
-                    <!-- Amazon -->
-                    <div id="amazonAccountFields" class="form-grid" style="display:none;">
-
-                        <div class="full-width">
-                            <input id="amazon_login_email" placeholder="Amazon Account Email">
-                        </div>
-
-                        <div class="full-width">
-                            <input id="amazon_login_password" placeholder="Amazon Account Password">
-                        </div>
-
-                        <div class="full-width">
-                            <input id="amazon_2fa_secret" placeholder="Amazon Authenticator Secret">
-                        </div>
-
-                    </div>
-
-                </div>
-
-
-                <!-- SHIPPING -->
-                <div class="form-section-title">Shipping</div>
-
-                <div class="form-grid">
-                    <input id="first_name" placeholder="First Name" required>
-                    <input id="last_name" placeholder="Last Name" required>
-
-                    <div class="full-width">
-                        <input id="email" placeholder="Email" required>
-                    </div>
-
-                    <div class="full-width">
-                        <input id="phone" placeholder="Phone (xxxxxxxxxx)" maxlength="10" required>
-                    </div>
-
-                    <div class="full-width">
-                        <input id="address1" placeholder="Address" required>
-                    </div>
-
-                    <input id="city" placeholder="City" required>
-
-                    <select id="state" required>
-                        <option value="">Select State</option>
-                        <option>Alabama</option>
-                        <option>Alaska</option>
-                        <option>Arizona</option>
-                        <option>Arkansas</option>
-                        <option>California</option>
-                        <option>Colorado</option>
-                        <option>Connecticut</option>
-                        <option>Delaware</option>
-                        <option>Florida</option>
-                        <option>Georgia</option>
-                        <option>Hawaii</option>
-                        <option>Idaho</option>
-                        <option>Illinois</option>
-                        <option>Indiana</option>
-                        <option>Iowa</option>
-                        <option>Kansas</option>
-                        <option>Kentucky</option>
-                        <option>Louisiana</option>
-                        <option>Maine</option>
-                        <option>Maryland</option>
-                        <option>Massachusetts</option>
-                        <option>Michigan</option>
-                        <option>Minnesota</option>
-                        <option>Mississippi</option>
-                        <option>Missouri</option>
-                        <option>Montana</option>
-                        <option>Nebraska</option>
-                        <option>Nevada</option>
-                        <option>New Hampshire</option>
-                        <option>New Jersey</option>
-                        <option>New Mexico</option>
-                        <option>New York</option>
-                        <option>North Carolina</option>
-                        <option>North Dakota</option>
-                        <option>Ohio</option>
-                        <option>Oklahoma</option>
-                        <option>Oregon</option>
-                        <option>Pennsylvania</option>
-                        <option>Rhode Island</option>
-                        <option>South Carolina</option>
-                        <option>South Dakota</option>
-                        <option>Tennessee</option>
-                        <option>Texas</option>
-                        <option>Utah</option>
-                        <option>Vermont</option>
-                        <option>Virginia</option>
-                        <option>Washington</option>
-                        <option>West Virginia</option>
-                        <option>Wisconsin</option>
-                        <option>Wyoming</option>
-                    </select>
-
-                    <input id="zip" placeholder="Zip" required>
-                </div>
-
-
-                <!-- PAYMENT -->
-                <div class="form-section-title">Payment</div>
-
-                <div class="form-grid">
-
-                    <div class="full-width">
-                        <input id="card" placeholder="Card Number" required>
-                    </div>
-
-                    <input id="exp_month" placeholder="Exp Month (MM)" required>
-                    <input id="exp_year" placeholder="Exp Year (YYYY)" required>
-
-                    <div class="full-width">
-                        <input id="cvv" placeholder="CVV" required>
-                    </div>
-
-                </div>
-
-
-                <div class="card-actions" style="margin-top:20px;">
-                    <button type="submit">Save Profile</button>
-                    <button type="button" onclick="openUserDashboard()">Cancel</button>
-                </div>
-
-                <p id="profileMessage" class="subtle-text" style="margin-top:14px;"></p>
-
-            </form>
-
-        </div>
-    </div>
-
-    <script src="script.js"></script>
+  <script src="script.js"></script>
 </body>
-
 </html>
