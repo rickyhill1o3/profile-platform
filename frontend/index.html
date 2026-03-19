@@ -1,19 +1,27 @@
 
 <!DOCTYPE html>
 <html lang="en">
-<head><meta charset="UTF-8" /><meta name="viewport" content="width=device-width, initial-scale=1.0" /><title>Profile Platform</title>
-<script>
-(function () {
-  try {
-    const token = localStorage.getItem("token");
-    const user = JSON.parse(localStorage.getItem("user") || "null");
-    if (token && user) window.location.replace("dashboard.html");
-    else window.location.replace("login.html");
-  } catch (err) {
-    window.location.replace("login.html");
-  }
-})();
-</script>
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Profile Platform</title>
+    <script>
+        (function () {
+            try {
+                const token = localStorage.getItem("token");
+                const user = JSON.parse(localStorage.getItem("user") || "null");
+                if (token && user) {
+                    window.location.replace("dashboard.html");
+                } else {
+                    window.location.replace("login.html");
+                }
+            } catch (err) {
+                window.location.replace("login.html");
+            }
+        })();
+    </script>
 </head>
-<body><p>Redirecting...</p></body>
+<body>
+    <p>Redirecting...</p>
+</body>
 </html>

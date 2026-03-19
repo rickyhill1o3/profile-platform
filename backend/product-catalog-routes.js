@@ -289,6 +289,7 @@ module.exports = function registerProductCatalogRoutes({
         sku: row.catalog_products?.sku || "",
         product_name: row.catalog_products?.product_name || row.catalog_products?.sku || "",
         image_url: row.catalog_products?.image_url || "",
+        selected: !!row.selected,
         run_mode: row.run_mode,
         max_price: row.max_price,
         default_max_price: row.catalog_products?.default_max_price ?? null,
@@ -329,7 +330,6 @@ module.exports = function registerProductCatalogRoutes({
           )
         `)
         .eq("user_id", targetUserId)
-        .eq("selected", true)
         .order("updated_at", { ascending: false });
 
       if (error) {

@@ -13,8 +13,13 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+app.get("/health", (_req, res) => {
+    res.json({ ok: true });
+});
+
 const phoneRegex = /^[0-9]{10}$/;
 const SUPER_ADMIN_EMAIL = "theshoreshacktcg@gmail.com";
+const PORT = Number(process.env.PORT || 3000);
 
 /* ================= AUTH HELPERS ================= */
 
@@ -1360,7 +1365,6 @@ app.get("/admin/export/profiles-json", auth, admin, async (req, res) => {
     }
 });
 
-
 app.get("/admin/export/accounts-txt", auth, admin, async (req, res) => {
     try {
         const currentUser = await getCurrentUser(req);
@@ -1400,29 +1404,26 @@ app.get("/admin/export/accounts-txt", auth, admin, async (req, res) => {
             return res.status(500).json({ error: error.message });
         }
 
-        const rows = (profiles || [])
+        const lines = (profiles || [])
             .map((profile) => {
                 const account = profile.accounts?.[0] || {};
-                const email = (account.login_email || "").trim();
-                const password = (account.login_password || "").trim();
+                const email = account.login_email || "";
+                const password = account.login_password || "";
+                const secret = account.amazon_2fa_secret || account.gmail_app_password || "";
 
-                if (!email && !password) return null;
+                if (!email && !password && !secret) return null;
 
-                return `${email}:::${password}:::proxie`;
+                return `${email}:${password}:${secret}`;
             })
             .filter(Boolean);
 
-        const output = ["account email:account password", ...rows].join("\n");
-
         res.setHeader("Content-Type", "text/plain; charset=utf-8");
         res.setHeader("Content-Disposition", `attachment; filename="${filename}.txt"`);
-        res.send(output);
+        res.send(lines.join("\\n"));
     } catch (err) {
-        console.error(err);
         res.status(500).json({ error: err.message });
     }
 });
-
 
 /* ================= SUPER ADMIN BOOTSTRAP ================= */
 
@@ -1487,8 +1488,8 @@ registerProductCatalogRoutes({
 
 ensureSuperAdmin()
     .then(() => {
-        app.listen(3000, () => {
-            console.log("Server running on port 3000");
+        app.listen(PORT, () => {
+            console.log(`Server running on port ${PORT}`);
         });
     })
     .catch((err) => {
