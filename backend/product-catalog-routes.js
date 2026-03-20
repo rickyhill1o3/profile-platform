@@ -51,6 +51,10 @@ async function canAdminAccessUser(supabase, currentUser, targetUserId) {
     return true;
   }
 
+  if (currentUser.id === targetUserId) {
+    return true;
+  }
+
   const { data, error } = await supabase
     .from("users")
     .select("id, owner_admin_id")
