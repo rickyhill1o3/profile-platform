@@ -1,42 +1,11 @@
 
-<!DOCTYPE html>
-<html>
-<head>
-    <title>Login</title>
-    <link rel="stylesheet" href="styles.css">
-</head>
-<body class="auth-page">
-    <div class="auth-wrap">
-        <div class="auth-card">
-            <p class="page-eyebrow">Profile Platform</p>
-            <h1 class="auth-title">Welcome back</h1>
-            <p class="auth-subtitle">Sign in to manage profiles, products, and admin tools.</p>
-
-            <form id="loginForm" class="form-stack">
-                <div class="input-shell">
-                    <label for="email">Email</label>
-                    <input id="email" placeholder="you@example.com" required>
-                </div>
-
-                <div class="input-shell">
-                    <label for="password">Password</label>
-                    <div class="password-row">
-                        <input id="password" type="password" placeholder="Enter your password" required>
-                        <button type="button" onclick="togglePasswordVisibility('password', this)">Show</button>
-                    </div>
-                </div>
-
-                <button type="submit" class="primary-action">Login</button>
-            </form>
-
-            <p id="error" class="auth-error"></p>
-
-            <p class="auth-footer">
-                Need an account? <a href="signup.html">Signup</a><br>
-                Forgot your password? <a href="forgot-password.html">Reset it here</a>
-            </p>
-        </div>
-    </div>
-    <script src="script.js"></script>
-</body>
-</html>
+<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/><title>Login</title><link rel="stylesheet" href="styles.css"/></head>
+<body class="auth-page"><div class="auth-shell"><div class="auth-card">
+<p class="eyebrow">Profile Platform</p><h1>Welcome back</h1><p class="subtle-text">Sign in to manage profiles and products.</p>
+<form id="loginForm" class="form-stack">
+<div class="field"><label for="email">Email</label><input class="input" id="email" required /></div>
+<div class="field"><label for="password">Password</label><div class="password-row"><input class="input" id="password" type="password" required /><button class="btn" type="button" onclick="togglePasswordVisibility('password', this)">Show</button></div></div>
+<button class="btn btn-primary" type="submit">Login</button></form>
+<p id="error" class="error-text"></p>
+<p class="subtle-text">Need an account? <a href="signup.html">Signup</a> · <a href="forgot-password.html">Forgot password?</a></p>
+</div></div><script src="script.js"></script></body></html>

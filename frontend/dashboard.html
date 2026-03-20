@@ -1,102 +1,100 @@
 
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-    <title>Dashboard</title>
-    <link rel="stylesheet" href="styles.css">
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Dashboard</title>
+  <link rel="stylesheet" href="styles.css" />
 </head>
-<body class="dashboard-page">
-    <div class="dashboard-shell">
-        <header class="dashboard-topbar">
-            <div>
-                <p class="page-eyebrow">Profile Platform</p>
-                <h1>User Dashboard</h1>
-                <p class="dashboard-subtitle">Manage profiles and choose the products you want run.</p>
-            </div>
-            <div class="dashboard-topbar-actions">
-                <button class="primary-action" onclick="createProfile()">New Profile</button>
-                <button onclick="goToChangePassword()">Change Password</button>
-                <button id="adminPanelButton" style="display:none;" onclick="openAdminPanel()">Admin Panel</button>
-                <button class="danger-action" onclick="logout()">Logout</button>
-            </div>
-        </header>
+<body class="app-page">
+  <div class="app-shell">
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">Profile Platform</p>
+        <h1>User Dashboard</h1>
+        <p class="subtle-text">Manage profiles and choose the products you want your accounts to run for.</p>
+      </div>
+      <div class="topbar-actions">
+        <button class="btn btn-primary" onclick="createProfile()">New Profile</button>
+        <button class="btn" onclick="goToChangePassword()">Change Password</button>
+        <button class="btn" id="adminPanelButton" style="display:none;" onclick="openAdminPanel()">Admin Panel</button>
+        <button class="btn btn-danger" onclick="logout()">Logout</button>
+      </div>
+    </header>
 
-        <section class="dashboard-summary-grid">
-            <div class="dashboard-summary-card">
-                <span class="summary-label">Profiles</span>
-                <strong class="summary-value" id="profileCountStat">0</strong>
-                <span class="summary-helper">Saved profiles ready to run</span>
-            </div>
-            <div class="dashboard-summary-card">
-                <span class="summary-label">Amazon Profiles</span>
-                <strong class="summary-value" id="amazonProfileCountStat">0</strong>
-                <span class="summary-helper">Amazon-ready accounts</span>
-            </div>
-            <div class="dashboard-summary-card">
-                <span class="summary-label">Target / Walmart</span>
-                <strong class="summary-value" id="retailProfileCountStat">0</strong>
-                <span class="summary-helper">Target + Walmart accounts</span>
-            </div>
-            <div class="dashboard-summary-card">
-                <span class="summary-label">General Profiles</span>
-                <strong class="summary-value" id="generalProfileCountStat">0</strong>
-                <span class="summary-helper">General checkout profiles</span>
-            </div>
-        </section>
+    <section class="stats-grid">
+      <div class="stat-card">
+        <span class="stat-label">Profiles</span>
+        <strong class="stat-value" id="profileCountStat">0</strong>
+        <span class="stat-help">Saved profiles ready to use</span>
+      </div>
+      <div class="stat-card">
+        <span class="stat-label">Amazon</span>
+        <strong class="stat-value" id="amazonProfileCountStat">0</strong>
+        <span class="stat-help">Amazon account profiles</span>
+      </div>
+      <div class="stat-card">
+        <span class="stat-label">Target / Walmart</span>
+        <strong class="stat-value" id="retailProfileCountStat">0</strong>
+        <span class="stat-help">Retail account profiles</span>
+      </div>
+      <div class="stat-card">
+        <span class="stat-label">General</span>
+        <strong class="stat-value" id="generalProfileCountStat">0</strong>
+        <span class="stat-help">General checkout profiles</span>
+      </div>
+    </section>
 
-        <div class="dashboard-layout">
-            <section>
-                <section class="dashboard-panel">
-                    <div class="dashboard-panel-header">
-                        <div>
-                            <h2>Your Profiles</h2>
-                            <p class="subtle-text">Create, edit, and organize your saved profiles by store type.</p>
-                        </div>
-                        <button class="primary-action" onclick="createProfile()">Create Profile</button>
-                    </div>
-                    <div id="dashboard" class="profile-dashboard-grid"></div>
-                </section>
-            </section>
-
-            <aside>
-                <section class="dashboard-panel product-dashboard-panel" id="productRunnerSection">
-                    <div class="dashboard-panel-header">
-                        <div>
-                            <h2>Product Runner</h2>
-                            <p class="subtle-text">Search, filter, and select products by category.</p>
-                        </div>
-                        <button class="primary-action" id="saveProductPreferencesButton" type="button">Save Changes</button>
-                    </div>
-
-                    <div class="product-control-stack">
-                        <div class="product-site-switcher">
-                            <button type="button" class="product-site-tab is-active" data-product-site="amazon">Amazon</button>
-                            <button type="button" class="product-site-tab" data-product-site="target">Target</button>
-                        </div>
-
-                        <div class="product-search-row">
-                            <input id="productSearch" type="search" placeholder="Search by product name, brand, or SKU" />
-                            <label class="product-inline-check">
-                                <input id="productSelectedOnly" type="checkbox" />
-                                <span>Selected only</span>
-                            </label>
-                        </div>
-
-                        <div id="productCategoryChips" class="product-category-chips"></div>
-
-                        <div class="product-summary-row">
-                            <span id="productSelectionSummary"></span>
-                            <span id="productSaveMessage"></span>
-                        </div>
-                    </div>
-
-                    <div id="productSelectionTableBody" class="product-category-list"></div>
-                </section>
-            </aside>
+    <div class="dashboard-layout">
+      <main class="panel">
+        <div class="panel-header">
+          <div>
+            <h2>Your Profiles</h2>
+            <p class="subtle-text">Create, edit, and organize your profiles by store type.</p>
+          </div>
+          <button class="btn btn-primary" onclick="createProfile()">Create Profile</button>
         </div>
-    </div>
+        <div id="dashboard" class="profile-groups"></div>
+      </main>
 
-    <script src="products.js" defer></script>
-    <script src="script.js"></script>
+      <aside class="panel products-panel">
+        <div class="panel-header">
+          <div>
+            <h2>Product Runner</h2>
+            <p class="subtle-text">Search by category and save what each account should run for.</p>
+          </div>
+          <button class="btn btn-primary" id="saveProductPreferencesButton" type="button">Save Changes</button>
+        </div>
+
+        <div class="product-toolbar">
+          <div class="segmented">
+            <button type="button" class="segmented-btn is-active" data-product-site="amazon">Amazon</button>
+            <button type="button" class="segmented-btn" data-product-site="target">Target</button>
+          </div>
+
+          <div class="toolbar-row">
+            <input id="productSearch" class="input" type="search" placeholder="Search product name, brand, or SKU" />
+            <label class="checkbox-inline">
+              <input id="productSelectedOnly" type="checkbox" />
+              <span>Selected only</span>
+            </label>
+          </div>
+
+          <div id="productCategoryChips" class="chip-row"></div>
+
+          <div class="toolbar-row toolbar-row--spread">
+            <span id="productSelectionSummary" class="subtle-text"></span>
+            <span id="productSaveMessage" class="success-text"></span>
+          </div>
+        </div>
+
+        <div id="productSelectionTableBody" class="product-list"></div>
+      </aside>
+    </div>
+  </div>
+
+  <script src="products.js" defer></script>
+  <script src="script.js"></script>
 </body>
 </html>
