@@ -56,7 +56,13 @@ async function sendEmail({ to, subject, text, html }) {
             html
         });
 
-        console.log("✅ EMAIL SENT:", info.messageId);
+        console.log("✅ EMAIL SENT:", {
+            messageId: info.messageId,
+            accepted: info.accepted,
+            rejected: info.rejected,
+            response: info.response
+        });
+
         return info;
 
     } catch (err) {
@@ -536,9 +542,23 @@ app.post("/auth/forgot-password", async (req, res) => {
         try {
             await sendEmail({
                 to: user.email,
-                subject: "Reset your password",
+                subject: "The Shore Shack Password Reset",
                 text: `Reset your password: ${resetUrl}`,
-                html: `<p>Click below to reset your password:</p><p><a href="${resetUrl}">Reset Password</a></p>`
+                html: `
+  <div style="font-family: Arial, sans-serif; line-height: 1.5;">
+    <h2>The Shore Shack Password Reset</h2>
+    <p>You requested a password reset for your account.</p>
+    <p>
+      <a href="${resetUrl}" style="display:inline-block;padding:12px 18px;background:#111;color:#fff;text-decoration:none;border-radius:6px;">
+        Reset Your Password
+      </a>
+    </p>
+    <p>If the button does not work, copy and paste this link into your browser:</p>
+    <p>${resetUrl}</p>
+    <p>This link expires in 1 hour.</p>
+  </div>
+`,
+                text: `The Shore Shack Password Reset\n\nUse this link to reset your password:\n${resetUrl}\n\nThis link expires in 1 hour.`,
             });
 
             console.log("✅ Reset email sent to:", user.email);
