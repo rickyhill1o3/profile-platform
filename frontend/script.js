@@ -1022,7 +1022,7 @@ async function loadExportAccounts() {
 }
 
 async function updateExportCount() {
-    const banner = document.getElementById("exportCountBanner");
+    const banner = document.getElementById("exportCountInfo");
     const userFilter = document.getElementById("exportUserFilter");
     const groupFilter = document.getElementById("exportGroupFilter");
     if (!banner) return;
@@ -1074,7 +1074,7 @@ function clearExportFilters() {
 async function getExportCountAndParams() {
     const userFilter = document.getElementById("exportUserFilter");
     const groupFilter = document.getElementById("exportGroupFilter");
-    const banner = document.getElementById("exportCountBanner");
+    const banner = document.getElementById("exportCountInfo");
 
     const params = new URLSearchParams();
     if (userFilter && userFilter.value) {
@@ -1167,11 +1167,12 @@ async function exportAccountsTxt() {
 
 /* ================= CHANGE PASSWORD ================= */
 
-const passwordForm = document.getElementById("passwordForm");
+const passwordForm = document.getElementById("changePasswordForm");
 if (passwordForm) {
     passwordForm.onsubmit = async (e) => {
         e.preventDefault();
 
+        const messageEl = document.getElementById("error");
         const res = await fetch(API + "/change-password", {
             method: "POST",
             headers: {
@@ -1185,8 +1186,75 @@ if (passwordForm) {
         });
 
         const data = await res.json();
-        msg.innerText = data.error || "Password updated";
-        msg.className = data.error ? "auth-error" : "success-text";
+        if (messageEl) {
+            messageEl.innerText = data.error || "Password updated";
+            messageEl.className = data.error ? "error-text" : "success-text";
+        }
+    };
+}
+
+const forgotPasswordForm = document.getElementById("forgotPasswordForm");
+if (forgotPasswordForm) {
+    forgotPasswordForm.onsubmit = async (e) => {
+        e.preventDefault();
+
+        const messageEl = document.getElementById("error");
+        try {
+            const res = await fetch(API + "/auth/forgot-password", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ email: email.value.trim() })
+            });
+            const data = await res.json();
+            if (messageEl) {
+                messageEl.innerText = data.error || data.message || "If that email exists, reset instructions have been sent.";
+                messageEl.className = data.error ? "error-text" : "success-text";
+            }
+        } catch {
+            if (messageEl) {
+                messageEl.innerText = "Could not connect to the server.";
+                messageEl.className = "error-text";
+            }
+        }
+    };
+}
+
+const resetPasswordForm = document.getElementById("resetPasswordForm");
+if (resetPasswordForm) {
+    resetPasswordForm.onsubmit = async (e) => {
+        e.preventDefault();
+
+        const messageEl = document.getElementById("error");
+        const resetToken = new URLSearchParams(window.location.search).get("token") || "";
+
+        if (!resetToken) {
+            if (messageEl) {
+                messageEl.innerText = "Reset link is missing or invalid.";
+                messageEl.className = "error-text";
+            }
+            return;
+        }
+
+        try {
+            const res = await fetch(API + "/auth/reset-password", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ token: resetToken, newPassword: newPassword.value })
+            });
+            const data = await res.json();
+            if (messageEl) {
+                messageEl.innerText = data.error || "Password reset successfully. Redirecting to login...";
+                messageEl.className = data.error ? "error-text" : "success-text";
+            }
+            if (!data.error) {
+                setTimeout(() => { window.location = "login.html"; }, 1200);
+            }
+        } catch {
+            if (messageEl) {
+                messageEl.innerText = "Could not connect to the server.";
+                messageEl.className = "error-text";
+            }
+        }
     };
 }
 
