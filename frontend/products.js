@@ -307,8 +307,19 @@
         const summary = document.getElementById("adminSelectedUserSummary");
 
         if (!section || !userSelect || !detailBody) return;
-        const user = currentUser();
-        if (!isAdminRole(user?.role)) { section.style.display = "none"; return; }
+
+        let user = currentUser();
+        if (!isAdminRole(user?.role)) {
+            try {
+                user = await refreshCurrentUserFromServer();
+            } catch (_) { }
+        }
+
+        if (!isAdminRole(user?.role)) {
+            section.style.display = "none";
+            return;
+        }
+
         section.style.display = "block";
 
         const data = await fetchJSON(API + "/admin/product-preferences", { headers: authHeaders() });
