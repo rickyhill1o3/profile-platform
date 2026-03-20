@@ -317,6 +317,7 @@
 
         items.forEach((row) => {
             if (!row.user_id) return;
+
             if (!usersMap.has(row.user_id)) {
                 usersMap.set(row.user_id, {
                     user_id: row.user_id,
@@ -324,19 +325,17 @@
                     selection_count: 0
                 });
             }
+
             if (row.selected) {
                 usersMap.get(row.user_id).selection_count += 1;
             }
         });
 
-        const users = [...usersMap.values()]
-            .filter((entry) => entry.selection_count > 0)
-            .sort((a, b) => (a.user_email || "").localeCompare(b.user_email || ""));
+        const users = [...usersMap.values()].sort((a, b) => (a.user_email || "").localeCompare(b.user_email || ""));
         userSelect.innerHTML = `<option value="">Select a user</option>` + users.map((entry) => `<option value="${escapeHTML(entry.user_id)}">${escapeHTML(entry.user_email)} (${entry.selection_count})</option>`).join("");
 
         if (!users.length) {
             if (message) message.textContent = "No users have selected products yet.";
-            if (summary) summary.textContent = "";
             detailBody.innerHTML = `<tr><td colspan="5">No saved product selections yet.</td></tr>`;
             return;
         }
@@ -364,10 +363,10 @@
 
             detailBody.innerHTML = rows.map((row) => `
         <tr>
-          <td>${escapeHTML(siteLabel(row.product.site))}</td>
+          <td>${escapeHTML(row.product.site)}</td>
           <td>${escapeHTML(row.product.product_name || row.product.sku)}</td>
           <td>${escapeHTML(row.product.sku)}</td>
-          <td>${escapeHTML(row.run_mode || "current")}</td>
+          <td>${escapeHTML(row.run_mode)}</td>
           <td>${formatPrice(row.max_price)}</td>
         </tr>
       `).join("");

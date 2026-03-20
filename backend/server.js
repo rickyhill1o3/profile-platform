@@ -15,29 +15,6 @@ app.use(express.json());
 
 const phoneRegex = /^[0-9]{10}$/;
 const SUPER_ADMIN_EMAIL = "theshoreshacktcg@gmail.com";
-const APP_BASE_URL = process.env.APP_BASE_URL || "";
-
-function getBaseUrl(req) {
-    if (APP_BASE_URL) return APP_BASE_URL.replace(/\/$/, "");
-    return `${req.protocol}://${req.get("host")}`;
-}
-
-async function sendEmail({ to, subject, text, html }) {
-    const host = process.env.SMTP_HOST;
-    const port = Number(process.env.SMTP_PORT || 587);
-    const user = process.env.SMTP_USER;
-    const pass = process.env.SMTP_PASS;
-    const from = process.env.SMTP_FROM || process.env.EMAIL_FROM || user;
-    const secure = String(process.env.SMTP_SECURE || "").toLowerCase() === "true" || port === 465;
-
-    if (!host || !port || !user || !pass || !from) {
-        throw new Error("Email is not configured on the server.");
-    }
-
-    const nodemailer = require("nodemailer");
-    const transporter = nodemailer.createTransport({ host, port, secure, auth: { user, pass } });
-    await transporter.sendMail({ from, to, subject, text, html });
-}
 
 /* ================= AUTH HELPERS ================= */
 
@@ -391,16 +368,6 @@ app.post("/auth/signup", async (req, res) => {
         })
         .eq("id", invite.id);
 
-    const loginUrl = `${getBaseUrl(req)}/login.html`;
-    sendEmail({
-        to: user.email,
-        subject: "Welcome to Profile Platform",
-        text: `Thanks for signing up. You can log in here: ${loginUrl}`,
-        html: `<p>Thank you for signing up for Profile Platform.</p><p><a href="${loginUrl}">Log in to your account</a></p>`
-    }).catch((err) => {
-        console.error("Welcome email failed:", err.message);
-    });
-
     res.json({ success: true });
 });
 
@@ -460,79 +427,6 @@ app.get("/auth/me", auth, async (req, res) => {
         });
     } catch (err) {
         res.status(500).json({ error: err.message });
-    }
-});
-
-app.post("/auth/forgot-password", async (req, res) => {
-    try {
-        const email = String(req.body?.email || "").trim().toLowerCase();
-        if (!email) {
-            return res.status(400).json({ error: "Email is required" });
-        }
-
-        if (!process.env.SMTP_HOST || !process.env.SMTP_USER || !process.env.SMTP_PASS) {
-            return res.status(500).json({ error: "Email is not configured on the server." });
-        }
-
-        const { data: user } = await supabase
-            .from("users")
-            .select("id, email")
-            .eq("email", email)
-            .maybeSingle();
-
-        if (!user) {
-            return res.json({ success: true, message: "If that email exists, reset instructions have been sent." });
-        }
-
-        const resetToken = jwt.sign(
-            { user_id: user.id, purpose: "password_reset" },
-            process.env.JWT_SECRET,
-            { expiresIn: "1h" }
-        );
-
-        const resetUrl = `${getBaseUrl(req)}/reset-password.html?token=${encodeURIComponent(resetToken)}`;
-
-        await sendEmail({
-            to: user.email,
-            subject: "Reset your password",
-            text: `Use this link to reset your password: ${resetUrl}`,
-            html: `<p>You requested a password reset.</p><p><a href="${resetUrl}">Reset your password</a></p><p>This link expires in 1 hour.</p>`
-        });
-
-        res.json({ success: true, message: "If that email exists, reset instructions have been sent." });
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
-});
-
-app.post("/auth/reset-password", async (req, res) => {
-    try {
-        const resetToken = String(req.body?.token || "").trim();
-        const newPassword = String(req.body?.newPassword || "");
-
-        if (!resetToken || !newPassword) {
-            return res.status(400).json({ error: "Token and new password are required" });
-        }
-
-        const decoded = jwt.verify(resetToken, process.env.JWT_SECRET);
-        if (decoded?.purpose !== "password_reset" || !decoded?.user_id) {
-            return res.status(400).json({ error: "Invalid reset token" });
-        }
-
-        const hash = await bcrypt.hash(newPassword, 10);
-        const { error } = await supabase
-            .from("users")
-            .update({ password_hash: hash })
-            .eq("id", decoded.user_id);
-
-        if (error) {
-            return res.status(500).json({ error: error.message });
-        }
-
-        res.json({ success: true });
-    } catch (err) {
-        const message = err.name === "TokenExpiredError" ? "Reset link expired" : "Invalid reset token";
-        res.status(400).json({ error: message });
     }
 });
 

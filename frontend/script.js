@@ -1167,7 +1167,7 @@ async function exportAccountsTxt() {
 
 /* ================= CHANGE PASSWORD ================= */
 
-const passwordForm = document.getElementById("changePasswordForm");
+const passwordForm = document.getElementById("passwordForm");
 if (passwordForm) {
     passwordForm.onsubmit = async (e) => {
         e.preventDefault();
@@ -1185,11 +1185,8 @@ if (passwordForm) {
         });
 
         const data = await res.json();
-        const msg = document.getElementById("error");
-        if (msg) {
-            msg.innerText = data.error || "Password updated";
-            msg.className = data.error ? "error-text" : "success-text";
-        }
+        msg.innerText = data.error || "Password updated";
+        msg.className = data.error ? "auth-error" : "success-text";
     };
 }
 
