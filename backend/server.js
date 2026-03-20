@@ -22,7 +22,7 @@ function getBaseUrl(req) {
     return `${req.protocol}://${req.get("host")}`;
 }
 
-import nodemailer from "nodemailer";
+const nodemailer = require("nodemailer");
 
 async function sendEmail({ to, subject, text, html }) {
     console.log("📧 Preparing to send email...");
