@@ -22,21 +22,52 @@ function getBaseUrl(req) {
     return `${req.protocol}://${req.get("host")}`;
 }
 
-async function sendEmail({ to, subject, text, html }) {
-    const host = process.env.SMTP_HOST;
-    const port = Number(process.env.SMTP_PORT || 587);
-    const user = process.env.SMTP_USER;
-    const pass = process.env.SMTP_PASS;
-    const from = process.env.SMTP_FROM || process.env.EMAIL_FROM || user;
-    const secure = String(process.env.SMTP_SECURE || "").toLowerCase() === "true" || port === 465;
+import nodemailer from "nodemailer";
 
-    if (!host || !port || !user || !pass || !from) {
-        throw new Error("Email is not configured on the server.");
+async function sendEmail({ to, subject, text, html }) {
+    console.log("📧 Preparing to send email...");
+    console.log("SMTP CONFIG:", {
+        host: process.env.SMTP_HOST,
+        port: process.env.SMTP_PORT,
+        user: process.env.SMTP_USER,
+        passExists: !!process.env.SMTP_PASS
+    });
+
+    if (!process.env.SMTP_HOST || !process.env.SMTP_USER || !process.env.SMTP_PASS) {
+        throw new Error("SMTP environment variables missing");
     }
 
-    const nodemailer = require("nodemailer");
-    const transporter = nodemailer.createTransport({ host, port, secure, auth: { user, pass } });
-    await transporter.sendMail({ from, to, subject, text, html });
+    const transporter = nodemailer.createTransport({
+        host: process.env.SMTP_HOST,
+        port: Number(process.env.SMTP_PORT),
+        secure: Number(process.env.SMTP_PORT) === 465, // auto true for 465
+        auth: {
+            user: process.env.SMTP_USER,
+            pass: process.env.SMTP_PASS
+        }
+    });
+
+    try {
+        const info = await transporter.sendMail({
+            from: process.env.SMTP_FROM,
+            to,
+            subject,
+            text,
+            html
+        });
+
+        console.log("✅ EMAIL SENT:", info.messageId);
+        return info;
+
+    } catch (err) {
+        console.error("❌ EMAIL FAILED:");
+        console.error("message:", err.message);
+        console.error("code:", err.code);
+        console.error("response:", err.response);
+        console.error("command:", err.command);
+
+        throw err;
+    }
 }
 
 /* ================= AUTH HELPERS ================= */
@@ -465,43 +496,92 @@ app.get("/auth/me", auth, async (req, res) => {
 
 app.post("/auth/forgot-password", async (req, res) => {
     try {
-        const email = String(req.body?.email || "").trim().toLowerCase();
+        const { email } = req.body;
+        console.log("🔐 Forgot password request for:", email);
+
         if (!email) {
             return res.status(400).json({ error: "Email is required" });
         }
 
-        if (!process.env.SMTP_HOST || !process.env.SMTP_USER || !process.env.SMTP_PASS) {
-            return res.status(500).json({ error: "Email is not configured on the server." });
-        }
-
-        const { data: user } = await supabase
+        const { data: user, error } = await supabase
             .from("users")
-            .select("id, email")
+            .select("*")
             .eq("email", email)
             .maybeSingle();
 
-        if (!user) {
-            return res.json({ success: true, message: "If that email exists, reset instructions have been sent." });
+        if (error) {
+            console.error("❌ DB ERROR:", error);
         }
 
-        const resetToken = jwt.sign(
-            { user_id: user.id, purpose: "password_reset" },
+        console.log("User found:", !!user);
+
+        // Always return same message (security)
+        const successMessage = {
+            message: "If this email exists, a reset link has been sent."
+        };
+
+        if (!user) {
+            return res.json(successMessage);
+        }
+
+        const token = jwt.sign(
+            { user_id: user.id, type: "reset" },
             process.env.JWT_SECRET,
             { expiresIn: "1h" }
         );
 
-        const resetUrl = `${getBaseUrl(req)}/reset-password.html?token=${encodeURIComponent(resetToken)}`;
+        const resetUrl = `${process.env.APP_BASE_URL}/reset-password.html?token=${token}`;
+        console.log("🔗 Reset URL:", resetUrl);
+
+        try {
+            await sendEmail({
+                to: user.email,
+                subject: "Reset your password",
+                text: `Reset your password: ${resetUrl}`,
+                html: `<p>Click below to reset your password:</p><p><a href="${resetUrl}">Reset Password</a></p>`
+            });
+
+            console.log("✅ Reset email sent to:", user.email);
+
+        } catch (mailErr) {
+            console.error("❌ Reset email failed:", mailErr);
+            return res.status(500).json({
+                error: "Email failed",
+                details: mailErr.message,
+                code: mailErr.code
+            });
+        }
+
+        res.json(successMessage);
+
+    } catch (err) {
+        console.error("❌ Forgot password crash:", err);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.get("/debug/email-test", async (req, res) => {
+    try {
+        console.log("🧪 Running email test...");
 
         await sendEmail({
-            to: user.email,
-            subject: "Reset your password",
-            text: `Use this link to reset your password: ${resetUrl}`,
-            html: `<p>You requested a password reset.</p><p><a href="${resetUrl}">Reset your password</a></p><p>This link expires in 1 hour.</p>`
+            to: "rickyhill1o3@gmail.com",
+            subject: "SMTP TEST",
+            text: "If you see this, SMTP works",
+            html: "<h2>SMTP TEST SUCCESS</h2>"
         });
 
-        res.json({ success: true, message: "If that email exists, reset instructions have been sent." });
+        res.json({ success: true });
+
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        console.error("❌ EMAIL TEST FAILED:", err);
+
+        res.status(500).json({
+            error: err.message,
+            code: err.code,
+            response: err.response,
+            command: err.command
+        });
     }
 });
 
