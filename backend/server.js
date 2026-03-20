@@ -562,25 +562,23 @@ app.post("/auth/forgot-password", async (req, res) => {
 
 app.get("/debug/email-test", async (req, res) => {
     try {
-        console.log("🧪 Running email test...");
-
         await sendEmail({
             to: "rickyhill1o3@gmail.com",
             subject: "SMTP TEST",
-            text: "If you see this, SMTP works",
+            text: "If you see this, SMTP works.",
             html: "<h2>SMTP TEST SUCCESS</h2>"
         });
 
         res.json({ success: true });
 
     } catch (err) {
-        console.error("❌ EMAIL TEST FAILED:", err);
+        console.error("EMAIL TEST FAILED:", err);
 
         res.status(500).json({
             error: err.message,
-            code: err.code,
-            response: err.response,
-            command: err.command
+            code: err.code || null,
+            response: err.response || null,
+            command: err.command || null
         });
     }
 });
