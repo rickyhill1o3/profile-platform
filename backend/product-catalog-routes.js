@@ -1,27 +1,7 @@
-const SUPPORTED_SITES = new Set(["amazon", "target", "walmart", "general"]);
-const VIRTUAL_SITE_DEFAULTS = {
-  walmart: {
-    catalogName: "Walmart next drop",
-    sku: "WALMART-NEXT-DROP",
-    product_name: "Walmart Next Drop",
-    brand: "Walmart",
-    release_mode_default: "next",
-    metadata: { virtual: true, release_type: "next_drop" }
-  },
-  general: {
-    catalogName: "Supreme next drop",
-    sku: "SUPREME-NEXT-DROP",
-    product_name: "Supreme Next Drop",
-    brand: "Supreme",
-    release_mode_default: "next",
-    metadata: { virtual: true, release_type: "next_drop" }
-  }
-};
-
 function normalizeSite(value) {
   const site = String(value || "").trim().toLowerCase();
-  if (!SUPPORTED_SITES.has(site)) {
-    throw new Error("Invalid site. Expected amazon, target, walmart, or general.");
+  if (site !== "amazon" && site !== "target") {
+    throw new Error("Invalid site. Expected amazon or target.");
   }
   return site;
 }
@@ -63,16 +43,11 @@ async function getScopedUserIds(supabase, currentUser) {
     throw new Error(error.message);
   }
 
-  const ids = (data || []).map((row) => row.id);
-  return [...new Set([currentUser.id, ...ids])];
+  return (data || []).map((row) => row.id);
 }
 
 async function canAdminAccessUser(supabase, currentUser, targetUserId) {
   if (currentUser.role === "super_admin") {
-    return true;
-  }
-
-  if (currentUser.id === targetUserId) {
     return true;
   }
 
@@ -89,78 +64,6 @@ async function canAdminAccessUser(supabase, currentUser, targetUserId) {
   return data.owner_admin_id === currentUser.id;
 }
 
-async function ensureVirtualCatalogForSite(supabase, site) {
-  const config = VIRTUAL_SITE_DEFAULTS[site];
-  if (!config) {
-    return null;
-  }
-
-  let { data: activeCatalog, error: catalogError } = await supabase
-    .from("product_catalogs")
-    .select("id, site, name, export_date")
-    .eq("site", site)
-    .eq("is_active", true)
-    .order("created_at", { ascending: false })
-    .limit(1)
-    .maybeSingle();
-
-  if (catalogError) {
-    throw new Error(catalogError.message);
-  }
-
-  if (!activeCatalog?.id) {
-    const { data: createdCatalog, error: createCatalogError } = await supabase
-      .from("product_catalogs")
-      .insert({
-        site,
-        name: config.catalogName,
-        is_active: true,
-        export_date: new Date().toISOString()
-      })
-      .select("id, site, name, export_date")
-      .single();
-
-    if (createCatalogError) {
-      throw new Error(createCatalogError.message);
-    }
-
-    activeCatalog = createdCatalog;
-  }
-
-  const { data: existingProducts, error: existingProductsError } = await supabase
-    .from("catalog_products")
-    .select("id")
-    .eq("catalog_id", activeCatalog.id)
-    .eq("site", site)
-    .limit(1);
-
-  if (existingProductsError) {
-    throw new Error(existingProductsError.message);
-  }
-
-  if (!Array.isArray(existingProducts) || existingProducts.length === 0) {
-    const { error: createProductError } = await supabase
-      .from("catalog_products")
-      .insert({
-        catalog_id: activeCatalog.id,
-        site,
-        sku: config.sku,
-        product_name: config.product_name,
-        brand: config.brand,
-        default_max_price: null,
-        release_mode_default: config.release_mode_default,
-        is_enabled: true,
-        metadata: config.metadata
-      });
-
-    if (createProductError) {
-      throw new Error(createProductError.message);
-    }
-  }
-
-  return activeCatalog;
-}
-
 module.exports = function registerProductCatalogRoutes({
   app,
   supabase,
@@ -175,10 +78,6 @@ module.exports = function registerProductCatalogRoutes({
       const site = normalizeSite(req.query.site);
       const search = sanitizeLike(req.query.search);
       const selectedOnly = req.query.selected_only === "1";
-
-      if (VIRTUAL_SITE_DEFAULTS[site]) {
-        await ensureVirtualCatalogForSite(supabase, site);
-      }
 
       const { data: activeCatalog, error: catalogError } = await supabase
         .from("product_catalogs")
@@ -349,7 +248,6 @@ module.exports = function registerProductCatalogRoutes({
           users!inner (
             id,
             email,
-            role,
             owner_admin_id
           ),
           catalog_products!inner (
@@ -386,7 +284,6 @@ module.exports = function registerProductCatalogRoutes({
         preference_id: row.id,
         user_id: row.user_id,
         user_email: row.users?.email || "",
-        user_role: row.users?.role || "user",
         owner_admin_id: row.users?.owner_admin_id || null,
         selected: !!row.selected,
         site: row.catalog_products?.site || "",

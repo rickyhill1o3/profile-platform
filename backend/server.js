@@ -28,19 +28,14 @@ async function sendEmail({ to, subject, text, html }) {
     const user = process.env.SMTP_USER;
     const pass = process.env.SMTP_PASS;
     const from = process.env.SMTP_FROM || process.env.EMAIL_FROM || user;
+    const secure = String(process.env.SMTP_SECURE || "").toLowerCase() === "true" || port === 465;
 
     if (!host || !port || !user || !pass || !from) {
         throw new Error("Email is not configured on the server.");
     }
 
     const nodemailer = require("nodemailer");
-    const transporter = nodemailer.createTransport({
-        host,
-        port,
-        secure: port === 465,
-        auth: { user, pass }
-    });
-
+    const transporter = nodemailer.createTransport({ host, port, secure, auth: { user, pass } });
     await transporter.sendMail({ from, to, subject, text, html });
 }
 
@@ -400,7 +395,7 @@ app.post("/auth/signup", async (req, res) => {
     sendEmail({
         to: user.email,
         subject: "Welcome to Profile Platform",
-        text: `Thanks for signing up. You can log in here: ${loginUrl}` ,
+        text: `Thanks for signing up. You can log in here: ${loginUrl}`,
         html: `<p>Thank you for signing up for Profile Platform.</p><p><a href="${loginUrl}">Log in to your account</a></p>`
     }).catch((err) => {
         console.error("Welcome email failed:", err.message);
