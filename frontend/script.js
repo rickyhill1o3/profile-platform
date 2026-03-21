@@ -1165,92 +1165,9 @@ async function exportAccountsTxt() {
     }
 }
 
-
-/* ================= FORGOT / RESET PASSWORD ================= */
-
-const forgotPasswordForm = document.getElementById("forgotPasswordForm");
-if (forgotPasswordForm) {
-    forgotPasswordForm.onsubmit = async (e) => {
-        e.preventDefault();
-        const msg = document.getElementById("error");
-        if (msg) {
-            msg.innerText = "";
-            msg.className = "error-text";
-        }
-
-        try {
-            const res = await fetch(API + "/auth/forgot-password", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ email: email.value })
-            });
-
-            const data = await res.json();
-            if (msg) {
-                msg.innerText = data.error || data.message || "If that email exists, reset instructions have been sent.";
-                msg.className = data.error ? "error-text" : "success-text";
-            }
-        } catch {
-            if (msg) {
-                msg.innerText = "Could not connect to the server.";
-                msg.className = "error-text";
-            }
-        }
-    };
-}
-
-const resetPasswordForm = document.getElementById("resetPasswordForm");
-if (resetPasswordForm) {
-    resetPasswordForm.onsubmit = async (e) => {
-        e.preventDefault();
-        const msg = document.getElementById("error");
-        if (msg) {
-            msg.innerText = "";
-            msg.className = "error-text";
-        }
-
-        try {
-            const params = new URLSearchParams(window.location.search);
-            const tokenValue = params.get("token") || "";
-            const res = await fetch(API + "/auth/reset-password", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    token: tokenValue,
-                    newPassword: newPassword.value
-                })
-            });
-
-            const data = await res.json();
-            if (data.error) {
-                if (msg) {
-                    msg.innerText = data.error;
-                    msg.className = "error-text";
-                }
-                return;
-            }
-
-            if (msg) {
-                msg.innerText = "Password reset. You can now log in.";
-                msg.className = "success-text";
-            }
-
-            setTimeout(() => {
-                window.location.href = "login.html";
-            }, 1200);
-        } catch {
-            if (msg) {
-                msg.innerText = "Could not connect to the server.";
-                msg.className = "error-text";
-            }
-        }
-    };
-}
-
-
 /* ================= CHANGE PASSWORD ================= */
 
-const passwordForm = document.getElementById("changePasswordForm");
+const passwordForm = document.getElementById("passwordForm");
 if (passwordForm) {
     passwordForm.onsubmit = async (e) => {
         e.preventDefault();
@@ -1268,20 +1185,42 @@ if (passwordForm) {
         });
 
         const data = await res.json();
-        const msg = document.getElementById("error");
-        if (msg) {
-            msg.innerText = data.error || "Password updated";
-            msg.className = data.error ? "error-text" : "success-text";
-        }
+        msg.innerText = data.error || "Password updated";
+        msg.className = data.error ? "auth-error" : "success-text";
     };
 }
 
 /* ================= PAGE LOAD ================= */
 
 document.addEventListener("DOMContentLoaded", async () => {
-    try {
-        await refreshCurrentUserFromServer();
-    } catch (_) {}
+    const currentPath = (window.location.pathname.split("/").pop() || "index.html").toLowerCase();
+    const publicPages = new Set([
+        "index.html",
+        "guide.html",
+        "login.html",
+        "signup.html",
+        "forgot-password.html",
+        "reset-password.html"
+    ]);
+
+    const savedToken = token();
+    let refreshedUser = null;
+
+    if (savedToken) {
+        try {
+            refreshedUser = await refreshCurrentUserFromServer();
+        } catch (_) {}
+    }
+
+    if (!publicPages.has(currentPath) && !savedToken) {
+        window.location = "login.html";
+        return;
+    }
+
+    if ((currentPath === "login.html" || currentPath === "signup.html") && savedToken && refreshedUser) {
+        window.location = "dashboard.html";
+        return;
+    }
 
     if (document.getElementById("dashboard")) {
         await loadProfiles();
