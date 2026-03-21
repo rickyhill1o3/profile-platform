@@ -24,6 +24,10 @@ function getBaseUrl(req) {
 
 const nodemailer = require("nodemailer");
 
+function normalizeEmail(email) {
+    return String(email || "").trim().toLowerCase();
+}
+
 async function sendEmail({ to, subject, text, html }) {
     console.log("📧 Preparing to send email...");
     console.log("SMTP CONFIG:", {
@@ -385,7 +389,12 @@ async function upsertProfileRelations(profileId, payload) {
 /* ================= AUTH ROUTES ================= */
 
 app.post("/auth/signup", async (req, res) => {
-    const { email, password, invite_code } = req.body;
+    const email = normalizeEmail(req.body?.email);
+    const { password, invite_code } = req.body;
+
+    if (!email) {
+        return res.status(400).json({ error: "Email is required" });
+    }
 
     const { data: invite, error: inviteError } = await supabase
         .from("invite_codes")
@@ -442,13 +451,14 @@ app.post("/auth/signup", async (req, res) => {
 });
 
 app.post("/auth/login", async (req, res) => {
-    const { email, password } = req.body;
+    const email = normalizeEmail(req.body?.email);
+    const { password } = req.body;
 
     const { data: user } = await supabase
         .from("users")
         .select("*")
-        .eq("email", email)
-        .single();
+        .ilike("email", email)
+        .maybeSingle();
 
     if (!user) {
         return res.status(401).json({ error: "Wrong password" });
@@ -509,10 +519,10 @@ app.post("/auth/forgot-password", async (req, res) => {
             return res.status(400).json({ error: "Email is required" });
         }
 
-        const { data: user, error } = await supabase
+        const { data: user } = await supabase
             .from("users")
-            .select("*")
-            .eq("email", email)
+            .select("id, email")
+            .ilike("email", email)
             .maybeSingle();
 
         if (error) {
@@ -1636,7 +1646,7 @@ async function ensureSuperAdmin() {
     const { data: user } = await supabase
         .from("users")
         .select("*")
-        .eq("email", SUPER_ADMIN_EMAIL)
+        .ilike("email", normalizeEmail(SUPER_ADMIN_EMAIL))
         .maybeSingle();
 
     if (!user) {
@@ -1649,7 +1659,7 @@ async function ensureSuperAdmin() {
         const { error } = await supabase
             .from("users")
             .insert({
-                email: SUPER_ADMIN_EMAIL,
+                email: normalizeEmail(SUPER_ADMIN_EMAIL),
                 password_hash: hash,
                 role: "super_admin",
                 revoked: false,
@@ -1671,7 +1681,7 @@ async function ensureSuperAdmin() {
             revoked: false,
             owner_admin_id: null
         })
-        .eq("email", SUPER_ADMIN_EMAIL);
+        .ilike("email", normalizeEmail(SUPER_ADMIN_EMAIL))
 
     if (error) {
         throw new Error(error.message);
