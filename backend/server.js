@@ -512,26 +512,28 @@ app.get("/auth/me", auth, async (req, res) => {
 
 app.post("/auth/forgot-password", async (req, res) => {
     try {
-        const { email } = req.body;
+        const email = String(req.body?.email || "");
+        const normalizedEmail = normalizeEmail(email);
+
         console.log("🔐 Forgot password request for:", email);
 
-        if (!email) {
+        if (!normalizedEmail) {
             return res.status(400).json({ error: "Email is required" });
         }
 
-        const { data: user } = await supabase
+        const { data: user, error } = await supabase
             .from("users")
             .select("id, email")
-            .ilike("email", email)
+            .ilike("email", normalizedEmail)
             .maybeSingle();
 
         if (error) {
             console.error("❌ DB ERROR:", error);
+            return res.status(500).json({ error: error.message });
         }
 
         console.log("User found:", !!user);
 
-        // Always return same message (security)
         const successMessage = {
             message: "If this email exists, a reset link has been sent."
         };
@@ -541,7 +543,7 @@ app.post("/auth/forgot-password", async (req, res) => {
         }
 
         const token = jwt.sign(
-            { user_id: user.id, type: "reset" },
+            { user_id: user.id, purpose: "password_reset" },
             process.env.JWT_SECRET,
             { expiresIn: "1h" }
         );
@@ -553,7 +555,6 @@ app.post("/auth/forgot-password", async (req, res) => {
             await sendEmail({
                 to: user.email,
                 subject: "The Shore Shack Password Reset",
-                text: `Reset your password: ${resetUrl}`,
                 html: `
   <div style="font-family: Arial, sans-serif; line-height: 1.5;">
     <h2>The Shore Shack Password Reset</h2>
@@ -568,11 +569,10 @@ app.post("/auth/forgot-password", async (req, res) => {
     <p>This link expires in 1 hour.</p>
   </div>
 `,
-                text: `The Shore Shack Password Reset\n\nUse this link to reset your password:\n${resetUrl}\n\nThis link expires in 1 hour.`,
+                text: `The Shore Shack Password Reset\n\nUse this link to reset your password:\n${resetUrl}\n\nThis link expires in 1 hour.`
             });
 
             console.log("✅ Reset email sent to:", user.email);
-
         } catch (mailErr) {
             console.error("❌ Reset email failed:", mailErr);
             return res.status(500).json({
@@ -583,7 +583,6 @@ app.post("/auth/forgot-password", async (req, res) => {
         }
 
         res.json(successMessage);
-
     } catch (err) {
         console.error("❌ Forgot password crash:", err);
         res.status(500).json({ error: err.message });
