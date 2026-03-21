@@ -440,9 +440,9 @@ app.post("/auth/signup", async (req, res) => {
     const loginUrl = `${getBaseUrl(req)}/login.html`;
     sendEmail({
         to: user.email,
-        subject: "Welcome to Profile Platform",
+        subject: "Welcome to The Shore Shack Profile Builder",
         text: `Thanks for signing up. You can log in here: ${loginUrl}`,
-        html: `<p>Thank you for signing up for Profile Platform.</p><p><a href="${loginUrl}">Log in to your account</a></p>`
+        html: `<p>Thank you for signing up for The Shore Shack's Profile Platform.</p><p><a href="${loginUrl}">Log in to your account</a></p>`
     }).catch((err) => {
         console.error("Welcome email failed:", err.message);
     });
