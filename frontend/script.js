@@ -8,7 +8,20 @@ let usersPage = 1;
 const PAGE_SIZE = 10;
 
 
-const PUBLIC_PATHS = new Set(["/", "/index.html", "/guide.html", "/login.html", "/signup.html", "/forgot-password.html", "/reset-password.html"]);
+const PUBLIC_PATHS = new Set([
+    "/",
+    "/index.html",
+    "/guide",
+    "/guide.html",
+    "/login",
+    "/login.html",
+    "/signup",
+    "/signup.html",
+    "/forgot-password",
+    "/forgot-password.html",
+    "/reset-password",
+    "/reset-password.html"
+]);
 
 function currentPathname() {
     return window.location.pathname || "/";
@@ -16,7 +29,10 @@ function currentPathname() {
 
 function requireAuthForPrivatePages() {
     const path = currentPathname();
-    const isPublic = PUBLIC_PATHS.has(path) || path.endsWith("guide.html") || path.endsWith("index.html");
+    const isPublic =
+        PUBLIC_PATHS.has(path) ||
+        path.includes("guide") ||
+        path.includes("index");
     if (!isPublic && !token()) {
         window.location.replace("login.html");
         return false;
@@ -232,7 +248,7 @@ async function loadProfiles() {
     try {
         const refreshedUser = await refreshCurrentUserFromServer();
         user = refreshedUser || user;
-    } catch (_) {}
+    } catch (_) { }
 
     if (adminButton) {
         adminButton.style.display = isAdminRole(user?.role) ? "inline-flex" : "none";
@@ -1319,7 +1335,7 @@ async function initSkuRequestForm() {
             message.textContent = data.message || 'Request submitted.';
             skuInput.value = '';
             if (window.location.pathname.endsWith('dashboard.html') && typeof loadProducts === 'function') {
-                try { await loadProducts(); } catch (_) {}
+                try { await loadProducts(); } catch (_) { }
             }
         } catch (err) {
             message.textContent = err.message;
@@ -1480,8 +1496,8 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (!requireAuthForPrivatePages()) return;
     try {
         if (token()) { await refreshCurrentUserFromServer(); }
-    } catch (_) {}
-    try { await loadPublicCountdowns(); } catch (_) {}
+    } catch (_) { }
+    try { await loadPublicCountdowns(); } catch (_) { }
 
     if (document.getElementById("dashboard")) {
         await loadProfiles();
@@ -1493,15 +1509,15 @@ document.addEventListener("DOMContentLoaded", async () => {
 
     if (document.getElementById("inviteTableBody")) {
         setupInviteControls();
-        try { await loadOwnerAdminFilter(); } catch (_) {}
-        try { await loadExportAccounts(); } catch (_) {}
-        try { await loadInvites(1); } catch (_) {}
-        try { await loadUsers(1); } catch (_) {}
-        try { updateExportCount(); } catch (_) {}
-        try { await initCountdownManager(); } catch (_) {}
-        try { await initCatalogTools(); } catch (_) {}
+        try { await loadOwnerAdminFilter(); } catch (_) { }
+        try { await loadExportAccounts(); } catch (_) { }
+        try { await loadInvites(1); } catch (_) { }
+        try { await loadUsers(1); } catch (_) { }
+        try { updateExportCount(); } catch (_) { }
+        try { await initCountdownManager(); } catch (_) { }
+        try { await initCatalogTools(); } catch (_) { }
     }
-    try { await initSkuRequestForm(); } catch (_) {}
+    try { await initSkuRequestForm(); } catch (_) { }
 });
 
 /* ===== 2026-03-22 overrides: public guide/home, ET countdowns, countdown product linking ===== */
