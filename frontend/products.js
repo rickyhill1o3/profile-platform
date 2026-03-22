@@ -41,6 +41,32 @@
         return "$" + number.toFixed(2);
     }
 
+
+    const NEXT_RELEASE_PRODUCTS = {
+        amazon: { id: "next-release-amazon", site: "amazon", sku: "AMAZON-NEXT-RELEASE", product_name: "Run Next Amazon Release", brand: "Amazon", image_url: "", product_url: "", default_max_price: null, release_mode_default: "next", selected: false, run_mode: "next", max_price: null, preference_id: null, metadata: { virtual: true, release_type: "next_release" } },
+        target: { id: "next-release-target", site: "target", sku: "TARGET-NEXT-RELEASE", product_name: "Run Next Target Release", brand: "Target", image_url: "", product_url: "", default_max_price: null, release_mode_default: "next", selected: false, run_mode: "next", max_price: null, preference_id: null, metadata: { virtual: true, release_type: "next_release" } },
+        walmart: { id: "next-release-walmart", site: "walmart", sku: "WALMART-NEXT-RELEASE", product_name: "Run Next Walmart Release", brand: "Walmart", image_url: "", product_url: "", default_max_price: null, release_mode_default: "next", selected: false, run_mode: "next", max_price: null, preference_id: null, metadata: { virtual: true, release_type: "next_release" } },
+        supreme: { id: "next-release-supreme", site: "supreme", sku: "SUPREME-NEXT-RELEASE", product_name: "Run Next Supreme Release", brand: "Supreme", image_url: "", product_url: "", default_max_price: null, release_mode_default: "next", selected: false, run_mode: "next", max_price: null, preference_id: null, metadata: { virtual: true, release_type: "next_release" } },
+        pokemon: { id: "next-release-pokemon", site: "pokemon", sku: "POKEMON-NEXT-RELEASE", product_name: "Run Next Pokémon Center Release", brand: "Pokémon Center", image_url: "", product_url: "", default_max_price: null, release_mode_default: "next", selected: false, run_mode: "next", max_price: null, preference_id: null, metadata: { virtual: true, release_type: "next_release" } },
+        general: { id: "next-release-general", site: "general", sku: "GENERAL-NEXT-RELEASE", product_name: "Run Next General Release", brand: "General", image_url: "", product_url: "", default_max_price: null, release_mode_default: "next", selected: false, run_mode: "next", max_price: null, preference_id: null, metadata: { virtual: true, release_type: "next_release" } }
+    };
+
+    function ensureNextReleaseFirst(rows) {
+        const site = PRODUCT_STATE.site;
+        const placeholder = { ...NEXT_RELEASE_PRODUCTS[site] };
+        const list = Array.isArray(rows) ? rows.slice() : [];
+        const existingIndex = list.findIndex((row) => row && ((row.metadata && row.metadata.virtual) || String(row.sku || '').toUpperCase().includes('NEXT-RELEASE') || String(row.sku || '').toUpperCase().includes('NEXT-DROP')));
+        if (existingIndex >= 0) {
+            placeholder.selected = !!list[existingIndex].selected;
+            placeholder.run_mode = list[existingIndex].run_mode || 'next';
+            placeholder.max_price = list[existingIndex].max_price ?? null;
+            placeholder.id = list[existingIndex].id || placeholder.id;
+            placeholder.preference_id = list[existingIndex].preference_id || null;
+            list.splice(existingIndex, 1);
+        }
+        return [placeholder, ...list];
+    }
+
     function getEffectiveProduct(row) {
         return PRODUCT_STATE.dirtyMap.get(row.id) || row;
     }
@@ -50,9 +76,9 @@
     }
 
     function categoryFromProduct(row) {
-        if (row && row.metadata && row.metadata.virtual) return 'Next Release';
         const text = `${normalizeText(row.product_name)} ${normalizeText(row.brand)} ${normalizeText(row.sku)}`;
 
+        if ((row.metadata && row.metadata.virtual) || text.includes("next release") || text.includes("next drop")) return "Next Release";
         if (text.includes("pokemon") || text.includes("pokémon") || text.includes("scarlet") || text.includes("violet") || text.includes("elite trainer") || text.includes("booster bundle")) return "Pokemon";
         if (text.includes("one piece") || /\bop[- ]?\d+/i.test(text) || text.includes("romance dawn") || text.includes("paramount war")) return "One Piece";
         if (text.includes("magic") || text.includes("mtg") || text.includes("commander") || text.includes("collector booster") || text.includes("play booster") || text.includes("wizards of the coast")) return "Magic";
@@ -87,10 +113,10 @@
             groups.get(category).push(row);
         });
         return [...groups.entries()]
-            .sort((a, b) => { if (a[0] === 'Next Release') return -1; if (b[0] === 'Next Release') return 1; return a[0].localeCompare(b[0]); })
+            .sort((a, b) => { if (a[0] === "Next Release") return -1; if (b[0] === "Next Release") return 1; return a[0].localeCompare(b[0]); })
             .map(([category, items]) => ({
                 category,
-                items: items.sort((x, y) => (x.product_name || x.sku || "").localeCompare(y.product_name || y.sku || ""))
+                items: items.sort((x, y) => { const xv = x.metadata && x.metadata.virtual ? 0 : 1; const yv = y.metadata && y.metadata.virtual ? 0 : 1; if (xv !== yv) return xv - yv; return (x.product_name || x.sku || "").localeCompare(y.product_name || y.sku || ""); })
             }));
     }
 
@@ -102,7 +128,7 @@
             const category = categoryFromProduct(row);
             counts.set(category, (counts.get(category) || 0) + 1);
         });
-        const categories = [...counts.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+        const categories = [...counts.entries()].sort((a, b) => { if (a[0] === "Next Release") return -1; if (b[0] === "Next Release") return 1; return a[0].localeCompare(b[0]); });
         chipWrap.innerHTML = `
       <button type="button" class="chip ${PRODUCT_STATE.activeCategory === "all" ? "is-active" : ""}" data-category="all">All (${rows.length})</button>
       ${categories.map(([category, count]) => `
@@ -119,7 +145,7 @@
 
     function productCardMarkup(row) {
         return `
-      <article class="product-select-card ${row.selected ? "is-selected" : ""}" data-product-id="${escapeHTML(row.id)}" data-category="${escapeHTML(categoryFromProduct(row))}">
+      <article class="product-select-card ${row.selected ? "is-selected" : ""} ${row.metadata && row.metadata.virtual ? "is-next-release" : ""}" data-product-id="${escapeHTML(row.id)}" data-category="${escapeHTML(categoryFromProduct(row))}">
         ${row.image_url ? `<img class="product-thumb" src="${escapeHTML(row.image_url)}" alt="${escapeHTML(row.product_name || row.sku)}" />` : `<div class="product-thumb product-thumb--empty">No image</div>`}
         <div class="product-card-content">
           <div class="product-card-header">
@@ -130,7 +156,7 @@
                 <span class="product-pill">${escapeHTML(categoryFromProduct(row))}</span>
                 <span class="product-pill">${escapeHTML(PRODUCT_STATE.site.toUpperCase())}</span>
               </div>
-              <div class="product-sku">SKU: ${escapeHTML(row.sku)}</div>
+              <div class="product-sku">${row.sku ? `SKU: ${escapeHTML(row.sku)}` : "No SKU required"}</div>
             </div>
             <button type="button" class="btn product-toggle-button ${row.selected ? "is-selected" : ""}">
               ${row.selected ? "Selected" : "Select"}
@@ -272,8 +298,12 @@
     }
 
     async function loadProducts() {
-        const data = await fetchJSON(API + "/product-catalog?site=" + PRODUCT_STATE.site, { headers: authHeaders() });
-        PRODUCT_STATE.products = data.products || [];
+        try {
+            const data = await fetchJSON(API + "/product-catalog?site=" + PRODUCT_STATE.site, { headers: authHeaders() });
+            PRODUCT_STATE.products = ensureNextReleaseFirst(data.products || []);
+        } catch (err) {
+            PRODUCT_STATE.products = ensureNextReleaseFirst([]);
+        }
         renderProducts();
     }
 
