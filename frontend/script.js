@@ -1231,6 +1231,7 @@ window.__countdownItems = [];
 function countdownSiteLabel(site) {
     const value = String(site || "general").toLowerCase();
     if (value === "supreme") return "Supreme";
+    if (value === "pokemon") return "Pokémon Center";
     if (value === "general") return "General";
     return value.charAt(0).toUpperCase() + value.slice(1);
 }
@@ -1263,6 +1264,8 @@ function renderCountdownFeed(items) {
                     <h3>${escapeHTML(item.label || countdownSiteLabel(item.site))}</h3>
                     <div class="countdown-time">${escapeHTML(diff.text)}</div>
                     <div class="countdown-sub">${escapeHTML(new Date(item.scheduled_for).toLocaleString())}</div>
+                    ${item.description ? `<p class="countdown-desc">${escapeHTML(item.description)}</p>` : ''}
+                    ${Array.isArray(item.products) && item.products.length ? `<div class="countdown-products">${item.products.map((p) => `<span class="product-pill">${escapeHTML(p.product_name || p.sku)}</span>`).join('')}</div>` : ''}
                 </article>`;
         }).join('');
     });
@@ -1327,6 +1330,43 @@ async function initSkuRequestForm() {
     });
 }
 
+
+let countdownPickerCache = [];
+
+async function loadCountdownProductOptions() {
+    const picker = document.getElementById('countdownProductPicker');
+    const siteSelect = document.getElementById('countdownSite');
+    if (!picker || !siteSelect) return;
+    picker.innerHTML = '<div class="empty-state-soft">Loading products...</div>';
+    try {
+        const data = await authJSON(API + '/admin/countdown-product-options?site=' + encodeURIComponent(siteSelect.value));
+        const items = Array.isArray(data.items) ? data.items : [];
+        countdownPickerCache = items;
+        if (!items.length) {
+            picker.innerHTML = '<div class="empty-state-soft">No products available for this site yet.</div>';
+            return;
+        }
+        picker.innerHTML = items.map((item) => `
+            <label class="checkbox-chip">
+              <input type="checkbox" value="${escapeHTML(item.id)}" />
+              <span>${escapeHTML(item.product_name || item.sku)}</span>
+            </label>`).join('');
+    } catch (err) {
+        picker.innerHTML = `<div class="empty-state-soft">${escapeHTML(err.message)}</div>`;
+    }
+}
+
+function setCountdownPickerSelection(productIds) {
+    const wanted = new Set((productIds || []).map(String));
+    document.querySelectorAll('#countdownProductPicker input[type="checkbox"]').forEach((input) => {
+        input.checked = wanted.has(String(input.value));
+    });
+}
+
+function getCountdownPickerSelection() {
+    return [...document.querySelectorAll('#countdownProductPicker input[type="checkbox"]:checked')].map((input) => input.value);
+}
+
 async function loadCountdownAdminList() {
     const wrap = document.getElementById('countdownAdminList');
     if (!wrap) return;
@@ -1342,6 +1382,8 @@ async function loadCountdownAdminList() {
               <div class="stack-item-meta">
                 <strong>${escapeHTML(item.label || countdownSiteLabel(item.site))}</strong>
                 <span class="subtle-text">${escapeHTML(countdownSiteLabel(item.site))} • ${escapeHTML(new Date(item.scheduled_for).toLocaleString())}</span>
+                ${item.description ? `<span class="subtle-text">${escapeHTML(item.description)}</span>` : ''}
+                ${Array.isArray(item.products) && item.products.length ? `<span class="subtle-text">Products: ${escapeHTML(item.products.map((p) => p.product_name || p.sku).join(', '))}</span>` : ''}
               </div>
               <div class="countdown-admin-actions">
                 <button class="btn" type="button" data-edit-countdown="${escapeHTML(item.id)}">Edit</button>
@@ -1357,8 +1399,10 @@ async function loadCountdownAdminList() {
                 document.getElementById('countdownLabel').value = item.label || '';
                 document.getElementById('countdownWhen').value = new Date(item.scheduled_for).toISOString().slice(0, 16);
                 document.getElementById('countdownOrder').value = item.sort_order || 0;
+                document.getElementById('countdownDescription').value = item.description || '';
                 document.getElementById('countdownActive').checked = !!item.is_active;
                 document.getElementById('countdownManagerMessage').textContent = 'Editing countdown.';
+                loadCountdownProductOptions().then(() => setCountdownPickerSelection((item.products || []).map((p) => p.id || p.product_id)));
             });
         });
         wrap.querySelectorAll('[data-delete-countdown]').forEach((button) => {
@@ -1388,9 +1432,11 @@ async function initCountdownManager() {
         const payload = {
             site: document.getElementById('countdownSite').value,
             label: document.getElementById('countdownLabel').value,
+            description: document.getElementById('countdownDescription').value,
             scheduled_for: document.getElementById('countdownWhen').value,
             sort_order: Number(document.getElementById('countdownOrder').value || 0),
-            is_active: document.getElementById('countdownActive').checked
+            is_active: document.getElementById('countdownActive').checked,
+            product_ids: getCountdownPickerSelection()
         };
         const editingId = form.dataset.editingId;
         try {
@@ -1404,12 +1450,16 @@ async function initCountdownManager() {
             form.reset();
             form.dataset.editingId = '';
             document.getElementById('countdownActive').checked = true;
+            document.getElementById('countdownDescription').value = '';
+            setCountdownPickerSelection([]);
             await loadCountdownAdminList();
             await loadPublicCountdowns();
         } catch (err) {
             message.textContent = err.message;
         }
     });
+    document.getElementById('countdownSite').addEventListener('change', loadCountdownProductOptions);
+    await loadCountdownProductOptions();
     await loadCountdownAdminList();
 }
 

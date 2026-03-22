@@ -6,72 +6,66 @@
   <title>User Guide | The Shore Shack TCG</title>
   <link rel="stylesheet" href="styles.css" />
 </head>
-<body class="app-page">
-  <div class="app-shell guide-shell">
-    <header class="topbar">
-      <div>
-        <p class="eyebrow">The Shore Shack TCG</p>
-        <h1>User Guide</h1>
-        <p class="subtle-text">Everything a user needs to know before the next drop.</p>
-      </div>
-      <div class="topbar-actions">
-        <a class="btn" href="index.html">Home</a>
-        <a class="btn" href="login.html">Login</a>
-        <a class="btn btn-primary" href="signup.html">Sign Up</a>
-      </div>
-    </header>
-
-    <section class="guide-layout">
-      <article class="panel guide-content">
-        <div class="guide-block">
-          <h2>1. Access the website</h2>
-          <p>Go to <strong>https://www.theshoreshacktcg.com</strong>. If a browser has old DNS or SSL cache, open the site in a private window or toggle Wi-Fi off and back on.</p>
-        </div>
-        <div class="guide-block">
-          <h2>2. Create your account</h2>
-          <p>Click <strong>Sign Up</strong>, enter your email, password, and invite code if one is required. You will receive a welcome email after signup.</p>
-        </div>
-        <div class="guide-block">
-          <h2>3. Build your store profiles</h2>
-          <p>Create profiles for the stores you want to run:</p>
-          <ul>
-            <li><strong>Amazon</strong> for Amazon-specific checkout details.</li>
-            <li><strong>Target</strong> for Target-specific checkout details.</li>
-            <li><strong>Walmart</strong> for Walmart-specific checkout details.</li>
-            <li><strong>General</strong> for Supreme or any release that does not fit a store-specific profile.</li>
-          </ul>
-          <p>Your saved profiles are what the software uses to shop. They contain the checkout information the platform needs when the release starts.</p>
-        </div>
-        <div class="guide-block">
-          <h2>4. Select your products</h2>
-          <p>Open the <strong>Products</strong> section and switch between the Amazon, Target, Walmart, and General tabs. Mark the products you want the system to run for, then save your preferences.</p>
-          <p><strong>Important:</strong> your profiles tell the platform <em>how</em> to shop, and your selected products tell it <em>what</em> to shop.</p>
-        </div>
-        <div class="guide-block">
-          <h2>5. Request SKUs if something is missing</h2>
-          <p>If a product is not in the list yet, use the SKU request form. The software will try to look up the SKU, add it to the correct catalog, and pull in the best available title and price data automatically.</p>
-        </div>
-        <div class="guide-block">
-          <h2>6. Watch live countdowns</h2>
-          <p>Countdown cards show Walmart, Target, Supreme, and other general release windows. Admins can also post one-off release names for general drops.</p>
-        </div>
-        <div class="guide-block">
-          <h2>7. Password reset</h2>
-          <p>If you forget your password, use the <strong>Forgot Password</strong> page. A reset email will be sent to your inbox with a secure link.</p>
-        </div>
-      </article>
-
-      <aside class="panel tips-panel">
-        <div class="panel-header"><div><h2>Quick reminders</h2></div></div>
-        <div class="tip-stack">
-          <div class="tip-card"><strong>Profiles first</strong><p>Create your store profiles before you expect the bot to run.</p></div>
-          <div class="tip-card"><strong>Selections matter</strong><p>Only products you select in the Products page are eligible to run for your account.</p></div>
-          <div class="tip-card"><strong>Match store to profile</strong><p>Use the Walmart profile for Walmart drops, the Target profile for Target drops, and so on.</p></div>
-          <div class="tip-card"><strong>General profiles</strong><p>General profiles are used for Supreme and other non-store-specific general releases.</p></div>
-        </div>
-      </aside>
+<body class="app-page guide-page">
+  <header class="marketing-nav">
+    <a class="brand-mark" href="index.html">The Shore Shack TCG</a>
+    <nav class="marketing-links">
+      <a href="index.html">Home</a>
+      <a href="login.html">Login</a>
+      <a class="btn btn-primary" href="signup.html">Create Account</a>
+    </nav>
+  </header>
+  <main class="guide-layout">
+    <section class="panel marketing-panel guide-hero">
+      <p class="eyebrow">Public user guide</p>
+      <h1>How to use The Shore Shack TCG</h1>
+      <p class="subtle-text">This guide is public. Anyone can view it before signing up. Private areas like profiles, product selections, and admin controls still require login.</p>
     </section>
-  </div>
-  <script src="script.js?v=20260322a" defer></script>
+
+    <section class="panel marketing-panel">
+      <h2>1. Create an account</h2>
+      <p>Go to <strong>Sign Up</strong>, enter your email and password, and complete account creation. New users receive a welcome email after signup.</p>
+    </section>
+
+    <section class="panel marketing-panel">
+      <h2>2. Build your store profiles</h2>
+      <p>Create the profiles you want the platform to use during checkout. Profiles store the checkout information that gets used when the system runs.</p>
+      <ul class="guide-list">
+        <li><strong>Amazon profile</strong> — used for Amazon releases.</li>
+        <li><strong>Target profile</strong> — used for Target releases.</li>
+        <li><strong>Walmart profile</strong> — used for Walmart releases.</li>
+        <li><strong>General profile</strong> — used for Supreme, Pokémon Center, and other custom drops.</li>
+      </ul>
+    </section>
+
+    <section class="panel marketing-panel">
+      <h2>3. Select products</h2>
+      <p>Go to the <strong>Products</strong> section and select the items you want the system to run for. Your saved profiles tell the platform <em>how</em> to buy. Your product selections tell it <em>what</em> to buy.</p>
+      <ul class="guide-list">
+        <li>Amazon tab — select Amazon products.</li>
+        <li>Target tab — select Target products.</li>
+        <li>Walmart tab — select Walmart products.</li>
+        <li>Supreme tab — select Supreme items or the Supreme next release option.</li>
+        <li>Pokémon Center tab — select Pokémon Center items or the next release option.</li>
+        <li>General tab — select custom release items or a next release entry when exact SKUs are not available yet.</li>
+      </ul>
+    </section>
+
+    <section class="panel marketing-panel">
+      <h2>4. Request missing SKUs</h2>
+      <p>If you do not see a Walmart, Target, or Amazon product in the product list, use the SKU request form. The system can attempt to look up the SKU, enrich the catalog, and add the product with a title and price.</p>
+    </section>
+
+    <section class="panel marketing-panel">
+      <h2>5. Follow release countdowns</h2>
+      <p>The release countdowns board shows upcoming Walmart, Target, Supreme, Pokémon Center, and custom general releases. Admins can also attach related products to each countdown so users know what the timer is for.</p>
+    </section>
+
+    <section class="panel marketing-panel">
+      <h2>How your account is used during releases</h2>
+      <p>When a release goes live, the system uses the profiles you saved to attempt checkout for the products you selected. If you selected “Shop Next Release” for a site, that tells the platform you want to run the next upcoming drop for that site even when the exact product list is not known yet.</p>
+    </section>
+  </main>
+  <script src="script.js?v=20260322b" defer></script>
 </body>
 </html>
