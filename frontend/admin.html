@@ -53,16 +53,20 @@
       </section>
 
       <section class="panel" id="countdownManagerPanel">
-        <div class="panel-header"><div><h2>Countdown Manager</h2><p class="subtle-text">Create timers for Walmart, Target, Supreme, or any custom general release.</p></div></div>
+        <div class="panel-header"><div><h2>Countdown Manager</h2><p class="subtle-text">Create timers for Walmart, Target, Supreme, Pokémon Center, or any custom general release. All times are entered and displayed in US Eastern Time (ET).</p></div></div>
         <form id="countdownForm" class="form-grid">
           <div class="field"><label for="countdownSite">Site</label>
-            <select class="input" id="countdownSite"><option value="walmart">Walmart</option><option value="target">Target</option><option value="general">General / Custom</option><option value="supreme">Supreme</option><option value="pokemon">Pokémon Center</option></select>
+            <select class="input" id="countdownSite"><option value="walmart">Walmart</option><option value="target">Target</option><option value="supreme">Supreme</option><option value="pokemon">Pokémon Center</option><option value="general">General / Custom</option></select>
           </div>
           <div class="field"><label for="countdownLabel">Display Name</label><input class="input" id="countdownLabel" placeholder="Walmart Friday Restock" /></div>
-          <div class="field"><label for="countdownWhen">Release Date & Time</label><input class="input" type="datetime-local" id="countdownWhen" /></div>
+          <div class="field"><label for="countdownWhen">Release Date & Time <span class="subtle-text">(US Eastern Time)</span></label><input class="input" type="datetime-local" id="countdownWhen" /></div>
           <div class="field"><label for="countdownOrder">Sort Order</label><input class="input" type="number" id="countdownOrder" value="0" /></div>
-          <div class="field field--full"><label for="countdownDescription">Detail Description</label><textarea class="input" id="countdownDescription" rows="3" placeholder="What is releasing and what should users know?"></textarea></div>
-          <div class="field field--full"><label>Products releasing at this time</label><div id="countdownProductPicker" class="checkbox-chip-grid"></div><p class="subtle-text">Select catalog products that belong to this countdown.</p></div>
+          <div class="field field--full"><label for="countdownDescription">Detail Description</label><textarea class="input" id="countdownDescription" rows="3" placeholder="Describe the release or drop details"></textarea></div>
+          <div class="field field--full">
+            <label>Products releasing at this time</label>
+            <div id="countdownProductsChooser" class="selection-box">Loading products…</div>
+            <p class="subtle-text">Select catalog products that belong to this countdown.</p>
+          </div>
           <div class="field field--full"><label class="checkbox-inline"><input type="checkbox" id="countdownActive" checked /><span>Active</span></label></div>
           <div class="field field--full panel-actions"><button class="btn btn-primary" type="submit">Save Countdown</button></div>
         </form>
@@ -73,7 +77,7 @@
       <section class="panel" id="catalogToolsPanel">
         <div class="panel-header"><div><h2>Catalog Tools</h2><p class="subtle-text">Add products by SKU and sync Target max prices from matching Amazon titles.</p></div></div>
         <form id="adminSkuUpsertForm" class="form-grid">
-          <div class="field"><label for="adminSkuSite">Site</label><select class="input" id="adminSkuSite"><option value="amazon">Amazon</option><option value="target">Target</option><option value="walmart">Walmart</option><option value="general">General</option><option value="supreme">Supreme</option><option value="pokemon">Pokémon Center</option></select></div>
+          <div class="field"><label for="adminSkuSite">Site</label><select class="input" id="adminSkuSite"><option value="amazon">Amazon</option><option value="target">Target</option><option value="walmart">Walmart</option><option value="general">General</option></select></div>
           <div class="field"><label for="adminSkuValue">SKU / ASIN / DPCI</label><input class="input" id="adminSkuValue" placeholder="Enter SKU" /></div>
           <div class="field field--full panel-actions"><button class="btn btn-primary" type="submit">Add / Update Product</button><button class="btn" type="button" id="syncTargetPricingButton">Sync Target Prices From Amazon</button></div>
         </form>
@@ -152,7 +156,7 @@
     </section>
   </div>
 
-  <script src="script.js?v=20260322b" defer></script>
-  <script src="products.js?v=20260322b" defer></script>
+  <script src="products.js?v=20260322a" defer></script>
+  <script src="script.js?v=20260322a" defer></script>
 </body>
 </html>

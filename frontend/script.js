@@ -1231,7 +1231,6 @@ window.__countdownItems = [];
 function countdownSiteLabel(site) {
     const value = String(site || "general").toLowerCase();
     if (value === "supreme") return "Supreme";
-    if (value === "pokemon") return "Pokémon Center";
     if (value === "general") return "General";
     return value.charAt(0).toUpperCase() + value.slice(1);
 }
@@ -1264,8 +1263,6 @@ function renderCountdownFeed(items) {
                     <h3>${escapeHTML(item.label || countdownSiteLabel(item.site))}</h3>
                     <div class="countdown-time">${escapeHTML(diff.text)}</div>
                     <div class="countdown-sub">${escapeHTML(new Date(item.scheduled_for).toLocaleString())}</div>
-                    ${item.description ? `<p class="countdown-desc">${escapeHTML(item.description)}</p>` : ''}
-                    ${Array.isArray(item.products) && item.products.length ? `<div class="countdown-products">${item.products.map((p) => `<span class="product-pill">${escapeHTML(p.product_name || p.sku)}</span>`).join('')}</div>` : ''}
                 </article>`;
         }).join('');
     });
@@ -1330,43 +1327,6 @@ async function initSkuRequestForm() {
     });
 }
 
-
-let countdownPickerCache = [];
-
-async function loadCountdownProductOptions() {
-    const picker = document.getElementById('countdownProductPicker');
-    const siteSelect = document.getElementById('countdownSite');
-    if (!picker || !siteSelect) return;
-    picker.innerHTML = '<div class="empty-state-soft">Loading products...</div>';
-    try {
-        const data = await authJSON(API + '/admin/countdown-product-options?site=' + encodeURIComponent(siteSelect.value));
-        const items = Array.isArray(data.items) ? data.items : [];
-        countdownPickerCache = items;
-        if (!items.length) {
-            picker.innerHTML = '<div class="empty-state-soft">No products available for this site yet.</div>';
-            return;
-        }
-        picker.innerHTML = items.map((item) => `
-            <label class="checkbox-chip">
-              <input type="checkbox" value="${escapeHTML(item.id)}" />
-              <span>${escapeHTML(item.product_name || item.sku)}</span>
-            </label>`).join('');
-    } catch (err) {
-        picker.innerHTML = `<div class="empty-state-soft">${escapeHTML(err.message)}</div>`;
-    }
-}
-
-function setCountdownPickerSelection(productIds) {
-    const wanted = new Set((productIds || []).map(String));
-    document.querySelectorAll('#countdownProductPicker input[type="checkbox"]').forEach((input) => {
-        input.checked = wanted.has(String(input.value));
-    });
-}
-
-function getCountdownPickerSelection() {
-    return [...document.querySelectorAll('#countdownProductPicker input[type="checkbox"]:checked')].map((input) => input.value);
-}
-
 async function loadCountdownAdminList() {
     const wrap = document.getElementById('countdownAdminList');
     if (!wrap) return;
@@ -1382,8 +1342,6 @@ async function loadCountdownAdminList() {
               <div class="stack-item-meta">
                 <strong>${escapeHTML(item.label || countdownSiteLabel(item.site))}</strong>
                 <span class="subtle-text">${escapeHTML(countdownSiteLabel(item.site))} • ${escapeHTML(new Date(item.scheduled_for).toLocaleString())}</span>
-                ${item.description ? `<span class="subtle-text">${escapeHTML(item.description)}</span>` : ''}
-                ${Array.isArray(item.products) && item.products.length ? `<span class="subtle-text">Products: ${escapeHTML(item.products.map((p) => p.product_name || p.sku).join(', '))}</span>` : ''}
               </div>
               <div class="countdown-admin-actions">
                 <button class="btn" type="button" data-edit-countdown="${escapeHTML(item.id)}">Edit</button>
@@ -1397,12 +1355,10 @@ async function loadCountdownAdminList() {
                 document.getElementById('countdownForm').dataset.editingId = item.id;
                 document.getElementById('countdownSite').value = item.site;
                 document.getElementById('countdownLabel').value = item.label || '';
-                document.getElementById('countdownWhen').value = new Date(item.scheduled_for).toISOString().slice(0, 16);
+                document.getElementById('countdownWhen').value = toEasternInputValue(item.scheduled_for);
                 document.getElementById('countdownOrder').value = item.sort_order || 0;
-                document.getElementById('countdownDescription').value = item.description || '';
                 document.getElementById('countdownActive').checked = !!item.is_active;
                 document.getElementById('countdownManagerMessage').textContent = 'Editing countdown.';
-                loadCountdownProductOptions().then(() => setCountdownPickerSelection((item.products || []).map((p) => p.id || p.product_id)));
             });
         });
         wrap.querySelectorAll('[data-delete-countdown]').forEach((button) => {
@@ -1432,11 +1388,9 @@ async function initCountdownManager() {
         const payload = {
             site: document.getElementById('countdownSite').value,
             label: document.getElementById('countdownLabel').value,
-            description: document.getElementById('countdownDescription').value,
             scheduled_for: document.getElementById('countdownWhen').value,
             sort_order: Number(document.getElementById('countdownOrder').value || 0),
-            is_active: document.getElementById('countdownActive').checked,
-            product_ids: getCountdownPickerSelection()
+            is_active: document.getElementById('countdownActive').checked
         };
         const editingId = form.dataset.editingId;
         try {
@@ -1450,16 +1404,12 @@ async function initCountdownManager() {
             form.reset();
             form.dataset.editingId = '';
             document.getElementById('countdownActive').checked = true;
-            document.getElementById('countdownDescription').value = '';
-            setCountdownPickerSelection([]);
             await loadCountdownAdminList();
             await loadPublicCountdowns();
         } catch (err) {
             message.textContent = err.message;
         }
     });
-    document.getElementById('countdownSite').addEventListener('change', loadCountdownProductOptions);
-    await loadCountdownProductOptions();
     await loadCountdownAdminList();
 }
 
@@ -1553,3 +1503,220 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
     try { await initSkuRequestForm(); } catch (_) {}
 });
+
+/* ===== 2026-03-22 overrides: public guide/home, ET countdowns, countdown product linking ===== */
+let countdownSelectionIds = [];
+
+function requireAuthForPrivatePages() {
+    const path = window.location.pathname || "/";
+    const normalized = (path.split('/').pop() || 'index.html').toLowerCase();
+    const isPublic = path === '/' || path === '' || PUBLIC_PATHS.has(path) || PUBLIC_PATHS.has('/' + normalized) || normalized === 'index.html' || normalized === 'guide.html';
+    if (!isPublic && !token()) {
+        window.location.replace('login.html');
+        return false;
+    }
+    return true;
+}
+
+
+function toEasternInputValue(value) {
+    const parts = new Intl.DateTimeFormat('en-CA', {
+        timeZone: 'America/New_York',
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: false
+    }).formatToParts(new Date(value));
+    const map = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+    return `${map.year}-${map.month}-${map.day}T${map.hour}:${map.minute}`;
+}
+
+function formatEasternDateTime(value) {
+    if (!value) return 'TBD';
+    return new Intl.DateTimeFormat('en-US', {
+        timeZone: 'America/New_York',
+        year: 'numeric',
+        month: 'numeric',
+        day: 'numeric',
+        hour: 'numeric',
+        minute: '2-digit'
+    }).format(new Date(value)) + ' ET';
+}
+
+function countdownSiteLabel(site) {
+    const value = String(site || 'general').toLowerCase();
+    if (value === 'supreme') return 'Supreme';
+    if (value === 'pokemon') return 'Pokémon Center';
+    if (value === 'general') return 'General';
+    return value.charAt(0).toUpperCase() + value.slice(1);
+}
+
+function renderCountdownFeed(items) {
+    document.querySelectorAll('[data-countdown-feed]').forEach((wrap) => {
+        const source = Array.isArray(items) ? items : [];
+        if (!source.length) {
+            wrap.innerHTML = `<div class="empty-state-soft">${escapeHTML(wrap.dataset.emptyText || 'No countdowns posted yet.')}</div>`;
+            return;
+        }
+        wrap.innerHTML = source.map((item) => {
+            const diff = countdownDiffParts(item.scheduled_for);
+            const linked = Array.isArray(item.linked_products) && item.linked_products.length
+                ? `<div class="countdown-tags">${item.linked_products.map((p) => `<span class="product-pill">${escapeHTML(p.product_name || p.sku || 'Product')}</span>`).join('')}</div>`
+                : '';
+            return `
+                <article class="countdown-card" data-countdown-id="${escapeHTML(item.id)}" data-countdown-at="${escapeHTML(item.scheduled_for)}">
+                    <span class="countdown-site">${escapeHTML(countdownSiteLabel(item.site))}</span>
+                    <h3>${escapeHTML(item.label || countdownSiteLabel(item.site))}</h3>
+                    ${item.description ? `<p class="subtle-text">${escapeHTML(item.description)}</p>` : ''}
+                    <div class="countdown-time">${escapeHTML(diff.text)}</div>
+                    <div class="countdown-sub">${escapeHTML(formatEasternDateTime(item.scheduled_for))}</div>
+                    ${linked}
+                </article>`;
+        }).join('');
+    });
+}
+
+async function loadPublicCountdowns() {
+    const feeds = document.querySelectorAll('[data-countdown-feed]');
+    if (!feeds.length) return;
+    try {
+        const res = await fetch(API + '/public/countdowns');
+        const data = await res.json();
+        window.__countdownItems = Array.isArray(data.items) ? data.items : [];
+        renderCountdownFeed(window.__countdownItems);
+        clearInterval(countdownTimerHandle);
+        countdownTimerHandle = setInterval(tickCountdownCards, 1000);
+    } catch (err) {
+        renderCountdownFeed([]);
+    }
+}
+
+async function loadCountdownProductChoices(site, selectedIds = []) {
+    const wrap = document.getElementById('countdownProductsChooser');
+    if (!wrap) return;
+    wrap.innerHTML = 'Loading products…';
+    countdownSelectionIds = Array.isArray(selectedIds) ? [...selectedIds] : [];
+    try {
+        const data = await authJSON(API + '/admin/catalog-products?site=' + encodeURIComponent(site));
+        const items = Array.isArray(data.items) ? data.items : [];
+        if (!items.length) {
+            wrap.innerHTML = '<div class="empty-state-soft">No catalog products available for this site yet.</div>';
+            return;
+        }
+        wrap.innerHTML = items.map((item) => {
+            const checked = countdownSelectionIds.includes(item.id) ? 'checked' : '';
+            return `<label class="checkbox-inline checkbox-inline--block"><input type="checkbox" value="${escapeHTML(item.id)}" ${checked} /><span>${escapeHTML(item.product_name || item.sku)} ${item.sku ? `• ${escapeHTML(item.sku)}` : ''}</span></label>`;
+        }).join('');
+        wrap.querySelectorAll('input[type="checkbox"]').forEach((input) => {
+            input.addEventListener('change', () => {
+                countdownSelectionIds = [...wrap.querySelectorAll('input[type="checkbox"]:checked')].map((node) => node.value);
+            });
+        });
+    } catch (err) {
+        wrap.innerHTML = `<div class="empty-state-soft">${escapeHTML(err.message)}</div>`;
+    }
+}
+
+async function loadCountdownAdminList() {
+    const wrap = document.getElementById('countdownAdminList');
+    if (!wrap) return;
+    try {
+        const data = await authJSON(API + '/admin/countdowns');
+        const items = Array.isArray(data.items) ? data.items : [];
+        if (!items.length) {
+            wrap.innerHTML = '<div class="empty-state-soft">No countdowns yet.</div>';
+            return;
+        }
+        wrap.innerHTML = items.map((item) => `
+            <div class="stack-item">
+              <div class="stack-item-meta">
+                <strong>${escapeHTML(item.label || countdownSiteLabel(item.site))}</strong>
+                <span class="subtle-text">${escapeHTML(countdownSiteLabel(item.site))} • ${escapeHTML(formatEasternDateTime(item.scheduled_for))}</span>
+                ${item.description ? `<span class="subtle-text">${escapeHTML(item.description)}</span>` : ''}
+                ${Array.isArray(item.linked_products) && item.linked_products.length ? `<div class="countdown-tags">${item.linked_products.map((p) => `<span class="product-pill">${escapeHTML(p.product_name || p.sku || 'Product')}</span>`).join('')}</div>` : ''}
+              </div>
+              <div class="countdown-admin-actions">
+                <button class="btn" type="button" data-edit-countdown="${escapeHTML(item.id)}">Edit</button>
+                <button class="btn btn-danger" type="button" data-delete-countdown="${escapeHTML(item.id)}">Delete</button>
+              </div>
+            </div>`).join('');
+        wrap.querySelectorAll('[data-edit-countdown]').forEach((button) => {
+            button.addEventListener('click', async () => {
+                const item = items.find((entry) => entry.id === button.dataset.editCountdown);
+                if (!item) return;
+                document.getElementById('countdownForm').dataset.editingId = item.id;
+                document.getElementById('countdownSite').value = item.site;
+                document.getElementById('countdownLabel').value = item.label || '';
+                document.getElementById('countdownWhen').value = toEasternInputValue(item.scheduled_for);
+                document.getElementById('countdownOrder').value = item.sort_order || 0;
+                const desc = document.getElementById('countdownDescription');
+                if (desc) desc.value = item.description || '';
+                document.getElementById('countdownActive').checked = !!item.is_active;
+                document.getElementById('countdownManagerMessage').textContent = 'Editing countdown.';
+                await loadCountdownProductChoices(item.site, (item.linked_products || []).map((p) => p.id));
+            });
+        });
+        wrap.querySelectorAll('[data-delete-countdown]').forEach((button) => {
+            button.addEventListener('click', async () => {
+                if (!confirm('Delete this countdown?')) return;
+                try {
+                    await authJSON(API + '/admin/countdowns/' + button.dataset.deleteCountdown, { method: 'DELETE' });
+                    document.getElementById('countdownManagerMessage').textContent = 'Countdown deleted.';
+                    await loadCountdownAdminList();
+                    await loadPublicCountdowns();
+                } catch (err) {
+                    document.getElementById('countdownManagerMessage').textContent = err.message;
+                }
+            });
+        });
+    } catch (err) {
+        wrap.innerHTML = `<div class="empty-state-soft">${escapeHTML(err.message)}</div>`;
+    }
+}
+
+async function initCountdownManager() {
+    const form = document.getElementById('countdownForm');
+    if (!form) return;
+    const message = document.getElementById('countdownManagerMessage');
+    const siteInput = document.getElementById('countdownSite');
+    if (siteInput) {
+        siteInput.addEventListener('change', async () => {
+            await loadCountdownProductChoices(siteInput.value, []);
+        });
+    }
+    form.addEventListener('submit', async (event) => {
+        event.preventDefault();
+        const payload = {
+            site: document.getElementById('countdownSite').value,
+            label: document.getElementById('countdownLabel').value,
+            description: document.getElementById('countdownDescription') ? document.getElementById('countdownDescription').value : '',
+            scheduled_for: document.getElementById('countdownWhen').value,
+            sort_order: Number(document.getElementById('countdownOrder').value || 0),
+            is_active: document.getElementById('countdownActive').checked,
+            product_ids: countdownSelectionIds
+        };
+        const editingId = form.dataset.editingId;
+        try {
+            if (editingId) {
+                await authJSON(API + '/admin/countdowns/' + editingId, { method: 'PUT', body: JSON.stringify(payload) });
+                message.textContent = 'Countdown updated.';
+            } else {
+                await authJSON(API + '/admin/countdowns', { method: 'POST', body: JSON.stringify(payload) });
+                message.textContent = 'Countdown created.';
+            }
+            form.reset();
+            form.dataset.editingId = '';
+            document.getElementById('countdownActive').checked = true;
+            countdownSelectionIds = [];
+            await loadCountdownProductChoices(document.getElementById('countdownSite').value, []);
+            await loadCountdownAdminList();
+            await loadPublicCountdowns();
+        } catch (err) {
+            message.textContent = err.message;
+        }
+    });
+    await loadCountdownProductChoices(document.getElementById('countdownSite').value, []);
+    await loadCountdownAdminList();
+}

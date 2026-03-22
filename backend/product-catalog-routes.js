@@ -1,36 +1,28 @@
 const cheerio = require("cheerio");
 
 const SUPPORTED_SITES = new Set(["amazon", "target", "walmart", "general", "supreme", "pokemon"]);
-const REQUESTABLE_SITES = new Set(["amazon", "target", "walmart", "general", "supreme", "pokemon"]);
+const REQUESTABLE_SITES = new Set(["amazon", "target", "walmart", "general"]);
 const VIRTUAL_SITE_DEFAULTS = {
-  target: {
-    catalogName: "Target next drop",
-    sku: "TARGET-NEXT-DROP",
-    product_name: "Target Next Release",
-    brand: "Target",
-    release_mode_default: "next",
-    metadata: { virtual: true, release_type: "next_drop" }
-  },
   walmart: {
     catalogName: "Walmart next drop",
     sku: "WALMART-NEXT-DROP",
-    product_name: "Walmart Next Drop",
+    product_name: "Run Next Walmart Release",
     brand: "Walmart",
     release_mode_default: "next",
     metadata: { virtual: true, release_type: "next_drop" }
   },
   supreme: {
-    catalogName: "Supreme releases",
+    catalogName: "Supreme next drop",
     sku: "SUPREME-NEXT-DROP",
-    product_name: "Supreme Next Release",
+    product_name: "Run Next Supreme Release",
     brand: "Supreme",
     release_mode_default: "next",
     metadata: { virtual: true, release_type: "next_drop" }
   },
   pokemon: {
-    catalogName: "Pokemon Center releases",
+    catalogName: "Pokemon Center next drop",
     sku: "POKEMON-NEXT-DROP",
-    product_name: "Pokémon Center Next Release",
+    product_name: "Run Next Pokémon Center Release",
     brand: "Pokémon Center",
     release_mode_default: "next",
     metadata: { virtual: true, release_type: "next_drop" }
@@ -38,7 +30,7 @@ const VIRTUAL_SITE_DEFAULTS = {
   general: {
     catalogName: "General releases",
     sku: "GENERAL-NEXT-DROP",
-    product_name: "General Next Release",
+    product_name: "Run Next General Release",
     brand: "General",
     release_mode_default: "next",
     metadata: { virtual: true, release_type: "general_drop" }
@@ -192,13 +184,6 @@ async function firstRowOrNull(supabase, site, sku) {
     .maybeSingle();
   if (error) throw new Error(error.message);
   return data || null;
-}
-
-function countdownLabelForSite(site) {
-  if (site === "supreme") return "Supreme Release";
-  if (site === "pokemon") return "Pokémon Center Release";
-  if (site === "general") return "General Release";
-  return site.charAt(0).toUpperCase() + site.slice(1) + " Release";
 }
 
 function parseMoney(value) {
@@ -410,7 +395,7 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
     try {
       const { data, error } = await supabase
         .from('drop_countdowns')
-        .select(`id, site, label, description, scheduled_for, sort_order, is_active, countdown_products ( product_id, catalog_products ( id, sku, product_name, brand ) )`)
+        .select(`*, countdown_products(product_id, catalog_products(id, site, sku, product_name))`)
         .eq('is_active', true)
         .order('sort_order', { ascending: true })
         .order('scheduled_for', { ascending: true });
@@ -418,7 +403,9 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
       if (error) return res.status(500).json({ error: error.message });
       const items = (data || []).map((item) => ({
         ...item,
-        products: Array.isArray(item.countdown_products) ? item.countdown_products.map((row) => row.catalog_products).filter(Boolean) : []
+        linked_products: Array.isArray(item.countdown_products)
+          ? item.countdown_products.map((row) => row.catalog_products).filter(Boolean)
+          : []
       }));
       res.json({ items });
     } catch (err) {
@@ -426,19 +413,19 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
     }
   });
 
-  app.get('/admin/countdown-product-options', auth, admin, async (req, res) => {
+  app.get('/admin/catalog-products', auth, admin, async (req, res) => {
     try {
       const site = normalizeSite(req.query.site || 'general');
-      await ensureVirtualCatalogForSite(supabase, site);
       const activeCatalog = await getActiveCatalog(supabase, site);
       if (!activeCatalog?.id) return res.json({ items: [] });
       const { data, error } = await supabase
         .from('catalog_products')
-        .select('id, site, sku, product_name, brand, default_max_price, metadata')
+        .select('id, site, sku, product_name, default_max_price, metadata')
         .eq('catalog_id', activeCatalog.id)
         .eq('site', site)
         .eq('is_enabled', true)
-        .order('product_name', { ascending: true });
+        .order('product_name', { ascending: true, nullsFirst: false })
+        .order('sku', { ascending: true });
       if (error) return res.status(500).json({ error: error.message });
       res.json({ items: data || [] });
     } catch (err) {
@@ -449,12 +436,15 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
   app.get('/admin/countdowns', auth, admin, async (req, res) => {
     const { data, error } = await supabase
       .from('drop_countdowns')
-      .select(`id, site, label, description, scheduled_for, sort_order, is_active, countdown_products ( product_id, catalog_products ( id, sku, product_name, brand ) )`)
-      .order('sort_order', { ascending: true }).order('scheduled_for', { ascending: true });
+      .select(`*, countdown_products(product_id, catalog_products(id, site, sku, product_name))`)
+      .order('sort_order', { ascending: true })
+      .order('scheduled_for', { ascending: true });
     if (error) return res.status(500).json({ error: error.message });
     const items = (data || []).map((item) => ({
       ...item,
-      products: Array.isArray(item.countdown_products) ? item.countdown_products.map((row) => ({ ...(row.catalog_products || {}), product_id: row.product_id })).filter((row) => row.id || row.product_id) : []
+      linked_products: Array.isArray(item.countdown_products)
+        ? item.countdown_products.map((row) => row.catalog_products).filter(Boolean)
+        : []
     }));
     res.json({ items });
   });
@@ -463,13 +453,15 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
     try {
       const currentUser = await getCurrentUser(req);
       const site = normalizeSite(req.body.site);
-      const label = String(req.body.label || '').trim() || countdownLabelForSite(site);
+      const label = String(req.body.label || '').trim() || (site === 'general' ? 'General Release' : site.charAt(0).toUpperCase() + site.slice(1));
       const scheduled_for = req.body.scheduled_for;
+      const description = String(req.body.description || '').trim();
+      const product_ids = Array.isArray(req.body.product_ids) ? req.body.product_ids.filter(Boolean) : [];
       if (!scheduled_for) return res.status(400).json({ error: 'scheduled_for is required' });
       const payload = {
         site,
         label,
-        description: String(req.body.description || '').trim() || null,
+        description,
         scheduled_for,
         sort_order: Number(req.body.sort_order || 0),
         is_active: req.body.is_active !== false,
@@ -477,11 +469,10 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
       };
       const { data, error } = await supabase.from('drop_countdowns').insert(payload).select('*').single();
       if (error) return res.status(500).json({ error: error.message });
-      const productIds = Array.isArray(req.body.product_ids) ? req.body.product_ids.filter(Boolean) : [];
-      if (productIds.length) {
-        const rows = productIds.map((product_id) => ({ countdown_id: data.id, product_id }));
-        const { error: relError } = await supabase.from('countdown_products').insert(rows);
-        if (relError) return res.status(500).json({ error: relError.message });
+      if (product_ids.length) {
+        const rows = product_ids.map((product_id) => ({ countdown_id: data.id, product_id }));
+        const { error: linkError } = await supabase.from('countdown_products').insert(rows);
+        if (linkError) return res.status(500).json({ error: linkError.message });
       }
       res.json({ item: data });
     } catch (err) {
@@ -494,19 +485,20 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
       const payload = {
         site: normalizeSite(req.body.site),
         label: String(req.body.label || '').trim(),
-        description: String(req.body.description || '').trim() || null,
+        description: String(req.body.description || '').trim(),
         scheduled_for: req.body.scheduled_for,
         sort_order: Number(req.body.sort_order || 0),
         is_active: req.body.is_active !== false
       };
+      const product_ids = Array.isArray(req.body.product_ids) ? req.body.product_ids.filter(Boolean) : [];
       const { data, error } = await supabase.from('drop_countdowns').update(payload).eq('id', req.params.id).select('*').single();
       if (error) return res.status(500).json({ error: error.message });
-      const productIds = Array.isArray(req.body.product_ids) ? req.body.product_ids.filter(Boolean) : [];
-      await supabase.from('countdown_products').delete().eq('countdown_id', req.params.id);
-      if (productIds.length) {
-        const rows = productIds.map((product_id) => ({ countdown_id: req.params.id, product_id }));
-        const { error: relError } = await supabase.from('countdown_products').insert(rows);
-        if (relError) return res.status(500).json({ error: relError.message });
+      const { error: deleteLinksError } = await supabase.from('countdown_products').delete().eq('countdown_id', req.params.id);
+      if (deleteLinksError) return res.status(500).json({ error: deleteLinksError.message });
+      if (product_ids.length) {
+        const rows = product_ids.map((product_id) => ({ countdown_id: req.params.id, product_id }));
+        const { error: linkError } = await supabase.from('countdown_products').insert(rows);
+        if (linkError) return res.status(500).json({ error: linkError.message });
       }
       res.json({ item: data });
     } catch (err) {

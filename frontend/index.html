@@ -3,135 +3,204 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>The Shore Shack TCG | Automated Release Checkout</title>
-  <meta name="description" content="Create store profiles, select products, follow release countdowns, and let The Shore Shack TCG run releases for you." />
+  <title>The Shore Shack | Auto Shopping Platform</title>
+  <meta name="description" content="Build store profiles, select products, and let The Shore Shack run for your chosen Amazon, Target, Walmart, Supreme, Pokémon Center, and general drops." />
   <link rel="stylesheet" href="styles.css" />
 </head>
-<body class="app-page marketing-page">
-  <header class="marketing-nav">
-    <a class="brand-mark" href="index.html">The Shore Shack TCG</a>
-    <nav class="marketing-links">
-      <a href="#how-it-works">How it works</a>
-      <a href="#countdowns">Release countdowns</a>
-      <a href="#features">Features</a>
-      <a href="guide.html">User Guide</a>
-      <a href="login.html">Login</a>
-      <a class="btn btn-primary" href="signup.html">Get Started</a>
-    </nav>
+<body class="marketing-page">
+  <header class="marketing-header">
+    <div class="marketing-shell marketing-nav">
+      <a href="index.html" class="brand-mark">
+        <span class="brand-mark__logo">TSS</span>
+        <span>
+          <strong>The Shore Shack</strong>
+          <small>Auto shopping platform</small>
+        </span>
+      </a>
+      <nav class="marketing-links">
+        <a href="#countdowns">Release Board</a>
+        <a href="guide.html">User Guide</a>
+        <a href="login.html">Login</a>
+        <a class="btn btn-primary" href="signup.html">Create Account</a>
+      </nav>
+    </div>
   </header>
 
   <main>
-    <section class="hero-shell hero-shell--dense">
-      <div class="hero-copy">
-        <p class="eyebrow">Automated release platform</p>
-        <h1>Build store profiles once. Select products once. Be ready for every Walmart, Target, Amazon, Supreme, Pokémon Center, and custom release.</h1>
-        <p class="hero-subcopy">The Shore Shack TCG is built for users who want one place to manage checkout profiles, product selections, SKU requests, and release countdowns. Your saved profiles control how the platform checks out. Your selected products control what the platform runs for.</p>
-        <div class="hero-actions">
-          <a class="btn btn-primary" href="signup.html">Create account</a>
-          <a class="btn" href="guide.html">Read user guide</a>
-        </div>
-        <div class="hero-badges">
-          <span class="product-pill">Amazon</span>
-          <span class="product-pill">Target</span>
-          <span class="product-pill">Walmart</span>
-          <span class="product-pill">Supreme</span>
-          <span class="product-pill">Pokémon Center</span>
-          <span class="product-pill">General releases</span>
-        </div>
-        <div class="marketing-stat-row">
-          <div class="marketing-stat"><strong>Profiles</strong><span>Store-specific checkout setups</span></div>
-          <div class="marketing-stat"><strong>Selections</strong><span>Choose exact products to run</span></div>
-          <div class="marketing-stat"><strong>Countdowns</strong><span>Track the next drops in one place</span></div>
-        </div>
-      </div>
-      <div class="hero-scene" aria-hidden="true">
-        <div class="scene-storefront scene-storefront--animated">
-          <div class="store-sign">Release Day</div>
-          <div class="shelf shelf-top">
-            <span class="box card-box"></span>
-            <span class="box electronics-box"></span>
-            <span class="box tcg-box"></span>
+    <section class="hero-section">
+      <div class="marketing-shell hero-grid">
+        <div class="hero-copy">
+          <p class="eyebrow">Fast setup. Clear product control.</p>
+          <h1>Set your profiles, pick your products, and let the platform shop for you.</h1>
+          <p class="hero-lead">
+            The Shore Shack helps users prepare Amazon, Target, Walmart, Supreme, Pokémon Center, and General store profiles,
+            choose exactly which products to run for, and use those saved profiles during shopping runs.
+          </p>
+          <div class="hero-actions">
+            <a class="btn btn-primary btn-lg" href="signup.html">Get Started</a>
+            <a class="btn btn-lg" href="guide.html">View User Guide</a>
           </div>
-          <div class="shelf shelf-bottom">
-            <span class="box retail-box"></span>
-            <span class="box sneaker-box"></span>
-            <span class="box bundle-box"></span>
-          </div>
-          <div class="shopper shopper-one">
-            <span class="head"></span><span class="body"></span><span class="cart"></span>
-          </div>
-          <div class="shopper shopper-two">
-            <span class="head"></span><span class="body"></span><span class="bag"></span>
-          </div>
-          <div class="delivery-lane">
-            <div class="delivery-truck">
-              <span class="truck-cab"></span><span class="truck-box"></span><span class="wheel wheel-left"></span><span class="wheel wheel-right"></span>
+          <div class="hero-stats">
+            <div class="hero-stat-card">
+              <strong>6</strong>
+              <span>Store tabs</span>
             </div>
-            <div class="front-door">
-              <span class="door-frame"></span><span class="package-drop"></span>
+            <div class="hero-stat-card">
+              <strong>1</strong>
+              <span>Product selection page</span>
+            </div>
+            <div class="hero-stat-card">
+              <strong>ET</strong>
+              <span>Countdown timezone</span>
             </div>
           </div>
         </div>
-      </div>
-    </section>
 
-    <section class="marketing-grid marketing-grid--four" id="how-it-works">
-      <article class="feature-card">
-        <h2>Create checkout-ready profiles</h2>
-        <p>Save separate profiles for Amazon, Target, Walmart, and General. General profiles are used for releases like Supreme, Pokémon Center, and other custom drops.</p>
-      </article>
-      <article class="feature-card">
-        <h2>Select exact products</h2>
-        <p>Use the Products page to select the items you want the platform to run for. You can also select “Shop Next Release” tabs when no exact SKU list is available yet.</p>
-      </article>
-      <article class="feature-card">
-        <h2>Request missing SKUs</h2>
-        <p>If you do not see a Walmart, Target, or Amazon product, request the SKU and the platform can enrich the catalog with title and price details automatically.</p>
-      </article>
-      <article class="feature-card">
-        <h2>Track live countdowns</h2>
-        <p>Countdowns for Walmart, Target, Supreme, Pokémon Center, and custom general releases help users stay prepared for what is dropping next.</p>
-      </article>
-    </section>
-
-    <section class="panel marketing-panel" id="countdowns">
-      <div class="panel-header">
-        <div>
-          <p class="eyebrow">Live release board</p>
-          <h2>Upcoming releases</h2>
-          <p class="subtle-text">These countdowns are public, so users can follow releases before creating an account.</p>
+        <div class="hero-scene-card">
+          <div class="shop-scene" aria-hidden="true">
+            <div class="scene-sky"></div>
+            <div class="scene-floor"></div>
+            <div class="store-front">
+              <div class="store-awning"></div>
+              <div class="store-sign">Drop Shop</div>
+              <div class="shelf shelf-one">
+                <span class="product-box box-red"></span>
+                <span class="product-box box-gold"></span>
+                <span class="product-box box-blue"></span>
+              </div>
+              <div class="shelf shelf-two">
+                <span class="product-box box-purple"></span>
+                <span class="product-box box-teal"></span>
+                <span class="product-box box-orange"></span>
+              </div>
+            </div>
+            <div class="character shopper">
+              <div class="character-head"></div>
+              <div class="character-body"></div>
+              <div class="character-bag"></div>
+            </div>
+            <div class="character courier">
+              <div class="character-head"></div>
+              <div class="character-body"></div>
+              <div class="delivery-box"></div>
+            </div>
+            <div class="delivery-home">
+              <div class="roof"></div>
+              <div class="house"></div>
+              <div class="door"></div>
+            </div>
+            <div class="motion-dots">
+              <span></span><span></span><span></span>
+            </div>
+          </div>
+          <div class="scene-caption">
+            <strong>How it works</strong>
+            <p>Create profiles, select products, and the platform uses those saved profiles during runs for your chosen items.</p>
+          </div>
         </div>
       </div>
-      <div class="countdown-grid" data-countdown-feed data-empty-text="No countdowns posted yet."></div>
     </section>
 
-    <section class="marketing-grid" id="features">
-      <article class="feature-card feature-card--wide">
-        <h2>What the platform actually does</h2>
-        <p>Users save store-specific profiles with checkout information, then select the products they want the software to run for. During releases, those saved profiles are used to attempt checkout for the selected products. If the exact drop list is not known yet, users can still mark Walmart, Target, Supreme, Pokémon Center, or General “next release” entries so they are queued for the upcoming drop.</p>
-      </article>
-      <article class="feature-card">
-        <h2>Public onboarding</h2>
-        <p>Anyone can view the homepage and user guide without logging in. Private areas like profiles, products, and admin tools remain protected behind login.</p>
-      </article>
-      <article class="feature-card">
-        <h2>Admin controls</h2>
-        <p>Admins can create countdowns, attach related products to them, enrich the catalog by SKU, and review user product selections.</p>
-      </article>
-    </section>
+    <section class="marketing-section">
+      <div class="marketing-shell">
+        <div class="section-heading marketing-heading">
+          <div>
+            <p class="eyebrow">What the platform does</p>
+            <h2>Everything users need to get ready before a run.</h2>
+          </div>
+          <p class="subtle-text marketing-heading-copy">Public visitors can learn how the platform works before creating an account. Profile details and private account actions stay behind login.</p>
+        </div>
 
-    <section class="panel marketing-panel guide-cta-strip">
-      <div>
-        <p class="eyebrow">Need help?</p>
-        <h2>Open the user guide</h2>
-        <p class="subtle-text">Learn how to create profiles, request SKUs, choose products, and understand how your saved profiles are used during live releases.</p>
+        <div class="feature-grid">
+          <article class="feature-card">
+            <div class="feature-icon">1</div>
+            <h3>Create store-specific profiles</h3>
+            <p>Users can set up dedicated profiles for Walmart, Target, Amazon, Supreme, Pokémon Center, and General shopping flows with saved checkout details.</p>
+          </article>
+          <article class="feature-card">
+            <div class="feature-icon">2</div>
+            <h3>Select exact products</h3>
+            <p>The Products page is where users decide what items the system should run for. For upcoming drops without known SKUs, users can still choose the “next release” placeholders.</p>
+          </article>
+          <article class="feature-card">
+            <div class="feature-icon">3</div>
+            <h3>Use saved profiles during runs</h3>
+            <p>The profiles users build are the profiles used to shop for the items they selected in the product selection page.</p>
+          </article>
+        </div>
       </div>
-      <div class="panel-actions">
-        <a class="btn btn-primary" href="guide.html">View user guide</a>
-        <a class="btn" href="login.html">Existing user login</a>
+    </section>
+
+    <section class="marketing-section marketing-section--soft" id="countdowns">
+      <div class="marketing-shell">
+        <div class="section-heading marketing-heading">
+          <div>
+            <p class="eyebrow">Live release board</p>
+            <h2>Upcoming release countdowns</h2>
+          </div>
+          <p class="subtle-text marketing-heading-copy">All countdowns are displayed in US Eastern Time (ET).</p>
+        </div>
+        <div class="countdown-grid" data-countdown-feed data-empty-text="No countdowns posted yet."></div>
+      </div>
+    </section>
+
+    <section class="marketing-section marketing-section--soft">
+      <div class="marketing-shell">
+        <div class="steps-grid">
+          <article class="step-card">
+            <span class="step-number">01</span>
+            <h3>Make an account</h3>
+            <p>Sign up, verify your login details, and access the dashboard.</p>
+          </article>
+          <article class="step-card">
+            <span class="step-number">02</span>
+            <h3>Build your profiles</h3>
+            <p>Add store-specific information for Amazon, Target, Walmart, Supreme, Pokémon Center, or General.</p>
+          </article>
+          <article class="step-card">
+            <span class="step-number">03</span>
+            <h3>Choose your products</h3>
+            <p>Open the Products section and mark the items you want the platform to run for.</p>
+          </article>
+          <article class="step-card">
+            <span class="step-number">04</span>
+            <h3>Be ready for the run</h3>
+            <p>When the platform runs, it uses the saved profile tied to the store and the products you selected.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="marketing-section">
+      <div class="marketing-shell">
+        <div class="cta-card">
+          <div>
+            <p class="eyebrow">Need help first?</p>
+            <h2>Read the user guide before you sign up.</h2>
+            <p class="subtle-text">The guide explains access, profile setup, product selection, and how saved profiles are used during shopping runs.</p>
+          </div>
+          <div class="cta-actions">
+            <a class="btn btn-primary" href="guide.html">Open User Guide</a>
+            <a class="btn" href="login.html">Existing User Login</a>
+          </div>
+        </div>
       </div>
     </section>
   </main>
+
+  <footer class="marketing-footer">
+    <div class="marketing-shell marketing-footer__inner">
+      <div>
+        <strong>The Shore Shack</strong>
+        <p class="subtle-text">Profiles and product selections stay private behind login.</p>
+      </div>
+      <div class="marketing-footer__links">
+        <a href="guide.html">User Guide</a>
+        <a href="signup.html">Create Account</a>
+        <a href="login.html">Login</a>
+      </div>
+    </div>
+  </footer>
 
   <script src="script.js?v=20260322b" defer></script>
 </body>

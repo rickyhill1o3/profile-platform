@@ -41,6 +41,17 @@
         return "$" + number.toFixed(2);
     }
 
+
+    function siteLabel(site) {
+        const normalized = String(site || '').toLowerCase();
+        if (normalized === 'general') return 'General';
+        if (normalized === 'supreme') return 'Supreme';
+        if (normalized === 'pokemon') return 'Pokémon Center';
+        if (normalized === 'walmart') return 'Walmart';
+        if (normalized === 'target') return 'Target';
+        return 'Amazon';
+    }
+
     function getEffectiveProduct(row) {
         return PRODUCT_STATE.dirtyMap.get(row.id) || row;
     }
@@ -52,7 +63,6 @@
     function categoryFromProduct(row) {
         const text = `${normalizeText(row.product_name)} ${normalizeText(row.brand)} ${normalizeText(row.sku)}`;
 
-        if (text.includes("next release") || text.includes("next drop")) return "Next Release";
         if (text.includes("pokemon") || text.includes("pokémon") || text.includes("scarlet") || text.includes("violet") || text.includes("elite trainer") || text.includes("booster bundle")) return "Pokemon";
         if (text.includes("one piece") || /\bop[- ]?\d+/i.test(text) || text.includes("romance dawn") || text.includes("paramount war")) return "One Piece";
         if (text.includes("magic") || text.includes("mtg") || text.includes("commander") || text.includes("collector booster") || text.includes("play booster") || text.includes("wizards of the coast")) return "Magic";
@@ -128,7 +138,7 @@
               <div class="product-card-meta">
                 ${row.brand ? `<span class="product-pill">${escapeHTML(row.brand)}</span>` : ""}
                 <span class="product-pill">${escapeHTML(categoryFromProduct(row))}</span>
-                <span class="product-pill">${escapeHTML((PRODUCT_STATE.site === "pokemon" ? "POKEMON CENTER" : PRODUCT_STATE.site.toUpperCase()))}</span>
+                <span class="product-pill">${escapeHTML(siteLabel(PRODUCT_STATE.site))}</span>
               </div>
               <div class="product-sku">SKU: ${escapeHTML(row.sku)}</div>
             </div>
@@ -215,8 +225,7 @@
         const rows = filteredProducts();
         const selectedCount = PRODUCT_STATE.products.map((p) => getEffectiveProduct(p)).filter((row) => row.selected).length;
 
-        const siteLabel = PRODUCT_STATE.site === "pokemon" ? "POKEMON CENTER" : PRODUCT_STATE.site.toUpperCase();
-        if (summary) summary.textContent = `${siteLabel} • ${rows.length} shown • ${selectedCount} selected`;
+        if (summary) summary.textContent = `${siteLabel(PRODUCT_STATE.site)} • ${rows.length} shown • ${selectedCount} selected`;
 
         if (!rows.length) {
             list.innerHTML = `<div class="product-empty-state"><h3>No products found</h3><p>Try another category or search.</p></div>`;
