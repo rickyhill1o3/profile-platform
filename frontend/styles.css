@@ -217,3 +217,20 @@ h1,h2,h3,h4,p{margin:0}
 .table-wrap--admin-scroll{max-height:360px;overflow:auto;border-radius:18px;border:1px solid var(--line);}
 .table-wrap--admin-scroll table{margin:0;}
 .table-wrap--admin-scroll thead th{position:sticky;top:0;background:var(--panel);z-index:1;}
+
+
+.admin-grid--three{grid-template-columns:minmax(300px,.9fr) minmax(380px,1.1fr) minmax(380px,1.15fr);align-items:start}
+#countdownManagerPanel,#catalogToolsPanel{background:linear-gradient(180deg,#ffffff 0%,#fbfdff 100%)}
+#countdownManagerPanel .stack-list{max-height:280px;overflow:auto;padding-right:4px}
+#countdownManagerPanel .stack-item{padding:14px 16px;border:1px solid var(--line);border-radius:16px;background:#fff;box-shadow:0 8px 24px rgba(15,23,42,.04)}
+#countdownManagerPanel .stack-item + .stack-item{margin-top:10px}
+#countdownManagerPanel .stack-item strong{display:block;font-size:15px}
+#catalogToolsPanel .banner-soft{background:#f8fbff}
+.countdown-card{position:relative}
+.countdown-card-actions{display:flex;justify-content:flex-end;margin-top:4px}
+.countdown-card--selected{border-color:#93c5fd;background:linear-gradient(180deg,#eff6ff 0%,#ffffff 100%)}
+.countdown-select-button{min-width:170px}
+.table-wrap--catalog-scroll{max-height:320px;overflow:auto;border-radius:18px;border:1px solid var(--line)}
+.table-wrap--catalog-scroll thead th{position:sticky;top:0;background:var(--panel);z-index:1}
+.table-wrap--catalog-scroll tbody td{background:#fff}
+@media (max-width:1280px){.admin-grid--three{grid-template-columns:1fr}.products-panel{position:static}}

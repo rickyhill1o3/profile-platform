@@ -146,16 +146,17 @@ async function ensureVirtualCatalogForSite(supabase, site) {
     activeCatalog = createdCatalog;
   }
 
-  const { data: existingProducts, error: existingProductsError } = await supabase
+  const { data: existingVirtual, error: existingProductsError } = await supabase
     .from("catalog_products")
     .select("id")
     .eq("catalog_id", activeCatalog.id)
     .eq("site", site)
+    .ilike("sku", config.sku)
     .limit(1);
 
   if (existingProductsError) throw new Error(existingProductsError.message);
 
-  if (!Array.isArray(existingProducts) || existingProducts.length === 0) {
+  if (!Array.isArray(existingVirtual) || existingVirtual.length === 0) {
     const { error: createProductError } = await supabase
       .from("catalog_products")
       .insert({
@@ -540,6 +541,47 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
     const { error } = await supabase.from('drop_countdowns').delete().eq('id', req.params.id);
     if (error) return res.status(500).json({ error: error.message });
     res.json({ success: true });
+  });
+
+
+  app.get('/countdown-selections', auth, async (req, res) => {
+    try {
+      const { data, error } = await supabase
+        .from('user_selected_countdowns')
+        .select('countdown_id')
+        .eq('user_id', req.user_id);
+      if (error && String(error.message || '').toLowerCase().includes('user_selected_countdowns')) return res.json({ items: [] });
+      if (error) return res.status(500).json({ error: error.message });
+      res.json({ items: (data || []).map((row) => row.countdown_id) });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post('/countdowns/:id/select', auth, async (req, res) => {
+    try {
+      await ensureUserNotRevoked(req.user_id);
+      const countdownId = req.params.id;
+      const { data: existing, error: existingError } = await supabase
+        .from('user_selected_countdowns')
+        .select('id')
+        .eq('user_id', req.user_id)
+        .eq('countdown_id', countdownId)
+        .maybeSingle();
+      if (existingError && !String(existingError.message || '').toLowerCase().includes('user_selected_countdowns')) return res.status(500).json({ error: existingError.message });
+
+      if (existing?.id) {
+        const { error } = await supabase.from('user_selected_countdowns').delete().eq('id', existing.id);
+        if (error) return res.status(500).json({ error: error.message });
+        return res.json({ success: true, selected: false, message: 'Release unselected.' });
+      }
+
+      const { error } = await supabase.from('user_selected_countdowns').insert({ user_id: req.user_id, countdown_id: countdownId });
+      if (error) return res.status(500).json({ error: error.message });
+      res.json({ success: true, selected: true, message: 'Release selected.' });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
   });
 
   app.get('/product-catalog', auth, async (req, res) => {

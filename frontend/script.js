@@ -1212,6 +1212,7 @@ if (passwordForm) {
 
 let countdownTimerHandle = null;
 window.__countdownItems = [];
+window.__selectedCountdownIds = new Set();
 
 function formatEasternTime(value) {
     try {
@@ -1249,7 +1250,9 @@ function toEasternInputValue(value) {
 
 function fromEasternInputValue(value) {
     if (!value) return value;
-    return `${value}:00-05:00`;
+    const parsed = new Date(value);
+    if (Number.isNaN(parsed.getTime())) return value;
+    return parsed.toISOString();
 }
 
 function countdownSiteLabel(site) {
@@ -1281,15 +1284,19 @@ function renderCountdownFeed(items) {
         }
         wrap.innerHTML = source.map((item) => {
             const diff = countdownDiffParts(item.scheduled_for);
+            const selected = window.__selectedCountdownIds.has(item.id);
+            const action = token() ? `<button class="btn ${selected ? '' : 'btn-primary'} countdown-select-button" type="button" data-select-countdown="${escapeHTML(item.id)}">${selected ? 'Chosen for Release' : 'Choose This Release'}</button>` : '';
             return `
-                <article class="countdown-card" data-countdown-id="${escapeHTML(item.id)}" data-countdown-at="${escapeHTML(item.scheduled_for)}">
+                <article class="countdown-card ${selected ? 'countdown-card--selected' : ''}" data-countdown-id="${escapeHTML(item.id)}" data-countdown-at="${escapeHTML(item.scheduled_for)}">
                     <span class="countdown-site">${escapeHTML(countdownSiteLabel(item.site))}</span>
                     <h3>${escapeHTML(item.label || countdownSiteLabel(item.site))}</h3>
                     <div class="countdown-time">${escapeHTML(diff.text)}</div>
                     <div class="countdown-sub">${escapeHTML(formatEasternTime(item.scheduled_for))} ET</div>
+                    ${action ? `<div class="countdown-card-actions">${action}</div>` : ''}
                 </article>`;
         }).join('');
     });
+    attachCountdownSelectionEvents();
 }
 
 function tickCountdownCards() {
@@ -1305,6 +1312,7 @@ async function loadPublicCountdowns() {
     const feeds = document.querySelectorAll('[data-countdown-feed]');
     if (!feeds.length) return;
     try {
+        await loadCountdownSelections();
         const res = await fetch(API + '/public/countdowns');
         const data = await res.json();
         window.__countdownItems = Array.isArray(data.items) ? data.items : [];
@@ -1313,6 +1321,34 @@ async function loadPublicCountdowns() {
         countdownTimerHandle = setInterval(tickCountdownCards, 1000);
     } catch (err) {
         renderCountdownFeed([]);
+    }
+}
+
+function attachCountdownSelectionEvents() {
+    document.querySelectorAll('[data-select-countdown]').forEach((button) => {
+        button.addEventListener('click', async () => {
+            try {
+                const data = await authJSON(API + '/countdowns/' + button.dataset.selectCountdown + '/select', { method: 'POST' });
+                if (data.selected) window.__selectedCountdownIds.add(button.dataset.selectCountdown);
+                else window.__selectedCountdownIds.delete(button.dataset.selectCountdown);
+                renderCountdownFeed(window.__countdownItems);
+            } catch (err) {
+                alert(err.message);
+            }
+        });
+    });
+}
+
+async function loadCountdownSelections() {
+    if (!token()) {
+        window.__selectedCountdownIds = new Set();
+        return;
+    }
+    try {
+        const data = await authJSON(API + '/countdown-selections');
+        window.__selectedCountdownIds = new Set(Array.isArray(data.items) ? data.items : []);
+    } catch (_) {
+        window.__selectedCountdownIds = new Set();
     }
 }
 
