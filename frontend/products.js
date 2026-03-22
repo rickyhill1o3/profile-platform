@@ -320,28 +320,15 @@
         const items = Array.isArray(data.items) ? data.items : [];
         const usersMap = new Map();
 
-        items.forEach((row) => {
-            if (!row.user_id) return;
+        const users = (Array.isArray(data.items) ? data.items : []).sort(
+            (a, b) => (a.user_email || "").localeCompare(b.user_email || "")
+        );
 
-            if (!usersMap.has(row.user_id)) {
-                usersMap.set(row.user_id, {
-                    user_id: row.user_id,
-                    user_email: row.user_email || row.user_id,
-                    selection_count: 0,
-                    countdown_only: !!row.countdown_only
-                });
-            }
-
-            if (row.selected) {
-                usersMap.get(row.user_id).selection_count += 1;
-            }
-        });
-
-        const users = [...usersMap.values()].sort((a, b) => (a.user_email || "").localeCompare(b.user_email || ""));
-        userSelect.innerHTML = `<option value="">Select a user</option>` + users.map((entry) => {
-            const label = entry.selection_count > 0 ? `${entry.user_email} (${entry.selection_count})` : `${entry.user_email} (countdown only)`;
-            return `<option value="${escapeHTML(entry.user_id)}">${escapeHTML(label)}</option>`;
-        }).join("");
+        userSelect.innerHTML =
+            `<option value="">Select a user</option>` +
+            users.map((entry) =>
+                `<option value="${escapeHTML(entry.user_id)}">${escapeHTML(entry.user_email)} (${Number(entry.selection_count || 0)})</option>`
+            ).join("");
 
         if (!users.length) {
             if (message) message.textContent = "No users have selected products or countdown releases yet.";
