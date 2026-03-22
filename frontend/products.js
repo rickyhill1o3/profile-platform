@@ -364,7 +364,7 @@
             if (summary && selectedUser) summary.textContent = `${selectedUser.user_email} • ${rows.length} selected products • ${countdownSelections.length} countdown releases`;
             renderCountdownSelectionChips(countdownSelections);
             if (exportOutput) exportOutput.value = buildProductExportLines(rows).join("
-");
+                ");
 
             if (!rows.length) {
                 detailBody.innerHTML = `<tr><td colspan="5">This user has no saved product selections.</td></tr>`;
@@ -393,10 +393,10 @@
             try {
                 const data = await fetchJSON(API + `/admin/users/${userId}/product-export`, { headers: authHeaders() });
                 const text = Array.isArray(data.lines) ? data.lines.join("
-") : String(data.text || "");
+                    ") : String(data.text || "");
                 if (exportOutput) exportOutput.value = text;
                 if (navigator.clipboard && text) {
-                    try { await navigator.clipboard.writeText(text); } catch (_) {}
+                    try { await navigator.clipboard.writeText(text); } catch (_) { }
                 }
                 if (message) message.textContent = "Export generated.";
             } catch (err) {
