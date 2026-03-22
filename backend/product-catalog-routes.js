@@ -878,7 +878,28 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
         .eq('selected', true)
         .order('updated_at', { ascending: false });
       if (error) return res.status(500).json({ error: error.message });
-      res.json({ items: (data || []).map((row) => ({ preference_id: row.id, selected: !!row.selected, run_mode: row.run_mode, max_price: row.max_price, updated_at: row.updated_at, product: row.catalog_products })) });
+      let countdownItems = [];
+      try {
+        const { data: countdownData, error: countdownError } = await supabase
+          .from('user_selected_countdowns')
+          .select(`
+            id, created_at,
+            drop_countdowns!inner ( id, site, label, scheduled_for, is_active )
+          `)
+          .eq('user_id', targetUserId)
+          .order('created_at', { ascending: false });
+        if (!countdownError && Array.isArray(countdownData)) {
+          countdownItems = countdownData.map((row) => ({
+            id: row.drop_countdowns?.id,
+            site: row.drop_countdowns?.site,
+            label: row.drop_countdowns?.label,
+            scheduled_for: row.drop_countdowns?.scheduled_for,
+            is_active: !!row.drop_countdowns?.is_active,
+            selected_at: row.created_at
+          })).filter((row) => row.id);
+        }
+      } catch (_) {}
+      res.json({ items: (data || []).map((row) => ({ preference_id: row.id, selected: !!row.selected, run_mode: row.run_mode, max_price: row.max_price, updated_at: row.updated_at, product: row.catalog_products })), countdown_items: countdownItems });
     } catch (err) {
       res.status(500).json({ error: err.message });
     }
