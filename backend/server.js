@@ -3,6 +3,7 @@ const cors = require("cors");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const { v4: uuidv4 } = require("uuid");
+const nodemailer = require("nodemailer");
 const registerProductCatalogRoutes = require("./product-catalog-routes");
 
 const supabase = require("./database");
@@ -322,6 +323,35 @@ async function upsertProfileRelations(profileId, payload) {
     }
 }
 
+
+async function sendEmail({ to, subject, text, html }) {
+    const host = process.env.SMTP_HOST;
+    const port = Number(process.env.SMTP_PORT || 465);
+    const user = process.env.SMTP_USER;
+    const pass = process.env.SMTP_PASS;
+    const from = process.env.SMTP_FROM || user;
+
+    if (!host || !user || !pass || !from) {
+        throw new Error("Email is not configured on the server");
+    }
+
+    const transporter = nodemailer.createTransport({
+        host,
+        port,
+        secure: port === 465,
+        auth: { user, pass }
+    });
+
+    return transporter.sendMail({ from, to, subject, text, html });
+}
+
+function buildAppUrl(pathname) {
+    const base = (process.env.APP_BASE_URL || "").replace(/\/$/, "");
+    if (!base) return pathname;
+    return base + pathname;
+}
+
+
 /* ================= AUTH ROUTES ================= */
 
 app.post("/auth/signup", async (req, res) => {
@@ -367,6 +397,17 @@ app.post("/auth/signup", async (req, res) => {
             used_by: user.id
         })
         .eq("id", invite.id);
+
+    try {
+        await sendEmail({
+            to: user.email,
+            subject: "Welcome to The Shore Shack TCG",
+            text: "Thanks for signing up for The Shore Shack TCG. You can now log in and configure your profiles and product selections.",
+            html: "<h2>Welcome to The Shore Shack TCG</h2><p>Thanks for signing up. You can now log in and configure your profiles and product selections.</p>"
+        });
+    } catch (mailErr) {
+        console.error("Welcome email failed:", mailErr.message);
+    }
 
     res.json({ success: true });
 });
@@ -429,6 +470,88 @@ app.get("/auth/me", auth, async (req, res) => {
         res.status(500).json({ error: err.message });
     }
 });
+
+
+app.post("/auth/forgot-password", async (req, res) => {
+    try {
+        const email = String(req.body?.email || "").trim().toLowerCase();
+        if (!email) return res.status(400).json({ error: "Email is required" });
+
+        const { data: user, error } = await supabase
+            .from("users")
+            .select("id, email")
+            .ilike("email", email)
+            .maybeSingle();
+
+        if (error) {
+            return res.status(500).json({ error: error.message });
+        }
+
+        const successMessage = { message: "If this email exists, a reset link has been sent." };
+        if (!user) return res.json(successMessage);
+
+        const resetToken = jwt.sign(
+            { user_id: user.id, purpose: "password_reset" },
+            process.env.JWT_SECRET,
+            { expiresIn: "1h" }
+        );
+
+        const resetUrl = buildAppUrl("/reset-password.html?token=" + encodeURIComponent(resetToken));
+
+        try {
+            await sendEmail({
+                to: user.email,
+                subject: "The Shore Shack Password Reset",
+                text: "Use this link to reset your password: " + resetUrl,
+                html: `<h2>The Shore Shack Password Reset</h2><p>Use the link below to reset your password.</p><p><a href="${resetUrl}">Reset Password</a></p><p>If the button does not work, copy and paste this link into your browser:</p><p>${resetUrl}</p>`
+            });
+        } catch (mailErr) {
+            console.error("Reset email failed:", mailErr.message);
+            return res.status(500).json({ error: "Email failed" });
+        }
+
+        res.json(successMessage);
+    } catch (err) {
+        console.error("Forgot password crash:", err.message);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.post("/auth/reset-password", async (req, res) => {
+    try {
+        const { token, newPassword } = req.body;
+        if (!token || !newPassword) {
+            return res.status(400).json({ error: "Token and new password are required" });
+        }
+
+        let decoded;
+        try {
+            decoded = jwt.verify(token, process.env.JWT_SECRET);
+        } catch {
+            return res.status(400).json({ error: "Invalid or expired reset token" });
+        }
+
+        if (decoded?.purpose !== "password_reset" || !decoded?.user_id) {
+            return res.status(400).json({ error: "Invalid reset token" });
+        }
+
+        const hash = await bcrypt.hash(newPassword, 10);
+
+        const { error } = await supabase
+            .from("users")
+            .update({ password_hash: hash })
+            .eq("id", decoded.user_id);
+
+        if (error) {
+            return res.status(500).json({ error: error.message });
+        }
+
+        res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
 
 /* ================= CHANGE PASSWORD ================= */
 

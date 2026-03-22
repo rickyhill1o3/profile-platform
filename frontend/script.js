@@ -1183,7 +1183,7 @@ async function exportAccountsTxt() {
 
 /* ================= CHANGE PASSWORD ================= */
 
-const passwordForm = document.getElementById("passwordForm");
+const passwordForm = document.getElementById("changePasswordForm");
 if (passwordForm) {
     passwordForm.onsubmit = async (e) => {
         e.preventDefault();
@@ -1201,8 +1201,9 @@ if (passwordForm) {
         });
 
         const data = await res.json();
+        const msg = document.getElementById("error");
         msg.innerText = data.error || "Password updated";
-        msg.className = data.error ? "auth-error" : "success-text";
+        msg.className = data.error ? "error-text" : "success-text";
     };
 }
 
@@ -1723,3 +1724,58 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
     try { await initSkuRequestForm(); } catch (_) {}
 });
+
+
+/* ================= FORGOT / RESET PASSWORD ================= */
+
+const forgotPasswordForm = document.getElementById("forgotPasswordForm");
+if (forgotPasswordForm) {
+    forgotPasswordForm.onsubmit = async (e) => {
+        e.preventDefault();
+        try {
+            const res = await fetch(API + "/auth/forgot-password", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ email: document.getElementById("email").value })
+            });
+            const data = await res.json();
+            const msg = document.getElementById("error");
+            msg.innerText = data.error || data.message || "If this email exists, a reset link has been sent.";
+            msg.className = data.error ? "error-text" : "success-text";
+        } catch {
+            const msg = document.getElementById("error");
+            msg.innerText = "Could not connect to the server.";
+            msg.className = "error-text";
+        }
+    };
+}
+
+const resetPasswordForm = document.getElementById("resetPasswordForm");
+if (resetPasswordForm) {
+    resetPasswordForm.onsubmit = async (e) => {
+        e.preventDefault();
+        try {
+            const params = new URLSearchParams(window.location.search);
+            const tokenValue = params.get("token");
+            const res = await fetch(API + "/auth/reset-password", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    token: tokenValue,
+                    newPassword: document.getElementById("newPassword").value
+                })
+            });
+            const data = await res.json();
+            const msg = document.getElementById("error");
+            msg.innerText = data.error || "Password reset successful. You can now log in.";
+            msg.className = data.error ? "error-text" : "success-text";
+            if (!data.error) {
+                setTimeout(() => { window.location = "login.html"; }, 1200);
+            }
+        } catch {
+            const msg = document.getElementById("error");
+            msg.innerText = "Could not connect to the server.";
+            msg.className = "error-text";
+        }
+    };
+}
