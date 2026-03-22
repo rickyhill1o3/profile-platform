@@ -82,6 +82,10 @@ function isSuperAdmin() {
     return currentUser()?.role === "super_admin";
 }
 
+function canManageCatalog() {
+    return isSuperAdmin();
+}
+
 function logout() {
     localStorage.clear();
     location = "login.html";
@@ -1455,6 +1459,7 @@ async function initCountdownManager() {
 async function loadProductRequests() {
     const body = document.getElementById('productRequestsBody');
     if (!body) return;
+    const superAdmin = canManageCatalog();
     try {
         const data = await authJSON(API + '/admin/product-requests');
         const items = Array.isArray(data.items) ? data.items : [];
@@ -1462,7 +1467,13 @@ async function loadProductRequests() {
             body.innerHTML = '<tr><td colspan="7">No requests yet.</td></tr>';
             return;
         }
-        body.innerHTML = items.map((item) => `
+        body.innerHTML = items.map((item) => {
+            const actions = superAdmin
+                ? `<button class="btn btn-primary" type="button" data-approve-request="${escapeHTML(item.id)}">Approve</button>
+                   <button class="btn" type="button" data-reject-request="${escapeHTML(item.id)}">Reject</button>
+                   <button class="btn btn-danger" type="button" data-delete-request="${escapeHTML(item.id)}">Delete</button>`
+                : '<span class="subtle-text">Super admin approval only</span>';
+            return `
             <tr>
               <td>${escapeHTML(item.user_email || '-')}</td>
               <td>${escapeHTML(item.site)}</td>
@@ -1470,12 +1481,10 @@ async function loadProductRequests() {
               <td>${escapeHTML(item.status || '-')}</td>
               <td>${escapeHTML(item.product_name || '-')} ${item.default_max_price !== null && item.default_max_price !== undefined ? `(${escapeHTML(formatMoney(item.default_max_price))})` : ''}</td>
               <td>${escapeHTML(formatEasternTime(item.updated_at || item.created_at))} ET</td>
-              <td class="table-actions">
-                <button class="btn btn-primary" type="button" data-approve-request="${escapeHTML(item.id)}">Approve</button>
-                <button class="btn" type="button" data-reject-request="${escapeHTML(item.id)}">Reject</button>
-                <button class="btn btn-danger" type="button" data-delete-request="${escapeHTML(item.id)}">Delete</button>
-              </td>
-            </tr>`).join('');
+              <td class="table-actions">${actions}</td>
+            </tr>`;
+        }).join('');
+        if (!superAdmin) return;
         body.querySelectorAll('[data-approve-request]').forEach((button) => {
             button.addEventListener('click', async () => {
                 try {
@@ -1527,6 +1536,7 @@ async function loadCatalogProducts() {
     if (!body) return;
     const site = document.getElementById('catalogFilterSite')?.value || '';
     const search = document.getElementById('catalogFilterSearch')?.value || '';
+    const superAdmin = canManageCatalog();
     try {
         const qs = new URLSearchParams();
         if (site) qs.set('site', site);
@@ -1544,8 +1554,9 @@ async function loadCatalogProducts() {
               <td>${escapeHTML(item.sku || '-')}</td>
               <td>${escapeHTML(formatMoney(item.default_max_price))}</td>
               <td>${item.metadata && item.metadata.virtual ? 'Virtual' : 'Live'}</td>
-              <td><button class="btn btn-danger" type="button" data-delete-catalog-product="${escapeHTML(item.id)}">Delete</button></td>
+              <td>${superAdmin ? `<button class="btn btn-danger" type="button" data-delete-catalog-product="${escapeHTML(item.id)}">Delete</button>` : '<span class="subtle-text">Super admin only</span>'}</td>
             </tr>`).join('');
+        if (!superAdmin) return;
         body.querySelectorAll('[data-delete-catalog-product]').forEach((button) => {
             button.addEventListener('click', async () => {
                 if (!confirm('Delete this product?')) return;
@@ -1567,12 +1578,18 @@ async function loadCatalogProducts() {
 
 async function initCatalogTools() {
     const form = document.getElementById('adminSkuUpsertForm');
+    const manualForm = document.getElementById('adminManualProductForm');
     const message = document.getElementById('adminSkuMessage');
     const syncButton = document.getElementById('syncTargetPricingButton');
     const filterSite = document.getElementById('catalogFilterSite');
     const filterSearch = document.getElementById('catalogFilterSearch');
     const filterButton = document.getElementById('catalogFilterButton');
-    if (form) {
+    const controls = document.getElementById('superAdminCatalogControls');
+    const notice = document.getElementById('superAdminCatalogNotice');
+    const superAdmin = canManageCatalog();
+    if (controls) controls.style.display = superAdmin ? 'block' : 'none';
+    if (notice) notice.style.display = superAdmin ? 'none' : 'block';
+    if (form && superAdmin) {
         form.addEventListener('submit', async (event) => {
             event.preventDefault();
             message.textContent = 'Adding product...';
@@ -1593,7 +1610,33 @@ async function initCatalogTools() {
             }
         });
     }
-    if (syncButton) {
+    if (manualForm && superAdmin) {
+        manualForm.addEventListener('submit', async (event) => {
+            event.preventDefault();
+            message.textContent = 'Saving manual product...';
+            try {
+                const data = await authJSON(API + '/admin/catalog-products/manual', {
+                    method: 'POST',
+                    body: JSON.stringify({
+                        site: document.getElementById('manualProductSite').value,
+                        sku: document.getElementById('manualProductSku').value,
+                        product_name: document.getElementById('manualProductName').value,
+                        default_max_price: document.getElementById('manualProductPrice').value,
+                        brand: document.getElementById('manualProductBrand').value,
+                        image_url: document.getElementById('manualProductImage').value,
+                        product_url: document.getElementById('manualProductUrl').value,
+                        is_placeholder: document.getElementById('manualProductPlaceholder').checked
+                    })
+                });
+                message.textContent = data.message || 'Manual product saved.';
+                manualForm.reset();
+                await loadCatalogProducts();
+            } catch (err) {
+                message.textContent = err.message;
+            }
+        });
+    }
+    if (syncButton && superAdmin) {
         syncButton.addEventListener('click', async () => {
             message.textContent = 'Syncing target pricing...';
             try {

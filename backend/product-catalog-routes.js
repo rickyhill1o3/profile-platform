@@ -3,6 +3,22 @@ const cheerio = require("cheerio");
 const SUPPORTED_SITES = new Set(["amazon", "target", "walmart", "general", "supreme", "pokemon"]);
 const REQUESTABLE_SITES = new Set(["amazon", "target", "walmart", "general", "supreme", "pokemon"]);
 const VIRTUAL_SITE_DEFAULTS = {
+  amazon: {
+    catalogName: "Amazon next drop",
+    sku: "AMAZON-NEXT-DROP",
+    product_name: "Run Next Amazon Release",
+    brand: "Amazon",
+    release_mode_default: "next",
+    metadata: { virtual: true, release_type: "next_drop" }
+  },
+  target: {
+    catalogName: "Target next drop",
+    sku: "TARGET-NEXT-DROP",
+    product_name: "Run Next Target Release",
+    brand: "Target",
+    release_mode_default: "next",
+    metadata: { virtual: true, release_type: "next_drop" }
+  },
   walmart: {
     catalogName: "Walmart next drop",
     sku: "WALMART-NEXT-DROP",
@@ -161,6 +177,7 @@ async function ensureVirtualCatalogForSite(supabase, site) {
 
 async function getActiveCatalog(supabase, site) {
   if (VIRTUAL_SITE_DEFAULTS[site]) await ensureVirtualCatalogForSite(supabase, site);
+  else await ensureActiveCatalogForSite(supabase, site);
   const { data, error } = await supabase
     .from("product_catalogs")
     .select("id, site, name, export_date")
@@ -405,6 +422,56 @@ async function syncTargetPricingFromAmazon(supabase) {
   return updated;
 }
 
+
+function requireSuperAdmin(req, res) {
+  if (req.role !== 'super_admin') {
+    res.status(403).json({ error: 'Super admin only.' });
+    return false;
+  }
+  return true;
+}
+
+async function upsertCatalogProductManual(supabase, payloadInput) {
+  const site = normalizeSite(payloadInput.site);
+  const catalog = await getActiveCatalog(supabase, site);
+  if (!catalog?.id) throw new Error(`No active ${site} catalog found.`);
+
+  const isPlaceholder = !!payloadInput.is_placeholder;
+  const sku = String(payloadInput.sku || '').trim() || (isPlaceholder ? `${site.toUpperCase()}-CUSTOM-${Date.now()}` : '');
+  if (!sku) throw new Error('SKU is required.');
+
+  const product_name = String(payloadInput.product_name || '').trim() || (isPlaceholder ? `Run Next ${site.charAt(0).toUpperCase() + site.slice(1)} Release` : sku);
+  const default_max_price = normalizeMaxPrice(payloadInput.default_max_price);
+  const brand = String(payloadInput.brand || '').trim() || (site === 'pokemon' ? 'Pokémon Center' : site.charAt(0).toUpperCase() + site.slice(1));
+  const image_url = String(payloadInput.image_url || '').trim();
+  const product_url = String(payloadInput.product_url || '').trim();
+  const metadata = Object.assign({}, payloadInput.metadata || {}, isPlaceholder ? { virtual: true, release_type: 'next_drop' } : {});
+
+  const existing = await firstRowOrNull(supabase, site, sku);
+  const payload = {
+    catalog_id: catalog.id,
+    site,
+    sku,
+    product_name,
+    brand,
+    image_url,
+    product_url,
+    default_max_price,
+    release_mode_default: isPlaceholder ? 'next' : normalizeRunMode(payloadInput.release_mode_default, 'current'),
+    is_enabled: true,
+    metadata
+  };
+
+  if (existing?.id) {
+    const { data, error } = await supabase.from('catalog_products').update(payload).eq('id', existing.id).select('*').single();
+    if (error) throw new Error(error.message);
+    return data;
+  }
+  const { data, error } = await supabase.from('catalog_products').insert(payload).select('*').single();
+  if (error) throw new Error(error.message);
+  return data;
+}
+
 module.exports = function registerProductCatalogRoutes({ app, supabase, auth, admin, getCurrentUser, ensureUserNotRevoked }) {
   app.get('/public/countdowns', async (req, res) => {
     try {
@@ -416,7 +483,8 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
         .order('scheduled_for', { ascending: true });
       if (error && String(error.message || '').toLowerCase().includes('drop_countdowns')) return res.json({ items: [] });
       if (error) return res.status(500).json({ error: error.message });
-      res.json({ items: data || [] });
+      const items = (data || []).sort((a,b)=>{ const av=a.metadata&&a.metadata.virtual?1:0; const bv=b.metadata&&b.metadata.virtual?1:0; if (av!==bv) return bv-av; return String(a.product_name||a.sku||'').localeCompare(String(b.product_name||b.sku||'')); });
+      res.json({ items });
     } catch (err) {
       res.json({ items: [] });
     }
@@ -516,7 +584,12 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
           preference_id: pref?.id || null,
           metadata: row.metadata || {}
         };
-      }).filter((row) => !selectedOnly || row.selected);
+      }).filter((row) => !selectedOnly || row.selected).sort((a, b) => {
+        const av = a.metadata && a.metadata.virtual ? 1 : 0;
+        const bv = b.metadata && b.metadata.virtual ? 1 : 0;
+        if (av !== bv) return bv - av;
+        return String(a.product_name || a.sku || '').localeCompare(String(b.product_name || b.sku || ''));
+      });
       res.json({ site, catalog: activeCatalog, products });
     } catch (err) {
       const status = err.message === 'This account has been revoked' ? 403 : 500;
@@ -598,6 +671,7 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
   });
 
   app.post('/admin/catalog-products/upsert-by-sku', auth, admin, async (req, res) => {
+    if (!requireSuperAdmin(req, res)) return;
     try {
       const product = await upsertCatalogProductByLookup(supabase, normalizeSite(req.body.site), req.body.sku);
       res.json({ success: true, product, message: `${product.product_name} was added / updated.` });
@@ -606,7 +680,18 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
     }
   });
 
+  app.post('/admin/catalog-products/manual', auth, admin, async (req, res) => {
+    if (!requireSuperAdmin(req, res)) return;
+    try {
+      const product = await upsertCatalogProductManual(supabase, req.body || {});
+      res.json({ success: true, product, message: `${product.product_name} was saved to the catalog.` });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   app.post('/admin/catalog-products/sync-target-pricing', auth, admin, async (req, res) => {
+    if (!requireSuperAdmin(req, res)) return;
     try {
       const updated = await syncTargetPricingFromAmazon(supabase);
       res.json({ success: true, updated, message: `Updated ${updated} target products from matching Amazon prices.` });
@@ -617,6 +702,7 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
 
 
   app.post('/admin/product-requests/:id/approve', auth, admin, async (req, res) => {
+    if (!requireSuperAdmin(req, res)) return;
     try {
       const { data: requestRow, error: requestError } = await supabase
         .from('product_requests')
@@ -645,6 +731,7 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
   });
 
   app.post('/admin/product-requests/:id/reject', auth, admin, async (req, res) => {
+    if (!requireSuperAdmin(req, res)) return;
     const { error } = await supabase
       .from('product_requests')
       .update({ status: 'rejected', updated_at: new Date().toISOString() })
@@ -654,6 +741,7 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
   });
 
   app.delete('/admin/product-requests/:id', auth, admin, async (req, res) => {
+    if (!requireSuperAdmin(req, res)) return;
     const { error } = await supabase.from('product_requests').delete().eq('id', req.params.id);
     if (error) return res.status(500).json({ error: error.message });
     res.json({ success: true, message: 'Request deleted.' });
@@ -672,13 +760,15 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
       if (search) query = query.or(`sku.ilike.%${search}%,product_name.ilike.%${search}%`);
       const { data, error } = await query;
       if (error) return res.status(500).json({ error: error.message });
-      res.json({ items: data || [] });
+      const items = (data || []).sort((a,b)=>{ const av=a.metadata&&a.metadata.virtual?1:0; const bv=b.metadata&&b.metadata.virtual?1:0; if (av!==bv) return bv-av; return String(a.product_name||a.sku||'').localeCompare(String(b.product_name||b.sku||'')); });
+      res.json({ items });
     } catch (err) {
       res.status(500).json({ error: err.message });
     }
   });
 
   app.delete('/admin/catalog-products/:id', auth, admin, async (req, res) => {
+    if (!requireSuperAdmin(req, res)) return;
     try {
       const { error } = await supabase.from('catalog_products').delete().eq('id', req.params.id);
       if (error) return res.status(500).json({ error: error.message });

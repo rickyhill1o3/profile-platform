@@ -69,12 +69,27 @@
       </section>
 
       <section class="panel" id="catalogToolsPanel">
-        <div class="panel-header"><div><h2>Catalog Tools</h2><p class="subtle-text">Add products manually, review pending requests, and delete bad catalog entries. User requests never auto-add to the catalog.</p></div></div>
+        <div class="panel-header"><div><h2>Catalog Tools</h2><p class="subtle-text">Only the super admin can approve requests, add products, placeholders, or delete catalog entries. Admins can review requests and view the catalog.</p></div></div>
+        <div id="superAdminCatalogControls">
         <form id="adminSkuUpsertForm" class="form-grid">
           <div class="field"><label for="adminSkuSite">Site</label><select class="input" id="adminSkuSite"><option value="amazon">Amazon</option><option value="target">Target</option><option value="walmart">Walmart</option><option value="supreme">Supreme</option><option value="pokemon">Pokémon Center</option><option value="general">General</option></select></div>
           <div class="field"><label for="adminSkuValue">SKU / ASIN / DPCI</label><input class="input" id="adminSkuValue" placeholder="Enter SKU" /></div>
           <div class="field field--full panel-actions"><button class="btn btn-primary" type="submit">Add / Update Catalog Product</button><button class="btn" type="button" id="syncTargetPricingButton">Sync Target Prices From Amazon</button></div>
         </form>
+        <div class="banner banner-soft"><strong>Manual product add</strong><p class="subtle-text">Create products manually when a scrape fails, or create a blank placeholder card for future drops.</p></div>
+        <form id="adminManualProductForm" class="form-grid">
+          <div class="field"><label for="manualProductSite">Site</label><select class="input" id="manualProductSite"><option value="amazon">Amazon</option><option value="target">Target</option><option value="walmart">Walmart</option><option value="supreme">Supreme</option><option value="pokemon">Pokémon Center</option><option value="general">General</option></select></div>
+          <div class="field"><label for="manualProductSku">SKU</label><input class="input" id="manualProductSku" placeholder="SKU or custom code" /></div>
+          <div class="field field--full"><label for="manualProductName">Product Name</label><input class="input" id="manualProductName" placeholder="Product title or next drop label" /></div>
+          <div class="field"><label for="manualProductPrice">Default Max Price</label><input class="input" id="manualProductPrice" type="number" step="0.01" min="0" placeholder="0.00" /></div>
+          <div class="field"><label for="manualProductBrand">Brand</label><input class="input" id="manualProductBrand" placeholder="Optional brand" /></div>
+          <div class="field"><label for="manualProductImage">Image URL</label><input class="input" id="manualProductImage" placeholder="Optional image URL" /></div>
+          <div class="field"><label for="manualProductUrl">Product URL</label><input class="input" id="manualProductUrl" placeholder="Optional product URL" /></div>
+          <div class="field field--full"><label class="checkbox-inline"><input type="checkbox" id="manualProductPlaceholder" /><span>Create as blank next-drop placeholder</span></label></div>
+          <div class="field field--full panel-actions"><button class="btn btn-primary" type="submit">Save Manual Product</button></div>
+        </form>
+        </div>
+        <div id="superAdminCatalogNotice" class="banner banner-soft" style="display:none"><strong>View only</strong><p class="subtle-text">Only the super admin can approve requests, add products, placeholders, or delete catalog entries.</p></div>
         <div id="adminSkuMessage" class="subtle-text"></div>
         <div class="banner banner-soft"><strong>SKU requests</strong><p class="subtle-text">All user requests stay pending until an admin approves, rejects, or deletes them.</p></div>
         <div class="table-wrap"><table class="admin-table"><thead><tr><th>User</th><th>Site</th><th>SKU / Label</th><th>Status</th><th>Resolved Product</th><th>Updated (ET)</th><th>Actions</th></tr></thead><tbody id="productRequestsBody"><tr><td colspan="7">No requests yet.</td></tr></tbody></table></div>
@@ -84,7 +99,7 @@
           <div class="field"><label for="catalogFilterSearch">Search</label><input class="input" id="catalogFilterSearch" placeholder="Product name or SKU" /></div>
           <div class="field field-actions"><label>&nbsp;</label><button class="btn" type="button" id="catalogFilterButton">Load Products</button></div>
         </div>
-        <div class="table-wrap"><table class="admin-table"><thead><tr><th>Site</th><th>Product</th><th>SKU</th><th>Max Price</th><th>Type</th><th>Action</th></tr></thead><tbody id="catalogProductsBody"><tr><td colspan="6">Load products to manage the catalog.</td></tr></tbody></table></div>
+        <div class="table-wrap table-wrap--catalog-scroll"><table class="admin-table"><thead><tr><th>Site</th><th>Product</th><th>SKU</th><th>Max Price</th><th>Type</th><th>Action</th></tr></thead><tbody id="catalogProductsBody"><tr><td colspan="6">Load products to manage the catalog.</td></tr></tbody></table></div>
       </section>
     </div>
 

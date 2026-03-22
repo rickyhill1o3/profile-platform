@@ -50,6 +50,7 @@
     }
 
     function categoryFromProduct(row) {
+        if (row && row.metadata && row.metadata.virtual) return 'Next Release';
         const text = `${normalizeText(row.product_name)} ${normalizeText(row.brand)} ${normalizeText(row.sku)}`;
 
         if (text.includes("pokemon") || text.includes("pokémon") || text.includes("scarlet") || text.includes("violet") || text.includes("elite trainer") || text.includes("booster bundle")) return "Pokemon";
@@ -86,7 +87,7 @@
             groups.get(category).push(row);
         });
         return [...groups.entries()]
-            .sort((a, b) => a[0].localeCompare(b[0]))
+            .sort((a, b) => { if (a[0] === 'Next Release') return -1; if (b[0] === 'Next Release') return 1; return a[0].localeCompare(b[0]); })
             .map(([category, items]) => ({
                 category,
                 items: items.sort((x, y) => (x.product_name || x.sku || "").localeCompare(y.product_name || y.sku || ""))

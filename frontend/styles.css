@@ -209,3 +209,6 @@ h1,h2,h3,h4,p{margin:0}
 @keyframes dropPulse{0%,100%{transform:translateY(0)}50%{transform:translateY(-6px)}}
 @media (max-width:1180px){.hero-shell,.guide-layout,.admin-grid--three,.marketing-grid{grid-template-columns:1fr}.hero-scene{min-height:420px}.sku-request-form{grid-template-columns:1fr}}
 @media (max-width:760px){.marketing-nav{flex-direction:column;align-items:flex-start}.marketing-links{width:100%}.hero-copy h1{font-size:38px}.product-card-grid{grid-template-columns:1fr}.guide-cta-strip{align-items:flex-start}}
+
+.table-wrap--catalog-scroll{max-height:420px;overflow:auto;border-radius:18px;border:1px solid var(--line);}
+.table-wrap--catalog-scroll table{margin:0;}
