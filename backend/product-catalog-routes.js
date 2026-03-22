@@ -829,87 +829,54 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
 
             let productQuery = supabase
                 .from('user_product_preferences')
-                .select(`
-        id, user_id, selected, run_mode, max_price, updated_at,
-        users!inner ( id, email, owner_admin_id ),
-        catalog_products!inner ( id, site, sku, product_name, default_max_price, image_url )
-      `)
-                .eq('selected', true)
-                .order('updated_at', { ascending: false });
+                .select(`user_id, selected, catalog_products!inner ( site, sku, product_name )`)
+                .eq('selected', true);
 
             if (site) productQuery = productQuery.eq('catalog_products.site', site);
             if (scopedUserIds && scopedUserIds.length) productQuery = productQuery.in('user_id', scopedUserIds);
-            if (search) {
-                productQuery = productQuery.or(
-                    `catalog_products.sku.ilike.%${search}%,catalog_products.product_name.ilike.%${search}%,users.email.ilike.%${search}%`
-                );
-            }
+            if (search) productQuery = productQuery.or(`catalog_products.sku.ilike.%${search}%,catalog_products.product_name.ilike.%${search}%`);
 
             const { data: productData, error: productError } = await productQuery;
             if (productError) return res.status(500).json({ error: productError.message });
 
-            let countdownData = [];
+            let countdownRows = [];
             try {
                 let countdownQuery = supabase
                     .from('user_selected_countdowns')
-                    .select(`
-          id, user_id, created_at,
-          users!inner ( id, email, owner_admin_id ),
-          drop_countdowns!inner ( id, site, label, scheduled_for, is_active )
-        `)
+                    .select(`countdown_id, user_id, created_at, drop_countdowns!inner(id, site, label, scheduled_for, is_active)`)
                     .order('created_at', { ascending: false });
-
                 if (scopedUserIds && scopedUserIds.length) countdownQuery = countdownQuery.in('user_id', scopedUserIds);
                 if (site) countdownQuery = countdownQuery.eq('drop_countdowns.site', site);
-                if (search) {
-                    countdownQuery = countdownQuery.or(
-                        `users.email.ilike.%${search}%,drop_countdowns.label.ilike.%${search}%`
-                    );
-                }
+                if (search) countdownQuery = countdownQuery.or(`drop_countdowns.label.ilike.%${search}%`);
+                const { data, error } = await countdownQuery;
+                if (!error && Array.isArray(data)) countdownRows = data;
+            } catch (_) {}
 
-                const result = await countdownQuery;
-                if (!result.error && Array.isArray(result.data)) {
-                    countdownData = result.data;
-                }
-            } catch (_) { }
+            const allUserIds = [...new Set([...(productData || []).map((r) => r.user_id).filter(Boolean), ...(countdownRows || []).map((r) => r.user_id).filter(Boolean)])];
+            if (!allUserIds.length) return res.json({ items: [] });
+
+            let userQuery = supabase.from('users').select('id, email, owner_admin_id').in('id', allUserIds);
+            if (search) userQuery = userQuery.ilike('email', `%${search}%`);
+            const { data: usersData, error: usersError } = await userQuery;
+            if (usersError) return res.status(500).json({ error: usersError.message });
+            const userInfo = new Map((usersData || []).map((u) => [u.id, u]));
 
             const usersMap = new Map();
-
             (productData || []).forEach((row) => {
-                if (!row.user_id) return;
-                if (!usersMap.has(row.user_id)) {
-                    usersMap.set(row.user_id, {
-                        user_id: row.user_id,
-                        user_email: row.users?.email || row.user_id,
-                        owner_admin_id: row.users?.owner_admin_id || null,
-                        product_count: 0,
-                        countdown_count: 0
-                    });
-                }
-                usersMap.get(row.user_id).product_count += 1;
+                const info = userInfo.get(row.user_id);
+                if (!row.user_id || !info) return;
+                if (!usersMap.has(row.user_id)) usersMap.set(row.user_id, { user_id: row.user_id, user_email: info.email || row.user_id, owner_admin_id: info.owner_admin_id || null, product_count: 0, countdown_count: 0 });
+                if (row.selected) usersMap.get(row.user_id).product_count += 1;
             });
-
-            (countdownData || []).forEach((row) => {
-                if (!row.user_id) return;
-                if (!usersMap.has(row.user_id)) {
-                    usersMap.set(row.user_id, {
-                        user_id: row.user_id,
-                        user_email: row.users?.email || row.user_id,
-                        owner_admin_id: row.users?.owner_admin_id || null,
-                        product_count: 0,
-                        countdown_count: 0
-                    });
-                }
+            (countdownRows || []).forEach((row) => {
+                const info = userInfo.get(row.user_id);
+                if (!row.user_id || !info) return;
+                if (!usersMap.has(row.user_id)) usersMap.set(row.user_id, { user_id: row.user_id, user_email: info.email || row.user_id, owner_admin_id: info.owner_admin_id || null, product_count: 0, countdown_count: 0 });
                 usersMap.get(row.user_id).countdown_count += 1;
             });
 
-            const items = [...usersMap.values()]
-                .map((row) => ({
-                    ...row,
-                    selection_count: row.product_count + row.countdown_count
-                }))
+            const items = [...usersMap.values()].map((row) => ({ ...row, selection_count: row.product_count + row.countdown_count }))
                 .sort((a, b) => (a.user_email || '').localeCompare(b.user_email || ''));
-
             res.json({ items });
         } catch (err) {
             res.status(500).json({ error: err.message });
@@ -925,10 +892,7 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
             }
             const { data, error } = await supabase
                 .from('user_product_preferences')
-                .select(`
-          id, selected, run_mode, max_price, updated_at,
-          catalog_products!inner ( id, site, sku, product_name, image_url, default_max_price, product_url )
-        `)
+                .select(`id, selected, run_mode, max_price, updated_at, catalog_products!inner ( id, site, sku, product_name, image_url, default_max_price, product_url )`)
                 .eq('user_id', targetUserId)
                 .eq('selected', true)
                 .order('updated_at', { ascending: false });
@@ -941,28 +905,19 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
                     .select(`countdown_id, created_at, drop_countdowns!inner(id, site, label, scheduled_for)`)
                     .eq('user_id', targetUserId)
                     .order('created_at', { ascending: false });
-                if (!countdownError) {
-                    countdownSelections = (countdownRows || []).map((row) => ({
-                        countdown_id: row.countdown_id,
-                        selected_at: row.created_at,
-                        site: row.drop_countdowns?.site || '',
-                        label: row.drop_countdowns?.label || '',
-                        scheduled_for: row.drop_countdowns?.scheduled_for || null,
-                        when_label: row.drop_countdowns?.scheduled_for ? new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', month: 'numeric', day: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true }).format(new Date(row.drop_countdowns.scheduled_for)) + ' ET' : ''
-                    }));
-                }
-            } catch (_) { }
+                if (!countdownError) countdownSelections = (countdownRows || []).map((row) => ({
+                    countdown_id: row.countdown_id,
+                    selected_at: row.created_at,
+                    site: row.drop_countdowns?.site || '',
+                    label: row.drop_countdowns?.label || row.drop_countdowns?.site || '',
+                    scheduled_for: row.drop_countdowns?.scheduled_for || null,
+                    when_label: row.drop_countdowns?.scheduled_for ? new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', month: 'numeric', day: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true }).format(new Date(row.drop_countdowns.scheduled_for)) + ' ET' : ''
+                }));
+            } catch (_) {}
 
             res.json({
-                items: (data || []).map((row) => ({
-                    preference_id: row.id,
-                    selected: !!row.selected,
-                    run_mode: row.run_mode,
-                    max_price: row.max_price,
-                    updated_at: row.updated_at,
-                    product: row.catalog_products
-                })),
-                countdown_selections: countdownItems
+                items: (data || []).map((row) => ({ preference_id: row.id, selected: !!row.selected, run_mode: row.run_mode, max_price: row.max_price, updated_at: row.updated_at, product: row.catalog_products })),
+                countdown_selections: countdownSelections
             });
         } catch (err) {
             res.status(500).json({ error: err.message });
@@ -973,37 +928,27 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
         try {
             const currentUser = await getCurrentUser(req);
             const scopedUserIds = await getScopedUserIds(supabase, currentUser);
-
-            let query = supabase
-                .from('user_selected_countdowns')
-                .select(`
-        id, user_id,
-        drop_countdowns!inner ( id, site, label, scheduled_for, is_active )
-      `);
-
+            let query = supabase.from('user_selected_countdowns').select(`countdown_id, user_id, drop_countdowns!inner ( id, site, label, scheduled_for, is_active )`);
             if (scopedUserIds && scopedUserIds.length) query = query.in('user_id', scopedUserIds);
-
             const { data, error } = await query;
             if (error) return res.status(500).json({ error: error.message });
-
             const map = new Map();
-
             (data || []).forEach((row) => {
                 const countdown = row.drop_countdowns;
                 if (!countdown?.id) return;
-                if (!map.has(countdown.id)) {
-                    map.set(countdown.id, {
-                        countdown_id: countdown.id,
-                        name: countdown.label || countdown.site || 'Release',
-                        site: countdown.site || '',
-                        scheduled_for: countdown.scheduled_for || null,
-                        selected_users: 0
-                    });
-                }
+                if (!map.has(countdown.id)) map.set(countdown.id, {
+                    id: countdown.id,
+                    countdown_id: countdown.id,
+                    label: countdown.label || countdown.site || 'Release',
+                    name: countdown.label || countdown.site || 'Release',
+                    site: countdown.site || '',
+                    scheduled_for: countdown.scheduled_for || null,
+                    when_label: countdown.scheduled_for ? new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', month: 'numeric', day: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true }).format(new Date(countdown.scheduled_for)) + ' ET' : '',
+                    selected_users: 0
+                });
                 map.get(countdown.id).selected_users += 1;
             });
-
-            res.json({ items: [...map.values()].sort((a, b) => (a.name || '').localeCompare(b.name || '')) });
+            res.json({ items: [...map.values()].sort((a, b) => (a.label || '').localeCompare(b.label || '')) });
         } catch (err) {
             res.status(500).json({ error: err.message });
         }
@@ -1014,37 +959,34 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
             const currentUser = await getCurrentUser(req);
             const scopedUserIds = await getScopedUserIds(supabase, currentUser);
             const countdownId = req.params.countdownId;
-
             let query = supabase
                 .from('user_selected_countdowns')
-                .select(`
-        id, user_id, created_at,
-        users!inner ( id, email, owner_admin_id ),
-        drop_countdowns!inner ( id, site, label, scheduled_for )
-      `)
+                .select(`countdown_id, user_id, created_at, drop_countdowns!inner ( id, site, label, scheduled_for )`)
                 .eq('countdown_id', countdownId)
                 .order('created_at', { ascending: false });
-
             if (scopedUserIds && scopedUserIds.length) query = query.in('user_id', scopedUserIds);
-
             const { data, error } = await query;
             if (error) return res.status(500).json({ error: error.message });
-
-            const countdown = data?.[0]?.drop_countdowns
-                ? {
-                    id: data[0].drop_countdowns.id,
-                    site: data[0].drop_countdowns.site,
-                    label: data[0].drop_countdowns.label,
-                    scheduled_for: data[0].drop_countdowns.scheduled_for
-                }
-                : null;
-
+            const userIds = [...new Set((data || []).map((r) => r.user_id).filter(Boolean))];
+            let userMap = new Map();
+            if (userIds.length) {
+                const { data: userRows, error: userErr } = await supabase.from('users').select('id, email').in('id', userIds);
+                if (userErr) return res.status(500).json({ error: userErr.message });
+                userMap = new Map((userRows || []).map((u) => [u.id, u]));
+            }
+            const countdown = data?.[0]?.drop_countdowns ? {
+                id: data[0].drop_countdowns.id,
+                site: data[0].drop_countdowns.site,
+                label: data[0].drop_countdowns.label || data[0].drop_countdowns.site || 'Release',
+                scheduled_for: data[0].drop_countdowns.scheduled_for,
+                when_label: data[0].drop_countdowns.scheduled_for ? new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', month: 'numeric', day: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true }).format(new Date(data[0].drop_countdowns.scheduled_for)) + ' ET' : ''
+            } : null;
             const users = (data || []).map((row) => ({
-                id: row.users?.id,
-                email: row.users?.email || '',
-                selected_at: row.created_at
+                id: row.user_id,
+                email: userMap.get(row.user_id)?.email || row.user_id,
+                selected_at: row.created_at,
+                selected_at_label: row.created_at ? new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', month: 'numeric', day: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true }).format(new Date(row.created_at)) + ' ET' : ''
             }));
-
             res.json({ countdown, users });
         } catch (err) {
             res.status(500).json({ error: err.message });

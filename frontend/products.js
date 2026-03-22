@@ -350,11 +350,11 @@
             }
 
             const selectedUser = users.find((entry) => entry.user_id === userId);
-            if (summary && selectedUser) summary.textContent = selectedUser.selection_count > 0 ? `${selectedUser.user_email} • ${selectedUser.selection_count} selected products` : `${selectedUser.user_email} • countdown selections only`;
+            if (summary && selectedUser) summary.textContent = `${selectedUser.user_email} • ${Number(selectedUser.product_count || 0)} selected products • ${Number(selectedUser.countdown_count || 0)} countdown releases`;
 
             const detail = await fetchJSON(API + `/admin/users/${userId}/product-preferences`, { headers: authHeaders() });
             const rows = Array.isArray(detail.items) ? detail.items : [];
-            const countdowns = Array.isArray(detail.countdown_selections) ? detail.countdown_selections : [];
+            const countdowns = Array.isArray(detail.countdown_selections || detail.countdown_items) ? (detail.countdown_selections || detail.countdown_items) : [];
 
             if (countdownWrap) {
                 if (countdowns.length) {
@@ -364,9 +364,15 @@
                 }
             }
 
+            if (!rows.length && !countdowns.length) {
+                detailBody.innerHTML = `<tr><td colspan="5">This user has no saved product or countdown selections.</td></tr>`;
+                if (message) message.textContent = "";
+                return;
+            }
+
             if (!rows.length) {
-                detailBody.innerHTML = `<tr><td colspan="5">This user has no saved product selections.</td></tr>`;
-                if (message) message.textContent = countdowns.length ? "This user selected countdown releases but no products." : "";
+                detailBody.innerHTML = `<tr><td colspan="5">This user selected countdown releases but no products.</td></tr>`;
+                if (message) message.textContent = "";
                 return;
             }
 
@@ -405,8 +411,8 @@
             }
 
             countdownList.innerHTML = items.map((item) => `
-                <button type="button" class="countdown-list-item" data-countdown-id="${escapeHTML(item.id)}">
-                    <span><strong>${escapeHTML(item.label || item.site || 'Release')}</strong><small>${escapeHTML(item.when_label || '')}</small></span>
+                <button type="button" class="countdown-list-item" data-countdown-id="${escapeHTML(item.id || item.countdown_id)}">
+                    <span><strong>${escapeHTML(item.label || item.name || item.site || 'Release')}</strong><small>${escapeHTML(item.when_label || '')}</small></span>
                     <span class="badge">${Number(item.selected_users || 0)}</span>
                 </button>
             `).join('');
