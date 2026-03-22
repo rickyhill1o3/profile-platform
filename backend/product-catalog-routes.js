@@ -883,24 +883,136 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
       try {
         const { data: countdownRows, error: countdownError } = await supabase
           .from('user_selected_countdowns')
-          .select(`countdown_id, created_at, drop_countdowns!inner(id, site, label, scheduled_for)`)
+          .select('countdown_id, created_at, drop_countdowns!inner(id, site, label, scheduled_for)')
           .eq('user_id', targetUserId)
           .order('created_at', { ascending: false });
         if (!countdownError) {
           countdownSelections = (countdownRows || []).map((row) => ({
             countdown_id: row.countdown_id,
-            selected_at: row.created_at,
             site: row.drop_countdowns?.site || '',
             label: row.drop_countdowns?.label || '',
             scheduled_for: row.drop_countdowns?.scheduled_for || null,
+            selected_at: row.created_at || null,
             when_label: row.drop_countdowns?.scheduled_for ? new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', month: 'numeric', day: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true }).format(new Date(row.drop_countdowns.scheduled_for)) + ' ET' : ''
           }));
         }
       } catch (_) {}
 
       res.json({
-        items: (data || []).map((row) => ({ preference_id: row.id, selected: !!row.selected, run_mode: row.run_mode, max_price: row.max_price, updated_at: row.updated_at, product: row.catalog_products })),
+        items: (data || []).map((row) => ({
+          preference_id: row.id,
+          selected: !!row.selected,
+          run_mode: row.run_mode,
+          max_price: row.max_price,
+          updated_at: row.updated_at,
+          product: row.catalog_products
+        })),
         countdown_selections: countdownSelections
+      });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.get('/admin/users/:userId/product-export', auth, admin, async (req, res) => {
+    try {
+      const currentUser = await getCurrentUser(req);
+      const targetUserId = req.params.userId;
+      if (!(await canAdminAccessUser(supabase, currentUser, targetUserId))) {
+        return res.status(403).json({ error: 'You do not have access to this user.' });
+      }
+      const { data, error } = await supabase
+        .from('user_product_preferences')
+        .select('max_price, catalog_products!inner(sku, product_name, default_max_price)')
+        .eq('user_id', targetUserId)
+        .eq('selected', true)
+        .order('updated_at', { ascending: false });
+      if (error) return res.status(500).json({ error: error.message });
+      const lines = (data || []).map((row) => {
+        const sku = row.catalog_products?.sku || '';
+        const name = row.catalog_products?.product_name || '';
+        const price = row.max_price ?? row.catalog_products?.default_max_price ?? '';
+        const normalizedPrice = price === '' || price === null || price === undefined ? '' : Number(price).toFixed(2);
+        return `${sku};${name};${normalizedPrice}`;
+      });
+      res.json({ lines, text: lines.join('
+') });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.get('/admin/countdowns/selection-summary', auth, admin, async (req, res) => {
+    try {
+      const currentUser = await getCurrentUser(req);
+      const scopedIds = await getScopedUserIds(supabase, currentUser);
+      const { data: countdowns, error: countdownError } = await supabase
+        .from('drop_countdowns')
+        .select('id, site, label, scheduled_for, is_active')
+        .order('scheduled_for', { ascending: true });
+      if (countdownError) return res.status(500).json({ error: countdownError.message });
+
+      const { data: selectedRows, error: selectedError } = await supabase
+        .from('user_selected_countdowns')
+        .select('countdown_id, user_id');
+      if (selectedError && !String(selectedError.message || '').toLowerCase().includes('user_selected_countdowns')) {
+        return res.status(500).json({ error: selectedError.message });
+      }
+      const usableRows = (selectedRows || []).filter((row) => !scopedIds || scopedIds.includes(row.user_id));
+      const countMap = new Map();
+      usableRows.forEach((row) => countMap.set(row.countdown_id, (countMap.get(row.countdown_id) || 0) + 1));
+
+      const items = (countdowns || []).map((item) => ({
+        id: item.id,
+        site: item.site,
+        label: item.label,
+        scheduled_for: item.scheduled_for,
+        when_label: item.scheduled_for ? new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', month: 'numeric', day: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true }).format(new Date(item.scheduled_for)) + ' ET' : '',
+        selected_users: countMap.get(item.id) || 0
+      })).sort((a, b) => (b.selected_users - a.selected_users) || String(a.label || '').localeCompare(String(b.label || '')));
+      res.json({ items });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.get('/admin/countdowns/:countdownId/users', auth, admin, async (req, res) => {
+    try {
+      const currentUser = await getCurrentUser(req);
+      const scopedIds = await getScopedUserIds(supabase, currentUser);
+      const countdownId = req.params.countdownId;
+      const { data: countdown, error: countdownError } = await supabase
+        .from('drop_countdowns')
+        .select('id, site, label, scheduled_for')
+        .eq('id', countdownId)
+        .single();
+      if (countdownError) return res.status(500).json({ error: countdownError.message });
+
+      const { data: rows, error } = await supabase
+        .from('user_selected_countdowns')
+        .select('user_id, created_at, users!inner(id, email, role, owner_admin_id)')
+        .eq('countdown_id', countdownId)
+        .order('created_at', { ascending: false });
+      if (error && !String(error.message || '').toLowerCase().includes('user_selected_countdowns')) {
+        return res.status(500).json({ error: error.message });
+      }
+      const users = (rows || [])
+        .filter((row) => !scopedIds || scopedIds.includes(row.user_id))
+        .map((row) => ({
+          id: row.users?.id || row.user_id,
+          email: row.users?.email || row.user_id,
+          role: row.users?.role || 'user',
+          selected_at: row.created_at || null,
+          selected_at_label: row.created_at ? new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', month: 'numeric', day: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true }).format(new Date(row.created_at)) + ' ET' : ''
+        }));
+      res.json({
+        countdown: {
+          id: countdown.id,
+          label: countdown.label,
+          site: countdown.site,
+          when_label: countdown.scheduled_for ? new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', month: 'numeric', day: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true }).format(new Date(countdown.scheduled_for)) + ' ET' : ''
+        },
+        users
       });
     } catch (err) {
       res.status(500).json({ error: err.message });

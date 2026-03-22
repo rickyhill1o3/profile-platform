@@ -300,18 +300,19 @@
     }
 
     async function loadAdminSelections() {
-        const section = document.getElementById("adminProductSelectionsSection");
+        const section = document.getElementById("adminProductSelectionsSection") || document.querySelector('h2')?.closest?.("section");
         const userSelect = document.getElementById("adminProductUserSelect");
         const loadButton = document.getElementById("adminLoadUserProductsButton");
+        const exportButton = document.getElementById("adminExportUserProductsButton");
         const detailBody = document.getElementById("adminUserProductDetailBody");
         const message = document.getElementById("adminProductSelectionsMessage");
         const summary = document.getElementById("adminSelectedUserSummary");
-        const countdownWrap = document.getElementById("adminSelectedUserCountdowns");
+        const exportOutput = document.getElementById("adminProductExportOutput");
 
-        if (!section || !userSelect || !detailBody) return;
+        if (!userSelect || !detailBody) return;
         const user = currentUser();
-        if (!isAdminRole(user?.role)) { section.style.display = "none"; return; }
-        section.style.display = "block";
+        if (!isAdminRole(user?.role)) { if (section) section.style.display = "none"; return; }
+        if (section) section.style.display = "block";
 
         const data = await fetchJSON(API + "/admin/product-preferences", { headers: authHeaders() });
         const items = Array.isArray(data.items) ? data.items : [];
@@ -338,7 +339,10 @@
 
         if (!users.length) {
             if (message) message.textContent = "No users have selected products yet.";
+            if (exportOutput) exportOutput.value = "";
+            renderCountdownSelectionChips([]);
             detailBody.innerHTML = `<tr><td colspan="5">No saved product selections yet.</td></tr>`;
+            await loadCountdownSelectionSummary();
             return;
         }
 
@@ -347,25 +351,20 @@
             if (!userId) {
                 if (message) message.textContent = "Choose a user first.";
                 if (summary) summary.textContent = "";
-                if (countdownWrap) countdownWrap.innerHTML = '';
+                if (exportOutput) exportOutput.value = "";
+                renderCountdownSelectionChips([]);
                 detailBody.innerHTML = `<tr><td colspan="5">Choose a user to view product selections.</td></tr>`;
                 return;
             }
 
             const selectedUser = users.find((entry) => entry.user_id === userId);
-            if (summary && selectedUser) summary.textContent = `${selectedUser.user_email} • ${selectedUser.selection_count} selected products`;
-
             const detail = await fetchJSON(API + `/admin/users/${userId}/product-preferences`, { headers: authHeaders() });
             const rows = Array.isArray(detail.items) ? detail.items : [];
-            const countdowns = Array.isArray(detail.countdown_selections) ? detail.countdown_selections : [];
-
-            if (countdownWrap) {
-                if (countdowns.length) {
-                    countdownWrap.innerHTML = countdowns.map((item) => `<span class="selection-chip">${escapeHTML(item.label || item.site || 'Release')} • ${escapeHTML(item.when_label || '')}</span>`).join('');
-                } else {
-                    countdownWrap.innerHTML = `<span class="selection-chip selection-chip--empty">No countdown releases selected.</span>`;
-                }
-            }
+            const countdownSelections = Array.isArray(detail.countdown_selections) ? detail.countdown_selections : [];
+            if (summary && selectedUser) summary.textContent = `${selectedUser.user_email} • ${rows.length} selected products • ${countdownSelections.length} countdown releases`;
+            renderCountdownSelectionChips(countdownSelections);
+            if (exportOutput) exportOutput.value = buildProductExportLines(rows).join("
+");
 
             if (!rows.length) {
                 detailBody.innerHTML = `<tr><td colspan="5">This user has no saved product selections.</td></tr>`;
@@ -385,10 +384,105 @@
             if (message) message.textContent = "";
         }
 
+        async function exportSelectedUserProducts() {
+            const userId = userSelect.value;
+            if (!userId) {
+                if (message) message.textContent = "Choose a user first.";
+                return;
+            }
+            try {
+                const data = await fetchJSON(API + `/admin/users/${userId}/product-export`, { headers: authHeaders() });
+                const text = Array.isArray(data.lines) ? data.lines.join("
+") : String(data.text || "");
+                if (exportOutput) exportOutput.value = text;
+                if (navigator.clipboard && text) {
+                    try { await navigator.clipboard.writeText(text); } catch (_) {}
+                }
+                if (message) message.textContent = "Export generated.";
+            } catch (err) {
+                if (message) message.textContent = err.message;
+            }
+        }
+
         if (loadButton) loadButton.onclick = loadSelectedUserProducts;
+        if (exportButton) exportButton.onclick = exportSelectedUserProducts;
         userSelect.onchange = () => { if (message) message.textContent = ""; };
         detailBody.innerHTML = `<tr><td colspan="5">Choose a user to view product selections.</td></tr>`;
+        renderCountdownSelectionChips([]);
+        await loadCountdownSelectionSummary();
     }
+
+
+    function buildProductExportLines(rows) {
+        return rows.map((row) => {
+            const sku = row?.product?.sku || "";
+            const name = row?.product?.product_name || row?.product?.sku || "";
+            const price = row?.max_price ?? row?.product?.default_max_price ?? "";
+            const normalizedPrice = price === "" || price === null || price === undefined ? "" : Number(price).toFixed(2);
+            return `${sku};${name};${normalizedPrice}`;
+        });
+    }
+
+    function renderCountdownSelectionChips(items) {
+        const wrap = document.getElementById("adminSelectedUserCountdowns");
+        if (!wrap) return;
+        if (!Array.isArray(items) || !items.length) {
+            wrap.innerHTML = '<span class="subtle-text">No countdown releases selected.</span>';
+            return;
+        }
+        wrap.innerHTML = items.map((item) => `<span class="selection-chip">${escapeHTML(item.label || item.site || "Release")} • ${escapeHTML(item.when_label || "")}</span>`).join("");
+    }
+
+    async function loadCountdownSelectionSummary() {
+        const list = document.getElementById("adminCountdownSelectionList");
+        const usersTitle = document.getElementById("adminCountdownUsersTitle");
+        const usersList = document.getElementById("adminCountdownUsersList");
+        if (!list || !usersTitle || !usersList) return;
+        try {
+            const data = await fetchJSON(API + "/admin/countdowns/selection-summary", { headers: authHeaders() });
+            const items = Array.isArray(data.items) ? data.items : [];
+            if (!items.length) {
+                list.innerHTML = '<div class="selection-list-card"><p>No countdown selections yet.</p></div>';
+                usersList.innerHTML = "";
+                return;
+            }
+            list.innerHTML = items.map((item) => `
+                <div class="selection-list-card">
+                    <h4>${escapeHTML(item.label || item.site || "Release")}</h4>
+                    <p>${escapeHTML(item.when_label || "")}</p>
+                    <p>${escapeHTML(String(item.selected_users || 0))} selected users</p>
+                    <button class="btn btn-primary" type="button" data-countdown-users="${escapeHTML(item.id)}">View Users</button>
+                </div>
+            `).join("");
+            list.querySelectorAll("[data-countdown-users]").forEach((button) => {
+                button.addEventListener("click", async () => {
+                    usersTitle.textContent = "Loading users...";
+                    usersList.innerHTML = "";
+                    try {
+                        const detail = await fetchJSON(API + "/admin/countdowns/" + button.dataset.countdownUsers + "/users", { headers: authHeaders() });
+                        const users = Array.isArray(detail.users) ? detail.users : [];
+                        usersTitle.textContent = `${detail.countdown?.label || "Release"} • ${users.length} user${users.length === 1 ? "" : "s"}`;
+                        if (!users.length) {
+                            usersList.innerHTML = '<div class="selection-list-card"><p>No users selected this release.</p></div>';
+                            return;
+                        }
+                        usersList.innerHTML = users.map((user) => `
+                            <div class="selection-list-card">
+                                <h4>${escapeHTML(user.email || user.id)}</h4>
+                                <p>${escapeHTML(user.role || "user")}</p>
+                                <p>${escapeHTML(user.selected_at_label || "")}</p>
+                            </div>
+                        `).join("");
+                    } catch (err) {
+                        usersTitle.textContent = err.message;
+                    }
+                });
+            });
+        } catch (err) {
+            list.innerHTML = `<div class="selection-list-card"><p>${escapeHTML(err.message)}</p></div>`;
+        }
+    }
+
 
     document.addEventListener("DOMContentLoaded", async () => {
         try {
