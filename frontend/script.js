@@ -6,7 +6,37 @@ const API =
 let invitePage = 1;
 let usersPage = 1;
 const PAGE_SIZE = 10;
-const ADMIN_FETCH_LIMIT = 500;
+
+
+const PUBLIC_PATHS = new Set(["/", "/index.html", "/guide", "/guide.html", "/login", "/login.html", "/signup", "/signup.html", "/forgot-password", "/forgot-password.html", "/reset-password", "/reset-password.html"]);
+
+function currentPathname() {
+    return window.location.pathname || "/";
+}
+
+function requireAuthForPrivatePages() {
+    const path = currentPathname();
+    const isPublic = PUBLIC_PATHS.has(path) || path.includes("guide") || path.endsWith("index.html") || path === "/";
+    if (!isPublic && !token()) {
+        window.location.replace("login.html");
+        return false;
+    }
+    return true;
+}
+
+function escapeHTML(value) {
+    return String(value || "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;");
+}
+
+function formatMoney(value) {
+    const n = Number(value);
+    return Number.isFinite(n) ? "$" + n.toFixed(2) : "—";
+}
+
 
 function token() {
     return localStorage.getItem("token");
@@ -50,6 +80,10 @@ function isAdminRole(role) {
 
 function isSuperAdmin() {
     return currentUser()?.role === "super_admin";
+}
+
+function canManageCatalog() {
+    return isSuperAdmin();
 }
 
 function logout() {
@@ -597,7 +631,7 @@ async function loadInvites(page = invitePage) {
 
     invitePage = 1;
 
-    const res = await fetch(API + `/admin/invites?page=1&limit=${ADMIN_FETCH_LIMIT}`, {
+    const res = await fetch(API + `/admin/invites?all=1`, {
         headers: { Authorization: "Bearer " + token() }
     });
     const payload = await res.json();
@@ -657,7 +691,10 @@ async function loadInvites(page = invitePage) {
         tableBody.innerHTML = html;
     }
 
-    if (pager) pager.innerHTML = "";
+    if (pager) {
+        pager.innerHTML = "";
+        pager.style.display = "none";
+    }
 }
 
 async function cancelInvite(id) {
@@ -734,8 +771,7 @@ async function loadUsers(page = usersPage) {
     const createdBefore = document.getElementById("usersCreatedBefore")?.value || "";
 
     const params = new URLSearchParams();
-    params.append("page", 1);
-    params.append("limit", ADMIN_FETCH_LIMIT);
+    params.append("all", "1");
 
     if (ownerFilter) params.append("owner_admin_id", ownerFilter);
     if (roleFilter) params.append("role", roleFilter);
@@ -757,7 +793,9 @@ async function loadUsers(page = usersPage) {
     }
 
     const userCounter = document.getElementById("userCount");
-    if (userCounter) userCounter.textContent = totalCount;
+    if (userCounter) {
+        userCounter.textContent = totalCount;
+    }
 
     if (usersData.length === 0) {
         tableBody.innerHTML = `<tr><td colspan="7">No users found.</td></tr>`;
@@ -770,7 +808,9 @@ async function loadUsers(page = usersPage) {
                 if (activeUser?.role === "super_admin") {
                     actionHtml = `
                         <button onclick="demoteAdmin('${u.id}', '${u.email}')">Demote</button>
-                        ${u.revoked ? `<button onclick="restoreUser('${u.id}')">Restore</button>` : `<button onclick="revokeUser('${u.id}')">Revoke</button>`}
+                        ${u.revoked
+                            ? `<button onclick="restoreUser('${u.id}')">Restore</button>`
+                            : `<button onclick="revokeUser('${u.id}')">Revoke</button>`}
                         <button onclick="deleteUser('${u.id}', '${u.email}')">Delete</button>
                     `;
                 }
@@ -778,7 +818,9 @@ async function loadUsers(page = usersPage) {
                 if (activeUser?.role === "super_admin") {
                     actionHtml = `
                         <button onclick="promoteUserToAdmin('${u.id}', '${u.email}')">Promote</button>
-                        ${u.revoked ? `<button onclick="restoreUser('${u.id}')">Restore</button>` : `<button onclick="revokeUser('${u.id}')">Revoke</button>`}
+                        ${u.revoked
+                            ? `<button onclick="restoreUser('${u.id}')">Restore</button>`
+                            : `<button onclick="revokeUser('${u.id}')">Revoke</button>`}
                         <button onclick="deleteUser('${u.id}', '${u.email}')">Delete</button>
                     `;
                 } else {
@@ -803,7 +845,10 @@ async function loadUsers(page = usersPage) {
         tableBody.innerHTML = html;
     }
 
-    if (pager) pager.innerHTML = "";
+    if (pager) {
+        pager.innerHTML = "";
+        pager.style.display = "none";
+    }
 }
 
 async function revokeUser(id) {
@@ -1161,12 +1206,444 @@ if (passwordForm) {
     };
 }
 
+
+
+/* ================= PUBLIC COUNTDOWNS ================= */
+
+let countdownTimerHandle = null;
+window.__countdownItems = [];
+
+function formatEasternTime(value) {
+    try {
+        return new Intl.DateTimeFormat("en-US", {
+            timeZone: "America/New_York",
+            year: "numeric",
+            month: "2-digit",
+            day: "2-digit",
+            hour: "numeric",
+            minute: "2-digit",
+            hour12: true
+        }).format(new Date(value));
+    } catch (_) {
+        return String(value || "");
+    }
+}
+
+function toEasternInputValue(value) {
+    try {
+        const parts = new Intl.DateTimeFormat('en-CA', {
+            timeZone: 'America/New_York',
+            year: 'numeric',
+            month: '2-digit',
+            day: '2-digit',
+            hour: '2-digit',
+            minute: '2-digit',
+            hour12: false
+        }).formatToParts(new Date(value));
+        const get = (type) => parts.find((p) => p.type === type)?.value || '';
+        return `${get('year')}-${get('month')}-${get('day')}T${get('hour')}:${get('minute')}`;
+    } catch (_) {
+        return '';
+    }
+}
+
+function fromEasternInputValue(value) {
+    if (!value) return value;
+    return `${value}:00-05:00`;
+}
+
+function countdownSiteLabel(site) {
+    const value = String(site || "general").toLowerCase();
+    if (value === "supreme") return "Supreme";
+    if (value === "general") return "General";
+    return value.charAt(0).toUpperCase() + value.slice(1);
+}
+
+function countdownDiffParts(target) {
+    const ms = new Date(target).getTime() - Date.now();
+    if (!Number.isFinite(ms)) return { done: false, text: "TBD" };
+    if (ms <= 0) return { done: true, text: "Live now" };
+    const totalSeconds = Math.floor(ms / 1000);
+    const days = Math.floor(totalSeconds / 86400);
+    const hours = Math.floor((totalSeconds % 86400) / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const seconds = totalSeconds % 60;
+    if (days > 0) return { done: false, text: `${days}d ${hours}h ${minutes}m` };
+    return { done: false, text: `${hours}h ${minutes}m ${seconds}s` };
+}
+
+function renderCountdownFeed(items) {
+    document.querySelectorAll('[data-countdown-feed]').forEach((wrap) => {
+        const source = Array.isArray(items) ? items : [];
+        if (!source.length) {
+            wrap.innerHTML = `<div class="empty-state-soft">${escapeHTML(wrap.dataset.emptyText || 'No countdowns posted yet.')}</div>`;
+            return;
+        }
+        wrap.innerHTML = source.map((item) => {
+            const diff = countdownDiffParts(item.scheduled_for);
+            return `
+                <article class="countdown-card" data-countdown-id="${escapeHTML(item.id)}" data-countdown-at="${escapeHTML(item.scheduled_for)}">
+                    <span class="countdown-site">${escapeHTML(countdownSiteLabel(item.site))}</span>
+                    <h3>${escapeHTML(item.label || countdownSiteLabel(item.site))}</h3>
+                    <div class="countdown-time">${escapeHTML(diff.text)}</div>
+                    <div class="countdown-sub">${escapeHTML(formatEasternTime(item.scheduled_for))} ET</div>
+                </article>`;
+        }).join('');
+    });
+}
+
+function tickCountdownCards() {
+    document.querySelectorAll('[data-countdown-at]').forEach((card) => {
+        const target = card.getAttribute('data-countdown-at');
+        const slot = card.querySelector('.countdown-time');
+        if (!slot) return;
+        slot.textContent = countdownDiffParts(target).text;
+    });
+}
+
+async function loadPublicCountdowns() {
+    const feeds = document.querySelectorAll('[data-countdown-feed]');
+    if (!feeds.length) return;
+    try {
+        const res = await fetch(API + '/public/countdowns');
+        const data = await res.json();
+        window.__countdownItems = Array.isArray(data.items) ? data.items : [];
+        renderCountdownFeed(window.__countdownItems);
+        clearInterval(countdownTimerHandle);
+        countdownTimerHandle = setInterval(tickCountdownCards, 1000);
+    } catch (err) {
+        renderCountdownFeed([]);
+    }
+}
+
+/* ================= SKU REQUESTS / COUNTDOWN ADMIN ================= */
+
+async function authJSON(url, options = {}) {
+    const headers = Object.assign({ 'Content-Type': 'application/json' }, options.headers || {}, token() ? { Authorization: 'Bearer ' + token() } : {});
+    const res = await fetch(url, { ...options, headers });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data.error) throw new Error(data.error || 'Request failed');
+    return data;
+}
+
+async function initSkuRequestForm() {
+    const form = document.getElementById('skuRequestForm');
+    if (!form) return;
+    const siteSelect = document.getElementById('skuRequestSite');
+    const skuInput = document.getElementById('skuRequestValue');
+    const message = document.getElementById('skuRequestMessage');
+    form.addEventListener('submit', async (event) => {
+        event.preventDefault();
+        message.textContent = 'Submitting request...';
+        try {
+            const data = await authJSON(API + '/product-requests', {
+                method: 'POST',
+                body: JSON.stringify({ site: siteSelect.value, sku: skuInput.value })
+            });
+            message.textContent = data.message || 'Request submitted for admin review.';
+            skuInput.value = '';
+            if (window.location.pathname.endsWith('dashboard.html') && typeof loadProducts === 'function') {
+                try { await loadProducts(); } catch (_) {}
+            }
+        } catch (err) {
+            message.textContent = err.message;
+        }
+    });
+}
+
+async function loadCountdownAdminList() {
+    const wrap = document.getElementById('countdownAdminList');
+    if (!wrap) return;
+    try {
+        const data = await authJSON(API + '/admin/countdowns');
+        const items = Array.isArray(data.items) ? data.items : [];
+        if (!items.length) {
+            wrap.innerHTML = '<div class="empty-state-soft">No countdowns yet.</div>';
+            return;
+        }
+        wrap.innerHTML = items.map((item) => `
+            <div class="stack-item">
+              <div class="stack-item-meta">
+                <strong>${escapeHTML(item.label || countdownSiteLabel(item.site))}</strong>
+                <span class="subtle-text">${escapeHTML(countdownSiteLabel(item.site))} • ${escapeHTML(formatEasternTime(item.scheduled_for))} ET</span>
+              </div>
+              <div class="countdown-admin-actions">
+                <button class="btn" type="button" data-edit-countdown="${escapeHTML(item.id)}">Edit</button>
+                <button class="btn btn-danger" type="button" data-delete-countdown="${escapeHTML(item.id)}">Delete</button>
+              </div>
+            </div>`).join('');
+        wrap.querySelectorAll('[data-edit-countdown]').forEach((button) => {
+            button.addEventListener('click', () => {
+                const item = items.find((entry) => entry.id === button.dataset.editCountdown);
+                if (!item) return;
+                document.getElementById('countdownForm').dataset.editingId = item.id;
+                document.getElementById('countdownSite').value = item.site;
+                document.getElementById('countdownLabel').value = item.label || '';
+                document.getElementById('countdownWhen').value = toEasternInputValue(item.scheduled_for);
+                document.getElementById('countdownOrder').value = item.sort_order || 0;
+                document.getElementById('countdownActive').checked = !!item.is_active;
+                document.getElementById('countdownManagerMessage').textContent = 'Editing countdown.';
+            });
+        });
+        wrap.querySelectorAll('[data-delete-countdown]').forEach((button) => {
+            button.addEventListener('click', async () => {
+                if (!confirm('Delete this countdown?')) return;
+                try {
+                    await authJSON(API + '/admin/countdowns/' + button.dataset.deleteCountdown, { method: 'DELETE' });
+                    document.getElementById('countdownManagerMessage').textContent = 'Countdown deleted.';
+                    await loadCountdownAdminList();
+                    await loadPublicCountdowns();
+                } catch (err) {
+                    document.getElementById('countdownManagerMessage').textContent = err.message;
+                }
+            });
+        });
+    } catch (err) {
+        wrap.innerHTML = `<div class="empty-state-soft">${escapeHTML(err.message)}</div>`;
+    }
+}
+
+async function initCountdownManager() {
+    const form = document.getElementById('countdownForm');
+    if (!form) return;
+    const message = document.getElementById('countdownManagerMessage');
+    form.addEventListener('submit', async (event) => {
+        event.preventDefault();
+        const payload = {
+            site: document.getElementById('countdownSite').value,
+            label: document.getElementById('countdownLabel').value,
+            scheduled_for: fromEasternInputValue(document.getElementById('countdownWhen').value),
+            sort_order: Number(document.getElementById('countdownOrder').value || 0),
+            is_active: document.getElementById('countdownActive').checked
+        };
+        const editingId = form.dataset.editingId;
+        try {
+            if (editingId) {
+                await authJSON(API + '/admin/countdowns/' + editingId, { method: 'PUT', body: JSON.stringify(payload) });
+                message.textContent = 'Countdown updated.';
+            } else {
+                await authJSON(API + '/admin/countdowns', { method: 'POST', body: JSON.stringify(payload) });
+                message.textContent = 'Countdown created.';
+            }
+            form.reset();
+            form.dataset.editingId = '';
+            document.getElementById('countdownActive').checked = true;
+            await loadCountdownAdminList();
+            await loadPublicCountdowns();
+        } catch (err) {
+            message.textContent = err.message;
+        }
+    });
+    await loadCountdownAdminList();
+}
+
+async function loadProductRequests() {
+    const body = document.getElementById('productRequestsBody');
+    if (!body) return;
+    const superAdmin = canManageCatalog();
+    try {
+        const data = await authJSON(API + '/admin/product-requests');
+        const items = Array.isArray(data.items) ? data.items : [];
+        if (!items.length) {
+            body.innerHTML = '<tr><td colspan="7">No requests yet.</td></tr>';
+            return;
+        }
+        body.innerHTML = items.map((item) => {
+            const actions = superAdmin
+                ? `<button class="btn btn-primary" type="button" data-approve-request="${escapeHTML(item.id)}">Approve</button>
+                   <button class="btn" type="button" data-reject-request="${escapeHTML(item.id)}">Reject</button>
+                   <button class="btn btn-danger" type="button" data-delete-request="${escapeHTML(item.id)}">Delete</button>`
+                : '<span class="subtle-text">Super admin approval only</span>';
+            return `
+            <tr>
+              <td>${escapeHTML(item.user_email || '-')}</td>
+              <td>${escapeHTML(item.site)}</td>
+              <td>${escapeHTML(item.sku)}</td>
+              <td>${escapeHTML(item.status || '-')}</td>
+              <td>${escapeHTML(item.product_name || '-')} ${item.default_max_price !== null && item.default_max_price !== undefined ? `(${escapeHTML(formatMoney(item.default_max_price))})` : ''}</td>
+              <td>${escapeHTML(formatEasternTime(item.updated_at || item.created_at))} ET</td>
+              <td class="table-actions">${actions}</td>
+            </tr>`;
+        }).join('');
+        if (!superAdmin) return;
+        body.querySelectorAll('[data-approve-request]').forEach((button) => {
+            button.addEventListener('click', async () => {
+                try {
+                    const data = await authJSON(API + '/admin/product-requests/' + button.dataset.approveRequest + '/approve', { method: 'POST' });
+                    const msg = document.getElementById('adminSkuMessage');
+                    if (msg) msg.textContent = data.message || 'Request approved.';
+                    await loadProductRequests();
+                    await loadCatalogProducts();
+                } catch (err) {
+                    const msg = document.getElementById('adminSkuMessage');
+                    if (msg) msg.textContent = err.message;
+                }
+            });
+        });
+        body.querySelectorAll('[data-reject-request]').forEach((button) => {
+            button.addEventListener('click', async () => {
+                try {
+                    const data = await authJSON(API + '/admin/product-requests/' + button.dataset.rejectRequest + '/reject', { method: 'POST' });
+                    const msg = document.getElementById('adminSkuMessage');
+                    if (msg) msg.textContent = data.message || 'Request rejected.';
+                    await loadProductRequests();
+                } catch (err) {
+                    const msg = document.getElementById('adminSkuMessage');
+                    if (msg) msg.textContent = err.message;
+                }
+            });
+        });
+        body.querySelectorAll('[data-delete-request]').forEach((button) => {
+            button.addEventListener('click', async () => {
+                if (!confirm('Delete this request?')) return;
+                try {
+                    const data = await authJSON(API + '/admin/product-requests/' + button.dataset.deleteRequest, { method: 'DELETE' });
+                    const msg = document.getElementById('adminSkuMessage');
+                    if (msg) msg.textContent = data.message || 'Request deleted.';
+                    await loadProductRequests();
+                } catch (err) {
+                    const msg = document.getElementById('adminSkuMessage');
+                    if (msg) msg.textContent = err.message;
+                }
+            });
+        });
+    } catch (err) {
+        body.innerHTML = `<tr><td colspan="7">${escapeHTML(err.message)}</td></tr>`;
+    }
+}
+
+async function loadCatalogProducts() {
+    const body = document.getElementById('catalogProductsBody');
+    if (!body) return;
+    const site = document.getElementById('catalogFilterSite')?.value || '';
+    const search = document.getElementById('catalogFilterSearch')?.value || '';
+    const superAdmin = canManageCatalog();
+    try {
+        const qs = new URLSearchParams();
+        if (site) qs.set('site', site);
+        if (search) qs.set('search', search);
+        const data = await authJSON(API + '/admin/catalog-products?' + qs.toString());
+        const items = Array.isArray(data.items) ? data.items : [];
+        if (!items.length) {
+            body.innerHTML = '<tr><td colspan="6">No catalog products found.</td></tr>';
+            return;
+        }
+        body.innerHTML = items.map((item) => `
+            <tr>
+              <td>${escapeHTML(item.site)}</td>
+              <td>${escapeHTML(item.product_name || '-')}</td>
+              <td>${escapeHTML(item.sku || '-')}</td>
+              <td>${escapeHTML(formatMoney(item.default_max_price))}</td>
+              <td>${item.metadata && item.metadata.virtual ? 'Virtual' : 'Live'}</td>
+              <td>${superAdmin ? `<button class="btn btn-danger" type="button" data-delete-catalog-product="${escapeHTML(item.id)}">Delete</button>` : '<span class="subtle-text">Super admin only</span>'}</td>
+            </tr>`).join('');
+        if (!superAdmin) return;
+        body.querySelectorAll('[data-delete-catalog-product]').forEach((button) => {
+            button.addEventListener('click', async () => {
+                if (!confirm('Delete this product?')) return;
+                try {
+                    const data = await authJSON(API + '/admin/catalog-products/' + button.dataset.deleteCatalogProduct, { method: 'DELETE' });
+                    const msg = document.getElementById('adminSkuMessage');
+                    if (msg) msg.textContent = data.message || 'Product deleted.';
+                    await loadCatalogProducts();
+                } catch (err) {
+                    const msg = document.getElementById('adminSkuMessage');
+                    if (msg) msg.textContent = err.message;
+                }
+            });
+        });
+    } catch (err) {
+        body.innerHTML = `<tr><td colspan="6">${escapeHTML(err.message)}</td></tr>`;
+    }
+}
+
+async function initCatalogTools() {
+    const form = document.getElementById('adminSkuUpsertForm');
+    const manualForm = document.getElementById('adminManualProductForm');
+    const message = document.getElementById('adminSkuMessage');
+    const syncButton = document.getElementById('syncTargetPricingButton');
+    const filterSite = document.getElementById('catalogFilterSite');
+    const filterSearch = document.getElementById('catalogFilterSearch');
+    const filterButton = document.getElementById('catalogFilterButton');
+    const controls = document.getElementById('superAdminCatalogControls');
+    const notice = document.getElementById('superAdminCatalogNotice');
+    const superAdmin = canManageCatalog();
+    if (controls) controls.style.display = superAdmin ? 'block' : 'none';
+    if (notice) notice.style.display = superAdmin ? 'none' : 'block';
+    if (form && superAdmin) {
+        form.addEventListener('submit', async (event) => {
+            event.preventDefault();
+            message.textContent = 'Adding product...';
+            try {
+                const data = await authJSON(API + '/admin/catalog-products/upsert-by-sku', {
+                    method: 'POST',
+                    body: JSON.stringify({
+                        site: document.getElementById('adminSkuSite').value,
+                        sku: document.getElementById('adminSkuValue').value
+                    })
+                });
+                message.textContent = data.message || 'Product added.';
+                document.getElementById('adminSkuValue').value = '';
+                await loadCatalogProducts();
+                await loadProductRequests();
+            } catch (err) {
+                message.textContent = err.message;
+            }
+        });
+    }
+    if (manualForm && superAdmin) {
+        manualForm.addEventListener('submit', async (event) => {
+            event.preventDefault();
+            message.textContent = 'Saving manual product...';
+            try {
+                const data = await authJSON(API + '/admin/catalog-products/manual', {
+                    method: 'POST',
+                    body: JSON.stringify({
+                        site: document.getElementById('manualProductSite').value,
+                        sku: document.getElementById('manualProductSku').value,
+                        product_name: document.getElementById('manualProductName').value,
+                        default_max_price: document.getElementById('manualProductPrice').value,
+                        brand: document.getElementById('manualProductBrand').value,
+                        image_url: document.getElementById('manualProductImage').value,
+                        product_url: document.getElementById('manualProductUrl').value,
+                        is_placeholder: document.getElementById('manualProductPlaceholder').checked
+                    })
+                });
+                message.textContent = data.message || 'Manual product saved.';
+                manualForm.reset();
+                await loadCatalogProducts();
+            } catch (err) {
+                message.textContent = err.message;
+            }
+        });
+    }
+    if (syncButton && superAdmin) {
+        syncButton.addEventListener('click', async () => {
+            message.textContent = 'Syncing target pricing...';
+            try {
+                const data = await authJSON(API + '/admin/catalog-products/sync-target-pricing', { method: 'POST' });
+                message.textContent = data.message || `Updated ${data.updated || 0} target prices.`;
+                await loadCatalogProducts();
+            } catch (err) {
+                message.textContent = err.message;
+            }
+        });
+    }
+    if (filterButton) filterButton.addEventListener('click', loadCatalogProducts);
+    if (filterSite) filterSite.addEventListener('change', loadCatalogProducts);
+    if (filterSearch) filterSearch.addEventListener('keydown', (event) => { if (event.key === 'Enter') { event.preventDefault(); loadCatalogProducts(); } });
+    await loadProductRequests();
+    await loadCatalogProducts();
+}
+
 /* ================= PAGE LOAD ================= */
 
 document.addEventListener("DOMContentLoaded", async () => {
+    if (!requireAuthForPrivatePages()) return;
     try {
-        await refreshCurrentUserFromServer();
+        if (token()) { await refreshCurrentUserFromServer(); }
     } catch (_) {}
+    try { await loadPublicCountdowns(); } catch (_) {}
 
     if (document.getElementById("dashboard")) {
         await loadProfiles();
@@ -1183,5 +1660,8 @@ document.addEventListener("DOMContentLoaded", async () => {
         try { await loadInvites(1); } catch (_) {}
         try { await loadUsers(1); } catch (_) {}
         try { updateExportCount(); } catch (_) {}
+        try { await initCountdownManager(); } catch (_) {}
+        try { await initCatalogTools(); } catch (_) {}
     }
+    try { await initSkuRequestForm(); } catch (_) {}
 });

@@ -626,8 +626,9 @@ app.get("/admin/users", auth, admin, async (req, res) => {
     try {
         const currentUser = await getCurrentUser(req);
 
+        const loadAll = req.query.all === "1";
         const page = Math.max(parseInt(req.query.page || "1", 10), 1);
-        const limit = Math.min(Math.max(parseInt(req.query.limit || "10", 10), 1), 10);
+        const limit = loadAll ? 1000 : Math.min(Math.max(parseInt(req.query.limit || "10", 10), 1), 10);
         const from = (page - 1) * limit;
         const to = from + limit - 1;
 
@@ -639,8 +640,11 @@ app.get("/admin/users", auth, admin, async (req, res) => {
         let usersQuery = supabase
             .from("users")
             .select("*", { count: "exact" })
-            .order("created_at", { ascending: false })
-            .range(from, to);
+            .order("created_at", { ascending: false });
+
+        if (!loadAll) {
+            usersQuery = usersQuery.range(from, to);
+        }
 
         if (currentUser.role !== "super_admin") {
             usersQuery = usersQuery.eq("owner_admin_id", currentUser.id);
@@ -699,10 +703,10 @@ app.get("/admin/users", auth, admin, async (req, res) => {
 
         res.json({
             items: output,
-            page,
+            page: loadAll ? 1 : page,
             limit,
-            total: count || 0,
-            total_pages: Math.ceil((count || 0) / limit)
+            total: count || output.length || 0,
+            total_pages: loadAll ? 1 : Math.ceil((count || 0) / limit)
         });
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -1031,16 +1035,20 @@ app.get("/admin/invites", auth, admin, async (req, res) => {
     try {
         const currentUser = await getCurrentUser(req);
 
+        const loadAll = req.query.all === "1";
         const page = Math.max(parseInt(req.query.page || "1", 10), 1);
-        const limit = Math.min(Math.max(parseInt(req.query.limit || "10", 10), 1), 10);
+        const limit = loadAll ? 1000 : Math.min(Math.max(parseInt(req.query.limit || "10", 10), 1), 10);
         const from = (page - 1) * limit;
         const to = from + limit - 1;
 
         let inviteQuery = supabase
             .from("invite_codes")
             .select("*", { count: "exact" })
-            .order("created_at", { ascending: false })
-            .range(from, to);
+            .order("created_at", { ascending: false });
+
+        if (!loadAll) {
+            inviteQuery = inviteQuery.range(from, to);
+        }
 
         if (currentUser.role !== "super_admin") {
             inviteQuery = inviteQuery.eq("created_by_admin_id", currentUser.id);
@@ -1074,10 +1082,10 @@ app.get("/admin/invites", auth, admin, async (req, res) => {
 
         res.json({
             items: output,
-            page,
+            page: loadAll ? 1 : page,
             limit,
-            total: count || 0,
-            total_pages: Math.ceil((count || 0) / limit)
+            total: count || output.length || 0,
+            total_pages: loadAll ? 1 : Math.ceil((count || 0) / limit)
         });
     } catch (err) {
         res.status(500).json({ error: err.message });
