@@ -1,105 +1,115 @@
 <!DOCTYPE html>
 <html lang="en">
-
 <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Dashboard</title>
-    <link rel="stylesheet" href="styles.css" />
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>User Dashboard</title>
+  <link rel="stylesheet" href="styles.css" />
 </head>
-
 <body class="app-page">
-    <div class="app-shell">
-        <header class="topbar">
-            <div>
-                <p class="eyebrow">Profile Platform</p>
-                <h1>User Dashboard</h1>
-                <p class="subtle-text">Manage profiles and choose the products you want your accounts to run for.</p>
-            </div>
-            <div class="topbar-actions">
-                <button class="btn btn-primary" onclick="createProfile()">New Profile</button>
-                <button class="btn" onclick="goToChangePassword()">Change Password</button>
-                <button class="btn" id="adminPanelButton" style="display:none;" onclick="openAdminPanel()">Admin
-                    Panel</button>
-                <button class="btn btn-danger" onclick="logout()">Logout</button>
-            </div>
-        </header>
+  <div class="app-shell">
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">The Shore Shack TCG</p>
+        <h1>Dashboard</h1>
+        <p class="subtle-text">Create your store profiles, select your products, request missing SKUs, and track the next release.</p>
+      </div>
+      <div class="topbar-actions">
+        <a class="btn" href="guide.html">User Guide</a>
+        <button class="btn" id="adminPanelButton" style="display:none" onclick="openAdminPanel()">Admin Panel</button>
+        <button class="btn" onclick="location='profile.html'">Create / Edit Profiles</button>
+        <button class="btn" onclick="goToChangePassword()">Change Password</button>
+        <button class="btn btn-danger" onclick="logout()">Logout</button>
+      </div>
+    </header>
 
-        <section class="stats-grid">
-            <div class="stat-card">
-                <span class="stat-label">Profiles</span>
-                <strong class="stat-value" id="profileCountStat">0</strong>
-                <span class="stat-help">Saved profiles ready to use</span>
-            </div>
-            <div class="stat-card">
-                <span class="stat-label">Amazon</span>
-                <strong class="stat-value" id="amazonProfileCountStat">0</strong>
-                <span class="stat-help">Amazon account profiles</span>
-            </div>
-            <div class="stat-card">
-                <span class="stat-label">Target / Walmart</span>
-                <strong class="stat-value" id="retailProfileCountStat">0</strong>
-                <span class="stat-help">Retail account profiles</span>
-            </div>
-            <div class="stat-card">
-                <span class="stat-label">General</span>
-                <strong class="stat-value" id="generalProfileCountStat">0</strong>
-                <span class="stat-help">General checkout profiles</span>
-            </div>
-        </section>
+    <section class="stats-grid">
+      <div class="stat-card"><span class="stat-label">All Profiles</span><strong class="stat-value" id="profileCountStat">0</strong><span class="stat-help">Saved checkout profiles</span></div>
+      <div class="stat-card"><span class="stat-label">Amazon</span><strong class="stat-value" id="amazonProfileCountStat">0</strong><span class="stat-help">Amazon-ready profiles</span></div>
+      <div class="stat-card"><span class="stat-label">Retail</span><strong class="stat-value" id="retailProfileCountStat">0</strong><span class="stat-help">Target + Walmart profiles</span></div>
+      <div class="stat-card"><span class="stat-label">General</span><strong class="stat-value" id="generalProfileCountStat">0</strong><span class="stat-help">Supreme or custom releases</span></div>
+    </section>
 
-        <div class="dashboard-layout">
-            <main class="panel">
-                <div class="panel-header">
-                    <div>
-                        <h2>Your Profiles</h2>
-                        <p class="subtle-text">Create, edit, and organize your profiles by store type.</p>
-                    </div>
-                    <button class="btn btn-primary" onclick="createProfile()">Create Profile</button>
-                </div>
-                <div id="dashboard" class="profile-groups"></div>
-            </main>
-
-            <aside class="panel products-panel">
-                <div class="panel-header">
-                    <div>
-                        <h2>Product Runner</h2>
-                        <p class="subtle-text">Search by category and save what each account should run for.</p>
-                    </div>
-                    <button class="btn btn-primary" id="saveProductPreferencesButton" type="button">Save
-                        Changes</button>
-                </div>
-
-                <div class="product-toolbar">
-                    <div class="segmented">
-                        <button type="button" class="segmented-btn is-active" data-product-site="amazon">Amazon</button>
-                        <button type="button" class="segmented-btn" data-product-site="target">Target</button>
-                    </div>
-
-                    <div class="toolbar-row">
-                        <input id="productSearch" class="input" type="search"
-                            placeholder="Search product name, brand, or SKU" />
-                        <label class="checkbox-inline">
-                            <input id="productSelectedOnly" type="checkbox" />
-                            <span>Selected only</span>
-                        </label>
-                    </div>
-
-                    <div id="productCategoryChips" class="chip-row"></div>
-
-                    <div class="toolbar-row toolbar-row--spread">
-                        <span id="productSelectionSummary" class="subtle-text"></span>
-                        <span id="productSaveMessage" class="success-text"></span>
-                    </div>
-                </div>
-
-                <div id="productSelectionTableBody" class="product-list"></div>
-            </aside>
+    <section class="panel countdown-panel">
+      <div class="panel-header">
+        <div>
+          <p class="eyebrow">Live drop board</p>
+          <h2>Upcoming countdowns</h2>
+          <p class="subtle-text">These timers are visible to all users and update in real time.</p>
         </div>
+      </div>
+      <div class="countdown-grid" data-countdown-feed data-empty-text="No countdowns are live yet."></div>
+    </section>
+
+    <div class="dashboard-layout">
+      <section class="panel" id="dashboard">
+        <div class="panel-header">
+          <div>
+            <h2>Your Profiles</h2>
+            <p class="subtle-text">Profiles are grouped by store. These saved checkout details are what the software will use when it runs for your selected products.</p>
+          </div>
+          <div class="panel-actions">
+            <button class="btn btn-primary" onclick="location='profile.html'">Add Profile</button>
+          </div>
+        </div>
+      </section>
+
+      <aside class="panel products-panel">
+        <div class="panel-header">
+          <div>
+            <h2>Product Selections</h2>
+            <p class="subtle-text">Choose the products you want the software to run for. Profiles control checkout. Product selections control what gets targeted.</p>
+          </div>
+          <div class="panel-actions">
+            <button class="btn btn-primary" id="saveProductPreferencesButton" type="button">Save Changes</button>
+          </div>
+        </div>
+
+        <div class="product-toolbar">
+          <div class="segmented segmented--wide">
+            <button type="button" class="segmented-btn is-active" data-product-site="amazon">Amazon</button>
+            <button type="button" class="segmented-btn" data-product-site="target">Target</button>
+            <button type="button" class="segmented-btn" data-product-site="walmart">Walmart</button>
+            <button type="button" class="segmented-btn" data-product-site="general">General</button>
+          </div>
+
+          <div class="toolbar-row">
+            <input id="productSearch" class="input" type="search" placeholder="Search product name, brand, or SKU" />
+            <label class="checkbox-inline">
+              <input id="productSelectedOnly" type="checkbox" />
+              <span>Selected only</span>
+            </label>
+          </div>
+
+          <div class="banner banner-soft">
+            <strong>Missing a SKU?</strong>
+            <p class="subtle-text">Request a Walmart, Target, or Amazon SKU and the system will try to pull the title + price and add it to the catalog automatically.</p>
+            <form id="skuRequestForm" class="sku-request-form">
+              <select class="input" id="skuRequestSite">
+                <option value="amazon">Amazon</option>
+                <option value="target">Target</option>
+                <option value="walmart">Walmart</option>
+              </select>
+              <input class="input" id="skuRequestValue" type="text" placeholder="Enter SKU / ASIN / DPCI" />
+              <button class="btn btn-primary" type="submit">Request SKU</button>
+            </form>
+            <div id="skuRequestMessage" class="subtle-text"></div>
+          </div>
+
+          <div id="productCategoryChips" class="chip-row"></div>
+
+          <div class="toolbar-row toolbar-row--spread">
+            <span id="productSelectionSummary" class="subtle-text"></span>
+            <span id="productSaveMessage" class="success-text"></span>
+          </div>
+        </div>
+
+        <div id="productSelectionTableBody" class="product-list"></div>
+      </aside>
     </div>
+  </div>
 
-    <script src="script.js?v=20260320b" defer></script>
-    <script src="products.js?v=20260320b" defer></script>
+  <script src="products.js?v=20260322a" defer></script>
+  <script src="script.js?v=20260322a" defer></script>
 </body>
-
 </html>

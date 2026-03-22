@@ -3,121 +3,75 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>The Shore Shack | User Guide</title>
+  <title>User Guide | The Shore Shack TCG</title>
   <link rel="stylesheet" href="styles.css" />
 </head>
-<body class="marketing-page">
-  <header class="marketing-header marketing-header--compact">
-    <div class="marketing-shell marketing-nav">
-      <a href="index.html" class="brand-mark">
-        <span class="brand-mark__logo">TSS</span>
-        <span>
-          <strong>The Shore Shack</strong>
-          <small>User Guide</small>
-        </span>
-      </a>
-      <nav class="marketing-links">
-        <a href="index.html">Home</a>
-        <a href="login.html">Login</a>
-        <a class="btn btn-primary" href="signup.html">Create Account</a>
-      </nav>
-    </div>
-  </header>
+<body class="app-page">
+  <div class="app-shell guide-shell">
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">The Shore Shack TCG</p>
+        <h1>User Guide</h1>
+        <p class="subtle-text">Everything a user needs to know before the next drop.</p>
+      </div>
+      <div class="topbar-actions">
+        <a class="btn" href="index.html">Home</a>
+        <a class="btn" href="login.html">Login</a>
+        <a class="btn btn-primary" href="signup.html">Sign Up</a>
+      </div>
+    </header>
 
-  <main class="marketing-section">
-    <div class="marketing-shell guide-layout">
-      <aside class="guide-sidebar">
-        <div class="guide-nav-card">
-          <strong>Guide Sections</strong>
-          <a href="#access">Access the website</a>
-          <a href="#account">Create an account</a>
-          <a href="#profiles">Create store profiles</a>
-          <a href="#products">Select products</a>
-          <a href="#how-runs-work">How runs work</a>
+    <section class="guide-layout">
+      <article class="panel guide-content">
+        <div class="guide-block">
+          <h2>1. Access the website</h2>
+          <p>Go to <strong>https://www.theshoreshacktcg.com</strong>. If a browser has old DNS or SSL cache, open the site in a private window or toggle Wi-Fi off and back on.</p>
+        </div>
+        <div class="guide-block">
+          <h2>2. Create your account</h2>
+          <p>Click <strong>Sign Up</strong>, enter your email, password, and invite code if one is required. You will receive a welcome email after signup.</p>
+        </div>
+        <div class="guide-block">
+          <h2>3. Build your store profiles</h2>
+          <p>Create profiles for the stores you want to run:</p>
+          <ul>
+            <li><strong>Amazon</strong> for Amazon-specific checkout details.</li>
+            <li><strong>Target</strong> for Target-specific checkout details.</li>
+            <li><strong>Walmart</strong> for Walmart-specific checkout details.</li>
+            <li><strong>General</strong> for Supreme or any release that does not fit a store-specific profile.</li>
+          </ul>
+          <p>Your saved profiles are what the software uses to shop. They contain the checkout information the platform needs when the release starts.</p>
+        </div>
+        <div class="guide-block">
+          <h2>4. Select your products</h2>
+          <p>Open the <strong>Products</strong> section and switch between the Amazon, Target, Walmart, and General tabs. Mark the products you want the system to run for, then save your preferences.</p>
+          <p><strong>Important:</strong> your profiles tell the platform <em>how</em> to shop, and your selected products tell it <em>what</em> to shop.</p>
+        </div>
+        <div class="guide-block">
+          <h2>5. Request SKUs if something is missing</h2>
+          <p>If a product is not in the list yet, use the SKU request form. The software will try to look up the SKU, add it to the correct catalog, and pull in the best available title and price data automatically.</p>
+        </div>
+        <div class="guide-block">
+          <h2>6. Watch live countdowns</h2>
+          <p>Countdown cards show Walmart, Target, Supreme, and other general release windows. Admins can also post one-off release names for general drops.</p>
+        </div>
+        <div class="guide-block">
+          <h2>7. Password reset</h2>
+          <p>If you forget your password, use the <strong>Forgot Password</strong> page. A reset email will be sent to your inbox with a secure link.</p>
+        </div>
+      </article>
+
+      <aside class="panel tips-panel">
+        <div class="panel-header"><div><h2>Quick reminders</h2></div></div>
+        <div class="tip-stack">
+          <div class="tip-card"><strong>Profiles first</strong><p>Create your store profiles before you expect the bot to run.</p></div>
+          <div class="tip-card"><strong>Selections matter</strong><p>Only products you select in the Products page are eligible to run for your account.</p></div>
+          <div class="tip-card"><strong>Match store to profile</strong><p>Use the Walmart profile for Walmart drops, the Target profile for Target drops, and so on.</p></div>
+          <div class="tip-card"><strong>General profiles</strong><p>General profiles are used for Supreme and other non-store-specific general releases.</p></div>
         </div>
       </aside>
-
-      <div class="guide-content">
-        <section class="guide-hero">
-          <p class="eyebrow">Public onboarding guide</p>
-          <h1>How to use The Shore Shack</h1>
-          <p class="subtle-text">This guide is viewable by anyone. Profile management, account data, and private actions still require login.</p>
-        </section>
-
-        <section id="access" class="guide-card">
-          <h2>1. Access the website</h2>
-          <p>Open <a href="index.html">The Shore Shack home page</a> to learn how the platform works. From there, users can choose to sign up, log in, or read this guide before creating an account.</p>
-        </section>
-
-        <section id="account" class="guide-card">
-          <h2>2. Create an account</h2>
-          <ol>
-            <li>Open the <a href="signup.html">Sign Up page</a>.</li>
-            <li>Enter your email, password, and invite code if one is required.</li>
-            <li>Submit the form to create your account.</li>
-            <li>After signing up, a welcome email is sent to confirm you are in the system.</li>
-          </ol>
-          <p>Existing users can always use the <a href="login.html">Login page</a>. If needed, the Forgot Password page can send a reset email.</p>
-        </section>
-
-        <section id="profiles" class="guide-card">
-          <h2>3. Create profiles for each store</h2>
-          <p>Profiles are the saved checkout details the platform uses when it runs for your selected products.</p>
-          <div class="guide-grid">
-            <article class="mini-guide-card">
-              <h3>Amazon Profile</h3>
-              <p>Create this for Amazon products you want the platform to shop for.</p>
-            </article>
-            <article class="mini-guide-card">
-              <h3>Target Profile</h3>
-              <p>Create this for Target runs and keep your Target information up to date.</p>
-            </article>
-            <article class="mini-guide-card">
-              <h3>Walmart Profile</h3>
-              <p>Create this for Walmart releases and Walmart product runs.</p>
-            </article>
-            <article class="mini-guide-card">
-              <h3>General Profile</h3>
-              <p>Use this for General runs such as Supreme or other store types that use the general flow.</p>
-            </article>
-          </div>
-          <p class="subtle-text">Always make sure your profile information is accurate. The system can only use the information you save.</p>
-        </section>
-
-        <section id="products" class="guide-card">
-          <h2>4. Select products in the Products section</h2>
-          <p>The Products section is where users choose exactly what items the platform should run for.</p>
-          <ol>
-            <li>Open the Products area after logging in.</li>
-            <li>Choose the store tab you want to work in: Amazon, Target, Walmart, or General.</li>
-            <li>Review the list of available items.</li>
-            <li>Select the products you want the system to run for.</li>
-            <li>Save or leave the selections active so the platform knows what to target.</li>
-          </ol>
-          <p><strong>Important:</strong> If a product is not selected, the platform should not run for it on your account.</p>
-        </section>
-
-        <section id="how-runs-work" class="guide-card">
-          <h2>5. How the platform uses your profiles</h2>
-          <p>Your saved profiles are used to shop for the items you selected in the product selection page.</p>
-          <div class="workflow-strip">
-            <div class="workflow-step"><strong>Create profile</strong><span>Tell the platform how to check out.</span></div>
-            <div class="workflow-step"><strong>Select product</strong><span>Tell the platform what to run for.</span></div>
-            <div class="workflow-step"><strong>Platform runs</strong><span>The matching store profile is used for the selected items.</span></div>
-          </div>
-          <p>Example: if you create a Target profile and select three Target products, the platform uses your Target profile when running for those three Target products.</p>
-        </section>
-
-        <section class="guide-card guide-card--cta">
-          <h2>Ready to get started?</h2>
-          <p>Set up your account, build your store profiles, and start selecting products.</p>
-          <div class="cta-actions">
-            <a class="btn btn-primary" href="signup.html">Create Account</a>
-            <a class="btn" href="login.html">Login</a>
-          </div>
-        </section>
-      </div>
-    </div>
-  </main>
+    </section>
+  </div>
+  <script src="script.js?v=20260322a" defer></script>
 </body>
 </html>

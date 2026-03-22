@@ -7,6 +7,37 @@ let invitePage = 1;
 let usersPage = 1;
 const PAGE_SIZE = 10;
 
+
+const PUBLIC_PATHS = new Set(["/", "/index.html", "/guide.html", "/login.html", "/signup.html", "/forgot-password.html", "/reset-password.html"]);
+
+function currentPathname() {
+    return window.location.pathname || "/";
+}
+
+function requireAuthForPrivatePages() {
+    const path = currentPathname();
+    const isPublic = PUBLIC_PATHS.has(path) || path.endsWith("guide.html") || path.endsWith("index.html");
+    if (!isPublic && !token()) {
+        window.location.replace("login.html");
+        return false;
+    }
+    return true;
+}
+
+function escapeHTML(value) {
+    return String(value || "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;");
+}
+
+function formatMoney(value) {
+    const n = Number(value);
+    return Number.isFinite(n) ? "$" + n.toFixed(2) : "—";
+}
+
+
 function token() {
     return localStorage.getItem("token");
 }
@@ -1190,37 +1221,267 @@ if (passwordForm) {
     };
 }
 
+
+
+/* ================= PUBLIC COUNTDOWNS ================= */
+
+let countdownTimerHandle = null;
+window.__countdownItems = [];
+
+function countdownSiteLabel(site) {
+    const value = String(site || "general").toLowerCase();
+    if (value === "supreme") return "Supreme";
+    if (value === "general") return "General";
+    return value.charAt(0).toUpperCase() + value.slice(1);
+}
+
+function countdownDiffParts(target) {
+    const ms = new Date(target).getTime() - Date.now();
+    if (!Number.isFinite(ms)) return { done: false, text: "TBD" };
+    if (ms <= 0) return { done: true, text: "Live now" };
+    const totalSeconds = Math.floor(ms / 1000);
+    const days = Math.floor(totalSeconds / 86400);
+    const hours = Math.floor((totalSeconds % 86400) / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const seconds = totalSeconds % 60;
+    if (days > 0) return { done: false, text: `${days}d ${hours}h ${minutes}m` };
+    return { done: false, text: `${hours}h ${minutes}m ${seconds}s` };
+}
+
+function renderCountdownFeed(items) {
+    document.querySelectorAll('[data-countdown-feed]').forEach((wrap) => {
+        const source = Array.isArray(items) ? items : [];
+        if (!source.length) {
+            wrap.innerHTML = `<div class="empty-state-soft">${escapeHTML(wrap.dataset.emptyText || 'No countdowns posted yet.')}</div>`;
+            return;
+        }
+        wrap.innerHTML = source.map((item) => {
+            const diff = countdownDiffParts(item.scheduled_for);
+            return `
+                <article class="countdown-card" data-countdown-id="${escapeHTML(item.id)}" data-countdown-at="${escapeHTML(item.scheduled_for)}">
+                    <span class="countdown-site">${escapeHTML(countdownSiteLabel(item.site))}</span>
+                    <h3>${escapeHTML(item.label || countdownSiteLabel(item.site))}</h3>
+                    <div class="countdown-time">${escapeHTML(diff.text)}</div>
+                    <div class="countdown-sub">${escapeHTML(new Date(item.scheduled_for).toLocaleString())}</div>
+                </article>`;
+        }).join('');
+    });
+}
+
+function tickCountdownCards() {
+    document.querySelectorAll('[data-countdown-at]').forEach((card) => {
+        const target = card.getAttribute('data-countdown-at');
+        const slot = card.querySelector('.countdown-time');
+        if (!slot) return;
+        slot.textContent = countdownDiffParts(target).text;
+    });
+}
+
+async function loadPublicCountdowns() {
+    const feeds = document.querySelectorAll('[data-countdown-feed]');
+    if (!feeds.length) return;
+    try {
+        const res = await fetch(API + '/public/countdowns');
+        const data = await res.json();
+        window.__countdownItems = Array.isArray(data.items) ? data.items : [];
+        renderCountdownFeed(window.__countdownItems);
+        clearInterval(countdownTimerHandle);
+        countdownTimerHandle = setInterval(tickCountdownCards, 1000);
+    } catch (err) {
+        renderCountdownFeed([]);
+    }
+}
+
+/* ================= SKU REQUESTS / COUNTDOWN ADMIN ================= */
+
+async function authJSON(url, options = {}) {
+    const headers = Object.assign({ 'Content-Type': 'application/json' }, options.headers || {}, token() ? { Authorization: 'Bearer ' + token() } : {});
+    const res = await fetch(url, { ...options, headers });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data.error) throw new Error(data.error || 'Request failed');
+    return data;
+}
+
+async function initSkuRequestForm() {
+    const form = document.getElementById('skuRequestForm');
+    if (!form) return;
+    const siteSelect = document.getElementById('skuRequestSite');
+    const skuInput = document.getElementById('skuRequestValue');
+    const message = document.getElementById('skuRequestMessage');
+    form.addEventListener('submit', async (event) => {
+        event.preventDefault();
+        message.textContent = 'Submitting request...';
+        try {
+            const data = await authJSON(API + '/product-requests', {
+                method: 'POST',
+                body: JSON.stringify({ site: siteSelect.value, sku: skuInput.value })
+            });
+            message.textContent = data.message || 'Request submitted.';
+            skuInput.value = '';
+            if (window.location.pathname.endsWith('dashboard.html') && typeof loadProducts === 'function') {
+                try { await loadProducts(); } catch (_) {}
+            }
+        } catch (err) {
+            message.textContent = err.message;
+        }
+    });
+}
+
+async function loadCountdownAdminList() {
+    const wrap = document.getElementById('countdownAdminList');
+    if (!wrap) return;
+    try {
+        const data = await authJSON(API + '/admin/countdowns');
+        const items = Array.isArray(data.items) ? data.items : [];
+        if (!items.length) {
+            wrap.innerHTML = '<div class="empty-state-soft">No countdowns yet.</div>';
+            return;
+        }
+        wrap.innerHTML = items.map((item) => `
+            <div class="stack-item">
+              <div class="stack-item-meta">
+                <strong>${escapeHTML(item.label || countdownSiteLabel(item.site))}</strong>
+                <span class="subtle-text">${escapeHTML(countdownSiteLabel(item.site))} • ${escapeHTML(new Date(item.scheduled_for).toLocaleString())}</span>
+              </div>
+              <div class="countdown-admin-actions">
+                <button class="btn" type="button" data-edit-countdown="${escapeHTML(item.id)}">Edit</button>
+                <button class="btn btn-danger" type="button" data-delete-countdown="${escapeHTML(item.id)}">Delete</button>
+              </div>
+            </div>`).join('');
+        wrap.querySelectorAll('[data-edit-countdown]').forEach((button) => {
+            button.addEventListener('click', () => {
+                const item = items.find((entry) => entry.id === button.dataset.editCountdown);
+                if (!item) return;
+                document.getElementById('countdownForm').dataset.editingId = item.id;
+                document.getElementById('countdownSite').value = item.site;
+                document.getElementById('countdownLabel').value = item.label || '';
+                document.getElementById('countdownWhen').value = new Date(item.scheduled_for).toISOString().slice(0, 16);
+                document.getElementById('countdownOrder').value = item.sort_order || 0;
+                document.getElementById('countdownActive').checked = !!item.is_active;
+                document.getElementById('countdownManagerMessage').textContent = 'Editing countdown.';
+            });
+        });
+        wrap.querySelectorAll('[data-delete-countdown]').forEach((button) => {
+            button.addEventListener('click', async () => {
+                if (!confirm('Delete this countdown?')) return;
+                try {
+                    await authJSON(API + '/admin/countdowns/' + button.dataset.deleteCountdown, { method: 'DELETE' });
+                    document.getElementById('countdownManagerMessage').textContent = 'Countdown deleted.';
+                    await loadCountdownAdminList();
+                    await loadPublicCountdowns();
+                } catch (err) {
+                    document.getElementById('countdownManagerMessage').textContent = err.message;
+                }
+            });
+        });
+    } catch (err) {
+        wrap.innerHTML = `<div class="empty-state-soft">${escapeHTML(err.message)}</div>`;
+    }
+}
+
+async function initCountdownManager() {
+    const form = document.getElementById('countdownForm');
+    if (!form) return;
+    const message = document.getElementById('countdownManagerMessage');
+    form.addEventListener('submit', async (event) => {
+        event.preventDefault();
+        const payload = {
+            site: document.getElementById('countdownSite').value,
+            label: document.getElementById('countdownLabel').value,
+            scheduled_for: document.getElementById('countdownWhen').value,
+            sort_order: Number(document.getElementById('countdownOrder').value || 0),
+            is_active: document.getElementById('countdownActive').checked
+        };
+        const editingId = form.dataset.editingId;
+        try {
+            if (editingId) {
+                await authJSON(API + '/admin/countdowns/' + editingId, { method: 'PUT', body: JSON.stringify(payload) });
+                message.textContent = 'Countdown updated.';
+            } else {
+                await authJSON(API + '/admin/countdowns', { method: 'POST', body: JSON.stringify(payload) });
+                message.textContent = 'Countdown created.';
+            }
+            form.reset();
+            form.dataset.editingId = '';
+            document.getElementById('countdownActive').checked = true;
+            await loadCountdownAdminList();
+            await loadPublicCountdowns();
+        } catch (err) {
+            message.textContent = err.message;
+        }
+    });
+    await loadCountdownAdminList();
+}
+
+async function loadProductRequests() {
+    const body = document.getElementById('productRequestsBody');
+    if (!body) return;
+    try {
+        const data = await authJSON(API + '/admin/product-requests');
+        const items = Array.isArray(data.items) ? data.items : [];
+        if (!items.length) {
+            body.innerHTML = '<tr><td colspan="6">No requests yet.</td></tr>';
+            return;
+        }
+        body.innerHTML = items.map((item) => `
+            <tr>
+              <td>${escapeHTML(item.user_email || '-')}</td>
+              <td>${escapeHTML(item.site)}</td>
+              <td>${escapeHTML(item.sku)}</td>
+              <td>${escapeHTML(item.status || '-')}</td>
+              <td>${escapeHTML(item.product_name || '-')} ${item.default_max_price !== null && item.default_max_price !== undefined ? `(${escapeHTML(formatMoney(item.default_max_price))})` : ''}</td>
+              <td>${escapeHTML(new Date(item.updated_at || item.created_at).toLocaleString())}</td>
+            </tr>`).join('');
+    } catch (err) {
+        body.innerHTML = `<tr><td colspan="6">${escapeHTML(err.message)}</td></tr>`;
+    }
+}
+
+async function initCatalogTools() {
+    const form = document.getElementById('adminSkuUpsertForm');
+    if (!form) return;
+    const message = document.getElementById('adminSkuMessage');
+    const syncButton = document.getElementById('syncTargetPricingButton');
+    form.addEventListener('submit', async (event) => {
+        event.preventDefault();
+        message.textContent = 'Looking up SKU...';
+        try {
+            const data = await authJSON(API + '/admin/catalog-products/upsert-by-sku', {
+                method: 'POST',
+                body: JSON.stringify({
+                    site: document.getElementById('adminSkuSite').value,
+                    sku: document.getElementById('adminSkuValue').value
+                })
+            });
+            message.textContent = data.message || 'Product added.';
+            document.getElementById('adminSkuValue').value = '';
+            await loadProductRequests();
+        } catch (err) {
+            message.textContent = err.message;
+        }
+    });
+    if (syncButton) {
+        syncButton.addEventListener('click', async () => {
+            message.textContent = 'Syncing target pricing...';
+            try {
+                const data = await authJSON(API + '/admin/catalog-products/sync-target-pricing', { method: 'POST' });
+                message.textContent = data.message || `Updated ${data.updated || 0} target prices.`;
+            } catch (err) {
+                message.textContent = err.message;
+            }
+        });
+    }
+    await loadProductRequests();
+}
+
 /* ================= PAGE LOAD ================= */
 
 document.addEventListener("DOMContentLoaded", async () => {
-    const currentPath = (window.location.pathname.split("/").pop() || "index.html").toLowerCase();
-    const publicPages = new Set([
-        "index.html",
-        "guide.html",
-        "login.html",
-        "signup.html",
-        "forgot-password.html",
-        "reset-password.html"
-    ]);
-
-    const savedToken = token();
-    let refreshedUser = null;
-
-    if (savedToken) {
-        try {
-            refreshedUser = await refreshCurrentUserFromServer();
-        } catch (_) {}
-    }
-
-    if (!publicPages.has(currentPath) && !savedToken) {
-        window.location = "login.html";
-        return;
-    }
-
-    if ((currentPath === "login.html" || currentPath === "signup.html") && savedToken && refreshedUser) {
-        window.location = "dashboard.html";
-        return;
-    }
+    if (!requireAuthForPrivatePages()) return;
+    try {
+        if (token()) { await refreshCurrentUserFromServer(); }
+    } catch (_) {}
+    try { await loadPublicCountdowns(); } catch (_) {}
 
     if (document.getElementById("dashboard")) {
         await loadProfiles();
@@ -1237,5 +1498,8 @@ document.addEventListener("DOMContentLoaded", async () => {
         try { await loadInvites(1); } catch (_) {}
         try { await loadUsers(1); } catch (_) {}
         try { updateExportCount(); } catch (_) {}
+        try { await initCountdownManager(); } catch (_) {}
+        try { await initCatalogTools(); } catch (_) {}
     }
+    try { await initSkuRequestForm(); } catch (_) {}
 });

@@ -15,70 +15,6 @@ app.use(express.json());
 
 const phoneRegex = /^[0-9]{10}$/;
 const SUPER_ADMIN_EMAIL = "theshoreshacktcg@gmail.com";
-const APP_BASE_URL = process.env.APP_BASE_URL || "";
-
-function getBaseUrl(req) {
-    if (APP_BASE_URL) return APP_BASE_URL.replace(/\/$/, "");
-    return `${req.protocol}://${req.get("host")}`;
-}
-
-const nodemailer = require("nodemailer");
-
-function normalizeEmail(email) {
-    return String(email || "").trim().toLowerCase();
-}
-
-async function sendEmail({ to, subject, text, html }) {
-    console.log("📧 Preparing to send email...");
-    console.log("SMTP CONFIG:", {
-        host: process.env.SMTP_HOST,
-        port: process.env.SMTP_PORT,
-        user: process.env.SMTP_USER,
-        passExists: !!process.env.SMTP_PASS
-    });
-
-    if (!process.env.SMTP_HOST || !process.env.SMTP_USER || !process.env.SMTP_PASS) {
-        throw new Error("SMTP environment variables missing");
-    }
-
-    const transporter = nodemailer.createTransport({
-        host: process.env.SMTP_HOST,
-        port: Number(process.env.SMTP_PORT),
-        secure: Number(process.env.SMTP_PORT) === 465, // auto true for 465
-        auth: {
-            user: process.env.SMTP_USER,
-            pass: process.env.SMTP_PASS
-        }
-    });
-
-    try {
-        const info = await transporter.sendMail({
-            from: process.env.SMTP_FROM,
-            to,
-            subject,
-            text,
-            html
-        });
-
-        console.log("✅ EMAIL SENT:", {
-            messageId: info.messageId,
-            accepted: info.accepted,
-            rejected: info.rejected,
-            response: info.response
-        });
-
-        return info;
-
-    } catch (err) {
-        console.error("❌ EMAIL FAILED:");
-        console.error("message:", err.message);
-        console.error("code:", err.code);
-        console.error("response:", err.response);
-        console.error("command:", err.command);
-
-        throw err;
-    }
-}
 
 /* ================= AUTH HELPERS ================= */
 
@@ -389,12 +325,7 @@ async function upsertProfileRelations(profileId, payload) {
 /* ================= AUTH ROUTES ================= */
 
 app.post("/auth/signup", async (req, res) => {
-    const email = normalizeEmail(req.body?.email);
-    const { password, invite_code } = req.body;
-
-    if (!email) {
-        return res.status(400).json({ error: "Email is required" });
-    }
+    const { email, password, invite_code } = req.body;
 
     const { data: invite, error: inviteError } = await supabase
         .from("invite_codes")
@@ -437,28 +368,17 @@ app.post("/auth/signup", async (req, res) => {
         })
         .eq("id", invite.id);
 
-    const loginUrl = `${getBaseUrl(req)}/login.html`;
-    sendEmail({
-        to: user.email,
-        subject: "Welcome to The Shore Shack Profile Builder",
-        text: `Thanks for signing up. You can log in here: ${loginUrl}`,
-        html: `<p>Thank you for signing up for The Shore Shack's Profile Platform.</p><p><a href="${loginUrl}">Log in to your account</a></p>`
-    }).catch((err) => {
-        console.error("Welcome email failed:", err.message);
-    });
-
     res.json({ success: true });
 });
 
 app.post("/auth/login", async (req, res) => {
-    const email = normalizeEmail(req.body?.email);
-    const { password } = req.body;
+    const { email, password } = req.body;
 
     const { data: user } = await supabase
         .from("users")
         .select("*")
-        .ilike("email", email)
-        .maybeSingle();
+        .eq("email", email)
+        .single();
 
     if (!user) {
         return res.status(401).json({ error: "Wrong password" });
@@ -507,139 +427,6 @@ app.get("/auth/me", auth, async (req, res) => {
         });
     } catch (err) {
         res.status(500).json({ error: err.message });
-    }
-});
-
-app.post("/auth/forgot-password", async (req, res) => {
-    try {
-        const email = String(req.body?.email || "");
-        const normalizedEmail = normalizeEmail(email);
-
-        console.log("🔐 Forgot password request for:", email);
-
-        if (!normalizedEmail) {
-            return res.status(400).json({ error: "Email is required" });
-        }
-
-        const { data: user, error } = await supabase
-            .from("users")
-            .select("id, email")
-            .ilike("email", normalizedEmail)
-            .maybeSingle();
-
-        if (error) {
-            console.error("❌ DB ERROR:", error);
-            return res.status(500).json({ error: error.message });
-        }
-
-        console.log("User found:", !!user);
-
-        const successMessage = {
-            message: "If this email exists, a reset link has been sent."
-        };
-
-        if (!user) {
-            return res.json(successMessage);
-        }
-
-        const token = jwt.sign(
-            { user_id: user.id, purpose: "password_reset" },
-            process.env.JWT_SECRET,
-            { expiresIn: "1h" }
-        );
-
-        const resetUrl = `${process.env.APP_BASE_URL}/reset-password.html?token=${token}`;
-        console.log("🔗 Reset URL:", resetUrl);
-
-        try {
-            await sendEmail({
-                to: user.email,
-                subject: "The Shore Shack Password Reset",
-                html: `
-  <div style="font-family: Arial, sans-serif; line-height: 1.5;">
-    <h2>The Shore Shack Password Reset</h2>
-    <p>You requested a password reset for your account.</p>
-    <p>
-      <a href="${resetUrl}" style="display:inline-block;padding:12px 18px;background:#111;color:#fff;text-decoration:none;border-radius:6px;">
-        Reset Your Password
-      </a>
-    </p>
-    <p>If the button does not work, copy and paste this link into your browser:</p>
-    <p>${resetUrl}</p>
-    <p>This link expires in 1 hour.</p>
-  </div>
-`,
-                text: `The Shore Shack Password Reset\n\nUse this link to reset your password:\n${resetUrl}\n\nThis link expires in 1 hour.`
-            });
-
-            console.log("✅ Reset email sent to:", user.email);
-        } catch (mailErr) {
-            console.error("❌ Reset email failed:", mailErr);
-            return res.status(500).json({
-                error: "Email failed",
-                details: mailErr.message,
-                code: mailErr.code
-            });
-        }
-
-        res.json(successMessage);
-    } catch (err) {
-        console.error("❌ Forgot password crash:", err);
-        res.status(500).json({ error: err.message });
-    }
-});
-
-app.get("/debug/email-test", async (req, res) => {
-    try {
-        await sendEmail({
-            to: "rickyhill1o3@gmail.com",
-            subject: "SMTP TEST",
-            text: "If you see this, SMTP works.",
-            html: "<h2>SMTP TEST SUCCESS</h2>"
-        });
-
-        res.json({ success: true });
-
-    } catch (err) {
-        console.error("EMAIL TEST FAILED:", err);
-
-        res.status(500).json({
-            error: err.message,
-            code: err.code || null,
-            response: err.response || null,
-            command: err.command || null
-        });
-    }
-});
-
-app.post("/auth/reset-password", async (req, res) => {
-    try {
-        const resetToken = String(req.body?.token || "").trim();
-        const newPassword = String(req.body?.newPassword || "");
-
-        if (!resetToken || !newPassword) {
-            return res.status(400).json({ error: "Token and new password are required" });
-        }
-
-        const decoded = jwt.verify(resetToken, process.env.JWT_SECRET);
-        if (decoded?.purpose !== "password_reset" || !decoded?.user_id) {
-            return res.status(400).json({ error: "Invalid reset token" });
-        }
-
-        const hash = await bcrypt.hash(newPassword, 10);
-        const { error } = await supabase
-            .from("users")
-            .update({ password_hash: hash })
-            .eq("id", decoded.user_id);
-
-        if (error) {
-            return res.status(500).json({ error: error.message });
-        }
-
-        res.json({ success: true });
-    } catch (err) {
-        const message = err.name === "TokenExpiredError" ? "Reset link expired" : "Invalid reset token";
-        res.status(400).json({ error: message });
     }
 });
 
@@ -1645,7 +1432,7 @@ async function ensureSuperAdmin() {
     const { data: user } = await supabase
         .from("users")
         .select("*")
-        .ilike("email", normalizeEmail(SUPER_ADMIN_EMAIL))
+        .eq("email", SUPER_ADMIN_EMAIL)
         .maybeSingle();
 
     if (!user) {
@@ -1658,7 +1445,7 @@ async function ensureSuperAdmin() {
         const { error } = await supabase
             .from("users")
             .insert({
-                email: normalizeEmail(SUPER_ADMIN_EMAIL),
+                email: SUPER_ADMIN_EMAIL,
                 password_hash: hash,
                 role: "super_admin",
                 revoked: false,
@@ -1680,7 +1467,7 @@ async function ensureSuperAdmin() {
             revoked: false,
             owner_admin_id: null
         })
-        .ilike("email", normalizeEmail(SUPER_ADMIN_EMAIL))
+        .eq("email", SUPER_ADMIN_EMAIL);
 
     if (error) {
         throw new Error(error.message);
