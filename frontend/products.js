@@ -300,7 +300,7 @@
     }
 
     async function loadAdminSelections() {
-        const section = document.getElementById("adminProductSelectionsSection") || document.querySelector('h2')?.closest?.("section");
+        const section = document.getElementById("adminProductSelectionsSection");
         const userSelect = document.getElementById("adminProductUserSelect");
         const loadButton = document.getElementById("adminLoadUserProductsButton");
         const exportButton = document.getElementById("adminExportUserProductsButton");
@@ -363,8 +363,7 @@
             const countdownSelections = Array.isArray(detail.countdown_selections) ? detail.countdown_selections : [];
             if (summary && selectedUser) summary.textContent = `${selectedUser.user_email} • ${rows.length} selected products • ${countdownSelections.length} countdown releases`;
             renderCountdownSelectionChips(countdownSelections);
-            if (exportOutput) exportOutput.value = buildProductExportLines(rows).join("
-                ");
+            if (exportOutput) exportOutput.value = buildProductExportLines(rows).join("\n");
 
             if (!rows.length) {
                 detailBody.innerHTML = `<tr><td colspan="5">This user has no saved product selections.</td></tr>`;
@@ -392,8 +391,7 @@
             }
             try {
                 const data = await fetchJSON(API + `/admin/users/${userId}/product-export`, { headers: authHeaders() });
-                const text = Array.isArray(data.lines) ? data.lines.join("
-                    ") : String(data.text || "");
+                const text = Array.isArray(data.lines) ? data.lines.join("\n") : String(data.text || "");
                 if (exportOutput) exportOutput.value = text;
                 if (navigator.clipboard && text) {
                     try { await navigator.clipboard.writeText(text); } catch (_) { }
