@@ -85,14 +85,17 @@
 
           <div class="banner banner-soft">
             <strong>Missing a SKU?</strong>
-            <p class="subtle-text">Request a Walmart, Target, or Amazon SKU and the system will try to pull the title + price and add it to the catalog automatically. Walmart, Supreme, Pokémon Center, and General each also include a single next-release placeholder for unknown drops.</p>
+            <p class="subtle-text">Request any Amazon, Target, Walmart, Supreme, Pokémon Center, or General item. All requests stay pending until an admin reviews and approves them.</p>
             <form id="skuRequestForm" class="sku-request-form">
               <select class="input" id="skuRequestSite">
                 <option value="amazon">Amazon</option>
                 <option value="target">Target</option>
                 <option value="walmart">Walmart</option>
+                <option value="supreme">Supreme</option>
+                <option value="pokemon">Pokémon Center</option>
+                <option value="general">General</option>
               </select>
-              <input class="input" id="skuRequestValue" type="text" placeholder="Enter SKU / ASIN / DPCI" />
+              <input class="input" id="skuRequestValue" type="text" placeholder="Enter SKU / ASIN / DPCI / release label" />
               <button class="btn btn-primary" type="submit">Request SKU</button>
             </form>
             <div id="skuRequestMessage" class="subtle-text"></div>

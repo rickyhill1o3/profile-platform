@@ -1,7 +1,7 @@
 const cheerio = require("cheerio");
 
 const SUPPORTED_SITES = new Set(["amazon", "target", "walmart", "general", "supreme", "pokemon"]);
-const REQUESTABLE_SITES = new Set(["amazon", "target", "walmart", "general"]);
+const REQUESTABLE_SITES = new Set(["amazon", "target", "walmart", "general", "supreme", "pokemon"]);
 const VIRTUAL_SITE_DEFAULTS = {
   walmart: {
     catalogName: "Walmart next drop",
@@ -207,7 +207,7 @@ async function bestEffortLookupBySku(site, sku) {
   const cleanSku = String(sku || "").trim();
   if (!cleanSku) throw new Error("SKU is required");
 
-  if (site === "general") {
+  if (site === "general" || site === "supreme" || site === "pokemon") {
     return {
       sku: cleanSku,
       product_name: cleanSku,
@@ -307,7 +307,22 @@ async function upsertCatalogProductByLookup(supabase, site, sku) {
   const catalog = await getActiveCatalog(supabase, normalizedSite);
   if (!catalog?.id) throw new Error(`No active ${normalizedSite} catalog found.`);
 
-  const lookup = existing || await bestEffortLookupBySku(normalizedSite, sku);
+  let lookup = existing;
+  if (!lookup) {
+    try {
+      lookup = await bestEffortLookupBySku(normalizedSite, sku);
+    } catch (lookupErr) {
+      lookup = {
+        sku,
+        product_name: sku,
+        brand: normalizedSite.charAt(0).toUpperCase() + normalizedSite.slice(1),
+        product_url: '',
+        image_url: '',
+        default_max_price: null,
+        metadata: { source: 'manual_fallback', lookup_error: String(lookupErr.message || lookupErr) }
+      };
+    }
+  }
   if (!lookup.default_max_price && normalizedSite === 'target') {
     const amazonMatch = await findAmazonPriceMatch(supabase, lookup.product_name);
     if (amazonMatch?.default_max_price !== null && amazonMatch?.default_max_price !== undefined) {
@@ -395,58 +410,22 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
     try {
       const { data, error } = await supabase
         .from('drop_countdowns')
-        .select(`*, countdown_products(product_id, catalog_products(id, site, sku, product_name))`)
+        .select('*')
         .eq('is_active', true)
         .order('sort_order', { ascending: true })
         .order('scheduled_for', { ascending: true });
       if (error && String(error.message || '').toLowerCase().includes('drop_countdowns')) return res.json({ items: [] });
       if (error) return res.status(500).json({ error: error.message });
-      const items = (data || []).map((item) => ({
-        ...item,
-        linked_products: Array.isArray(item.countdown_products)
-          ? item.countdown_products.map((row) => row.catalog_products).filter(Boolean)
-          : []
-      }));
-      res.json({ items });
+      res.json({ items: data || [] });
     } catch (err) {
       res.json({ items: [] });
     }
   });
 
-  app.get('/admin/catalog-products', auth, admin, async (req, res) => {
-    try {
-      const site = normalizeSite(req.query.site || 'general');
-      const activeCatalog = await getActiveCatalog(supabase, site);
-      if (!activeCatalog?.id) return res.json({ items: [] });
-      const { data, error } = await supabase
-        .from('catalog_products')
-        .select('id, site, sku, product_name, default_max_price, metadata')
-        .eq('catalog_id', activeCatalog.id)
-        .eq('site', site)
-        .eq('is_enabled', true)
-        .order('product_name', { ascending: true, nullsFirst: false })
-        .order('sku', { ascending: true });
-      if (error) return res.status(500).json({ error: error.message });
-      res.json({ items: data || [] });
-    } catch (err) {
-      res.status(500).json({ error: err.message });
-    }
-  });
-
   app.get('/admin/countdowns', auth, admin, async (req, res) => {
-    const { data, error } = await supabase
-      .from('drop_countdowns')
-      .select(`*, countdown_products(product_id, catalog_products(id, site, sku, product_name))`)
-      .order('sort_order', { ascending: true })
-      .order('scheduled_for', { ascending: true });
+    const { data, error } = await supabase.from('drop_countdowns').select('*').order('sort_order', { ascending: true }).order('scheduled_for', { ascending: true });
     if (error) return res.status(500).json({ error: error.message });
-    const items = (data || []).map((item) => ({
-      ...item,
-      linked_products: Array.isArray(item.countdown_products)
-        ? item.countdown_products.map((row) => row.catalog_products).filter(Boolean)
-        : []
-    }));
-    res.json({ items });
+    res.json({ items: data || [] });
   });
 
   app.post('/admin/countdowns', auth, admin, async (req, res) => {
@@ -455,13 +434,10 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
       const site = normalizeSite(req.body.site);
       const label = String(req.body.label || '').trim() || (site === 'general' ? 'General Release' : site.charAt(0).toUpperCase() + site.slice(1));
       const scheduled_for = req.body.scheduled_for;
-      const description = String(req.body.description || '').trim();
-      const product_ids = Array.isArray(req.body.product_ids) ? req.body.product_ids.filter(Boolean) : [];
       if (!scheduled_for) return res.status(400).json({ error: 'scheduled_for is required' });
       const payload = {
         site,
         label,
-        description,
         scheduled_for,
         sort_order: Number(req.body.sort_order || 0),
         is_active: req.body.is_active !== false,
@@ -469,11 +445,6 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
       };
       const { data, error } = await supabase.from('drop_countdowns').insert(payload).select('*').single();
       if (error) return res.status(500).json({ error: error.message });
-      if (product_ids.length) {
-        const rows = product_ids.map((product_id) => ({ countdown_id: data.id, product_id }));
-        const { error: linkError } = await supabase.from('countdown_products').insert(rows);
-        if (linkError) return res.status(500).json({ error: linkError.message });
-      }
       res.json({ item: data });
     } catch (err) {
       res.status(500).json({ error: err.message });
@@ -485,21 +456,12 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
       const payload = {
         site: normalizeSite(req.body.site),
         label: String(req.body.label || '').trim(),
-        description: String(req.body.description || '').trim(),
         scheduled_for: req.body.scheduled_for,
         sort_order: Number(req.body.sort_order || 0),
         is_active: req.body.is_active !== false
       };
-      const product_ids = Array.isArray(req.body.product_ids) ? req.body.product_ids.filter(Boolean) : [];
       const { data, error } = await supabase.from('drop_countdowns').update(payload).eq('id', req.params.id).select('*').single();
       if (error) return res.status(500).json({ error: error.message });
-      const { error: deleteLinksError } = await supabase.from('countdown_products').delete().eq('countdown_id', req.params.id);
-      if (deleteLinksError) return res.status(500).json({ error: deleteLinksError.message });
-      if (product_ids.length) {
-        const rows = product_ids.map((product_id) => ({ countdown_id: req.params.id, product_id }));
-        const { error: linkError } = await supabase.from('countdown_products').insert(rows);
-        if (linkError) return res.status(500).json({ error: linkError.message });
-      }
       res.json({ item: data });
     } catch (err) {
       res.status(500).json({ error: err.message });
@@ -507,7 +469,6 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
   });
 
   app.delete('/admin/countdowns/:id', auth, admin, async (req, res) => {
-    await supabase.from('countdown_products').delete().eq('countdown_id', req.params.id);
     const { error } = await supabase.from('drop_countdowns').delete().eq('id', req.params.id);
     if (error) return res.status(500).json({ error: error.message });
     res.json({ success: true });
@@ -595,40 +556,22 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
     try {
       await ensureUserNotRevoked(req.user_id);
       const site = normalizeSite(req.body.site);
-      if (!REQUESTABLE_SITES.has(site)) return res.status(400).json({ error: 'Request site must be amazon, target, walmart, or general.' });
+      if (!REQUESTABLE_SITES.has(site)) return res.status(400).json({ error: 'Invalid request site.' });
       const sku = String(req.body.sku || '').trim();
       if (!sku) return res.status(400).json({ error: 'SKU is required.' });
 
-      let requestRow = null;
-      try {
-        const { data, error } = await supabase.from('product_requests').insert({ user_id: req.user_id, site, sku, status: 'processing' }).select('*').single();
-        if (!error) requestRow = data;
-      } catch (_) {}
+      const { data, error } = await supabase
+        .from('product_requests')
+        .insert({ user_id: req.user_id, site, sku, status: 'pending' })
+        .select('*')
+        .single();
 
-      let product = null;
-      let status = 'resolved';
-      try {
-        product = await upsertCatalogProductByLookup(supabase, site, sku);
-      } catch (lookupErr) {
-        status = 'queued';
-      }
-
-      if (requestRow?.id) {
-        const update = product ? {
-          status,
-          resolved_product_id: product.id,
-          resolved_name: product.product_name,
-          resolved_price: product.default_max_price,
-          updated_at: new Date().toISOString()
-        } : { status, updated_at: new Date().toISOString() };
-        await supabase.from('product_requests').update(update).eq('id', requestRow.id);
-      }
+      if (error) return res.status(500).json({ error: error.message });
 
       res.json({
         success: true,
-        status,
-        product,
-        message: product ? `SKU ${sku} was added to the ${site} catalog.` : `SKU ${sku} was queued for admin review.`
+        request: data,
+        message: 'Request submitted for admin review.'
       });
     } catch (err) {
       res.status(500).json({ error: err.message });
@@ -667,6 +610,79 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
     try {
       const updated = await syncTargetPricingFromAmazon(supabase);
       res.json({ success: true, updated, message: `Updated ${updated} target products from matching Amazon prices.` });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+
+  app.post('/admin/product-requests/:id/approve', auth, admin, async (req, res) => {
+    try {
+      const { data: requestRow, error: requestError } = await supabase
+        .from('product_requests')
+        .select('*')
+        .eq('id', req.params.id)
+        .single();
+      if (requestError || !requestRow) return res.status(404).json({ error: 'Request not found.' });
+
+      const product = await upsertCatalogProductByLookup(supabase, requestRow.site, requestRow.sku);
+      const { error: updateError } = await supabase
+        .from('product_requests')
+        .update({
+          status: 'approved',
+          resolved_product_id: product.id,
+          resolved_name: product.product_name,
+          resolved_price: product.default_max_price,
+          updated_at: new Date().toISOString()
+        })
+        .eq('id', requestRow.id);
+      if (updateError) return res.status(500).json({ error: updateError.message });
+
+      res.json({ success: true, product, message: `${product.product_name} was approved and added to the catalog.` });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post('/admin/product-requests/:id/reject', auth, admin, async (req, res) => {
+    const { error } = await supabase
+      .from('product_requests')
+      .update({ status: 'rejected', updated_at: new Date().toISOString() })
+      .eq('id', req.params.id);
+    if (error) return res.status(500).json({ error: error.message });
+    res.json({ success: true, message: 'Request rejected.' });
+  });
+
+  app.delete('/admin/product-requests/:id', auth, admin, async (req, res) => {
+    const { error } = await supabase.from('product_requests').delete().eq('id', req.params.id);
+    if (error) return res.status(500).json({ error: error.message });
+    res.json({ success: true, message: 'Request deleted.' });
+  });
+
+  app.get('/admin/catalog-products', auth, admin, async (req, res) => {
+    try {
+      const site = req.query.site ? normalizeSite(req.query.site) : '';
+      const search = sanitizeLike(req.query.search);
+      let query = supabase
+        .from('catalog_products')
+        .select('id, site, sku, product_name, default_max_price, metadata, is_enabled, created_at')
+        .order('created_at', { ascending: false })
+        .limit(200);
+      if (site) query = query.eq('site', site);
+      if (search) query = query.or(`sku.ilike.%${search}%,product_name.ilike.%${search}%`);
+      const { data, error } = await query;
+      if (error) return res.status(500).json({ error: error.message });
+      res.json({ items: data || [] });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.delete('/admin/catalog-products/:id', auth, admin, async (req, res) => {
+    try {
+      const { error } = await supabase.from('catalog_products').delete().eq('id', req.params.id);
+      if (error) return res.status(500).json({ error: error.message });
+      res.json({ success: true, message: 'Catalog product deleted.' });
     } catch (err) {
       res.status(500).json({ error: err.message });
     }

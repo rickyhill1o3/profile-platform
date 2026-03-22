@@ -53,20 +53,14 @@
       </section>
 
       <section class="panel" id="countdownManagerPanel">
-        <div class="panel-header"><div><h2>Countdown Manager</h2><p class="subtle-text">Create timers for Walmart, Target, Supreme, Pokémon Center, or any custom general release. All times are entered and displayed in US Eastern Time (ET).</p></div></div>
+        <div class="panel-header"><div><h2>Countdown Manager</h2><p class="subtle-text">Create timers for Walmart, Target, Supreme, Pokémon Center, or any custom general release. All times are managed in US Eastern Time (ET).</p></div></div>
         <form id="countdownForm" class="form-grid">
           <div class="field"><label for="countdownSite">Site</label>
-            <select class="input" id="countdownSite"><option value="walmart">Walmart</option><option value="target">Target</option><option value="supreme">Supreme</option><option value="pokemon">Pokémon Center</option><option value="general">General / Custom</option></select>
+            <select class="input" id="countdownSite"><option value="walmart">Walmart</option><option value="target">Target</option><option value="general">General / Custom</option><option value="supreme">Supreme</option><option value="pokemon">Pokémon Center</option></select>
           </div>
           <div class="field"><label for="countdownLabel">Display Name</label><input class="input" id="countdownLabel" placeholder="Walmart Friday Restock" /></div>
-          <div class="field"><label for="countdownWhen">Release Date & Time <span class="subtle-text">(US Eastern Time)</span></label><input class="input" type="datetime-local" id="countdownWhen" /></div>
+          <div class="field"><label for="countdownWhen">Release Date & Time (ET)</label><input class="input" type="datetime-local" id="countdownWhen" /></div>
           <div class="field"><label for="countdownOrder">Sort Order</label><input class="input" type="number" id="countdownOrder" value="0" /></div>
-          <div class="field field--full"><label for="countdownDescription">Detail Description</label><textarea class="input" id="countdownDescription" rows="3" placeholder="Describe the release or drop details"></textarea></div>
-          <div class="field field--full">
-            <label>Products releasing at this time</label>
-            <div id="countdownProductsChooser" class="selection-box">Loading products…</div>
-            <p class="subtle-text">Select catalog products that belong to this countdown.</p>
-          </div>
           <div class="field field--full"><label class="checkbox-inline"><input type="checkbox" id="countdownActive" checked /><span>Active</span></label></div>
           <div class="field field--full panel-actions"><button class="btn btn-primary" type="submit">Save Countdown</button></div>
         </form>
@@ -75,15 +69,22 @@
       </section>
 
       <section class="panel" id="catalogToolsPanel">
-        <div class="panel-header"><div><h2>Catalog Tools</h2><p class="subtle-text">Add products by SKU and sync Target max prices from matching Amazon titles.</p></div></div>
+        <div class="panel-header"><div><h2>Catalog Tools</h2><p class="subtle-text">Add products manually, review pending requests, and delete bad catalog entries. User requests never auto-add to the catalog.</p></div></div>
         <form id="adminSkuUpsertForm" class="form-grid">
-          <div class="field"><label for="adminSkuSite">Site</label><select class="input" id="adminSkuSite"><option value="amazon">Amazon</option><option value="target">Target</option><option value="walmart">Walmart</option><option value="general">General</option></select></div>
+          <div class="field"><label for="adminSkuSite">Site</label><select class="input" id="adminSkuSite"><option value="amazon">Amazon</option><option value="target">Target</option><option value="walmart">Walmart</option><option value="supreme">Supreme</option><option value="pokemon">Pokémon Center</option><option value="general">General</option></select></div>
           <div class="field"><label for="adminSkuValue">SKU / ASIN / DPCI</label><input class="input" id="adminSkuValue" placeholder="Enter SKU" /></div>
-          <div class="field field--full panel-actions"><button class="btn btn-primary" type="submit">Add / Update Product</button><button class="btn" type="button" id="syncTargetPricingButton">Sync Target Prices From Amazon</button></div>
+          <div class="field field--full panel-actions"><button class="btn btn-primary" type="submit">Add / Update Catalog Product</button><button class="btn" type="button" id="syncTargetPricingButton">Sync Target Prices From Amazon</button></div>
         </form>
         <div id="adminSkuMessage" class="subtle-text"></div>
-        <div class="banner banner-soft"><strong>SKU requests</strong><p class="subtle-text">Recent user requests and the auto-enrichment result.</p></div>
-        <div class="table-wrap"><table class="admin-table"><thead><tr><th>User</th><th>Site</th><th>SKU</th><th>Status</th><th>Resolved Product</th><th>Updated</th></tr></thead><tbody id="productRequestsBody"><tr><td colspan="6">No requests yet.</td></tr></tbody></table></div>
+        <div class="banner banner-soft"><strong>SKU requests</strong><p class="subtle-text">All user requests stay pending until an admin approves, rejects, or deletes them.</p></div>
+        <div class="table-wrap"><table class="admin-table"><thead><tr><th>User</th><th>Site</th><th>SKU / Label</th><th>Status</th><th>Resolved Product</th><th>Updated (ET)</th><th>Actions</th></tr></thead><tbody id="productRequestsBody"><tr><td colspan="7">No requests yet.</td></tr></tbody></table></div>
+        <div class="banner banner-soft"><strong>Catalog products</strong><p class="subtle-text">Delete bad catalog products here. Users cannot delete products.</p></div>
+        <div class="form-grid">
+          <div class="field"><label for="catalogFilterSite">Filter Site</label><select class="input" id="catalogFilterSite"><option value="">All Sites</option><option value="amazon">Amazon</option><option value="target">Target</option><option value="walmart">Walmart</option><option value="supreme">Supreme</option><option value="pokemon">Pokémon Center</option><option value="general">General</option></select></div>
+          <div class="field"><label for="catalogFilterSearch">Search</label><input class="input" id="catalogFilterSearch" placeholder="Product name or SKU" /></div>
+          <div class="field field-actions"><label>&nbsp;</label><button class="btn" type="button" id="catalogFilterButton">Load Products</button></div>
+        </div>
+        <div class="table-wrap"><table class="admin-table"><thead><tr><th>Site</th><th>Product</th><th>SKU</th><th>Max Price</th><th>Type</th><th>Action</th></tr></thead><tbody id="catalogProductsBody"><tr><td colspan="6">Load products to manage the catalog.</td></tr></tbody></table></div>
       </section>
     </div>
 

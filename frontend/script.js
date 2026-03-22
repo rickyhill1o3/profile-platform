@@ -8,20 +8,7 @@ let usersPage = 1;
 const PAGE_SIZE = 10;
 
 
-const PUBLIC_PATHS = new Set([
-    "/",
-    "/index.html",
-    "/guide",
-    "/guide.html",
-    "/login",
-    "/login.html",
-    "/signup",
-    "/signup.html",
-    "/forgot-password",
-    "/forgot-password.html",
-    "/reset-password",
-    "/reset-password.html"
-]);
+const PUBLIC_PATHS = new Set(["/", "/index.html", "/guide", "/guide.html", "/login", "/login.html", "/signup", "/signup.html", "/forgot-password", "/forgot-password.html", "/reset-password", "/reset-password.html"]);
 
 function currentPathname() {
     return window.location.pathname || "/";
@@ -29,10 +16,7 @@ function currentPathname() {
 
 function requireAuthForPrivatePages() {
     const path = currentPathname();
-    const isPublic =
-        PUBLIC_PATHS.has(path) ||
-        path.includes("guide") ||
-        path.includes("index");
+    const isPublic = PUBLIC_PATHS.has(path) || path.includes("guide") || path.endsWith("index.html") || path === "/";
     if (!isPublic && !token()) {
         window.location.replace("login.html");
         return false;
@@ -248,7 +232,7 @@ async function loadProfiles() {
     try {
         const refreshedUser = await refreshCurrentUserFromServer();
         user = refreshedUser || user;
-    } catch (_) { }
+    } catch (_) {}
 
     if (adminButton) {
         adminButton.style.display = isAdminRole(user?.role) ? "inline-flex" : "none";
@@ -1244,6 +1228,45 @@ if (passwordForm) {
 let countdownTimerHandle = null;
 window.__countdownItems = [];
 
+function formatEasternTime(value) {
+    try {
+        return new Intl.DateTimeFormat("en-US", {
+            timeZone: "America/New_York",
+            year: "numeric",
+            month: "2-digit",
+            day: "2-digit",
+            hour: "numeric",
+            minute: "2-digit",
+            hour12: true
+        }).format(new Date(value));
+    } catch (_) {
+        return String(value || "");
+    }
+}
+
+function toEasternInputValue(value) {
+    try {
+        const parts = new Intl.DateTimeFormat('en-CA', {
+            timeZone: 'America/New_York',
+            year: 'numeric',
+            month: '2-digit',
+            day: '2-digit',
+            hour: '2-digit',
+            minute: '2-digit',
+            hour12: false
+        }).formatToParts(new Date(value));
+        const get = (type) => parts.find((p) => p.type === type)?.value || '';
+        return `${get('year')}-${get('month')}-${get('day')}T${get('hour')}:${get('minute')}`;
+    } catch (_) {
+        return '';
+    }
+}
+
+function fromEasternInputValue(value) {
+    if (!value) return value;
+    return `${value}:00-05:00`;
+}
+
 function countdownSiteLabel(site) {
     const value = String(site || "general").toLowerCase();
     if (value === "supreme") return "Supreme";
@@ -1278,7 +1301,7 @@ function renderCountdownFeed(items) {
                     <span class="countdown-site">${escapeHTML(countdownSiteLabel(item.site))}</span>
                     <h3>${escapeHTML(item.label || countdownSiteLabel(item.site))}</h3>
                     <div class="countdown-time">${escapeHTML(diff.text)}</div>
-                    <div class="countdown-sub">${escapeHTML(new Date(item.scheduled_for).toLocaleString())}</div>
+                    <div class="countdown-sub">${escapeHTML(formatEasternTime(item.scheduled_for))} ET</div>
                 </article>`;
         }).join('');
     });
@@ -1332,10 +1355,10 @@ async function initSkuRequestForm() {
                 method: 'POST',
                 body: JSON.stringify({ site: siteSelect.value, sku: skuInput.value })
             });
-            message.textContent = data.message || 'Request submitted.';
+            message.textContent = data.message || 'Request submitted for admin review.';
             skuInput.value = '';
             if (window.location.pathname.endsWith('dashboard.html') && typeof loadProducts === 'function') {
-                try { await loadProducts(); } catch (_) { }
+                try { await loadProducts(); } catch (_) {}
             }
         } catch (err) {
             message.textContent = err.message;
@@ -1357,7 +1380,7 @@ async function loadCountdownAdminList() {
             <div class="stack-item">
               <div class="stack-item-meta">
                 <strong>${escapeHTML(item.label || countdownSiteLabel(item.site))}</strong>
-                <span class="subtle-text">${escapeHTML(countdownSiteLabel(item.site))} • ${escapeHTML(new Date(item.scheduled_for).toLocaleString())}</span>
+                <span class="subtle-text">${escapeHTML(countdownSiteLabel(item.site))} • ${escapeHTML(formatEasternTime(item.scheduled_for))} ET</span>
               </div>
               <div class="countdown-admin-actions">
                 <button class="btn" type="button" data-edit-countdown="${escapeHTML(item.id)}">Edit</button>
@@ -1404,7 +1427,7 @@ async function initCountdownManager() {
         const payload = {
             site: document.getElementById('countdownSite').value,
             label: document.getElementById('countdownLabel').value,
-            scheduled_for: document.getElementById('countdownWhen').value,
+            scheduled_for: fromEasternInputValue(document.getElementById('countdownWhen').value),
             sort_order: Number(document.getElementById('countdownOrder').value || 0),
             is_active: document.getElementById('countdownActive').checked
         };
@@ -1436,7 +1459,7 @@ async function loadProductRequests() {
         const data = await authJSON(API + '/admin/product-requests');
         const items = Array.isArray(data.items) ? data.items : [];
         if (!items.length) {
-            body.innerHTML = '<tr><td colspan="6">No requests yet.</td></tr>';
+            body.innerHTML = '<tr><td colspan="7">No requests yet.</td></tr>';
             return;
         }
         body.innerHTML = items.map((item) => `
@@ -1446,8 +1469,97 @@ async function loadProductRequests() {
               <td>${escapeHTML(item.sku)}</td>
               <td>${escapeHTML(item.status || '-')}</td>
               <td>${escapeHTML(item.product_name || '-')} ${item.default_max_price !== null && item.default_max_price !== undefined ? `(${escapeHTML(formatMoney(item.default_max_price))})` : ''}</td>
-              <td>${escapeHTML(new Date(item.updated_at || item.created_at).toLocaleString())}</td>
+              <td>${escapeHTML(formatEasternTime(item.updated_at || item.created_at))} ET</td>
+              <td class="table-actions">
+                <button class="btn btn-primary" type="button" data-approve-request="${escapeHTML(item.id)}">Approve</button>
+                <button class="btn" type="button" data-reject-request="${escapeHTML(item.id)}">Reject</button>
+                <button class="btn btn-danger" type="button" data-delete-request="${escapeHTML(item.id)}">Delete</button>
+              </td>
             </tr>`).join('');
+        body.querySelectorAll('[data-approve-request]').forEach((button) => {
+            button.addEventListener('click', async () => {
+                try {
+                    const data = await authJSON(API + '/admin/product-requests/' + button.dataset.approveRequest + '/approve', { method: 'POST' });
+                    const msg = document.getElementById('adminSkuMessage');
+                    if (msg) msg.textContent = data.message || 'Request approved.';
+                    await loadProductRequests();
+                    await loadCatalogProducts();
+                } catch (err) {
+                    const msg = document.getElementById('adminSkuMessage');
+                    if (msg) msg.textContent = err.message;
+                }
+            });
+        });
+        body.querySelectorAll('[data-reject-request]').forEach((button) => {
+            button.addEventListener('click', async () => {
+                try {
+                    const data = await authJSON(API + '/admin/product-requests/' + button.dataset.rejectRequest + '/reject', { method: 'POST' });
+                    const msg = document.getElementById('adminSkuMessage');
+                    if (msg) msg.textContent = data.message || 'Request rejected.';
+                    await loadProductRequests();
+                } catch (err) {
+                    const msg = document.getElementById('adminSkuMessage');
+                    if (msg) msg.textContent = err.message;
+                }
+            });
+        });
+        body.querySelectorAll('[data-delete-request]').forEach((button) => {
+            button.addEventListener('click', async () => {
+                if (!confirm('Delete this request?')) return;
+                try {
+                    const data = await authJSON(API + '/admin/product-requests/' + button.dataset.deleteRequest, { method: 'DELETE' });
+                    const msg = document.getElementById('adminSkuMessage');
+                    if (msg) msg.textContent = data.message || 'Request deleted.';
+                    await loadProductRequests();
+                } catch (err) {
+                    const msg = document.getElementById('adminSkuMessage');
+                    if (msg) msg.textContent = err.message;
+                }
+            });
+        });
+    } catch (err) {
+        body.innerHTML = `<tr><td colspan="7">${escapeHTML(err.message)}</td></tr>`;
+    }
+}
+
+async function loadCatalogProducts() {
+    const body = document.getElementById('catalogProductsBody');
+    if (!body) return;
+    const site = document.getElementById('catalogFilterSite')?.value || '';
+    const search = document.getElementById('catalogFilterSearch')?.value || '';
+    try {
+        const qs = new URLSearchParams();
+        if (site) qs.set('site', site);
+        if (search) qs.set('search', search);
+        const data = await authJSON(API + '/admin/catalog-products?' + qs.toString());
+        const items = Array.isArray(data.items) ? data.items : [];
+        if (!items.length) {
+            body.innerHTML = '<tr><td colspan="6">No catalog products found.</td></tr>';
+            return;
+        }
+        body.innerHTML = items.map((item) => `
+            <tr>
+              <td>${escapeHTML(item.site)}</td>
+              <td>${escapeHTML(item.product_name || '-')}</td>
+              <td>${escapeHTML(item.sku || '-')}</td>
+              <td>${escapeHTML(formatMoney(item.default_max_price))}</td>
+              <td>${item.metadata && item.metadata.virtual ? 'Virtual' : 'Live'}</td>
+              <td><button class="btn btn-danger" type="button" data-delete-catalog-product="${escapeHTML(item.id)}">Delete</button></td>
+            </tr>`).join('');
+        body.querySelectorAll('[data-delete-catalog-product]').forEach((button) => {
+            button.addEventListener('click', async () => {
+                if (!confirm('Delete this product?')) return;
+                try {
+                    const data = await authJSON(API + '/admin/catalog-products/' + button.dataset.deleteCatalogProduct, { method: 'DELETE' });
+                    const msg = document.getElementById('adminSkuMessage');
+                    if (msg) msg.textContent = data.message || 'Product deleted.';
+                    await loadCatalogProducts();
+                } catch (err) {
+                    const msg = document.getElementById('adminSkuMessage');
+                    if (msg) msg.textContent = err.message;
+                }
+            });
+        });
     } catch (err) {
         body.innerHTML = `<tr><td colspan="6">${escapeHTML(err.message)}</td></tr>`;
     }
@@ -1455,39 +1567,49 @@ async function loadProductRequests() {
 
 async function initCatalogTools() {
     const form = document.getElementById('adminSkuUpsertForm');
-    if (!form) return;
     const message = document.getElementById('adminSkuMessage');
     const syncButton = document.getElementById('syncTargetPricingButton');
-    form.addEventListener('submit', async (event) => {
-        event.preventDefault();
-        message.textContent = 'Looking up SKU...';
-        try {
-            const data = await authJSON(API + '/admin/catalog-products/upsert-by-sku', {
-                method: 'POST',
-                body: JSON.stringify({
-                    site: document.getElementById('adminSkuSite').value,
-                    sku: document.getElementById('adminSkuValue').value
-                })
-            });
-            message.textContent = data.message || 'Product added.';
-            document.getElementById('adminSkuValue').value = '';
-            await loadProductRequests();
-        } catch (err) {
-            message.textContent = err.message;
-        }
-    });
+    const filterSite = document.getElementById('catalogFilterSite');
+    const filterSearch = document.getElementById('catalogFilterSearch');
+    const filterButton = document.getElementById('catalogFilterButton');
+    if (form) {
+        form.addEventListener('submit', async (event) => {
+            event.preventDefault();
+            message.textContent = 'Adding product...';
+            try {
+                const data = await authJSON(API + '/admin/catalog-products/upsert-by-sku', {
+                    method: 'POST',
+                    body: JSON.stringify({
+                        site: document.getElementById('adminSkuSite').value,
+                        sku: document.getElementById('adminSkuValue').value
+                    })
+                });
+                message.textContent = data.message || 'Product added.';
+                document.getElementById('adminSkuValue').value = '';
+                await loadCatalogProducts();
+                await loadProductRequests();
+            } catch (err) {
+                message.textContent = err.message;
+            }
+        });
+    }
     if (syncButton) {
         syncButton.addEventListener('click', async () => {
             message.textContent = 'Syncing target pricing...';
             try {
                 const data = await authJSON(API + '/admin/catalog-products/sync-target-pricing', { method: 'POST' });
                 message.textContent = data.message || `Updated ${data.updated || 0} target prices.`;
+                await loadCatalogProducts();
             } catch (err) {
                 message.textContent = err.message;
             }
         });
     }
+    if (filterButton) filterButton.addEventListener('click', loadCatalogProducts);
+    if (filterSite) filterSite.addEventListener('change', loadCatalogProducts);
+    if (filterSearch) filterSearch.addEventListener('keydown', (event) => { if (event.key === 'Enter') { event.preventDefault(); loadCatalogProducts(); } });
     await loadProductRequests();
+    await loadCatalogProducts();
 }
 
 /* ================= PAGE LOAD ================= */
@@ -1496,8 +1618,8 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (!requireAuthForPrivatePages()) return;
     try {
         if (token()) { await refreshCurrentUserFromServer(); }
-    } catch (_) { }
-    try { await loadPublicCountdowns(); } catch (_) { }
+    } catch (_) {}
+    try { await loadPublicCountdowns(); } catch (_) {}
 
     if (document.getElementById("dashboard")) {
         await loadProfiles();
@@ -1509,230 +1631,13 @@ document.addEventListener("DOMContentLoaded", async () => {
 
     if (document.getElementById("inviteTableBody")) {
         setupInviteControls();
-        try { await loadOwnerAdminFilter(); } catch (_) { }
-        try { await loadExportAccounts(); } catch (_) { }
-        try { await loadInvites(1); } catch (_) { }
-        try { await loadUsers(1); } catch (_) { }
-        try { updateExportCount(); } catch (_) { }
-        try { await initCountdownManager(); } catch (_) { }
-        try { await initCatalogTools(); } catch (_) { }
+        try { await loadOwnerAdminFilter(); } catch (_) {}
+        try { await loadExportAccounts(); } catch (_) {}
+        try { await loadInvites(1); } catch (_) {}
+        try { await loadUsers(1); } catch (_) {}
+        try { updateExportCount(); } catch (_) {}
+        try { await initCountdownManager(); } catch (_) {}
+        try { await initCatalogTools(); } catch (_) {}
     }
-    try { await initSkuRequestForm(); } catch (_) { }
+    try { await initSkuRequestForm(); } catch (_) {}
 });
-
-/* ===== 2026-03-22 overrides: public guide/home, ET countdowns, countdown product linking ===== */
-let countdownSelectionIds = [];
-
-function requireAuthForPrivatePages() {
-    const path = window.location.pathname || "/";
-    const normalized = (path.split('/').pop() || 'index.html').toLowerCase();
-    const isPublic = path === '/' || path === '' || PUBLIC_PATHS.has(path) || PUBLIC_PATHS.has('/' + normalized) || normalized === 'index.html' || normalized === 'guide.html';
-    if (!isPublic && !token()) {
-        window.location.replace('login.html');
-        return false;
-    }
-    return true;
-}
-
-
-function toEasternInputValue(value) {
-    const parts = new Intl.DateTimeFormat('en-CA', {
-        timeZone: 'America/New_York',
-        year: 'numeric',
-        month: '2-digit',
-        day: '2-digit',
-        hour: '2-digit',
-        minute: '2-digit',
-        hour12: false
-    }).formatToParts(new Date(value));
-    const map = Object.fromEntries(parts.map((part) => [part.type, part.value]));
-    return `${map.year}-${map.month}-${map.day}T${map.hour}:${map.minute}`;
-}
-
-function formatEasternDateTime(value) {
-    if (!value) return 'TBD';
-    return new Intl.DateTimeFormat('en-US', {
-        timeZone: 'America/New_York',
-        year: 'numeric',
-        month: 'numeric',
-        day: 'numeric',
-        hour: 'numeric',
-        minute: '2-digit'
-    }).format(new Date(value)) + ' ET';
-}
-
-function countdownSiteLabel(site) {
-    const value = String(site || 'general').toLowerCase();
-    if (value === 'supreme') return 'Supreme';
-    if (value === 'pokemon') return 'Pokémon Center';
-    if (value === 'general') return 'General';
-    return value.charAt(0).toUpperCase() + value.slice(1);
-}
-
-function renderCountdownFeed(items) {
-    document.querySelectorAll('[data-countdown-feed]').forEach((wrap) => {
-        const source = Array.isArray(items) ? items : [];
-        if (!source.length) {
-            wrap.innerHTML = `<div class="empty-state-soft">${escapeHTML(wrap.dataset.emptyText || 'No countdowns posted yet.')}</div>`;
-            return;
-        }
-        wrap.innerHTML = source.map((item) => {
-            const diff = countdownDiffParts(item.scheduled_for);
-            const linked = Array.isArray(item.linked_products) && item.linked_products.length
-                ? `<div class="countdown-tags">${item.linked_products.map((p) => `<span class="product-pill">${escapeHTML(p.product_name || p.sku || 'Product')}</span>`).join('')}</div>`
-                : '';
-            return `
-                <article class="countdown-card" data-countdown-id="${escapeHTML(item.id)}" data-countdown-at="${escapeHTML(item.scheduled_for)}">
-                    <span class="countdown-site">${escapeHTML(countdownSiteLabel(item.site))}</span>
-                    <h3>${escapeHTML(item.label || countdownSiteLabel(item.site))}</h3>
-                    ${item.description ? `<p class="subtle-text">${escapeHTML(item.description)}</p>` : ''}
-                    <div class="countdown-time">${escapeHTML(diff.text)}</div>
-                    <div class="countdown-sub">${escapeHTML(formatEasternDateTime(item.scheduled_for))}</div>
-                    ${linked}
-                </article>`;
-        }).join('');
-    });
-}
-
-async function loadPublicCountdowns() {
-    const feeds = document.querySelectorAll('[data-countdown-feed]');
-    if (!feeds.length) return;
-    try {
-        const res = await fetch(API + '/public/countdowns');
-        const data = await res.json();
-        window.__countdownItems = Array.isArray(data.items) ? data.items : [];
-        renderCountdownFeed(window.__countdownItems);
-        clearInterval(countdownTimerHandle);
-        countdownTimerHandle = setInterval(tickCountdownCards, 1000);
-    } catch (err) {
-        renderCountdownFeed([]);
-    }
-}
-
-async function loadCountdownProductChoices(site, selectedIds = []) {
-    const wrap = document.getElementById('countdownProductsChooser');
-    if (!wrap) return;
-    wrap.innerHTML = 'Loading products…';
-    countdownSelectionIds = Array.isArray(selectedIds) ? [...selectedIds] : [];
-    try {
-        const data = await authJSON(API + '/admin/catalog-products?site=' + encodeURIComponent(site));
-        const items = Array.isArray(data.items) ? data.items : [];
-        if (!items.length) {
-            wrap.innerHTML = '<div class="empty-state-soft">No catalog products available for this site yet.</div>';
-            return;
-        }
-        wrap.innerHTML = items.map((item) => {
-            const checked = countdownSelectionIds.includes(item.id) ? 'checked' : '';
-            return `<label class="checkbox-inline checkbox-inline--block"><input type="checkbox" value="${escapeHTML(item.id)}" ${checked} /><span>${escapeHTML(item.product_name || item.sku)} ${item.sku ? `• ${escapeHTML(item.sku)}` : ''}</span></label>`;
-        }).join('');
-        wrap.querySelectorAll('input[type="checkbox"]').forEach((input) => {
-            input.addEventListener('change', () => {
-                countdownSelectionIds = [...wrap.querySelectorAll('input[type="checkbox"]:checked')].map((node) => node.value);
-            });
-        });
-    } catch (err) {
-        wrap.innerHTML = `<div class="empty-state-soft">${escapeHTML(err.message)}</div>`;
-    }
-}
-
-async function loadCountdownAdminList() {
-    const wrap = document.getElementById('countdownAdminList');
-    if (!wrap) return;
-    try {
-        const data = await authJSON(API + '/admin/countdowns');
-        const items = Array.isArray(data.items) ? data.items : [];
-        if (!items.length) {
-            wrap.innerHTML = '<div class="empty-state-soft">No countdowns yet.</div>';
-            return;
-        }
-        wrap.innerHTML = items.map((item) => `
-            <div class="stack-item">
-              <div class="stack-item-meta">
-                <strong>${escapeHTML(item.label || countdownSiteLabel(item.site))}</strong>
-                <span class="subtle-text">${escapeHTML(countdownSiteLabel(item.site))} • ${escapeHTML(formatEasternDateTime(item.scheduled_for))}</span>
-                ${item.description ? `<span class="subtle-text">${escapeHTML(item.description)}</span>` : ''}
-                ${Array.isArray(item.linked_products) && item.linked_products.length ? `<div class="countdown-tags">${item.linked_products.map((p) => `<span class="product-pill">${escapeHTML(p.product_name || p.sku || 'Product')}</span>`).join('')}</div>` : ''}
-              </div>
-              <div class="countdown-admin-actions">
-                <button class="btn" type="button" data-edit-countdown="${escapeHTML(item.id)}">Edit</button>
-                <button class="btn btn-danger" type="button" data-delete-countdown="${escapeHTML(item.id)}">Delete</button>
-              </div>
-            </div>`).join('');
-        wrap.querySelectorAll('[data-edit-countdown]').forEach((button) => {
-            button.addEventListener('click', async () => {
-                const item = items.find((entry) => entry.id === button.dataset.editCountdown);
-                if (!item) return;
-                document.getElementById('countdownForm').dataset.editingId = item.id;
-                document.getElementById('countdownSite').value = item.site;
-                document.getElementById('countdownLabel').value = item.label || '';
-                document.getElementById('countdownWhen').value = toEasternInputValue(item.scheduled_for);
-                document.getElementById('countdownOrder').value = item.sort_order || 0;
-                const desc = document.getElementById('countdownDescription');
-                if (desc) desc.value = item.description || '';
-                document.getElementById('countdownActive').checked = !!item.is_active;
-                document.getElementById('countdownManagerMessage').textContent = 'Editing countdown.';
-                await loadCountdownProductChoices(item.site, (item.linked_products || []).map((p) => p.id));
-            });
-        });
-        wrap.querySelectorAll('[data-delete-countdown]').forEach((button) => {
-            button.addEventListener('click', async () => {
-                if (!confirm('Delete this countdown?')) return;
-                try {
-                    await authJSON(API + '/admin/countdowns/' + button.dataset.deleteCountdown, { method: 'DELETE' });
-                    document.getElementById('countdownManagerMessage').textContent = 'Countdown deleted.';
-                    await loadCountdownAdminList();
-                    await loadPublicCountdowns();
-                } catch (err) {
-                    document.getElementById('countdownManagerMessage').textContent = err.message;
-                }
-            });
-        });
-    } catch (err) {
-        wrap.innerHTML = `<div class="empty-state-soft">${escapeHTML(err.message)}</div>`;
-    }
-}
-
-async function initCountdownManager() {
-    const form = document.getElementById('countdownForm');
-    if (!form) return;
-    const message = document.getElementById('countdownManagerMessage');
-    const siteInput = document.getElementById('countdownSite');
-    if (siteInput) {
-        siteInput.addEventListener('change', async () => {
-            await loadCountdownProductChoices(siteInput.value, []);
-        });
-    }
-    form.addEventListener('submit', async (event) => {
-        event.preventDefault();
-        const payload = {
-            site: document.getElementById('countdownSite').value,
-            label: document.getElementById('countdownLabel').value,
-            description: document.getElementById('countdownDescription') ? document.getElementById('countdownDescription').value : '',
-            scheduled_for: document.getElementById('countdownWhen').value,
-            sort_order: Number(document.getElementById('countdownOrder').value || 0),
-            is_active: document.getElementById('countdownActive').checked,
-            product_ids: countdownSelectionIds
-        };
-        const editingId = form.dataset.editingId;
-        try {
-            if (editingId) {
-                await authJSON(API + '/admin/countdowns/' + editingId, { method: 'PUT', body: JSON.stringify(payload) });
-                message.textContent = 'Countdown updated.';
-            } else {
-                await authJSON(API + '/admin/countdowns', { method: 'POST', body: JSON.stringify(payload) });
-                message.textContent = 'Countdown created.';
-            }
-            form.reset();
-            form.dataset.editingId = '';
-            document.getElementById('countdownActive').checked = true;
-            countdownSelectionIds = [];
-            await loadCountdownProductChoices(document.getElementById('countdownSite').value, []);
-            await loadCountdownAdminList();
-            await loadPublicCountdowns();
-        } catch (err) {
-            message.textContent = err.message;
-        }
-    });
-    await loadCountdownProductChoices(document.getElementById('countdownSite').value, []);
-    await loadCountdownAdminList();
-}
