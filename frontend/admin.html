@@ -28,585 +28,154 @@
       <div class="stat-card"><span class="stat-label">Users</span><strong class="stat-value" id="userCount">0</strong></div>
     </section>
 
-        <div class="admin-layout-shell">
+    <div class="admin-layout-shell">
       <aside class="admin-sidebar panel">
         <p class="eyebrow">Admin Navigation</p>
-        <button class="admin-nav-button is-active" data-admin-nav="invites">Invites</button>
-        <button class="admin-nav-button" data-admin-nav="countdowns">Countdowns + Catalog</button>
-        <button class="admin-nav-button" data-admin-nav="exports">Exports</button>
-        <button class="admin-nav-button" data-admin-nav="selections">User Product Selections</button>
-        <button class="admin-nav-button" data-admin-nav="users">Current Users</button>
+        <button class="admin-nav-button is-active" type="button" data-admin-nav="invites">Invites</button>
+        <button class="admin-nav-button" type="button" data-admin-nav="countdowns">Countdowns + Catalog</button>
+        <button class="admin-nav-button" type="button" data-admin-nav="exports">Exports</button>
+        <button class="admin-nav-button" type="button" data-admin-nav="selections">User Product Selections</button>
+        <button class="admin-nav-button" type="button" data-admin-nav="users">Current Users</button>
       </aside>
+
       <div class="admin-content-stack">
         <section class="admin-pane is-active" data-admin-pane="invites">
-<section class="panel">
-        <div class="panel-header"><div><h2>Create Invite Code</h2><p class="subtle-text">Generate signup access codes.</p></div></div>
-        <div class="form-grid">
-          <div class="field">
-            <label for="inviteRoleSelect">Invite Role</label>
-            <select class="input" id="inviteRoleSelect" onchange="handleInviteRoleChange()">
-              <option value="user">User Invite</option>
-              <option value="admin">Admin Invite</option>
-            </select>
-          </div>
-          <div class="field">
-            <label for="inviteQuantitySelect">Quantity</label>
-            <select class="input" id="inviteQuantitySelect">
-              <option value="1">1 Invite</option><option value="2">2 Invites</option><option value="3">3 Invites</option>
-              <option value="4">4 Invites</option><option value="5">5 Invites</option><option value="6">6 Invites</option>
-              <option value="7">7 Invites</option><option value="8">8 Invites</option><option value="9">9 Invites</option><option value="10">10 Invites</option>
-            </select>
-          </div>
-        </div>
-        <div class="panel-actions"><button class="btn btn-primary" onclick="submitInviteCreation()">Create Invite</button></div>
-        <div class="banner" id="inviteResult">No invite created yet.</div>
-      </section>
-<section class="panel">
-        <div class="panel-header"><div><h2>Create Invite Code</h2><p class="subtle-text">Generate signup access codes.</p></div></div>
-        <div class="form-grid">
-          <div class="field">
-            <label for="inviteRoleSelect">Invite Role</label>
-            <select class="input" id="inviteRoleSelect" onchange="handleInviteRoleChange()">
-              <option value="user">User Invite</option>
-              <option value="admin">Admin Invite</option>
-            </select>
-          </div>
-          <div class="field">
-            <label for="inviteQuantitySelect">Quantity</label>
-            <select class="input" id="inviteQuantitySelect">
-              <option value="1">1 Invite</option><option value="2">2 Invites</option><option value="3">3 Invites</option>
-              <option value="4">4 Invites</option><option value="5">5 Invites</option><option value="6">6 Invites</option>
-              <option value="7">7 Invites</option><option value="8">8 Invites</option><option value="9">9 Invites</option><option value="10">10 Invites</option>
-            </select>
-          </div>
-        </div>
-        <div class="panel-actions"><button class="btn btn-primary" onclick="submitInviteCreation()">Create Invite</button></div>
-        <div class="banner" id="inviteResult">No invite created yet.</div>
-      </section>
+          <section class="panel">
+            <div class="panel-header"><div><h2>Create Invite Code</h2><p class="subtle-text">Generate signup access codes.</p></div></div>
+            <div class="form-grid">
+              <div class="field">
+                <label for="inviteRoleSelect">Invite Role</label>
+                <select class="input" id="inviteRoleSelect" onchange="handleInviteRoleChange()">
+                  <option value="user">User Invite</option>
+                  <option value="admin">Admin Invite</option>
+                </select>
+              </div>
+              <div class="field">
+                <label for="inviteQuantitySelect">Quantity</label>
+                <select class="input" id="inviteQuantitySelect">
+                  <option value="1">1 Invite</option><option value="2">2 Invites</option><option value="3">3 Invites</option>
+                  <option value="4">4 Invites</option><option value="5">5 Invites</option><option value="6">6 Invites</option>
+                  <option value="7">7 Invites</option><option value="8">8 Invites</option><option value="9">9 Invites</option><option value="10">10 Invites</option>
+                </select>
+              </div>
+            </div>
+            <div class="panel-actions"><button class="btn btn-primary" onclick="submitInviteCreation()">Create Invite</button></div>
+            <div class="banner" id="inviteResult">No invite created yet.</div>
+          </section>
 
-      <section class="panel" id="countdownManagerPanel">
-        <div class="panel-header"><div><h2>Countdown Manager</h2><p class="subtle-text">Create timers for Walmart, Target, Supreme, Pokémon Center, or any custom general release. All times are managed in US Eastern Time (ET).</p></div></div>
-        <form id="countdownForm" class="form-grid">
-          <div class="field"><label for="countdownSite">Site</label>
-            <select class="input" id="countdownSite"><option value="walmart">Walmart</option><option value="target">Target</option><option value="general">General / Custom</option><option value="supreme">Supreme</option><option value="pokemon">Pokémon Center</option></select>
-          </div>
-          <div class="field"><label for="countdownLabel">Display Name</label><input class="input" id="countdownLabel" placeholder="Walmart Friday Restock" /></div>
-          <div class="field"><label for="countdownWhen">Release Date & Time (ET)</label><input class="input" type="datetime-local" id="countdownWhen" /></div>
-          <div class="field"><label for="countdownOrder">Sort Order</label><input class="input" type="number" id="countdownOrder" value="0" /></div>
-          <div class="field field--full"><label class="checkbox-inline"><input type="checkbox" id="countdownActive" checked /><span>Active</span></label></div>
-          <div class="field field--full panel-actions"><button class="btn btn-primary" type="submit">Save Countdown</button></div>
-        </form>
-        <div id="countdownManagerMessage" class="subtle-text"></div>
-        <div id="countdownAdminList" class="stack-list"></div>
-      </section>
-
-      <section class="panel" id="catalogToolsPanel">
-        <div class="panel-header"><div><h2>Catalog Tools</h2><p class="subtle-text">Only the super admin can approve requests, add products, placeholders, or delete catalog entries. Admins can review requests and view the catalog.</p></div></div>
-        <div id="superAdminCatalogControls">
-        <form id="adminSkuUpsertForm" class="form-grid">
-          <div class="field"><label for="adminSkuSite">Site</label><select class="input" id="adminSkuSite"><option value="amazon">Amazon</option><option value="target">Target</option><option value="walmart">Walmart</option><option value="supreme">Supreme</option><option value="pokemon">Pokémon Center</option><option value="general">General</option></select></div>
-          <div class="field"><label for="adminSkuValue">SKU / ASIN / DPCI</label><input class="input" id="adminSkuValue" placeholder="Enter SKU" /></div>
-          <div class="field field--full panel-actions"><button class="btn btn-primary" type="submit">Add / Update Catalog Product</button><button class="btn" type="button" id="syncTargetPricingButton">Sync Target Prices From Amazon</button></div>
-        </form>
-        <div class="banner banner-soft"><strong>Manual product add</strong><p class="subtle-text">Create products manually when a scrape fails, or create a blank placeholder card for future drops.</p></div>
-        <form id="adminManualProductForm" class="form-grid">
-          <div class="field"><label for="manualProductSite">Site</label><select class="input" id="manualProductSite"><option value="amazon">Amazon</option><option value="target">Target</option><option value="walmart">Walmart</option><option value="supreme">Supreme</option><option value="pokemon">Pokémon Center</option><option value="general">General</option></select></div>
-          <div class="field"><label for="manualProductSku">SKU</label><input class="input" id="manualProductSku" placeholder="SKU or custom code" /></div>
-          <div class="field field--full"><label for="manualProductName">Product Name</label><input class="input" id="manualProductName" placeholder="Product title or next drop label" /></div>
-          <div class="field"><label for="manualProductPrice">Default Max Price</label><input class="input" id="manualProductPrice" type="number" step="0.01" min="0" placeholder="0.00" /></div>
-          <div class="field"><label for="manualProductBrand">Brand</label><input class="input" id="manualProductBrand" placeholder="Optional brand" /></div>
-          <div class="field"><label for="manualProductImage">Image URL</label><input class="input" id="manualProductImage" placeholder="Optional image URL" /></div>
-          <div class="field"><label for="manualProductUrl">Product URL</label><input class="input" id="manualProductUrl" placeholder="Optional product URL" /></div>
-          <div class="field field--full"><label class="checkbox-inline"><input type="checkbox" id="manualProductPlaceholder" /><span>Create as blank next-drop placeholder</span></label></div>
-          <div class="field field--full panel-actions"><button class="btn btn-primary" type="submit">Save Manual Product</button></div>
-        </form>
-        </div>
-        <div id="superAdminCatalogNotice" class="banner banner-soft" style="display:none"><strong>View only</strong><p class="subtle-text">Only the super admin can approve requests, add products, placeholders, or delete catalog entries.</p></div>
-        <div id="adminSkuMessage" class="subtle-text"></div>
-        <div class="banner banner-soft"><strong>SKU requests</strong><p class="subtle-text">All user requests stay pending until an admin approves, rejects, or deletes them.</p></div>
-        <div class="table-wrap"><table class="admin-table"><thead><tr><th>User</th><th>Site</th><th>SKU / Label</th><th>Status</th><th>Resolved Product</th><th>Updated (ET)</th><th>Actions</th></tr></thead><tbody id="productRequestsBody"><tr><td colspan="7">No requests yet.</td></tr></tbody></table></div>
-        <div class="banner banner-soft"><strong>Catalog products</strong><p class="subtle-text">Delete bad catalog products here. Users cannot delete products.</p></div>
-        <div class="form-grid">
-          <div class="field"><label for="catalogFilterSite">Filter Site</label><select class="input" id="catalogFilterSite"><option value="">All Sites</option><option value="amazon">Amazon</option><option value="target">Target</option><option value="walmart">Walmart</option><option value="supreme">Supreme</option><option value="pokemon">Pokémon Center</option><option value="general">General</option></select></div>
-          <div class="field"><label for="catalogFilterSearch">Search</label><input class="input" id="catalogFilterSearch" placeholder="Product name or SKU" /></div>
-          <div class="field field-actions"><label>&nbsp;</label><button class="btn" type="button" id="catalogFilterButton">Load Products</button></div>
-        </div>
-        <div class="table-wrap table-wrap--catalog-scroll"><table class="admin-table"><thead><tr><th>Site</th><th>Product</th><th>SKU</th><th>Max Price</th><th>Type</th><th>Action</th></tr></thead><tbody id="catalogProductsBody"><tr><td colspan="6">Load products to manage the catalog.</td></tr></tbody></table></div>
-      </section>
-    </div>
-
-    <div class="admin-grid">
-      <section class="panel">
-        <div class="panel-header"><div><h2>Export Profiles / Accounts</h2><p class="subtle-text">Export profile JSON or account login text files.</p></div></div>
-        <div class="form-grid">
-          <div class="field">
-            <label for="exportUserFilter">User</label>
-            <select class="input" id="exportUserFilter" onchange="updateExportCount()"><option value="">All Accounts</option></select>
-          </div>
-          <div class="field">
-            <label for="exportGroupFilter">Group</label>
-            <select class="input" id="exportGroupFilter" onchange="updateExportCount()">
-              <option value="">All Groups</option>
-              <option value="general">General</option>
-              <option value="walmart">Walmart</option>
-              <option value="target">Target</option>
-              <option value="amazon">Amazon</option>
-            </select>
-          </div>
-        </div>
-        <div class="toolbar-row toolbar-row--spread">
-          <span class="subtle-text" id="exportCountInfo">Checking export count...</span>
-          <span class="subtle-text">Account export format: username:::password:::proxie</span>
-        </div>
-        <div class="panel-actions">
-          <button class="btn" onclick="exportProfilesJson()">Export Profiles JSON</button>
-          <button class="btn btn-primary" onclick="exportAccountsTxt()">Export Account Logins</button>
-        </div>
-      </section>
-
-      <section class="panel" id="adminProductSelectionsSection">
-        <div class="panel-header"><div><h2>User Product Selections</h2><p class="subtle-text">Select a user first, then view only that user’s product picks.</p></div></div>
-        <div class="toolbar-row">
-          <select class="input input--sm" id="adminProductUserSelect"><option value="">Select a user</option></select>
-          <button class="btn btn-primary" type="button" id="adminLoadUserProductsButton">Load User Products</button>
-          <span id="adminProductSelectionsMessage" class="subtle-text"></span>
-        </div>
-        <div id="adminSelectedUserSummary" class="subtle-text"></div>
-        <div id="adminSelectedUserCountdowns" class="selection-chip-list subtle-text"></div>
-        <div class="table-wrap">
-          <table class="admin-table">
-            <thead><tr><th>Site</th><th>Product</th><th>SKU</th><th>Mode</th><th>Max Price</th></tr></thead>
-            <tbody id="adminUserProductDetailBody"><tr><td colspan="5">Choose a user to view product selections.</td></tr></tbody>
-          </table>
-        </div>
-      </section>
-    </div>
-
-    <section class="panel">
-      <div class="panel-header"><div><h2>All Invite Codes</h2><p class="subtle-text">View, cancel, and delete invite codes.</p></div></div>
-      <div class="table-wrap table-wrap--admin-scroll">
-        <table class="admin-table">
-          <thead><tr><th>Code</th><th>Role</th><th>Created By</th><th>Status</th><th>Created</th><th>Used By</th><th>Action</th></tr></thead>
-          <tbody id="inviteTableBody"></tbody>
-        </table>
-      </div>
-      <div class="panel-actions" id="invitePagination" style="display:none"></div>
-    </section>
+          <section class="panel">
+            <div class="panel-header"><div><h2>All Invite Codes</h2><p class="subtle-text">View, cancel, and delete invite codes.</p></div></div>
+            <div class="table-wrap table-wrap--admin-scroll">
+              <table class="admin-table">
+                <thead><tr><th>Code</th><th>Role</th><th>Created By</th><th>Status</th><th>Created</th><th>Used By</th><th>Action</th></tr></thead>
+                <tbody id="inviteTableBody"></tbody>
+              </table>
+            </div>
+            <div class="panel-actions" id="invitePagination" style="display:none"></div>
+          </section>
         </section>
+
         <section class="admin-pane" data-admin-pane="countdowns">
-<section class="panel">
-        <div class="panel-header"><div><h2>Create Invite Code</h2><p class="subtle-text">Generate signup access codes.</p></div></div>
-        <div class="form-grid">
-          <div class="field">
-            <label for="inviteRoleSelect">Invite Role</label>
-            <select class="input" id="inviteRoleSelect" onchange="handleInviteRoleChange()">
-              <option value="user">User Invite</option>
-              <option value="admin">Admin Invite</option>
-            </select>
-          </div>
-          <div class="field">
-            <label for="inviteQuantitySelect">Quantity</label>
-            <select class="input" id="inviteQuantitySelect">
-              <option value="1">1 Invite</option><option value="2">2 Invites</option><option value="3">3 Invites</option>
-              <option value="4">4 Invites</option><option value="5">5 Invites</option><option value="6">6 Invites</option>
-              <option value="7">7 Invites</option><option value="8">8 Invites</option><option value="9">9 Invites</option><option value="10">10 Invites</option>
-            </select>
-          </div>
-        </div>
-        <div class="panel-actions"><button class="btn btn-primary" onclick="submitInviteCreation()">Create Invite</button></div>
-        <div class="banner" id="inviteResult">No invite created yet.</div>
-      </section>
+          <section class="panel" id="countdownManagerPanel">
+            <div class="panel-header"><div><h2>Countdown Manager</h2><p class="subtle-text">Create timers for Walmart, Target, Supreme, Pokémon Center, or any custom general release. All times are managed in US Eastern Time (ET).</p></div></div>
+            <form id="countdownForm" class="form-grid">
+              <div class="field"><label for="countdownSite">Site</label>
+                <select class="input" id="countdownSite"><option value="walmart">Walmart</option><option value="target">Target</option><option value="general">General / Custom</option><option value="supreme">Supreme</option><option value="pokemon">Pokémon Center</option></select>
+              </div>
+              <div class="field"><label for="countdownLabel">Display Name</label><input class="input" id="countdownLabel" placeholder="Walmart Friday Restock" /></div>
+              <div class="field"><label for="countdownWhen">Release Date & Time (ET)</label><input class="input" type="datetime-local" id="countdownWhen" /></div>
+              <div class="field"><label for="countdownOrder">Sort Order</label><input class="input" type="number" id="countdownOrder" value="0" /></div>
+              <div class="field field--full"><label class="checkbox-inline"><input type="checkbox" id="countdownActive" checked /><span>Active</span></label></div>
+              <div class="field field--full panel-actions"><button class="btn btn-primary" type="submit">Save Countdown</button></div>
+            </form>
+            <div id="countdownManagerMessage" class="subtle-text"></div>
+            <div id="countdownAdminList" class="stack-list"></div>
+          </section>
 
-      <section class="panel" id="countdownManagerPanel">
-        <div class="panel-header"><div><h2>Countdown Manager</h2><p class="subtle-text">Create timers for Walmart, Target, Supreme, Pokémon Center, or any custom general release. All times are managed in US Eastern Time (ET).</p></div></div>
-        <form id="countdownForm" class="form-grid">
-          <div class="field"><label for="countdownSite">Site</label>
-            <select class="input" id="countdownSite"><option value="walmart">Walmart</option><option value="target">Target</option><option value="general">General / Custom</option><option value="supreme">Supreme</option><option value="pokemon">Pokémon Center</option></select>
-          </div>
-          <div class="field"><label for="countdownLabel">Display Name</label><input class="input" id="countdownLabel" placeholder="Walmart Friday Restock" /></div>
-          <div class="field"><label for="countdownWhen">Release Date & Time (ET)</label><input class="input" type="datetime-local" id="countdownWhen" /></div>
-          <div class="field"><label for="countdownOrder">Sort Order</label><input class="input" type="number" id="countdownOrder" value="0" /></div>
-          <div class="field field--full"><label class="checkbox-inline"><input type="checkbox" id="countdownActive" checked /><span>Active</span></label></div>
-          <div class="field field--full panel-actions"><button class="btn btn-primary" type="submit">Save Countdown</button></div>
-        </form>
-        <div id="countdownManagerMessage" class="subtle-text"></div>
-        <div id="countdownAdminList" class="stack-list"></div>
-      </section>
-<section class="panel">
-        <div class="panel-header"><div><h2>Create Invite Code</h2><p class="subtle-text">Generate signup access codes.</p></div></div>
-        <div class="form-grid">
-          <div class="field">
-            <label for="inviteRoleSelect">Invite Role</label>
-            <select class="input" id="inviteRoleSelect" onchange="handleInviteRoleChange()">
-              <option value="user">User Invite</option>
-              <option value="admin">Admin Invite</option>
-            </select>
-          </div>
-          <div class="field">
-            <label for="inviteQuantitySelect">Quantity</label>
-            <select class="input" id="inviteQuantitySelect">
-              <option value="1">1 Invite</option><option value="2">2 Invites</option><option value="3">3 Invites</option>
-              <option value="4">4 Invites</option><option value="5">5 Invites</option><option value="6">6 Invites</option>
-              <option value="7">7 Invites</option><option value="8">8 Invites</option><option value="9">9 Invites</option><option value="10">10 Invites</option>
-            </select>
-          </div>
-        </div>
-        <div class="panel-actions"><button class="btn btn-primary" onclick="submitInviteCreation()">Create Invite</button></div>
-        <div class="banner" id="inviteResult">No invite created yet.</div>
-      </section>
-
-      <section class="panel" id="countdownManagerPanel">
-        <div class="panel-header"><div><h2>Countdown Manager</h2><p class="subtle-text">Create timers for Walmart, Target, Supreme, Pokémon Center, or any custom general release. All times are managed in US Eastern Time (ET).</p></div></div>
-        <form id="countdownForm" class="form-grid">
-          <div class="field"><label for="countdownSite">Site</label>
-            <select class="input" id="countdownSite"><option value="walmart">Walmart</option><option value="target">Target</option><option value="general">General / Custom</option><option value="supreme">Supreme</option><option value="pokemon">Pokémon Center</option></select>
-          </div>
-          <div class="field"><label for="countdownLabel">Display Name</label><input class="input" id="countdownLabel" placeholder="Walmart Friday Restock" /></div>
-          <div class="field"><label for="countdownWhen">Release Date & Time (ET)</label><input class="input" type="datetime-local" id="countdownWhen" /></div>
-          <div class="field"><label for="countdownOrder">Sort Order</label><input class="input" type="number" id="countdownOrder" value="0" /></div>
-          <div class="field field--full"><label class="checkbox-inline"><input type="checkbox" id="countdownActive" checked /><span>Active</span></label></div>
-          <div class="field field--full panel-actions"><button class="btn btn-primary" type="submit">Save Countdown</button></div>
-        </form>
-        <div id="countdownManagerMessage" class="subtle-text"></div>
-        <div id="countdownAdminList" class="stack-list"></div>
-      </section>
-
-      <section class="panel" id="catalogToolsPanel">
-        <div class="panel-header"><div><h2>Catalog Tools</h2><p class="subtle-text">Only the super admin can approve requests, add products, placeholders, or delete catalog entries. Admins can review requests and view the catalog.</p></div></div>
-        <div id="superAdminCatalogControls">
-        <form id="adminSkuUpsertForm" class="form-grid">
-          <div class="field"><label for="adminSkuSite">Site</label><select class="input" id="adminSkuSite"><option value="amazon">Amazon</option><option value="target">Target</option><option value="walmart">Walmart</option><option value="supreme">Supreme</option><option value="pokemon">Pokémon Center</option><option value="general">General</option></select></div>
-          <div class="field"><label for="adminSkuValue">SKU / ASIN / DPCI</label><input class="input" id="adminSkuValue" placeholder="Enter SKU" /></div>
-          <div class="field field--full panel-actions"><button class="btn btn-primary" type="submit">Add / Update Catalog Product</button><button class="btn" type="button" id="syncTargetPricingButton">Sync Target Prices From Amazon</button></div>
-        </form>
-        <div class="banner banner-soft"><strong>Manual product add</strong><p class="subtle-text">Create products manually when a scrape fails, or create a blank placeholder card for future drops.</p></div>
-        <form id="adminManualProductForm" class="form-grid">
-          <div class="field"><label for="manualProductSite">Site</label><select class="input" id="manualProductSite"><option value="amazon">Amazon</option><option value="target">Target</option><option value="walmart">Walmart</option><option value="supreme">Supreme</option><option value="pokemon">Pokémon Center</option><option value="general">General</option></select></div>
-          <div class="field"><label for="manualProductSku">SKU</label><input class="input" id="manualProductSku" placeholder="SKU or custom code" /></div>
-          <div class="field field--full"><label for="manualProductName">Product Name</label><input class="input" id="manualProductName" placeholder="Product title or next drop label" /></div>
-          <div class="field"><label for="manualProductPrice">Default Max Price</label><input class="input" id="manualProductPrice" type="number" step="0.01" min="0" placeholder="0.00" /></div>
-          <div class="field"><label for="manualProductBrand">Brand</label><input class="input" id="manualProductBrand" placeholder="Optional brand" /></div>
-          <div class="field"><label for="manualProductImage">Image URL</label><input class="input" id="manualProductImage" placeholder="Optional image URL" /></div>
-          <div class="field"><label for="manualProductUrl">Product URL</label><input class="input" id="manualProductUrl" placeholder="Optional product URL" /></div>
-          <div class="field field--full"><label class="checkbox-inline"><input type="checkbox" id="manualProductPlaceholder" /><span>Create as blank next-drop placeholder</span></label></div>
-          <div class="field field--full panel-actions"><button class="btn btn-primary" type="submit">Save Manual Product</button></div>
-        </form>
-        </div>
-        <div id="superAdminCatalogNotice" class="banner banner-soft" style="display:none"><strong>View only</strong><p class="subtle-text">Only the super admin can approve requests, add products, placeholders, or delete catalog entries.</p></div>
-        <div id="adminSkuMessage" class="subtle-text"></div>
-        <div class="banner banner-soft"><strong>SKU requests</strong><p class="subtle-text">All user requests stay pending until an admin approves, rejects, or deletes them.</p></div>
-        <div class="table-wrap"><table class="admin-table"><thead><tr><th>User</th><th>Site</th><th>SKU / Label</th><th>Status</th><th>Resolved Product</th><th>Updated (ET)</th><th>Actions</th></tr></thead><tbody id="productRequestsBody"><tr><td colspan="7">No requests yet.</td></tr></tbody></table></div>
-        <div class="banner banner-soft"><strong>Catalog products</strong><p class="subtle-text">Delete bad catalog products here. Users cannot delete products.</p></div>
-        <div class="form-grid">
-          <div class="field"><label for="catalogFilterSite">Filter Site</label><select class="input" id="catalogFilterSite"><option value="">All Sites</option><option value="amazon">Amazon</option><option value="target">Target</option><option value="walmart">Walmart</option><option value="supreme">Supreme</option><option value="pokemon">Pokémon Center</option><option value="general">General</option></select></div>
-          <div class="field"><label for="catalogFilterSearch">Search</label><input class="input" id="catalogFilterSearch" placeholder="Product name or SKU" /></div>
-          <div class="field field-actions"><label>&nbsp;</label><button class="btn" type="button" id="catalogFilterButton">Load Products</button></div>
-        </div>
-        <div class="table-wrap table-wrap--catalog-scroll"><table class="admin-table"><thead><tr><th>Site</th><th>Product</th><th>SKU</th><th>Max Price</th><th>Type</th><th>Action</th></tr></thead><tbody id="catalogProductsBody"><tr><td colspan="6">Load products to manage the catalog.</td></tr></tbody></table></div>
-      </section>
+          <section class="panel" id="catalogToolsPanel">
+            <div class="panel-header"><div><h2>Catalog Tools</h2><p class="subtle-text">Only the super admin can approve requests, add products, placeholders, or delete catalog entries. Admins can review requests and view the catalog.</p></div></div>
+            <div id="superAdminCatalogControls">
+              <form id="adminSkuUpsertForm" class="form-grid">
+                <div class="field"><label for="adminSkuSite">Site</label><select class="input" id="adminSkuSite"><option value="amazon">Amazon</option><option value="target">Target</option><option value="walmart">Walmart</option><option value="supreme">Supreme</option><option value="pokemon">Pokémon Center</option><option value="general">General</option></select></div>
+                <div class="field"><label for="adminSkuValue">SKU / ASIN / DPCI</label><input class="input" id="adminSkuValue" placeholder="Enter SKU" /></div>
+                <div class="field field--full panel-actions"><button class="btn btn-primary" type="submit">Add / Update Catalog Product</button><button class="btn" type="button" id="syncTargetPricingButton">Sync Target Prices From Amazon</button></div>
+              </form>
+              <div class="banner banner-soft"><strong>Manual product add</strong><p class="subtle-text">Create products manually when a scrape fails, or create a blank placeholder card for future drops.</p></div>
+              <form id="adminManualProductForm" class="form-grid">
+                <div class="field"><label for="manualProductSite">Site</label><select class="input" id="manualProductSite"><option value="amazon">Amazon</option><option value="target">Target</option><option value="walmart">Walmart</option><option value="supreme">Supreme</option><option value="pokemon">Pokémon Center</option><option value="general">General</option></select></div>
+                <div class="field"><label for="manualProductSku">SKU / ASIN / DPCI</label><input class="input" id="manualProductSku" placeholder="AMAZON-NEXT-DROP" /></div>
+                <div class="field field--full"><label for="manualProductName">Product Name</label><input class="input" id="manualProductName" placeholder="Run Next Amazon Release" /></div>
+                <div class="field"><label for="manualProductPrice">Price</label><input class="input" id="manualProductPrice" type="number" min="0" step="0.01" placeholder="0.00" /></div>
+                <div class="field"><label for="manualProductBrand">Brand</label><input class="input" id="manualProductBrand" placeholder="Amazon" /></div>
+                <div class="field"><label for="manualProductImage">Image URL</label><input class="input" id="manualProductImage" placeholder="https://..." /></div>
+                <div class="field"><label for="manualProductUrl">Product URL</label><input class="input" id="manualProductUrl" placeholder="https://..." /></div>
+                <div class="field"><label class="checkbox-inline"><input type="checkbox" id="manualProductPlaceholder" /><span>Create as placeholder / next release card</span></label></div>
+                <div class="field field--full panel-actions"><button class="btn btn-primary" type="submit">Save Manual Product</button></div>
+              </form>
+            </div>
+            <div id="superAdminCatalogNotice" class="banner banner-soft" style="display:none;">You can review the catalog and requests, but only the super admin can change live catalog entries.</div>
+            <div class="toolbar-row toolbar-row--spread">
+              <div class="toolbar-row">
+                <select class="input input--sm" id="catalogFilterSite"><option value="">All sites</option><option value="amazon">Amazon</option><option value="target">Target</option><option value="walmart">Walmart</option><option value="supreme">Supreme</option><option value="pokemon">Pokémon Center</option><option value="general">General</option></select>
+                <input class="input input--sm" id="catalogFilterSearch" placeholder="Search SKU or product" />
+                <button class="btn" type="button" id="catalogFilterButton">Refresh</button>
+              </div>
+              <div id="adminSkuMessage" class="subtle-text"></div>
+            </div>
+            <div class="table-wrap table-wrap--admin-scroll"><table class="admin-table"><thead><tr><th>Site</th><th>SKU</th><th>Product</th><th>Price</th><th>Mode</th><th>Actions</th></tr></thead><tbody id="catalogProductsBody"><tr><td colspan="6">Loading catalog...</td></tr></tbody></table></div>
+            <div class="panel-header"><div><h3>Pending SKU Requests</h3><p class="subtle-text">User requests wait here until the super admin approves or removes them.</p></div></div>
+            <div class="table-wrap table-wrap--admin-scroll"><table class="admin-table"><thead><tr><th>Requested</th><th>User</th><th>Site</th><th>SKU</th><th>Actions</th></tr></thead><tbody id="skuRequestTableBody"><tr><td colspan="5">Loading requests...</td></tr></tbody></table></div>
+          </section>
         </section>
+
         <section class="admin-pane" data-admin-pane="exports">
-<section class="panel">
-        <div class="panel-header"><div><h2>Create Invite Code</h2><p class="subtle-text">Generate signup access codes.</p></div></div>
-        <div class="form-grid">
-          <div class="field">
-            <label for="inviteRoleSelect">Invite Role</label>
-            <select class="input" id="inviteRoleSelect" onchange="handleInviteRoleChange()">
-              <option value="user">User Invite</option>
-              <option value="admin">Admin Invite</option>
-            </select>
-          </div>
-          <div class="field">
-            <label for="inviteQuantitySelect">Quantity</label>
-            <select class="input" id="inviteQuantitySelect">
-              <option value="1">1 Invite</option><option value="2">2 Invites</option><option value="3">3 Invites</option>
-              <option value="4">4 Invites</option><option value="5">5 Invites</option><option value="6">6 Invites</option>
-              <option value="7">7 Invites</option><option value="8">8 Invites</option><option value="9">9 Invites</option><option value="10">10 Invites</option>
-            </select>
-          </div>
-        </div>
-        <div class="panel-actions"><button class="btn btn-primary" onclick="submitInviteCreation()">Create Invite</button></div>
-        <div class="banner" id="inviteResult">No invite created yet.</div>
-      </section>
-
-      <section class="panel" id="countdownManagerPanel">
-        <div class="panel-header"><div><h2>Countdown Manager</h2><p class="subtle-text">Create timers for Walmart, Target, Supreme, Pokémon Center, or any custom general release. All times are managed in US Eastern Time (ET).</p></div></div>
-        <form id="countdownForm" class="form-grid">
-          <div class="field"><label for="countdownSite">Site</label>
-            <select class="input" id="countdownSite"><option value="walmart">Walmart</option><option value="target">Target</option><option value="general">General / Custom</option><option value="supreme">Supreme</option><option value="pokemon">Pokémon Center</option></select>
-          </div>
-          <div class="field"><label for="countdownLabel">Display Name</label><input class="input" id="countdownLabel" placeholder="Walmart Friday Restock" /></div>
-          <div class="field"><label for="countdownWhen">Release Date & Time (ET)</label><input class="input" type="datetime-local" id="countdownWhen" /></div>
-          <div class="field"><label for="countdownOrder">Sort Order</label><input class="input" type="number" id="countdownOrder" value="0" /></div>
-          <div class="field field--full"><label class="checkbox-inline"><input type="checkbox" id="countdownActive" checked /><span>Active</span></label></div>
-          <div class="field field--full panel-actions"><button class="btn btn-primary" type="submit">Save Countdown</button></div>
-        </form>
-        <div id="countdownManagerMessage" class="subtle-text"></div>
-        <div id="countdownAdminList" class="stack-list"></div>
-      </section>
-
-      <section class="panel" id="catalogToolsPanel">
-        <div class="panel-header"><div><h2>Catalog Tools</h2><p class="subtle-text">Only the super admin can approve requests, add products, placeholders, or delete catalog entries. Admins can review requests and view the catalog.</p></div></div>
-        <div id="superAdminCatalogControls">
-        <form id="adminSkuUpsertForm" class="form-grid">
-          <div class="field"><label for="adminSkuSite">Site</label><select class="input" id="adminSkuSite"><option value="amazon">Amazon</option><option value="target">Target</option><option value="walmart">Walmart</option><option value="supreme">Supreme</option><option value="pokemon">Pokémon Center</option><option value="general">General</option></select></div>
-          <div class="field"><label for="adminSkuValue">SKU / ASIN / DPCI</label><input class="input" id="adminSkuValue" placeholder="Enter SKU" /></div>
-          <div class="field field--full panel-actions"><button class="btn btn-primary" type="submit">Add / Update Catalog Product</button><button class="btn" type="button" id="syncTargetPricingButton">Sync Target Prices From Amazon</button></div>
-        </form>
-        <div class="banner banner-soft"><strong>Manual product add</strong><p class="subtle-text">Create products manually when a scrape fails, or create a blank placeholder card for future drops.</p></div>
-        <form id="adminManualProductForm" class="form-grid">
-          <div class="field"><label for="manualProductSite">Site</label><select class="input" id="manualProductSite"><option value="amazon">Amazon</option><option value="target">Target</option><option value="walmart">Walmart</option><option value="supreme">Supreme</option><option value="pokemon">Pokémon Center</option><option value="general">General</option></select></div>
-          <div class="field"><label for="manualProductSku">SKU</label><input class="input" id="manualProductSku" placeholder="SKU or custom code" /></div>
-          <div class="field field--full"><label for="manualProductName">Product Name</label><input class="input" id="manualProductName" placeholder="Product title or next drop label" /></div>
-          <div class="field"><label for="manualProductPrice">Default Max Price</label><input class="input" id="manualProductPrice" type="number" step="0.01" min="0" placeholder="0.00" /></div>
-          <div class="field"><label for="manualProductBrand">Brand</label><input class="input" id="manualProductBrand" placeholder="Optional brand" /></div>
-          <div class="field"><label for="manualProductImage">Image URL</label><input class="input" id="manualProductImage" placeholder="Optional image URL" /></div>
-          <div class="field"><label for="manualProductUrl">Product URL</label><input class="input" id="manualProductUrl" placeholder="Optional product URL" /></div>
-          <div class="field field--full"><label class="checkbox-inline"><input type="checkbox" id="manualProductPlaceholder" /><span>Create as blank next-drop placeholder</span></label></div>
-          <div class="field field--full panel-actions"><button class="btn btn-primary" type="submit">Save Manual Product</button></div>
-        </form>
-        </div>
-        <div id="superAdminCatalogNotice" class="banner banner-soft" style="display:none"><strong>View only</strong><p class="subtle-text">Only the super admin can approve requests, add products, placeholders, or delete catalog entries.</p></div>
-        <div id="adminSkuMessage" class="subtle-text"></div>
-        <div class="banner banner-soft"><strong>SKU requests</strong><p class="subtle-text">All user requests stay pending until an admin approves, rejects, or deletes them.</p></div>
-        <div class="table-wrap"><table class="admin-table"><thead><tr><th>User</th><th>Site</th><th>SKU / Label</th><th>Status</th><th>Resolved Product</th><th>Updated (ET)</th><th>Actions</th></tr></thead><tbody id="productRequestsBody"><tr><td colspan="7">No requests yet.</td></tr></tbody></table></div>
-        <div class="banner banner-soft"><strong>Catalog products</strong><p class="subtle-text">Delete bad catalog products here. Users cannot delete products.</p></div>
-        <div class="form-grid">
-          <div class="field"><label for="catalogFilterSite">Filter Site</label><select class="input" id="catalogFilterSite"><option value="">All Sites</option><option value="amazon">Amazon</option><option value="target">Target</option><option value="walmart">Walmart</option><option value="supreme">Supreme</option><option value="pokemon">Pokémon Center</option><option value="general">General</option></select></div>
-          <div class="field"><label for="catalogFilterSearch">Search</label><input class="input" id="catalogFilterSearch" placeholder="Product name or SKU" /></div>
-          <div class="field field-actions"><label>&nbsp;</label><button class="btn" type="button" id="catalogFilterButton">Load Products</button></div>
-        </div>
-        <div class="table-wrap table-wrap--catalog-scroll"><table class="admin-table"><thead><tr><th>Site</th><th>Product</th><th>SKU</th><th>Max Price</th><th>Type</th><th>Action</th></tr></thead><tbody id="catalogProductsBody"><tr><td colspan="6">Load products to manage the catalog.</td></tr></tbody></table></div>
-      </section>
-    </div>
-
-    <div class="admin-grid">
-      <section class="panel">
-        <div class="panel-header"><div><h2>Export Profiles / Accounts</h2><p class="subtle-text">Export profile JSON or account login text files.</p></div></div>
-        <div class="form-grid">
-          <div class="field">
-            <label for="exportUserFilter">User</label>
-            <select class="input" id="exportUserFilter" onchange="updateExportCount()"><option value="">All Accounts</option></select>
-          </div>
-          <div class="field">
-            <label for="exportGroupFilter">Group</label>
-            <select class="input" id="exportGroupFilter" onchange="updateExportCount()">
-              <option value="">All Groups</option>
-              <option value="general">General</option>
-              <option value="walmart">Walmart</option>
-              <option value="target">Target</option>
-              <option value="amazon">Amazon</option>
-            </select>
-          </div>
-        </div>
-        <div class="toolbar-row toolbar-row--spread">
-          <span class="subtle-text" id="exportCountInfo">Checking export count...</span>
-          <span class="subtle-text">Account export format: username:::password:::proxie</span>
-        </div>
-        <div class="panel-actions">
-          <button class="btn" onclick="exportProfilesJson()">Export Profiles JSON</button>
-          <button class="btn btn-primary" onclick="exportAccountsTxt()">Export Account Logins</button>
-        </div>
-      </section>
+          <section class="panel">
+            <div class="panel-header"><div><h2>Export Profiles / Accounts</h2><p class="subtle-text">Export saved profiles as JSON or account logins as TXT.</p></div></div>
+            <div class="form-grid">
+              <div class="field"><label for="exportUserFilter">Account</label><select class="input" id="exportUserFilter" onchange="updateExportCount()"><option value="">All Accounts</option></select></div>
+              <div class="field"><label for="exportGroupFilter">Group</label><select class="input" id="exportGroupFilter" onchange="updateExportCount()"><option value="">All Groups</option><option value="general">General</option><option value="walmart">Walmart</option><option value="target">Target</option><option value="amazon">Amazon</option></select></div>
+            </div>
+            <div class="toolbar-row toolbar-row--spread"><span id="exportCountBanner" class="subtle-text">Checking export count...</span><span class="subtle-text">Account export format: username:::password:::proxie</span></div>
+            <div class="panel-actions"><button class="btn" onclick="exportProfilesJson()">Export Profiles JSON</button><button class="btn btn-primary" onclick="exportAccountsTxt()">Export Account Logins</button></div>
+          </section>
         </section>
+
         <section class="admin-pane" data-admin-pane="selections">
-<section class="panel">
-        <div class="panel-header"><div><h2>Create Invite Code</h2><p class="subtle-text">Generate signup access codes.</p></div></div>
-        <div class="form-grid">
-          <div class="field">
-            <label for="inviteRoleSelect">Invite Role</label>
-            <select class="input" id="inviteRoleSelect" onchange="handleInviteRoleChange()">
-              <option value="user">User Invite</option>
-              <option value="admin">Admin Invite</option>
-            </select>
-          </div>
-          <div class="field">
-            <label for="inviteQuantitySelect">Quantity</label>
-            <select class="input" id="inviteQuantitySelect">
-              <option value="1">1 Invite</option><option value="2">2 Invites</option><option value="3">3 Invites</option>
-              <option value="4">4 Invites</option><option value="5">5 Invites</option><option value="6">6 Invites</option>
-              <option value="7">7 Invites</option><option value="8">8 Invites</option><option value="9">9 Invites</option><option value="10">10 Invites</option>
-            </select>
-          </div>
-        </div>
-        <div class="panel-actions"><button class="btn btn-primary" onclick="submitInviteCreation()">Create Invite</button></div>
-        <div class="banner" id="inviteResult">No invite created yet.</div>
-      </section>
-
-      <section class="panel" id="countdownManagerPanel">
-        <div class="panel-header"><div><h2>Countdown Manager</h2><p class="subtle-text">Create timers for Walmart, Target, Supreme, Pokémon Center, or any custom general release. All times are managed in US Eastern Time (ET).</p></div></div>
-        <form id="countdownForm" class="form-grid">
-          <div class="field"><label for="countdownSite">Site</label>
-            <select class="input" id="countdownSite"><option value="walmart">Walmart</option><option value="target">Target</option><option value="general">General / Custom</option><option value="supreme">Supreme</option><option value="pokemon">Pokémon Center</option></select>
-          </div>
-          <div class="field"><label for="countdownLabel">Display Name</label><input class="input" id="countdownLabel" placeholder="Walmart Friday Restock" /></div>
-          <div class="field"><label for="countdownWhen">Release Date & Time (ET)</label><input class="input" type="datetime-local" id="countdownWhen" /></div>
-          <div class="field"><label for="countdownOrder">Sort Order</label><input class="input" type="number" id="countdownOrder" value="0" /></div>
-          <div class="field field--full"><label class="checkbox-inline"><input type="checkbox" id="countdownActive" checked /><span>Active</span></label></div>
-          <div class="field field--full panel-actions"><button class="btn btn-primary" type="submit">Save Countdown</button></div>
-        </form>
-        <div id="countdownManagerMessage" class="subtle-text"></div>
-        <div id="countdownAdminList" class="stack-list"></div>
-      </section>
-
-      <section class="panel" id="catalogToolsPanel">
-        <div class="panel-header"><div><h2>Catalog Tools</h2><p class="subtle-text">Only the super admin can approve requests, add products, placeholders, or delete catalog entries. Admins can review requests and view the catalog.</p></div></div>
-        <div id="superAdminCatalogControls">
-        <form id="adminSkuUpsertForm" class="form-grid">
-          <div class="field"><label for="adminSkuSite">Site</label><select class="input" id="adminSkuSite"><option value="amazon">Amazon</option><option value="target">Target</option><option value="walmart">Walmart</option><option value="supreme">Supreme</option><option value="pokemon">Pokémon Center</option><option value="general">General</option></select></div>
-          <div class="field"><label for="adminSkuValue">SKU / ASIN / DPCI</label><input class="input" id="adminSkuValue" placeholder="Enter SKU" /></div>
-          <div class="field field--full panel-actions"><button class="btn btn-primary" type="submit">Add / Update Catalog Product</button><button class="btn" type="button" id="syncTargetPricingButton">Sync Target Prices From Amazon</button></div>
-        </form>
-        <div class="banner banner-soft"><strong>Manual product add</strong><p class="subtle-text">Create products manually when a scrape fails, or create a blank placeholder card for future drops.</p></div>
-        <form id="adminManualProductForm" class="form-grid">
-          <div class="field"><label for="manualProductSite">Site</label><select class="input" id="manualProductSite"><option value="amazon">Amazon</option><option value="target">Target</option><option value="walmart">Walmart</option><option value="supreme">Supreme</option><option value="pokemon">Pokémon Center</option><option value="general">General</option></select></div>
-          <div class="field"><label for="manualProductSku">SKU</label><input class="input" id="manualProductSku" placeholder="SKU or custom code" /></div>
-          <div class="field field--full"><label for="manualProductName">Product Name</label><input class="input" id="manualProductName" placeholder="Product title or next drop label" /></div>
-          <div class="field"><label for="manualProductPrice">Default Max Price</label><input class="input" id="manualProductPrice" type="number" step="0.01" min="0" placeholder="0.00" /></div>
-          <div class="field"><label for="manualProductBrand">Brand</label><input class="input" id="manualProductBrand" placeholder="Optional brand" /></div>
-          <div class="field"><label for="manualProductImage">Image URL</label><input class="input" id="manualProductImage" placeholder="Optional image URL" /></div>
-          <div class="field"><label for="manualProductUrl">Product URL</label><input class="input" id="manualProductUrl" placeholder="Optional product URL" /></div>
-          <div class="field field--full"><label class="checkbox-inline"><input type="checkbox" id="manualProductPlaceholder" /><span>Create as blank next-drop placeholder</span></label></div>
-          <div class="field field--full panel-actions"><button class="btn btn-primary" type="submit">Save Manual Product</button></div>
-        </form>
-        </div>
-        <div id="superAdminCatalogNotice" class="banner banner-soft" style="display:none"><strong>View only</strong><p class="subtle-text">Only the super admin can approve requests, add products, placeholders, or delete catalog entries.</p></div>
-        <div id="adminSkuMessage" class="subtle-text"></div>
-        <div class="banner banner-soft"><strong>SKU requests</strong><p class="subtle-text">All user requests stay pending until an admin approves, rejects, or deletes them.</p></div>
-        <div class="table-wrap"><table class="admin-table"><thead><tr><th>User</th><th>Site</th><th>SKU / Label</th><th>Status</th><th>Resolved Product</th><th>Updated (ET)</th><th>Actions</th></tr></thead><tbody id="productRequestsBody"><tr><td colspan="7">No requests yet.</td></tr></tbody></table></div>
-        <div class="banner banner-soft"><strong>Catalog products</strong><p class="subtle-text">Delete bad catalog products here. Users cannot delete products.</p></div>
-        <div class="form-grid">
-          <div class="field"><label for="catalogFilterSite">Filter Site</label><select class="input" id="catalogFilterSite"><option value="">All Sites</option><option value="amazon">Amazon</option><option value="target">Target</option><option value="walmart">Walmart</option><option value="supreme">Supreme</option><option value="pokemon">Pokémon Center</option><option value="general">General</option></select></div>
-          <div class="field"><label for="catalogFilterSearch">Search</label><input class="input" id="catalogFilterSearch" placeholder="Product name or SKU" /></div>
-          <div class="field field-actions"><label>&nbsp;</label><button class="btn" type="button" id="catalogFilterButton">Load Products</button></div>
-        </div>
-        <div class="table-wrap table-wrap--catalog-scroll"><table class="admin-table"><thead><tr><th>Site</th><th>Product</th><th>SKU</th><th>Max Price</th><th>Type</th><th>Action</th></tr></thead><tbody id="catalogProductsBody"><tr><td colspan="6">Load products to manage the catalog.</td></tr></tbody></table></div>
-      </section>
-    </div>
-
-    <div class="admin-grid">
-      <section class="panel">
-        <div class="panel-header"><div><h2>Export Profiles / Accounts</h2><p class="subtle-text">Export profile JSON or account login text files.</p></div></div>
-        <div class="form-grid">
-          <div class="field">
-            <label for="exportUserFilter">User</label>
-            <select class="input" id="exportUserFilter" onchange="updateExportCount()"><option value="">All Accounts</option></select>
-          </div>
-          <div class="field">
-            <label for="exportGroupFilter">Group</label>
-            <select class="input" id="exportGroupFilter" onchange="updateExportCount()">
-              <option value="">All Groups</option>
-              <option value="general">General</option>
-              <option value="walmart">Walmart</option>
-              <option value="target">Target</option>
-              <option value="amazon">Amazon</option>
-            </select>
-          </div>
-        </div>
-        <div class="toolbar-row toolbar-row--spread">
-          <span class="subtle-text" id="exportCountInfo">Checking export count...</span>
-          <span class="subtle-text">Account export format: username:::password:::proxie</span>
-        </div>
-        <div class="panel-actions">
-          <button class="btn" onclick="exportProfilesJson()">Export Profiles JSON</button>
-          <button class="btn btn-primary" onclick="exportAccountsTxt()">Export Account Logins</button>
-        </div>
-      </section>
-
-      <section class="panel" id="adminProductSelectionsSection">
-        <div class="panel-header"><div><h2>User Product Selections</h2><p class="subtle-text">Select a user first, then view only that user’s product picks.</p></div></div>
-        <div class="toolbar-row">
-          <select class="input input--sm" id="adminProductUserSelect"><option value="">Select a user</option></select>
-          <button class="btn btn-primary" type="button" id="adminLoadUserProductsButton">Load User Products</button>
-          <span id="adminProductSelectionsMessage" class="subtle-text"></span>
-        </div>
-        <div id="adminSelectedUserSummary" class="subtle-text"></div>
-        <div id="adminSelectedUserCountdowns" class="selection-chip-list subtle-text"></div>
-        <div class="table-wrap">
-          <table class="admin-table">
-            <thead><tr><th>Site</th><th>Product</th><th>SKU</th><th>Mode</th><th>Max Price</th></tr></thead>
-            <tbody id="adminUserProductDetailBody"><tr><td colspan="5">Choose a user to view product selections.</td></tr></tbody>
-          </table>
-        </div>
-      </section>
+          <section class="panel" id="adminProductSelectionsSection">
+            <div class="panel-header"><div><h2>User Product Selections</h2><p class="subtle-text">Select a user first, then view that user’s product picks and chosen countdown releases.</p></div></div>
+            <div class="toolbar-row">
+              <select class="input input--sm" id="adminProductUserSelect"><option value="">Select a user</option></select>
+              <button class="btn btn-primary" type="button" id="adminLoadUserProductsButton">Load User Selections</button>
+              <span id="adminProductSelectionsMessage" class="subtle-text"></span>
+            </div>
+            <div id="adminSelectedUserSummary" class="subtle-text"></div>
+            <div id="adminSelectedUserCountdowns" class="selection-chip-list subtle-text"></div>
+            <div class="table-wrap table-wrap--admin-scroll">
+              <table class="admin-table">
+                <thead><tr><th>Site</th><th>Product</th><th>SKU</th><th>Mode</th><th>Max Price</th></tr></thead>
+                <tbody id="adminUserProductDetailBody"><tr><td colspan="5">Choose a user to view product selections.</td></tr></tbody>
+              </table>
+            </div>
+          </section>
         </section>
+
         <section class="admin-pane" data-admin-pane="users">
-<section class="panel">
-        <div class="panel-header"><div><h2>Create Invite Code</h2><p class="subtle-text">Generate signup access codes.</p></div></div>
-        <div class="form-grid">
-          <div class="field">
-            <label for="inviteRoleSelect">Invite Role</label>
-            <select class="input" id="inviteRoleSelect" onchange="handleInviteRoleChange()">
-              <option value="user">User Invite</option>
-              <option value="admin">Admin Invite</option>
-            </select>
-          </div>
-          <div class="field">
-            <label for="inviteQuantitySelect">Quantity</label>
-            <select class="input" id="inviteQuantitySelect">
-              <option value="1">1 Invite</option><option value="2">2 Invites</option><option value="3">3 Invites</option>
-              <option value="4">4 Invites</option><option value="5">5 Invites</option><option value="6">6 Invites</option>
-              <option value="7">7 Invites</option><option value="8">8 Invites</option><option value="9">9 Invites</option><option value="10">10 Invites</option>
-            </select>
-          </div>
-        </div>
-        <div class="panel-actions"><button class="btn btn-primary" onclick="submitInviteCreation()">Create Invite</button></div>
-        <div class="banner" id="inviteResult">No invite created yet.</div>
-      </section>
-
-      <section class="panel" id="countdownManagerPanel">
-        <div class="panel-header"><div><h2>Countdown Manager</h2><p class="subtle-text">Create timers for Walmart, Target, Supreme, Pokémon Center, or any custom general release. All times are managed in US Eastern Time (ET).</p></div></div>
-        <form id="countdownForm" class="form-grid">
-          <div class="field"><label for="countdownSite">Site</label>
-            <select class="input" id="countdownSite"><option value="walmart">Walmart</option><option value="target">Target</option><option value="general">General / Custom</option><option value="supreme">Supreme</option><option value="pokemon">Pokémon Center</option></select>
-          </div>
-          <div class="field"><label for="countdownLabel">Display Name</label><input class="input" id="countdownLabel" placeholder="Walmart Friday Restock" /></div>
-          <div class="field"><label for="countdownWhen">Release Date & Time (ET)</label><input class="input" type="datetime-local" id="countdownWhen" /></div>
-          <div class="field"><label for="countdownOrder">Sort Order</label><input class="input" type="number" id="countdownOrder" value="0" /></div>
-          <div class="field field--full"><label class="checkbox-inline"><input type="checkbox" id="countdownActive" checked /><span>Active</span></label></div>
-          <div class="field field--full panel-actions"><button class="btn btn-primary" type="submit">Save Countdown</button></div>
-        </form>
-        <div id="countdownManagerMessage" class="subtle-text"></div>
-        <div id="countdownAdminList" class="stack-list"></div>
-      </section>
-
-      <section class="panel" id="catalogToolsPanel">
-        <div class="panel-header"><div><h2>Catalog Tools</h2><p class="subtle-text">Only the super admin can approve requests, add products, placeholders, or delete catalog entries. Admins can review requests and view the catalog.</p></div></div>
-        <div id="superAdminCatalogControls">
-        <form id="adminSkuUpsertForm" class="form-grid">
-          <div class="field"><label for="adminSkuSite">Site</label><select class="input" id="adminSkuSite"><option value="amazon">Amazon</option><option value="target">Target</option><option value="walmart">Walmart</option><option value="supreme">Supreme</option><option value="pokemon">Pokémon Center</option><option value="general">General</option></select></div>
-          <div class="field"><label for="adminSkuValue">SKU / ASIN / DPCI</label><input class="input" id="adminSkuValue" placeholder="Enter SKU" /></div>
-          <div class="field field--full panel-actions"><button class="btn btn-primary" type="submit">Add / Update Catalog Product</button><button class="btn" type="button" id="syncTargetPricingButton">Sync Target Prices From Amazon</button></div>
-        </form>
-        <div class="banner banner-soft"><strong>Manual product add</strong><p class="subtle-text">Create products manually when a scrape fails, or create a blank placeholder card for future drops.</p></div>
-        <form id="adminManualProductForm" class="form-grid">
-          <div class="field"><label for="manualProductSite">Site</label><select class="input" id="manualProductSite"><option value="amazon">Amazon</option><option value="target">Target</option><option value="walmart">Walmart</option><option value="supreme">Supreme</option><option value="pokemon">Pokémon Center</option><option value="general">General</option></select></div>
-          <div class="field"><label for="manualProductSku">SKU</label><input class="input" id="manualProductSku" placeholder="SKU or custom code" /></div>
-          <div class="field field--full"><label for="manualProductName">Product Name</label><input class="input" id="manualProductName" placeholder="Product title or next drop label" /></div>
-          <div class="field"><label for="manualProductPrice">Default Max Price</label><input class="input" id="manualProductPrice" type="number" step="0.01" min="0" placeholder="0.00" /></div>
-          <div class="field"><label for="manualProductBrand">Brand</label><input class="input" id="manualProductBrand" placeholder="Optional brand" /></div>
-          <div class="field"><label for="manualProductImage">Image URL</label><input class="input" id="manualProductImage" placeholder="Optional image URL" /></div>
-          <div class="field"><label for="manualProductUrl">Product URL</label><input class="input" id="manualProductUrl" placeholder="Optional product URL" /></div>
-          <div class="field field--full"><label class="checkbox-inline"><input type="checkbox" id="manualProductPlaceholder" /><span>Create as blank next-drop placeholder</span></label></div>
-          <div class="field field--full panel-actions"><button class="btn btn-primary" type="submit">Save Manual Product</button></div>
-        </form>
-        </div>
-        <div id="superAdminCatalogNotice" class="banner banner-soft" style="display:none"><strong>View only</strong><p class="subtle-text">Only the super admin can approve requests, add products, placeholders, or delete catalog entries.</p></div>
-        <div id="adminSkuMessage" class="subtle-text"></div>
-        <div class="banner banner-soft"><strong>SKU requests</strong><p class="subtle-text">All user requests stay pending until an admin approves, rejects, or deletes them.</p></div>
-        <div class="table-wrap"><table class="admin-table"><thead><tr><th>User</th><th>Site</th><th>SKU / Label</th><th>Status</th><th>Resolved Product</th><th>Updated (ET)</th><th>Actions</th></tr></thead><tbody id="productRequestsBody"><tr><td colspan="7">No requests yet.</td></tr></tbody></table></div>
-        <div class="banner banner-soft"><strong>Catalog products</strong><p class="subtle-text">Delete bad catalog products here. Users cannot delete products.</p></div>
-        <div class="form-grid">
-          <div class="field"><label for="catalogFilterSite">Filter Site</label><select class="input" id="catalogFilterSite"><option value="">All Sites</option><option value="amazon">Amazon</option><option value="target">Target</option><option value="walmart">Walmart</option><option value="supreme">Supreme</option><option value="pokemon">Pokémon Center</option><option value="general">General</option></select></div>
-          <div class="field"><label for="catalogFilterSearch">Search</label><input class="input" id="catalogFilterSearch" placeholder="Product name or SKU" /></div>
-          <div class="field field-actions"><label>&nbsp;</label><button class="btn" type="button" id="catalogFilterButton">Load Products</button></div>
-        </div>
-        <div class="table-wrap table-wrap--catalog-scroll"><table class="admin-table"><thead><tr><th>Site</th><th>Product</th><th>SKU</th><th>Max Price</th><th>Type</th><th>Action</th></tr></thead><tbody id="catalogProductsBody"><tr><td colspan="6">Load products to manage the catalog.</td></tr></tbody></table></div>
-      </section>
+          <section class="panel">
+            <div class="panel-header"><div><h2>Current Users</h2><p class="subtle-text">Review current users and filter by owner, role, and date.</p></div></div>
+            <div class="form-grid">
+              <div class="field"><label for="usersOwnerFilter">Owner Admin</label><select class="input" id="usersOwnerFilter" onchange="applyUserFilters()"><option value="">All Admin Owners</option></select></div>
+              <div class="field"><label for="usersRoleFilter">Role</label><select class="input" id="usersRoleFilter" onchange="applyUserFilters()"><option value="">All Roles</option><option value="user">User</option><option value="admin">Admin</option><option value="super_admin">Super Admin</option></select></div>
+              <div class="field"><label for="usersCreatedAfter">Created After</label><input class="input" id="usersCreatedAfter" type="date" onchange="applyUserFilters()" /></div>
+              <div class="field"><label for="usersCreatedBefore">Created Before</label><input class="input" id="usersCreatedBefore" type="date" onchange="applyUserFilters()" /></div>
+            </div>
+            <div class="table-wrap table-wrap--admin-scroll"><table class="admin-table"><thead><tr><th>Email</th><th>Role</th><th>Owner Admin</th><th>Profiles</th><th>Status</th><th>Created</th><th>Action</th></tr></thead><tbody id="usersTableBody"></tbody></table></div>
+            <div class="panel-actions" id="usersPagination" style="display:none"></div>
+          </section>
         </section>
       </div>
     </div>
-  <script src="products.js?v=20260322b" defer></script>
-  <script src="script.js?v=20260322b" defer></script>
+  </div>
+  <script src="script.js?v=20260323a"></script>
+  <script src="products.js?v=20260323a"></script>
 </body>
 </html>

@@ -1248,34 +1248,11 @@ function toEasternInputValue(value) {
     }
 }
 
-function easternOffsetMinutes(date) {
-    try {
-        const tz = new Intl.DateTimeFormat('en-US', {
-            timeZone: 'America/New_York',
-            timeZoneName: 'shortOffset',
-            hour: '2-digit',
-            minute: '2-digit'
-        }).formatToParts(date).find((part) => part.type === 'timeZoneName')?.value || 'GMT-5';
-        const match = tz.match(/GMT([+-])(\d{1,2})(?::(\d{2}))?/i);
-        if (!match) return -300;
-        const sign = match[1] === '-' ? -1 : 1;
-        const hours = Number(match[2] || 0);
-        const minutes = Number(match[3] || 0);
-        return sign * (hours * 60 + minutes);
-    } catch (_) {
-        return -300;
-    }
-}
-
 function fromEasternInputValue(value) {
     if (!value) return value;
-    const match = String(value).match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/);
-    if (!match) return value;
-    const [, y, m, d, hh, mm] = match.map(Number);
-    const localAsUtc = new Date(Date.UTC(y, m - 1, d, hh, mm, 0));
-    const offsetMinutes = easternOffsetMinutes(localAsUtc);
-    const utcMs = localAsUtc.getTime() - offsetMinutes * 60000;
-    return new Date(utcMs).toISOString();
+    const parsed = new Date(value);
+    if (Number.isNaN(parsed.getTime())) return value;
+    return parsed.toISOString();
 }
 
 function countdownSiteLabel(site) {
@@ -1700,14 +1677,19 @@ function initAdminSidebar() {
     const buttons = document.querySelectorAll('[data-admin-nav]');
     const panes = document.querySelectorAll('[data-admin-pane]');
     if (!buttons.length || !panes.length) return;
-    const activate = (name) => {
+
+    function activate(name) {
         buttons.forEach((button) => button.classList.toggle('is-active', button.dataset.adminNav === name));
         panes.forEach((pane) => pane.classList.toggle('is-active', pane.dataset.adminPane === name));
-    };
-    buttons.forEach((button) => button.addEventListener('click', () => activate(button.dataset.adminNav)));
-    activate(buttons[0].dataset.adminNav);
-}
+    }
 
+    buttons.forEach((button) => {
+        button.addEventListener('click', () => activate(button.dataset.adminNav));
+    });
+
+    const active = document.querySelector('[data-admin-nav].is-active')?.dataset.adminNav || buttons[0].dataset.adminNav;
+    activate(active);
+}
 /* ================= PAGE LOAD ================= */
 
 document.addEventListener("DOMContentLoaded", async () => {
@@ -1725,8 +1707,11 @@ document.addEventListener("DOMContentLoaded", async () => {
         await loadProfileEditor();
     }
 
+    if (document.querySelector('[data-admin-nav]')) {
+        initAdminSidebar();
+    }
+
     if (document.getElementById("inviteTableBody")) {
-        try { initAdminSidebar(); } catch (_) {}
         setupInviteControls();
         try { await loadOwnerAdminFilter(); } catch (_) {}
         try { await loadExportAccounts(); } catch (_) {}

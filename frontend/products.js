@@ -306,6 +306,7 @@
         const detailBody = document.getElementById("adminUserProductDetailBody");
         const message = document.getElementById("adminProductSelectionsMessage");
         const summary = document.getElementById("adminSelectedUserSummary");
+        const countdownWrap = document.getElementById("adminSelectedUserCountdowns");
 
         if (!section || !userSelect || !detailBody) return;
         const user = currentUser();
@@ -346,6 +347,7 @@
             if (!userId) {
                 if (message) message.textContent = "Choose a user first.";
                 if (summary) summary.textContent = "";
+                if (countdownWrap) countdownWrap.innerHTML = '';
                 detailBody.innerHTML = `<tr><td colspan="5">Choose a user to view product selections.</td></tr>`;
                 return;
             }
@@ -355,6 +357,15 @@
 
             const detail = await fetchJSON(API + `/admin/users/${userId}/product-preferences`, { headers: authHeaders() });
             const rows = Array.isArray(detail.items) ? detail.items : [];
+            const countdowns = Array.isArray(detail.countdown_selections) ? detail.countdown_selections : [];
+
+            if (countdownWrap) {
+                if (countdowns.length) {
+                    countdownWrap.innerHTML = countdowns.map((item) => `<span class="selection-chip">${escapeHTML(item.label || item.site || 'Release')} • ${escapeHTML(item.when_label || '')}</span>`).join('');
+                } else {
+                    countdownWrap.innerHTML = `<span class="selection-chip selection-chip--empty">No countdown releases selected.</span>`;
+                }
+            }
 
             if (!rows.length) {
                 detailBody.innerHTML = `<tr><td colspan="5">This user has no saved product selections.</td></tr>`;
