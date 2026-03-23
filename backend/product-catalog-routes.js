@@ -927,7 +927,7 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
                     updated_at: row.updated_at,
                     product: row.catalog_products
                 })),
-                countdown_selections: countdownItems
+                countdown_selections: countdownSelections
             });
         } catch (err) {
             res.status(500).json({ error: err.message });
@@ -958,10 +958,13 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
                 if (!countdown?.id) return;
                 if (!map.has(countdown.id)) {
                     map.set(countdown.id, {
+                        id: countdown.id,
                         countdown_id: countdown.id,
+                        label: countdown.label || '',
                         name: countdown.label || countdown.site || 'Release',
                         site: countdown.site || '',
                         scheduled_for: countdown.scheduled_for || null,
+                        when_label: countdown.scheduled_for ? new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', month: 'numeric', day: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true }).format(new Date(countdown.scheduled_for)) + ' ET' : '',
                         selected_users: 0
                     });
                 }
@@ -980,13 +983,17 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
             const scopedUserIds = await getScopedUserIds(supabase, currentUser);
             const countdownId = req.params.countdownId;
 
+            const { data: countdownRow, error: countdownError } = await supabase
+                .from('drop_countdowns')
+                .select('id, site, label, scheduled_for')
+                .eq('id', countdownId)
+                .maybeSingle();
+            if (countdownError) return res.status(500).json({ error: countdownError.message });
+            if (!countdownRow) return res.status(404).json({ error: 'Countdown not found.' });
+
             let query = supabase
                 .from('user_selected_countdowns')
-                .select(`
-        id, user_id, created_at,
-        users!inner ( id, email, owner_admin_id ),
-        drop_countdowns!inner ( id, site, label, scheduled_for )
-      `)
+                .select('id, user_id, created_at')
                 .eq('countdown_id', countdownId)
                 .order('created_at', { ascending: false });
 
@@ -995,19 +1002,31 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
             const { data, error } = await query;
             if (error) return res.status(500).json({ error: error.message });
 
-            const countdown = data?.[0]?.drop_countdowns
-                ? {
-                    id: data[0].drop_countdowns.id,
-                    site: data[0].drop_countdowns.site,
-                    label: data[0].drop_countdowns.label,
-                    scheduled_for: data[0].drop_countdowns.scheduled_for
-                }
-                : null;
+            const userIds = [...new Set((data || []).map((row) => row.user_id).filter(Boolean))];
+            let userMap = new Map();
+            if (userIds.length) {
+                const { data: userRows, error: usersError } = await supabase
+                    .from('users')
+                    .select('id, email, owner_admin_id')
+                    .in('id', userIds);
+                if (usersError) return res.status(500).json({ error: usersError.message });
+                userMap = new Map((userRows || []).map((row) => [row.id, row]));
+            }
+
+            const countdown = {
+                id: countdownRow.id,
+                site: countdownRow.site || '',
+                label: countdownRow.label || '',
+                name: countdownRow.label || countdownRow.site || 'Release',
+                scheduled_for: countdownRow.scheduled_for || null,
+                when_label: countdownRow.scheduled_for ? new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', month: 'numeric', day: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true }).format(new Date(countdownRow.scheduled_for)) + ' ET' : ''
+            };
 
             const users = (data || []).map((row) => ({
-                id: row.users?.id,
-                email: row.users?.email || '',
-                selected_at: row.created_at
+                id: row.user_id,
+                email: userMap.get(row.user_id)?.email || row.user_id,
+                selected_at: row.created_at,
+                selected_at_label: row.created_at ? new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', month: 'numeric', day: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true }).format(new Date(row.created_at)) + ' ET' : ''
             }));
 
             res.json({ countdown, users });

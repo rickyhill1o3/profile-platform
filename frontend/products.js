@@ -22,7 +22,7 @@
     async function fetchJSON(url, options) {
         const res = await fetch(url, options);
         const data = await res.json().catch(() => ({}));
-        if (!res.ok || data.error) throw new Error(data.error || "Request failed");
+        if (!res.ok || data.error) throw new Error(data.error || `Request failed (${res.status})`);
         return data;
     }
 
@@ -348,7 +348,7 @@
             }
 
             const selectedUser = users.find((entry) => entry.user_id === userId);
-            if (summary && selectedUser) summary.textContent = selectedUser.selection_count > 0 ? `${selectedUser.user_email} • ${selectedUser.selection_count} selected products` : `${selectedUser.user_email} • countdown selections only`;
+            if (summary && selectedUser) summary.textContent = selectedUser.product_count > 0 ? `${selectedUser.user_email} • ${selectedUser.product_count} selected products` : `${selectedUser.user_email} • countdown selections only`;
 
             const detail = await fetchJSON(API + `/admin/users/${userId}/product-preferences`, { headers: authHeaders() });
             const rows = Array.isArray(detail.items) ? detail.items : [];
@@ -403,8 +403,8 @@
             }
 
             countdownList.innerHTML = items.map((item) => `
-                <button type="button" class="countdown-list-item" data-countdown-id="${escapeHTML(item.id)}">
-                    <span><strong>${escapeHTML(item.label || item.site || 'Release')}</strong><small>${escapeHTML(item.when_label || '')}</small></span>
+                <button type="button" class="countdown-list-item" data-countdown-id="${escapeHTML(item.id || item.countdown_id)}">
+                    <span><strong>${escapeHTML(item.label || item.name || item.site || 'Release')}</strong><small>${escapeHTML(item.when_label || '')}</small></span>
                     <span class="badge">${Number(item.selected_users || 0)}</span>
                 </button>
             `).join('');
@@ -415,6 +415,11 @@
                     buttons.forEach((b) => b.classList.remove('is-active'));
                     btn.classList.add('is-active');
                     const countdownId = btn.getAttribute('data-countdown-id');
+                    if (!countdownId) {
+                        countdownUsersTitle.textContent = 'Select a countdown to see the users.';
+                        countdownUsersList.innerHTML = `<div class="error-text">Missing countdown id in selection summary response.</div>`;
+                        return;
+                    }
                     countdownUsersTitle.textContent = 'Loading users...';
                     countdownUsersList.innerHTML = `<div class="subtle-text">Loading users...</div>`;
                     try {
