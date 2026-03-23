@@ -1616,15 +1616,13 @@ registerProductCatalogRoutes({
     ensureUserNotRevoked
 });
 
-const PORT = process.env.PORT || 3000;
-
-app.listen(PORT, async () => {
-    console.log(`Server running on port ${PORT}`);
-
-    try {
-        await ensureSuperAdmin();
-        console.log("Super admin ensured");
-    } catch (err) {
-        console.error("Error ensuring super admin:", err.message);
-    }
-});
+ensureSuperAdmin()
+    .then(() => {
+        app.listen(3000, () => {
+            console.log("Server running on port 3000");
+        });
+    })
+    .catch((err) => {
+        console.error("Failed to start server:", err.message);
+        process.exit(1);
+    });
