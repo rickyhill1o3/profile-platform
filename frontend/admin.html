@@ -130,13 +130,13 @@
 
         <section class="admin-pane" data-admin-pane="exports">
           <section class="panel">
-            <div class="panel-header"><div><h2>Export Profiles / Accounts</h2><p class="subtle-text">Export saved profiles as JSON or account logins as TXT.</p></div></div>
+            <div class="panel-header"><div><h2>Export Profiles / Accounts</h2><p class="subtle-text">Export saved profiles as JSON, account logins by site format, or IMAP / 2FA exports as TXT.</p></div></div>
             <div class="form-grid">
               <div class="field"><label for="exportUserFilter">Account</label><select class="input" id="exportUserFilter" onchange="updateExportCount()"><option value="">All Accounts</option></select></div>
               <div class="field"><label for="exportGroupFilter">Group</label><select class="input" id="exportGroupFilter" onchange="updateExportCount()"><option value="">All Groups</option><option value="general">General</option><option value="walmart">Walmart</option><option value="target">Target</option><option value="amazon">Amazon</option></select></div>
             </div>
-            <div class="toolbar-row toolbar-row--spread"><span id="exportCountBanner" class="subtle-text">Checking export count...</span><span class="subtle-text">Account export format: username:::password:::proxie</span></div>
-            <div class="panel-actions"><button class="btn" onclick="exportProfilesJson()">Export Profiles JSON</button><button class="btn btn-primary" onclick="exportAccountsTxt()">Export Account Logins</button></div>
+            <div class="toolbar-row toolbar-row--spread"><span id="exportCountBanner" class="subtle-text">Checking export count...</span><span class="subtle-text">Site formats: Walmart = email;password; | Target = email;password;; | Amazon = email;password;2faPassword | IMAP = host;email;app/2fapassword</span></div>
+            <div class="panel-actions"><button class="btn" onclick="exportProfilesJson()">Export Profiles JSON</button><button class="btn btn-primary" onclick="exportAccountsTxt()">Export Account Logins</button><button class="btn" onclick="exportImapTxt()">Export IMAP / 2FA</button></div>
           </section>
         </section>
 

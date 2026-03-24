@@ -1181,6 +1181,21 @@ async function exportAccountsTxt() {
     }
 }
 
+async function exportImapTxt() {
+    try {
+        const { params } = await getExportCountAndParams();
+        const filename = promptForExportFilename("imap");
+        if (!filename) return;
+
+        params.append("filename", filename);
+
+        const url = API + "/admin/export/accounts-imap" + (params.toString() ? "?" + params.toString() : "");
+        await downloadExportFile(url, filename + ".txt");
+    } catch (err) {
+        if (err.message) alert(err.message);
+    }
+}
+
 /* ================= CHANGE PASSWORD ================= */
 
 const passwordForm = document.getElementById("changePasswordForm");

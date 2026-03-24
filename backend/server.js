@@ -1285,6 +1285,66 @@ app.delete("/admin/invites/:id", auth, admin, async (req, res) => {
 
 /* ================= EXPORT ================= */
 
+function pickAccountSecret(profile, account) {
+    if (!account) return "";
+
+    if (profile?.account_type === "amazon") {
+        return (account.amazon_2fa_secret || "").trim();
+    }
+
+    return (account.gmail_app_password || "").trim();
+}
+
+function buildAccountLoginExport(profile) {
+    const account = profile?.accounts?.[0] || {};
+    const type = (profile?.account_type || "").trim().toLowerCase();
+    const email = (account.login_email || "").trim();
+    const password = (account.login_password || "").trim();
+    const secret = pickAccountSecret(profile, account);
+
+    if (!email && !password && !secret) return null;
+
+    if (type === "target") {
+        if (!email && !password) return null;
+        return `${email};${password};;`;
+    }
+
+    if (type === "walmart") {
+        if (!email && !password) return null;
+        return `${email};${password};`;
+    }
+
+    if (type === "amazon") {
+        if (!email && !password && !secret) return null;
+        return `${email};${password};${secret}`;
+    }
+
+    if (!email && !password && !secret) return null;
+    return `${type || "general"};${email};${password};${secret}`;
+}
+
+function getAccountLoginHeader(group) {
+    const normalized = (group || "").trim().toLowerCase();
+
+    if (normalized === "target") return "email;password;token;loginMethod";
+    if (normalized === "walmart") return "email;password;loginIp";
+    if (normalized === "amazon") return "email;password;2faPassword";
+
+    return "accountType;email;password;gmailOr2faPassword";
+}
+
+function buildImapExportRow(profile) {
+    const account = profile?.accounts?.[0] || {};
+    const type = (profile?.account_type || account.provider || "").trim().toLowerCase();
+    const email = (account.login_email || "").trim();
+    const secret = pickAccountSecret(profile, account);
+
+    if (!email || !secret) return null;
+
+    const host = type === "amazon" ? "Amazon" : "Gmail";
+    return `${host};${email};${secret}`;
+}
+
 app.get("/admin/export/accounts", auth, admin, async (req, res) => {
     try {
         const currentUser = await getCurrentUser(req);
@@ -1532,18 +1592,65 @@ app.get("/admin/export/accounts-txt", auth, admin, async (req, res) => {
         }
 
         const rows = (profiles || [])
-            .map((profile) => {
-                const account = profile.accounts?.[0] || {};
-                const email = (account.login_email || "").trim();
-                const password = (account.login_password || "").trim();
-
-                if (!email && !password) return null;
-
-                return `${email}:::${password}:::proxie`;
-            })
+            .map((profile) => buildAccountLoginExport(profile))
             .filter(Boolean);
 
-        const output = ["account email:account password", ...rows].join("\n");
+        const output = [getAccountLoginHeader(group), ...rows].join("\n");
+
+        res.setHeader("Content-Type", "text/plain; charset=utf-8");
+        res.setHeader("Content-Disposition", `attachment; filename="${filename}.txt"`);
+        res.send(output);
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+
+app.get("/admin/export/accounts-imap", auth, admin, async (req, res) => {
+    try {
+        const currentUser = await getCurrentUser(req);
+        const { user_id, group } = req.query;
+        const filename = (req.query.filename || "imap").replace(/[^a-zA-Z0-9-_]/g, "");
+
+        let query = supabase
+            .from("profiles")
+            .select(`
+                id,
+                user_id,
+                account_type,
+                created_at,
+                accounts(*)
+            `)
+            .order("created_at", { ascending: false });
+
+        if (currentUser.role === "super_admin") {
+            if (user_id) query = query.eq("user_id", user_id);
+            if (group) query = query.eq("account_type", group);
+        } else {
+            const ownedUserIds = await getScopeUserIdsForAdmin(currentUser);
+
+            if (user_id && !ownedUserIds.includes(user_id)) {
+                return res.status(403).json({ error: "Cannot export that account" });
+            }
+
+            query = query.in("user_id", safeIn(ownedUserIds));
+
+            if (user_id) query = query.eq("user_id", user_id);
+            if (group) query = query.eq("account_type", group);
+        }
+
+        const { data: profiles, error } = await query;
+
+        if (error) {
+            return res.status(500).json({ error: error.message });
+        }
+
+        const rows = (profiles || [])
+            .map((profile) => buildImapExportRow(profile))
+            .filter(Boolean);
+
+        const output = ["host;email;app/2fapassword", ...rows].join("\n");
 
         res.setHeader("Content-Type", "text/plain; charset=utf-8");
         res.setHeader("Content-Disposition", `attachment; filename="${filename}.txt"`);
