@@ -543,7 +543,7 @@ async function getCountdownCreditCost({ countdownId = null, productId = null, si
 async function resolveOrderCreditCost(payload) {
     const site = String(payload.site || "").trim().toLowerCase();
     const sku = String(payload.sku || payload.product_sku || "").trim();
-    const productId = payload.catalog_product_id || payload.product_id || null;
+    const productId = payload.product_id || payload.product_id || null;
     const countdownId = payload.countdown_id || null;
 
     const productMatch = await getProductCreditCost({ productId, site, sku });

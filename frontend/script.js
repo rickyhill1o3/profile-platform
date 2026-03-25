@@ -44,16 +44,16 @@ function formatCredits(value) {
 
 function parseCountdownProductCredits(textValue) {
     return String(textValue || "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean).map((line) => {
-        const [catalog_product_id, credit_cost] = line.split('|').map((part) => String(part || '').trim());
-        return { catalog_product_id, credit_cost: Number(credit_cost || 0) };
-    }).filter((row) => row.catalog_product_id);
+        const [product_id, credit_cost] = line.split('|').map((part) => String(part || '').trim());
+        return { product_id, credit_cost: Number(credit_cost || 0) };
+    }).filter((row) => row.product_id);
 }
 
 function formatCountdownProductCredits(rows) {
     return (Array.isArray(rows) ? rows : []).map((row) => {
         const product = row.catalog_products || {};
-        const label = product.product_name || product.sku || row.catalog_product_id;
-        return `${row.catalog_product_id}|${Number(row.credit_cost || 0)}${label ? `  # ${label}` : ''}`;
+        const label = product.product_name || product.sku || row.product_id;
+        return `${row.product_id}|${Number(row.credit_cost || 0)}${label ? `  # ${label}` : ''}`;
     }).join("\n");
 }
 
@@ -256,7 +256,7 @@ async function loadProfiles() {
     try {
         const refreshedUser = await refreshCurrentUserFromServer();
         user = refreshedUser || user;
-    } catch (_) {}
+    } catch (_) { }
 
     if (adminButton) {
         adminButton.style.display = isAdminRole(user?.role) ? "inline-flex" : "none";
@@ -1400,7 +1400,7 @@ async function initSkuRequestForm() {
             message.textContent = data.message || 'Request submitted for admin review.';
             skuInput.value = '';
             if (window.location.pathname.endsWith('dashboard.html') && typeof loadProducts === 'function') {
-                try { await loadProducts(); } catch (_) {}
+                try { await loadProducts(); } catch (_) { }
             }
         } catch (err) {
             message.textContent = err.message;
@@ -1490,7 +1490,7 @@ async function initCountdownManager() {
             form.dataset.editingId = '';
             document.getElementById('countdownActive').checked = true;
             document.getElementById('countdownBaseCreditCost').value = 0;
-            document.getElementById('countdownProductCredits').value = ''; 
+            document.getElementById('countdownProductCredits').value = '';
             await loadCountdownAdminList();
             await loadPublicCountdowns();
         } catch (err) {
@@ -1941,12 +1941,12 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (!requireAuthForPrivatePages()) return;
     try {
         if (token()) { await refreshCurrentUserFromServer(); }
-    } catch (_) {}
-    try { await loadPublicCountdowns(); } catch (_) {}
+    } catch (_) { }
+    try { await loadPublicCountdowns(); } catch (_) { }
 
     if (document.getElementById("dashboard")) {
         await loadProfiles();
-        try { await loadCreditsBalance(); } catch (_) {}
+        try { await loadCreditsBalance(); } catch (_) { }
     }
 
     if (document.getElementById("profileForm")) {
@@ -1959,20 +1959,20 @@ document.addEventListener("DOMContentLoaded", async () => {
 
     if (document.getElementById("inviteTableBody")) {
         setupInviteControls();
-        try { await loadOwnerAdminFilter(); } catch (_) {}
-        try { await loadExportAccounts(); } catch (_) {}
-        try { await loadInvites(1); } catch (_) {}
-        try { await loadUsers(1); } catch (_) {}
-        try { updateExportCount(); } catch (_) {}
-        try { await initCountdownManager(); } catch (_) {}
-        try { await initCatalogTools(); } catch (_) {}
-        try { await loadCreditsAdminPane(); } catch (_) {}
-        try { await loadWebhookSettings(); } catch (_) {}
+        try { await loadOwnerAdminFilter(); } catch (_) { }
+        try { await loadExportAccounts(); } catch (_) { }
+        try { await loadInvites(1); } catch (_) { }
+        try { await loadUsers(1); } catch (_) { }
+        try { updateExportCount(); } catch (_) { }
+        try { await initCountdownManager(); } catch (_) { }
+        try { await initCatalogTools(); } catch (_) { }
+        try { await loadCreditsAdminPane(); } catch (_) { }
+        try { await loadWebhookSettings(); } catch (_) { }
     }
     if (document.getElementById('customCreditsAmount')) {
-        try { await loadCreditsBalance(); } catch (_) {}
+        try { await loadCreditsBalance(); } catch (_) { }
     }
-    try { await initSkuRequestForm(); } catch (_) {}
+    try { await initSkuRequestForm(); } catch (_) { }
 });
 
 

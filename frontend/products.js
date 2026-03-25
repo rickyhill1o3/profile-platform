@@ -282,7 +282,7 @@
         const payload = PRODUCT_STATE.products
             .map((row) => getEffectiveProduct(row))
             .map((row) => ({
-                catalog_product_id: row.id,
+                product_id: row.id,
                 selected: !!row.selected,
                 run_mode: row.run_mode,
                 max_price: row.max_price
