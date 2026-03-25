@@ -465,6 +465,7 @@ async function upsertCatalogProductManual(supabase, payloadInput) {
         image_url,
         product_url,
         default_max_price,
+        credit_cost: normalizeCreditCost(payloadInput.credit_cost),
         release_mode_default: isPlaceholder ? 'next' : normalizeRunMode(payloadInput.release_mode_default, 'current'),
         is_enabled: true,
         metadata
@@ -858,6 +859,29 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
             if (error) return res.status(500).json({ error: error.message });
             const items = (data || []).sort((a, b) => { const av = a.metadata && a.metadata.virtual ? 1 : 0; const bv = b.metadata && b.metadata.virtual ? 1 : 0; if (av !== bv) return bv - av; return String(a.product_name || a.sku || '').localeCompare(String(b.product_name || b.sku || '')); });
             res.json({ items });
+        } catch (err) {
+            res.status(500).json({ error: err.message });
+        }
+    });
+
+
+    app.patch('/admin/catalog-products/:id', auth, admin, async (req, res) => {
+        if (!requireSuperAdmin(req, res)) return;
+        try {
+            const updates = {};
+            if (Object.prototype.hasOwnProperty.call(req.body || {}, 'credit_cost')) updates.credit_cost = normalizeCreditCost(req.body.credit_cost);
+            if (Object.prototype.hasOwnProperty.call(req.body || {}, 'default_max_price')) updates.default_max_price = normalizeMaxPrice(req.body.default_max_price);
+            if (Object.prototype.hasOwnProperty.call(req.body || {}, 'product_name')) updates.product_name = String(req.body.product_name || '').trim();
+            if (Object.prototype.hasOwnProperty.call(req.body || {}, 'brand')) updates.brand = String(req.body.brand || '').trim();
+            if (Object.keys(updates).length === 0) return res.status(400).json({ error: 'No valid fields to update.' });
+            const { data, error } = await supabase
+                .from('catalog_products')
+                .update(updates)
+                .eq('id', req.params.id)
+                .select('id, site, sku, product_name, default_max_price, credit_cost, metadata, is_enabled, created_at')
+                .single();
+            if (error) return res.status(500).json({ error: error.message });
+            res.json({ success: true, product: data, message: `${data.product_name || data.sku || 'Product'} updated.` });
         } catch (err) {
             res.status(500).json({ error: err.message });
         }

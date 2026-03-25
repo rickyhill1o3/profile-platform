@@ -1594,13 +1594,41 @@ async function loadCatalogProducts() {
         body.innerHTML = items.map((item) => `
             <tr>
               <td>${escapeHTML(item.site)}</td>
-              <td>${escapeHTML(item.product_name || '-')}</td>
               <td>${escapeHTML(item.sku || '-')}</td>
+              <td>${escapeHTML(item.product_name || '-')}</td>
               <td>${escapeHTML(formatMoney(item.default_max_price))} / ${escapeHTML(formatCredits(item.credit_cost || 0))}</td>
               <td>${item.metadata && item.metadata.virtual ? 'Virtual' : 'Live'}</td>
-              <td>${superAdmin ? `<button class="btn btn-danger" type="button" data-delete-catalog-product="${escapeHTML(item.id)}">Delete</button>` : '<span class="subtle-text">Super admin only</span>'}</td>
+              <td>${superAdmin ? `<div class="table-actions"><button class="btn" type="button" data-edit-catalog-product="${escapeHTML(item.id)}" data-edit-catalog-name="${escapeHTML(item.product_name || '')}" data-edit-catalog-price="${item.default_max_price ?? ''}" data-edit-catalog-credits="${item.credit_cost ?? 0}">Edit</button><button class="btn btn-danger" type="button" data-delete-catalog-product="${escapeHTML(item.id)}">Delete</button></div>` : '<span class="subtle-text">Super admin only</span>'}</td>
             </tr>`).join('');
         if (!superAdmin) return;
+        body.querySelectorAll('[data-edit-catalog-product]').forEach((button) => {
+            button.addEventListener('click', async () => {
+                const currentCredits = button.dataset.editCatalogCredits ?? '0';
+                const currentPrice = button.dataset.editCatalogPrice ?? '';
+                const nextCredits = window.prompt('Set product credit cost', currentCredits);
+                if (nextCredits === null) return;
+                const nextPrice = window.prompt('Set max price (leave blank for no max price)', currentPrice);
+                if (nextPrice === null) return;
+                const nextName = window.prompt('Edit product name', button.dataset.editCatalogName || '');
+                if (nextName === null) return;
+                try {
+                    const data = await authJSON(API + '/admin/catalog-products/' + button.dataset.editCatalogProduct, {
+                        method: 'PATCH',
+                        body: JSON.stringify({
+                            credit_cost: nextCredits,
+                            default_max_price: nextPrice,
+                            product_name: nextName
+                        })
+                    });
+                    const msg = document.getElementById('adminSkuMessage');
+                    if (msg) msg.textContent = data.message || 'Product updated.';
+                    await loadCatalogProducts();
+                } catch (err) {
+                    const msg = document.getElementById('adminSkuMessage');
+                    if (msg) msg.textContent = err.message;
+                }
+            });
+        });
         body.querySelectorAll('[data-delete-catalog-product]').forEach((button) => {
             button.addEventListener('click', async () => {
                 if (!confirm('Delete this product?')) return;
