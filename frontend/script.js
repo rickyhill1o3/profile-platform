@@ -1422,7 +1422,7 @@ async function loadCountdownAdminList() {
             <div class="stack-item">
               <div class="stack-item-meta">
                 <strong>${escapeHTML(item.label || countdownSiteLabel(item.site))}</strong>
-                <span class="subtle-text">${escapeHTML(countdownSiteLabel(item.site))} • ${escapeHTML(formatEasternTime(item.scheduled_for))} ET • ${escapeHTML(formatCredits(item.default_credit_cost || 0))}
+                <span class="subtle-text">${escapeHTML(countdownSiteLabel(item.site))} • ${escapeHTML(formatEasternTime(item.scheduled_for))} ET • ${escapeHTML(formatCredits(item.base_credit_cost || 0))}</span>
               </div>
               <div class="countdown-admin-actions">
                 <button class="btn" type="button" data-edit-countdown="${escapeHTML(item.id)}">Edit</button>
@@ -1438,7 +1438,7 @@ async function loadCountdownAdminList() {
                 document.getElementById('countdownLabel').value = item.label || '';
                 document.getElementById('countdownWhen').value = toEasternInputValue(item.scheduled_for);
                 document.getElementById('countdownOrder').value = item.sort_order || 0;
-                document.getElementById('countdownBaseCreditCost').value = Number(item.default_credit_cost || 0);
+                document.getElementById('countdownBaseCreditCost').value = Number(item.base_credit_cost || 0);
                 document.getElementById('countdownProductCredits').value = formatCountdownProductCredits(item.countdown_products || []);
                 document.getElementById('countdownActive').checked = !!item.is_active;
                 document.getElementById('countdownManagerMessage').textContent = 'Editing countdown.';
@@ -1473,7 +1473,7 @@ async function initCountdownManager() {
             label: document.getElementById('countdownLabel').value,
             scheduled_for: fromEasternInputValue(document.getElementById('countdownWhen').value),
             sort_order: Number(document.getElementById('countdownOrder').value || 0),
-            default_credit_cost: Number(document.getElementById('countdownBaseCreditCost').value || 0),
+            base_credit_cost: Number(document.getElementById('countdownBaseCreditCost').value || 0),
             countdown_products: parseCountdownProductCredits(document.getElementById('countdownProductCredits').value),
             is_active: document.getElementById('countdownActive').checked
         };
@@ -1858,6 +1858,53 @@ async function saveWebhookSettings() {
     }
 }
 
+
+async function loadUserCreditReceipt(userId) {
+    const summary = document.getElementById('creditReceiptSummary');
+    const txBody = document.getElementById('creditTransactionsTableBody');
+    const ordersBody = document.getElementById('userOrdersTableBody');
+    if (!summary || !txBody || !ordersBody) return;
+
+    summary.textContent = 'Loading user receipt...';
+    txBody.innerHTML = '<tr><td colspan="5">Loading transactions...</td></tr>';
+    ordersBody.innerHTML = '<tr><td colspan="6">Loading orders...</td></tr>';
+
+    try {
+        const data = await authJSON(API + '/admin/users/' + encodeURIComponent(userId) + '/credits/history');
+        const user = data.user || {};
+        const balance = Number(data.balance || 0);
+        summary.innerHTML = `
+            <strong>${escapeHTML(user.email || '-') }</strong>
+            <span class="subtle-text"> • Balance: ${escapeHTML(String(balance))} credits • Granted: ${escapeHTML(String(data.lifetime_credits_granted || 0))} • Spent: ${escapeHTML(String(data.lifetime_credits_spent || 0))} • ${data.needs_removal ? 'Needs removal until positive balance' : 'Eligible / positive balance'}</span>
+        `;
+
+        const transactions = Array.isArray(data.transactions) ? data.transactions : [];
+        txBody.innerHTML = transactions.length ? transactions.map((item) => `
+            <tr>
+              <td>${escapeHTML(formatEasternTime(item.created_at || ''))} ET</td>
+              <td>${Number(item.amount_delta || 0) >= 0 ? '+' : ''}${escapeHTML(String(item.amount_delta || 0))}</td>
+              <td>${escapeHTML(String(item.balance_after ?? '-'))}</td>
+              <td>${escapeHTML(item.reason || '-')}</td>
+              <td>${escapeHTML(item.note || '-')}</td>
+            </tr>`).join('') : '<tr><td colspan="5">No credit transactions found.</td></tr>';
+
+        const orders = Array.isArray(data.orders) ? data.orders : [];
+        ordersBody.innerHTML = orders.length ? orders.map((item) => `
+            <tr>
+              <td>${escapeHTML(formatEasternTime(item.created_at || ''))} ET</td>
+              <td>${escapeHTML(item.site || '-')}</td>
+              <td>${escapeHTML(item.product_name || item.sku || '-')}</td>
+              <td>${String(item.status || '') === 'insufficient_credits' ? '<span class="status-tag status-tag--danger">Insufficient Credits</span>' : '<span class="status-tag status-tag--success">Charged</span>'}</td>
+              <td>${escapeHTML(String(item.credits_charged || 0))}</td>
+              <td>${escapeHTML(item.external_order_id || '-')}</td>
+            </tr>`).join('') : '<tr><td colspan="6">No linked orders found.</td></tr>';
+    } catch (err) {
+        summary.textContent = err.message;
+        txBody.innerHTML = `<tr><td colspan="5">${escapeHTML(err.message)}</td></tr>`;
+        ordersBody.innerHTML = `<tr><td colspan="6">${escapeHTML(err.message)}</td></tr>`;
+    }
+}
+
 async function loadCreditsAdminPane() {
     const usersBody = document.getElementById('creditsUsersTableBody');
     const ordersBody = document.getElementById('ordersTableBody');
@@ -1877,8 +1924,9 @@ async function loadCreditsAdminPane() {
               <td>${escapeHTML(String(item.credits_balance || 0))}</td>
               <td>${escapeHTML(String(item.lifetime_credits_granted || 0))}</td>
               <td>${escapeHTML(String(item.lifetime_credits_spent || 0))}</td>
-              <td>${Number(item.insufficient_orders || 0) > 0 ? `<span class="status-tag status-tag--danger">${escapeHTML(String(item.insufficient_orders))} flagged</span>` : '<span class="subtle-text">No</span>'}</td>
+              <td>${item.needs_removal ? `<span class="status-tag status-tag--danger">Flagged until positive</span>` : '<span class="subtle-text">No</span>'}</td>
               <td class="table-actions">
+                <button class="btn" type="button" data-credit-user="${escapeHTML(item.id)}" data-credit-action="details">Details</button>
                 <button class="btn" type="button" data-credit-user="${escapeHTML(item.id)}" data-credit-action="add">Add</button>
                 <button class="btn btn-danger" type="button" data-credit-user="${escapeHTML(item.id)}" data-credit-action="remove">Remove</button>
               </td>
@@ -1886,6 +1934,10 @@ async function loadCreditsAdminPane() {
 
         usersBody.querySelectorAll('[data-credit-user]').forEach((button) => {
             button.addEventListener('click', async () => {
+                if (button.dataset.creditAction === 'details') {
+                    await loadUserCreditReceipt(button.dataset.creditUser);
+                    return;
+                }
                 const amountText = window.prompt(`${button.dataset.creditAction === 'add' ? 'Add' : 'Remove'} how many credits?`, '10');
                 if (amountText === null) return;
                 const amount = Math.round(Number(amountText || 0));
@@ -1896,6 +1948,7 @@ async function loadCreditsAdminPane() {
                     await authJSON(API + '/admin/users/' + button.dataset.creditUser + '/credits', { method: 'POST', body: JSON.stringify({ amount: signedAmount, note }) });
                     if (message) message.textContent = 'Credits updated.';
                     await loadCreditsAdminPane();
+                    await loadUserCreditReceipt(button.dataset.creditUser);
                 } catch (err) {
                     if (message) message.textContent = err.message;
                 }

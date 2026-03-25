@@ -182,6 +182,20 @@
             <div class="toolbar-row toolbar-row--spread"><span class="subtle-text">Credits are manually granted by admin</span><button class="btn btn-primary" type="button" onclick="loadCreditsAdminPane()">Refresh Credits + Orders</button></div>
             <div class="table-wrap table-wrap--admin-scroll"><table class="admin-table"><thead><tr><th>User</th><th>Role</th><th>Credits</th><th>Granted</th><th>Spent</th><th>Needs Removal</th><th>Adjust</th></tr></thead><tbody id="creditsUsersTableBody"><tr><td colspan="7">Loading credit balances...</td></tr></tbody></table></div>
             <div id="creditsAdminMessage" class="subtle-text"></div>
+            <section class="panel panel--subpanel">
+              <div class="panel-header panel-header--nested"><div><h3>User Credit Receipt</h3><p class="subtle-text">Click Details on a user to review linked orders and every credit transaction.</p></div></div>
+              <div id="creditReceiptSummary" class="subtle-text">No user selected.</div>
+              <div class="form-grid">
+                <div class="field field--full">
+                  <label>Credit Transactions</label>
+                  <div class="table-wrap table-wrap--admin-scroll"><table class="admin-table"><thead><tr><th>When</th><th>Delta</th><th>Balance After</th><th>Reason</th><th>Note</th></tr></thead><tbody id="creditTransactionsTableBody"><tr><td colspan="5">Select a user to view transactions.</td></tr></tbody></table></div>
+                </div>
+                <div class="field field--full">
+                  <label>Linked Orders</label>
+                  <div class="table-wrap table-wrap--admin-scroll"><table class="admin-table"><thead><tr><th>When</th><th>Site</th><th>Product</th><th>Status</th><th>Credits</th><th>Order</th></tr></thead><tbody id="userOrdersTableBody"><tr><td colspan="6">Select a user to view orders.</td></tr></tbody></table></div>
+                </div>
+              </div>
+            </section>
             <div class="panel-header panel-header--nested"><div><h3>Successful Orders</h3><p class="subtle-text">Every successful checkout webhook is stored here. Refund credits manually when you need to reverse a charge.</p></div></div>
             <div class="table-wrap table-wrap--admin-scroll"><table class="admin-table"><thead><tr><th>When</th><th>User</th><th>Source</th><th>Product</th><th>Status</th><th>Credits</th><th>Order</th><th>Action</th></tr></thead><tbody id="ordersTableBody"><tr><td colspan="8">Loading orders...</td></tr></tbody></table></div>
           </section>

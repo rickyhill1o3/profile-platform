@@ -370,6 +370,12 @@ function asWholeCredits(value, fallback = 0) {
     return Math.max(0, Math.round(parsed));
 }
 
+function asSignedCredits(value, fallback = 0) {
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed)) return fallback;
+    return Math.round(parsed);
+}
+
 async function maybeSingle(table, queryBuilder) {
     try {
         return await queryBuilder(supabase.from(table));
@@ -433,7 +439,7 @@ async function ensureUserCreditBalance(userId) {
 
 async function getUserCreditBalance(userId) {
     const balance = await ensureUserCreditBalance(userId);
-    return asWholeCredits(balance.balance, DEFAULT_FREE_CREDITS);
+    return asSignedCredits(balance.balance, DEFAULT_FREE_CREDITS);
 }
 
 async function adjustUserCredits({ userId, delta, reason, note = "", metadata = {}, createdBy = null, orderId = null }) {
@@ -443,10 +449,7 @@ async function adjustUserCredits({ userId, delta, reason, note = "", metadata = 
     }
 
     const current = await ensureUserCreditBalance(userId);
-    const nextBalance = asWholeCredits(current.balance, 0) + amount;
-    if (nextBalance < 0) {
-        throw new Error("Insufficient credits");
-    }
+    const nextBalance = asSignedCredits(current.balance, 0) + amount;
 
     const updates = {
         balance: nextBalance,
@@ -966,7 +969,7 @@ async function recordSuccessfulCheckout(payload) {
         user_id: user.id,
         external_order_id: externalOrderId,
         status: insufficientCredits ? 'insufficient_credits' : 'success',
-        credits_charged: insufficientCredits ? 0 : creditsToCharge,
+        credits_charged: creditsToCharge,
         metadata: {
             ...(payload.metadata || {}),
             matched_user_email: user.email,
@@ -977,17 +980,20 @@ async function recordSuccessfulCheckout(payload) {
     });
 
     let balanceAfter = currentBalance;
-    if (!insufficientCredits && creditsToCharge > 0) {
+    if (creditsToCharge > 0) {
         balanceAfter = await adjustUserCredits({
             userId: user.id,
             delta: -creditsToCharge,
-            reason: "successful_checkout",
-            note: `Credits charged for successful checkout ${externalOrderId}`,
+            reason: insufficientCredits ? "successful_checkout_negative_balance" : "successful_checkout",
+            note: insufficientCredits
+                ? `Credits charged into negative balance for checkout ${externalOrderId}`
+                : `Credits charged for successful checkout ${externalOrderId}`,
             metadata: {
                 source: normalized.source || payload.source || "bot_webhook",
                 site: normalized.site || payload.site || "",
                 sku: normalized.sku || payload.sku || payload.product_sku || "",
-                countdown_id: normalized.countdown_id || payload.countdown_id || null
+                countdown_id: normalized.countdown_id || payload.countdown_id || null,
+                charged_while_negative: insufficientCredits
             },
             orderId: order.id
         });
@@ -1004,7 +1010,7 @@ async function recordSuccessfulCheckout(payload) {
     return {
         order,
         duplicate: false,
-        credits_charged: insufficientCredits ? 0 : creditsToCharge,
+        credits_charged: creditsToCharge,
         requested_credits: creditsToCharge,
         balance_after: balanceAfter,
         user_id: user.id,
@@ -1209,12 +1215,14 @@ app.get("/admin/credits/users", auth, admin, async (req, res) => {
         const items = [];
         for (const user of users || []) {
             const balance = balancesByUser.get(user.id) || await ensureUserCreditBalance(user.id);
+            const creditsBalance = asSignedCredits(balance.balance, 0);
             items.push({
                 ...user,
-                credits_balance: asWholeCredits(balance.balance, 0),
+                credits_balance: creditsBalance,
                 lifetime_credits_granted: asWholeCredits(balance.lifetime_credits_granted, 0),
                 lifetime_credits_spent: asWholeCredits(balance.lifetime_credits_spent, 0),
-                insufficient_orders: insufficientCounts.get(user.id) || 0
+                insufficient_orders: insufficientCounts.get(user.id) || 0,
+                needs_removal: creditsBalance < 0
             });
         }
 
@@ -1248,6 +1256,47 @@ app.post("/admin/users/:id/credits", auth, admin, async (req, res) => {
     } catch (err) {
         const status = err.message === "Insufficient credits" ? 400 : 500;
         res.status(status).json({ error: err.message });
+    }
+});
+
+
+app.get("/admin/users/:id/credits/history", auth, admin, async (req, res) => {
+    try {
+        const currentUser = await getCurrentUser(req);
+        const targetUser = await getUserById(req.params.id);
+        if (!(await canManageTarget(currentUser, targetUser))) {
+            return res.status(403).json({ error: "You do not have access to this user." });
+        }
+
+        const [balanceRow, txRows, orderRows] = await Promise.all([
+            ensureUserCreditBalance(targetUser.id),
+            (async () => {
+                const { data, error } = await maybeMany("credit_transactions", (qb) =>
+                    qb.select("*").eq("user_id", targetUser.id).order("created_at", { ascending: false }).limit(250)
+                );
+                if (error) throw new Error(error.message);
+                return data || [];
+            })(),
+            (async () => {
+                const { data, error } = await maybeMany("orders", (qb) =>
+                    qb.select("*").eq("user_id", targetUser.id).order("created_at", { ascending: false }).limit(250)
+                );
+                if (error) throw new Error(error.message);
+                return data || [];
+            })()
+        ]);
+
+        res.json({
+            user: { id: targetUser.id, email: targetUser.email, role: targetUser.role },
+            balance: asSignedCredits(balanceRow.balance, 0),
+            lifetime_credits_granted: asWholeCredits(balanceRow.lifetime_credits_granted, 0),
+            lifetime_credits_spent: asWholeCredits(balanceRow.lifetime_credits_spent, 0),
+            needs_removal: asSignedCredits(balanceRow.balance, 0) < 0,
+            transactions: txRows,
+            orders: orderRows
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
     }
 });
 
