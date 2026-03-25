@@ -858,7 +858,11 @@ function maskEmail(email = '') {
 async function sendSanitizedDiscordWebhook(order, userEmail = '') {
     const settings = await getAppSetting('webhook_settings', {});
     const webhookUrl = String(settings?.discord_webhook_url || '').trim();
-    if (!webhookUrl) return { skipped: 'discord_webhook_not_configured' };
+
+    if (!webhookUrl) {
+        console.log('Discord relay skipped: no discord_webhook_url saved in webhook_settings');
+        return { skipped: 'discord_webhook_not_configured' };
+    }
 
     const payload = order.raw_payload || {};
     const normalized = normalizeIncomingOrderPayload(payload);
@@ -870,6 +874,11 @@ async function sendSanitizedDiscordWebhook(order, userEmail = '') {
             : `Successful Checkout • ${order.site || normalized.site || order.source || 'Bot'}`,
         description: normalized.product_name || order.product_name || 'Checkout received',
         fields: [
+            {
+                name: 'Message',
+                value: 'Thank you for checking out with The Shore Shack',
+                inline: false
+            },
             { name: 'Site', value: String(order.site || normalized.site || '-'), inline: true },
             { name: 'Source', value: String(order.source || normalized.source || '-'), inline: true },
             { name: 'Quantity', value: String(normalized.quantity || 1), inline: true },
@@ -899,11 +908,14 @@ async function sendSanitizedDiscordWebhook(order, userEmail = '') {
     }
 
     const body = JSON.stringify({
-        username: 'Checkout Relay',
+        username: 'The Shore Shack',
+        content: 'Thank you for checking out with The Shore Shack',
         embeds: [embed]
     });
 
     for (let attempt = 1; attempt <= 3; attempt++) {
+        console.log(`Discord relay attempt ${attempt} -> ${webhookUrl.slice(0, 40)}...`);
+
         const response = await fetch(webhookUrl, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -911,13 +923,15 @@ async function sendSanitizedDiscordWebhook(order, userEmail = '') {
         });
 
         if (response.ok) {
+            console.log(`Discord relay success on attempt ${attempt}`);
             return { success: true, attempt };
         }
 
         const text = await response.text().catch(() => '');
 
+        console.error(`Discord relay response ${response.status} on attempt ${attempt}: ${text}`);
+
         if (response.status === 429 && attempt < 3) {
-            console.error(`Discord rate limited on attempt ${attempt}: ${text}`);
             await new Promise((resolve) => setTimeout(resolve, 1500 * attempt));
             continue;
         }
@@ -985,8 +999,8 @@ async function recordSuccessfulCheckout(payload) {
     try {
         discordRelay = await sendSanitizedDiscordWebhook(order, user.email);
     } catch (discordErr) {
-        console.error("Discord relay failed:", discordErr.message);
-        discordRelay = { error: discordErr.message };
+        console.error("Discord relay failed:", discordErr);
+        discordRelay = { error: discordErr.message || String(discordErr) };
     }
 
     return {
