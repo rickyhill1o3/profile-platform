@@ -698,6 +698,7 @@ function normalizeIncomingOrderPayload(payload = {}) {
 
 async function findUserForWebhook(payload) {
     const normalized = normalizeIncomingOrderPayload(payload);
+
     const candidates = [
         payload.user_id,
         payload.metadata?.user_id,
@@ -712,42 +713,49 @@ async function findUserForWebhook(payload) {
 
     // 1. PROFILE NAME FIRST
     if (normalized.profile_name) {
-        const { data: profile, error } = await supabase
+        const { data: profiles, error } = await supabase
             .from('profiles')
-            .select('user_id')
+            .select('user_id, profile_name, created_at')
             .ilike('profile_name', String(normalized.profile_name).trim())
-            .maybeSingle();
+            .order('created_at', { ascending: false });
 
         if (error) throw new Error(error.message);
 
-        if (profile?.user_id) {
-            const user = await getUserById(profile.user_id);
-            if (user) return user;
+        if (profiles?.length) {
+            const profile = profiles[0];
+            if (profile?.user_id) {
+                const user = await getUserById(profile.user_id);
+                if (user) return user;
+            }
         }
     }
 
     // 2. ACCOUNT EMAIL SECOND
     if (normalized.account_email) {
-        const { data: account, error: accountError } = await supabase
+        const { data: accounts, error: accountError } = await supabase
             .from('accounts')
-            .select('profile_id')
+            .select('profile_id, login_email, created_at')
             .ilike('login_email', String(normalized.account_email).trim())
-            .maybeSingle();
+            .order('created_at', { ascending: false });
 
         if (accountError) throw new Error(accountError.message);
 
-        if (account?.profile_id) {
-            const { data: profile, error: profileError } = await supabase
-                .from('profiles')
-                .select('user_id')
-                .eq('id', account.profile_id)
-                .maybeSingle();
+        if (accounts?.length) {
+            const account = accounts[0];
 
-            if (profileError) throw new Error(profileError.message);
+            if (account?.profile_id) {
+                const { data: profiles, error: profileError } = await supabase
+                    .from('profiles')
+                    .select('user_id, created_at')
+                    .eq('id', account.profile_id)
+                    .order('created_at', { ascending: false });
 
-            if (profile?.user_id) {
-                const user = await getUserById(profile.user_id);
-                if (user) return user;
+                if (profileError) throw new Error(profileError.message);
+
+                if (profiles?.length && profiles[0]?.user_id) {
+                    const user = await getUserById(profiles[0].user_id);
+                    if (user) return user;
+                }
             }
         }
     }
@@ -763,14 +771,14 @@ async function findUserForWebhook(payload) {
     ].filter(Boolean);
 
     for (const email of emailCandidates) {
-        const { data, error } = await supabase
+        const { data: users, error } = await supabase
             .from("users")
             .select("*")
             .ilike("email", String(email).trim())
-            .maybeSingle();
+            .order('created_at', { ascending: false });
 
         if (error) throw new Error(error.message);
-        if (data?.id) return data;
+        if (users?.length) return users[0];
     }
 
     return null;
