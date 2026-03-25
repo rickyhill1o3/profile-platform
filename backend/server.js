@@ -9,6 +9,8 @@ const bodyParser = require("body-parser");
 const Stripe = require("stripe");
 const registerProductCatalogRoutes = require("./product-catalog-routes");
 
+const fetch = require("node-fetch");
+
 const supabase = require("./database");
 const { encrypt, decrypt } = require("./encryption");
 
@@ -708,6 +710,49 @@ async function findUserForWebhook(payload) {
         if (user) return user;
     }
 
+    // 1. PROFILE NAME FIRST
+    if (normalized.profile_name) {
+        const { data: profile, error } = await supabase
+            .from('profiles')
+            .select('user_id')
+            .ilike('profile_name', String(normalized.profile_name).trim())
+            .maybeSingle();
+
+        if (error) throw new Error(error.message);
+
+        if (profile?.user_id) {
+            const user = await getUserById(profile.user_id);
+            if (user) return user;
+        }
+    }
+
+    // 2. ACCOUNT EMAIL SECOND
+    if (normalized.account_email) {
+        const { data: account, error: accountError } = await supabase
+            .from('accounts')
+            .select('profile_id')
+            .ilike('login_email', String(normalized.account_email).trim())
+            .maybeSingle();
+
+        if (accountError) throw new Error(accountError.message);
+
+        if (account?.profile_id) {
+            const { data: profile, error: profileError } = await supabase
+                .from('profiles')
+                .select('user_id')
+                .eq('id', account.profile_id)
+                .maybeSingle();
+
+            if (profileError) throw new Error(profileError.message);
+
+            if (profile?.user_id) {
+                const user = await getUserById(profile.user_id);
+                if (user) return user;
+            }
+        }
+    }
+
+    // 3. USER EMAIL LAST
     const emailCandidates = [
         payload.user_email,
         payload.email,
@@ -718,36 +763,14 @@ async function findUserForWebhook(payload) {
     ].filter(Boolean);
 
     for (const email of emailCandidates) {
-        const { data, error } = await supabase.from("users").select("*").ilike("email", String(email).trim()).maybeSingle();
+        const { data, error } = await supabase
+            .from("users")
+            .select("*")
+            .ilike("email", String(email).trim())
+            .maybeSingle();
+
         if (error) throw new Error(error.message);
         if (data?.id) return data;
-    }
-
-    if (normalized.account_email) {
-        const { data: account } = await supabase
-            .from('accounts')
-            .select('profile_id')
-            .ilike('login_email', normalized.account_email)
-            .maybeSingle();
-        if (account?.profile_id) {
-            const { data: profile } = await supabase.from('profiles').select('user_id').eq('id', account.profile_id).maybeSingle();
-            if (profile?.user_id) {
-                const user = await getUserById(profile.user_id);
-                if (user) return user;
-            }
-        }
-    }
-
-    if (normalized.profile_name) {
-        const { data: profile } = await supabase
-            .from('profiles')
-            .select('user_id')
-            .ilike('profile_name', normalized.profile_name)
-            .maybeSingle();
-        if (profile?.user_id) {
-            const user = await getUserById(profile.user_id);
-            if (user) return user;
-        }
     }
 
     return null;
@@ -832,8 +855,11 @@ async function sendSanitizedDiscordWebhook(order, userEmail = '') {
     const payload = order.raw_payload || {};
     const normalized = normalizeIncomingOrderPayload(payload);
     const isInsufficient = String(order.status || '') === 'insufficient_credits';
+
     const embed = {
-        title: isInsufficient ? `Checkout Logged • Credits Needed` : `Successful Checkout • ${order.site || normalized.site || order.source || 'Bot'}`,
+        title: isInsufficient
+            ? `Checkout Logged • Credits Needed`
+            : `Successful Checkout • ${order.site || normalized.site || order.source || 'Bot'}`,
         description: normalized.product_name || order.product_name || 'Checkout received',
         fields: [
             { name: 'Site', value: String(order.site || normalized.site || '-'), inline: true },
@@ -843,24 +869,55 @@ async function sendSanitizedDiscordWebhook(order, userEmail = '') {
             { name: 'Credits', value: String(order.credits_charged || 0), inline: true },
             { name: 'User', value: maskEmail(userEmail), inline: true }
         ],
-        footer: { text: isInsufficient ? 'Order saved without charging credits' : 'Private order details removed' },
+        footer: {
+            text: isInsufficient
+                ? 'Order saved without charging credits'
+                : 'Private order details removed'
+        },
         timestamp: new Date().toISOString()
     };
-    if (normalized.size) embed.fields.push({ name: 'Size', value: normalized.size, inline: true });
-    if (normalized.mode) embed.fields.push({ name: 'Mode', value: normalized.mode, inline: true });
-    if (normalized.product_url) embed.fields.push({ name: 'Product Link', value: normalized.product_url, inline: false });
-    if (normalized.image_url) embed.thumbnail = { url: normalized.image_url };
 
-    const response = await fetch(webhookUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username: 'Checkout Relay', embeds: [embed] })
+    if (normalized.size) {
+        embed.fields.push({ name: 'Size', value: normalized.size, inline: true });
+    }
+    if (normalized.mode) {
+        embed.fields.push({ name: 'Mode', value: normalized.mode, inline: true });
+    }
+    if (normalized.product_url) {
+        embed.fields.push({ name: 'Product Link', value: normalized.product_url, inline: false });
+    }
+    if (normalized.image_url) {
+        embed.thumbnail = { url: normalized.image_url };
+    }
+
+    const body = JSON.stringify({
+        username: 'Checkout Relay',
+        embeds: [embed]
     });
-    if (!response.ok) {
+
+    for (let attempt = 1; attempt <= 3; attempt++) {
+        const response = await fetch(webhookUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body
+        });
+
+        if (response.ok) {
+            return { success: true, attempt };
+        }
+
         const text = await response.text().catch(() => '');
+
+        if (response.status === 429 && attempt < 3) {
+            console.error(`Discord rate limited on attempt ${attempt}: ${text}`);
+            await new Promise((resolve) => setTimeout(resolve, 1500 * attempt));
+            continue;
+        }
+
         throw new Error(`Discord webhook failed (${response.status}): ${text || response.statusText}`);
     }
-    return { success: true };
+
+    return { skipped: 'unknown' };
 }
 
 async function recordSuccessfulCheckout(payload) {
