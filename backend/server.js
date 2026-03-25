@@ -3,23 +3,22 @@ const cors = require("cors");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const { v4: uuidv4 } = require("uuid");
+const crypto = require("crypto");
 const nodemailer = require("nodemailer");
+const bodyParser = require("body-parser");
+const Stripe = require("stripe");
 const registerProductCatalogRoutes = require("./product-catalog-routes");
 
 const supabase = require("./database");
 const { encrypt, decrypt } = require("./encryption");
 
 const app = express();
+const stripe = process.env.STRIPE_SECRET_KEY ? new Stripe(process.env.STRIPE_SECRET_KEY) : null;
 
 app.use(cors());
-app.use(express.json());
-
-app.get("/", (req, res) => {
-    res.status(200).send("OK");
-});
-
-app.get("/health", (req, res) => {
-    res.status(200).json({ status: "ok" });
+app.use((req, res, next) => {
+    if (req.originalUrl === "/webhooks/stripe") return next();
+    return express.json()(req, res, next);
 });
 
 const phoneRegex = /^[0-9]{10}$/;
@@ -360,6 +359,901 @@ function buildAppUrl(pathname) {
 }
 
 
+
+/* ================= CREDITS + BILLING HELPERS ================= */
+
+const DEFAULT_FREE_CREDITS = Number(process.env.DEFAULT_FREE_CREDITS || 0);
+
+function asWholeCredits(value, fallback = 0) {
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed)) return fallback;
+    return Math.max(0, Math.round(parsed));
+}
+
+async function maybeSingle(table, queryBuilder) {
+    try {
+        return await queryBuilder(supabase.from(table));
+    } catch (err) {
+        if (String(err.message || "").toLowerCase().includes("does not exist")) {
+            return { data: null, error: null };
+        }
+        throw err;
+    }
+}
+
+async function maybeMany(table, queryBuilder) {
+    try {
+        return await queryBuilder(supabase.from(table));
+    } catch (err) {
+        if (String(err.message || "").toLowerCase().includes("does not exist")) {
+            return { data: [], error: null };
+        }
+        throw err;
+    }
+}
+
+async function ensureUserCreditBalance(userId) {
+    const { data: existing, error } = await maybeSingle("user_credit_balances", (qb) =>
+        qb.select("*").eq("user_id", userId).maybeSingle()
+    );
+    if (error) throw new Error(error.message);
+    if (existing?.user_id) return existing;
+
+    const openingBalance = DEFAULT_FREE_CREDITS;
+    const { data: inserted, error: insertError } = await supabase
+        .from("user_credit_balances")
+        .insert({
+            user_id: userId,
+            balance: openingBalance,
+            lifetime_credits_granted: openingBalance,
+            lifetime_credits_spent: 0
+        })
+        .select("*")
+        .single();
+
+    if (insertError) {
+        if (String(insertError.message || '').toLowerCase().includes('does not exist')) {
+            return { user_id: userId, balance: openingBalance, lifetime_credits_granted: openingBalance, lifetime_credits_spent: 0, transient: true };
+        }
+        throw new Error(insertError.message);
+    }
+
+    if (openingBalance > 0) {
+        await supabase.from("credit_transactions").insert({
+            user_id: userId,
+            amount_delta: openingBalance,
+            reason: "initial_balance",
+            note: `Initial credit balance (${openingBalance})`,
+            metadata: { source: "system_initial_balance" }
+        });
+    }
+
+    return inserted;
+}
+
+async function getUserCreditBalance(userId) {
+    const balance = await ensureUserCreditBalance(userId);
+    return asWholeCredits(balance.balance, DEFAULT_FREE_CREDITS);
+}
+
+async function adjustUserCredits({ userId, delta, reason, note = "", metadata = {}, createdBy = null, orderId = null }) {
+    const amount = Math.trunc(Number(delta || 0));
+    if (!Number.isFinite(amount) || amount === 0) {
+        throw new Error("A non-zero credit adjustment is required");
+    }
+
+    const current = await ensureUserCreditBalance(userId);
+    const nextBalance = asWholeCredits(current.balance, 0) + amount;
+    if (nextBalance < 0) {
+        throw new Error("Insufficient credits");
+    }
+
+    const updates = {
+        balance: nextBalance,
+        lifetime_credits_granted: asWholeCredits(current.lifetime_credits_granted, 0) + Math.max(amount, 0),
+        lifetime_credits_spent: asWholeCredits(current.lifetime_credits_spent, 0) + Math.max(-amount, 0),
+        updated_at: new Date().toISOString()
+    };
+
+    const { error: updateError } = await supabase
+        .from("user_credit_balances")
+        .update(updates)
+        .eq("user_id", userId);
+
+    if (updateError) throw new Error(updateError.message);
+
+    const { error: txError } = await supabase
+        .from("credit_transactions")
+        .insert({
+            user_id: userId,
+            amount_delta: amount,
+            reason,
+            note,
+            order_id: orderId,
+            created_by: createdBy,
+            balance_after: nextBalance,
+            metadata
+        });
+
+    if (txError) throw new Error(txError.message);
+
+    return nextBalance;
+}
+
+async function getProductCreditCost({ productId = null, site = "", sku = "" }) {
+    if (productId) {
+        const { data, error } = await supabase
+            .from("catalog_products")
+            .select("id, credit_cost, site, sku, product_name")
+            .eq("id", productId)
+            .maybeSingle();
+        if (error) throw new Error(error.message);
+        if (data?.id) return { credits: asWholeCredits(data.credit_cost, 0), product: data };
+    }
+
+    if (site && sku) {
+        const { data, error } = await supabase
+            .from("catalog_products")
+            .select("id, credit_cost, site, sku, product_name")
+            .eq("site", String(site).toLowerCase())
+            .ilike("sku", String(sku).trim())
+            .order("created_at", { ascending: false })
+            .limit(1)
+            .maybeSingle();
+        if (error) throw new Error(error.message);
+        if (data?.id) return { credits: asWholeCredits(data.credit_cost, 0), product: data };
+    }
+
+    return { credits: 0, product: null };
+}
+
+async function getCountdownCreditCost({ countdownId = null, productId = null, site = "", sku = "" }) {
+    if (!countdownId) return { credits: 0, countdown: null, countdownProduct: null };
+
+    if (productId) {
+        const { data, error } = await maybeSingle("countdown_products", (qb) =>
+            qb.select("id, credit_cost_override, countdown_id, product_id")
+                .eq("countdown_id", countdownId)
+                .eq("product_id", productId)
+                .maybeSingle()
+        );
+        if (error) throw new Error(error.message);
+        if (data?.id) return { credits: asWholeCredits(data.credit_cost_override, 0), countdown: null, countdownProduct: data };
+    }
+
+    if (site && sku) {
+        const { data: product } = await supabase
+            .from("catalog_products")
+            .select("id")
+            .eq("site", String(site).toLowerCase())
+            .ilike("sku", String(sku).trim())
+            .order("created_at", { ascending: false })
+            .limit(1)
+            .maybeSingle();
+        if (product?.id) return getCountdownCreditCost({ countdownId, productId: product.id });
+    }
+
+    const { data: countdown, error: countdownError } = await maybeSingle("drop_countdowns", (qb) =>
+        qb.select("id, default_credit_cost, site, label").eq("id", countdownId).maybeSingle()
+    );
+    if (countdownError) throw new Error(countdownError.message);
+    return { credits: asWholeCredits(countdown?.default_credit_cost, 0), countdown: countdown || null, countdownProduct: null };
+}
+
+async function resolveOrderCreditCost(payload) {
+    const site = String(payload.site || "").trim().toLowerCase();
+    const sku = String(payload.sku || payload.product_sku || "").trim();
+    const productId = payload.catalog_product_id || payload.product_id || null;
+    const countdownId = payload.countdown_id || null;
+
+    const productMatch = await getProductCreditCost({ productId, site, sku });
+    const countdownMatch = await getCountdownCreditCost({ countdownId, productId: productMatch.product?.id || productId, site, sku });
+
+    const explicitCredits = payload.credits_charged !== undefined && payload.credits_charged !== null
+        ? asWholeCredits(payload.credits_charged, 0)
+        : null;
+
+    if (explicitCredits !== null) return { credits: explicitCredits, productMatch, countdownMatch };
+    if (countdownMatch.credits > 0) return { credits: countdownMatch.credits, productMatch, countdownMatch };
+    if (productMatch.credits > 0) return { credits: productMatch.credits, productMatch, countdownMatch };
+    return { credits: 0, productMatch, countdownMatch };
+}
+
+function normalizeFieldLabel(value = "") {
+    return String(value || "")
+        .toLowerCase()
+        .replace(/&[#a-z0-9]+;/g, "")
+        .replace(/[^a-z0-9]+/g, " ")
+        .trim();
+}
+
+function cleanFieldValue(value = "") {
+    return String(value || "")
+        .replace(/<[^>]+>/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+}
+
+function extractEmail(value = "") {
+    const match = String(value || "").match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
+    return match ? match[0].toLowerCase() : "";
+}
+
+function buildFieldMapFromEmbeds(body = {}) {
+    const embed = Array.isArray(body.embeds) ? body.embeds[0] || {} : {};
+    const map = {};
+    for (const field of Array.isArray(embed.fields) ? embed.fields : []) {
+        const key = normalizeFieldLabel(field?.name || "");
+        if (key) map[key] = cleanFieldValue(field?.value || "");
+    }
+    return { embed, fields: map };
+}
+
+function inferSourceFromPayload(body = {}, embed = {}, fields = {}) {
+    const joined = [body.username, embed.footer?.text, embed.author?.name, body.content, embed.title]
+        .filter(Boolean)
+        .join(' ')
+        .toLowerCase();
+    if (joined.includes('stellar')) return 'stellar';
+    if (joined.includes('prism')) return 'refract';
+    if (joined.includes('refract')) return 'refract';
+    return String(body.source || fields.source || 'bot').trim().toLowerCase();
+}
+
+function inferSiteFromPayload(body = {}, embed = {}, fields = {}) {
+    const direct = cleanFieldValue(body.site || fields.site || "").toLowerCase();
+    if (direct) {
+        if (direct.includes('target')) return 'target';
+        if (direct.includes('walmart')) return 'walmart';
+        if (direct.includes('supreme')) return 'supreme';
+        if (direct.includes('amazon')) return 'amazon';
+        if (direct.includes('pokemon')) return 'pokemon';
+        return direct;
+    }
+    const title = String(embed.title || body.title || "").toLowerCase();
+    if (title.includes('walmart')) return 'walmart';
+    if (title.includes('target')) return 'target';
+    if (title.includes('supreme')) return 'supreme';
+    if (title.includes('amazon')) return 'amazon';
+    if (title.includes('pokemon')) return 'pokemon';
+    return '';
+}
+
+function stableExternalOrderId(payload = {}, normalized = {}) {
+    const direct = String(
+        payload.external_order_id ||
+        payload.order_id ||
+        payload.id ||
+        normalized.order_id ||
+        normalized.order_number ||
+        ''
+    ).trim();
+    if (direct) return direct;
+
+    const fingerprint = JSON.stringify({
+        source: normalized.source || '',
+        site: normalized.site || '',
+        account_email: normalized.account_email || '',
+        profile_name: normalized.profile_name || '',
+        product_name: normalized.product_name || '',
+        price: normalized.price || '',
+        quantity: normalized.quantity || '',
+        timestamp: normalized.timestamp || '',
+        raw: payload
+    });
+
+    return 'wh_' + crypto.createHash('sha256').update(fingerprint).digest('hex').slice(0, 32);
+}
+
+function normalizeIncomingOrderPayload(payload = {}) {
+    const { embed, fields } = buildFieldMapFromEmbeds(payload);
+    const source = inferSourceFromPayload(payload, embed, fields);
+    const site = inferSiteFromPayload(payload, embed, fields);
+    const productName = cleanFieldValue(
+        payload.product_name ||
+        payload.product?.name ||
+        fields['product'] ||
+        fields['product name'] ||
+        embed.description || ''
+    );
+    const orderNumber = cleanFieldValue(payload.order_number || fields['order id'] || fields['order number'] || '');
+    const accountEmail = extractEmail(payload.user_email || payload.email || fields['account'] || fields['email'] || '');
+    const profileName = cleanFieldValue(payload.profile_name || fields['profile'] || '');
+    const sku = cleanFieldValue(payload.sku || payload.product_sku || fields['sku'] || '');
+    const quantityRaw = payload.quantity ?? fields['quantity'];
+    const quantity = Number.isFinite(Number(quantityRaw)) ? Math.max(1, Math.round(Number(quantityRaw))) : 1;
+    const priceRaw = payload.price ?? fields['price'] ?? fields['product price'];
+    const priceMatch = String(priceRaw || '').replace(/[^0-9.]/g, '');
+    const price = priceMatch ? Number(priceMatch) : null;
+    const productUrl = cleanFieldValue(payload.product_url || payload.url || fields['input'] || fields['share link'] || '');
+    const imageUrl = payload.image_url || payload.product?.image_url || embed.thumbnail?.url || embed.image?.url || '';
+    const timestamp = cleanFieldValue(payload.timestamp || embed.timestamp || embed.footer?.text || '');
+    const mode = cleanFieldValue(payload.mode || fields['mode'] || '');
+    const size = cleanFieldValue(payload.size || fields['product size'] || fields['product - size'] || '');
+    const normalized = {
+        source,
+        site,
+        sku,
+        product_name: productName,
+        quantity,
+        price,
+        product_url: productUrl,
+        image_url: imageUrl,
+        timestamp,
+        mode,
+        size,
+        account_email: accountEmail,
+        user_email: accountEmail || extractEmail(payload.customer_email || ''),
+        profile_name: profileName,
+        order_id: orderNumber,
+        order_number: orderNumber,
+        countdown_id: payload.countdown_id || null,
+        raw_payload: payload
+    };
+    normalized.external_order_id = stableExternalOrderId(payload, normalized);
+    return normalized;
+}
+
+async function findUserForWebhook(payload) {
+    const normalized = normalizeIncomingOrderPayload(payload);
+    const candidates = [
+        payload.user_id,
+        payload.metadata?.user_id,
+        payload.client_reference_id,
+        payload.userId
+    ].filter(Boolean);
+
+    for (const userId of candidates) {
+        const user = await getUserById(userId);
+        if (user) return user;
+    }
+
+    const emailCandidates = [
+        payload.user_email,
+        payload.email,
+        payload.customer_email,
+        payload.metadata?.user_email,
+        normalized.user_email,
+        normalized.account_email
+    ].filter(Boolean);
+
+    for (const email of emailCandidates) {
+        const { data, error } = await supabase.from("users").select("*").ilike("email", String(email).trim()).maybeSingle();
+        if (error) throw new Error(error.message);
+        if (data?.id) return data;
+    }
+
+    if (normalized.account_email) {
+        const { data: account } = await supabase
+            .from('accounts')
+            .select('profile_id')
+            .ilike('login_email', normalized.account_email)
+            .maybeSingle();
+        if (account?.profile_id) {
+            const { data: profile } = await supabase.from('profiles').select('user_id').eq('id', account.profile_id).maybeSingle();
+            if (profile?.user_id) {
+                const user = await getUserById(profile.user_id);
+                if (user) return user;
+            }
+        }
+    }
+
+    if (normalized.profile_name) {
+        const { data: profile } = await supabase
+            .from('profiles')
+            .select('user_id')
+            .ilike('profile_name', normalized.profile_name)
+            .maybeSingle();
+        if (profile?.user_id) {
+            const user = await getUserById(profile.user_id);
+            if (user) return user;
+        }
+    }
+
+    return null;
+}
+
+async function createOrderRecord(payload) {
+    const insertPayload = {
+        user_id: payload.user_id,
+        external_order_id: payload.external_order_id,
+        source: payload.source || "bot",
+        status: payload.status || "success",
+        site: payload.site || "",
+        sku: payload.sku || payload.product_sku || "",
+        product_name: payload.product_name || "",
+        countdown_id: payload.countdown_id || null,
+        credits_charged: asWholeCredits(payload.credits_charged, 0),
+        metadata: payload.metadata || {},
+        raw_payload: payload.raw_payload || payload
+    };
+    const { data, error } = await supabase.from("orders").insert(insertPayload).select("*").single();
+    if (error) throw new Error(error.message);
+    return data;
+}
+
+async function getAppSetting(key, fallback = null) {
+    const { data, error } = await maybeSingle('app_settings', (qb) => qb.select('value_json').eq('key', key).maybeSingle());
+    if (error) throw new Error(error.message);
+    return data?.value_json ?? fallback;
+}
+
+async function setAppSetting(key, value) {
+    const payload = { key, value_json: value, updated_at: new Date().toISOString() };
+    const { error } = await supabase.from('app_settings').upsert(payload, { onConflict: 'key' });
+    if (error) throw new Error(error.message);
+    return value;
+}
+
+function getApiBaseUrl(req) {
+    const configured = String(process.env.PUBLIC_API_BASE_URL || process.env.API_BASE_URL || '').trim().replace(/\/$/, '');
+    if (configured) return configured;
+    return `${req.protocol}://${req.get('host')}`;
+}
+
+async function getActiveInboundWebhook() {
+    const { data, error } = await maybeSingle('inbound_webhooks', (qb) =>
+        qb.select('*').eq('is_active', true).order('created_at', { ascending: false }).limit(1).maybeSingle()
+    );
+    if (error) throw new Error(error.message);
+    return data || null;
+}
+
+async function createInboundWebhook(req, createdBy = null) {
+    const { error: deactivateError } = await supabase.from('inbound_webhooks').update({ is_active: false }).eq('is_active', true);
+    if (deactivateError && !String(deactivateError.message || '').toLowerCase().includes('does not exist')) {
+        throw new Error(deactivateError.message);
+    }
+
+    const token = crypto.randomBytes(18).toString('hex');
+    const { data, error } = await supabase
+        .from('inbound_webhooks')
+        .insert({ token, is_active: true, created_by: createdBy })
+        .select('*')
+        .single();
+    if (error) throw new Error(error.message);
+    return { ...data, url: `${getApiBaseUrl(req)}/webhooks/orders/${token}` };
+}
+
+function maskEmail(email = '') {
+    const value = String(email || '').trim().toLowerCase();
+    const parts = value.split('@');
+    if (parts.length !== 2) return value || '-';
+    const [name, domain] = parts;
+    const maskedName = name.length <= 2 ? `${name[0] || '*'}*` : `${name.slice(0, 2)}***`;
+    return `${maskedName}@${domain}`;
+}
+
+async function sendSanitizedDiscordWebhook(order, userEmail = '') {
+    const settings = await getAppSetting('webhook_settings', {});
+    const webhookUrl = String(settings?.discord_webhook_url || '').trim();
+    if (!webhookUrl) return { skipped: 'discord_webhook_not_configured' };
+
+    const payload = order.raw_payload || {};
+    const normalized = normalizeIncomingOrderPayload(payload);
+    const isInsufficient = String(order.status || '') === 'insufficient_credits';
+    const embed = {
+        title: isInsufficient ? `Checkout Logged • Credits Needed` : `Successful Checkout • ${order.site || normalized.site || order.source || 'Bot'}`,
+        description: normalized.product_name || order.product_name || 'Checkout received',
+        fields: [
+            { name: 'Site', value: String(order.site || normalized.site || '-'), inline: true },
+            { name: 'Source', value: String(order.source || normalized.source || '-'), inline: true },
+            { name: 'Quantity', value: String(normalized.quantity || 1), inline: true },
+            { name: 'Price', value: normalized.price ? `$${Number(normalized.price).toFixed(2)}` : '-', inline: true },
+            { name: 'Credits', value: String(order.credits_charged || 0), inline: true },
+            { name: 'User', value: maskEmail(userEmail), inline: true }
+        ],
+        footer: { text: isInsufficient ? 'Order saved without charging credits' : 'Private order details removed' },
+        timestamp: new Date().toISOString()
+    };
+    if (normalized.size) embed.fields.push({ name: 'Size', value: normalized.size, inline: true });
+    if (normalized.mode) embed.fields.push({ name: 'Mode', value: normalized.mode, inline: true });
+    if (normalized.product_url) embed.fields.push({ name: 'Product Link', value: normalized.product_url, inline: false });
+    if (normalized.image_url) embed.thumbnail = { url: normalized.image_url };
+
+    const response = await fetch(webhookUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: 'Checkout Relay', embeds: [embed] })
+    });
+    if (!response.ok) {
+        const text = await response.text().catch(() => '');
+        throw new Error(`Discord webhook failed (${response.status}): ${text || response.statusText}`);
+    }
+    return { success: true };
+}
+
+async function recordSuccessfulCheckout(payload) {
+    const normalized = normalizeIncomingOrderPayload(payload);
+    const externalOrderId = normalized.external_order_id;
+    if (!externalOrderId) throw new Error("external_order_id could not be determined");
+
+    const { data: existing, error: existingError } = await maybeSingle("orders", (qb) =>
+        qb.select("*").eq("external_order_id", externalOrderId).maybeSingle()
+    );
+    if (existingError) throw new Error(existingError.message);
+    if (existing?.id) return { order: existing, duplicate: true };
+
+    const user = await findUserForWebhook({ ...payload, ...normalized });
+    if (!user?.id) throw new Error("Could not match webhook payload to a user");
+
+    await ensureUserCreditBalance(user.id);
+    const resolvedCost = await resolveOrderCreditCost({ ...payload, ...normalized });
+    const creditsToCharge = asWholeCredits(resolvedCost.credits, 0);
+    const currentBalance = await getUserCreditBalance(user.id);
+    const insufficientCredits = creditsToCharge > currentBalance;
+
+    const order = await createOrderRecord({
+        ...payload,
+        ...normalized,
+        user_id: user.id,
+        external_order_id: externalOrderId,
+        status: insufficientCredits ? 'insufficient_credits' : 'success',
+        credits_charged: insufficientCredits ? 0 : creditsToCharge,
+        metadata: {
+            ...(payload.metadata || {}),
+            matched_user_email: user.email,
+            requested_credits: creditsToCharge,
+            insufficient_credits: insufficientCredits
+        },
+        raw_payload: payload
+    });
+
+    let balanceAfter = currentBalance;
+    if (!insufficientCredits && creditsToCharge > 0) {
+        balanceAfter = await adjustUserCredits({
+            userId: user.id,
+            delta: -creditsToCharge,
+            reason: "successful_checkout",
+            note: `Credits charged for successful checkout ${externalOrderId}`,
+            metadata: {
+                source: normalized.source || payload.source || "bot_webhook",
+                site: normalized.site || payload.site || "",
+                sku: normalized.sku || payload.sku || payload.product_sku || "",
+                countdown_id: normalized.countdown_id || payload.countdown_id || null
+            },
+            orderId: order.id
+        });
+    }
+
+    let discordRelay = { skipped: "not_attempted" };
+    try {
+        discordRelay = await sendSanitizedDiscordWebhook(order, user.email);
+    } catch (discordErr) {
+        console.error("Discord relay failed:", discordErr.message);
+        discordRelay = { error: discordErr.message };
+    }
+
+    return {
+        order,
+        duplicate: false,
+        credits_charged: insufficientCredits ? 0 : creditsToCharge,
+        requested_credits: creditsToCharge,
+        balance_after: balanceAfter,
+        user_id: user.id,
+        insufficient_credits: insufficientCredits,
+        discord_relay: discordRelay
+    };
+}
+
+app.post("/webhooks/stripe", bodyParser.raw({ type: "application/json" }), async (req, res) => {
+    if (!stripe) {
+        return res.status(400).json({ error: "Stripe is not configured" });
+    }
+
+    try {
+        let event = null;
+        const signature = req.headers["stripe-signature"];
+        const secret = process.env.STRIPE_WEBHOOK_SECRET;
+
+        if (secret && signature) {
+            event = stripe.webhooks.constructEvent(req.body, signature, secret);
+        } else {
+            event = JSON.parse(Buffer.isBuffer(req.body) ? req.body.toString("utf8") : String(req.body || "{}"));
+        }
+
+        if (event.type === "checkout.session.completed") {
+            const session = event.data.object || {};
+            const user = await findUserForWebhook(session);
+            if (!user?.id) {
+                return res.json({ received: true, skipped: "user_not_found" });
+            }
+
+            const credits = asWholeCredits(session.metadata?.credits, 0);
+            const externalOrderId = String(session.id || "");
+            const { data: existing } = await maybeSingle("orders", (qb) =>
+                qb.select("id").eq("external_order_id", externalOrderId).maybeSingle()
+            );
+            if (!existing?.id) {
+                await createOrderRecord({
+                    user_id: user.id,
+                    external_order_id: externalOrderId,
+                    source: "stripe",
+                    status: "paid",
+                    product_name: `${credits} credit purchase`,
+                    credits_charged: 0,
+                    metadata: {
+                        checkout_type: "credit_purchase",
+                        credits_purchased: credits,
+                        customer_email: session.customer_details?.email || session.customer_email || ""
+                    },
+                    raw_payload: session
+                });
+
+                if (credits > 0) {
+                    await adjustUserCredits({
+                        userId: user.id,
+                        delta: credits,
+                        reason: "stripe_purchase",
+                        note: `Purchased ${credits} credits via Stripe`,
+                        metadata: { stripe_checkout_session_id: session.id },
+                        createdBy: null
+                    });
+                }
+            }
+        }
+
+        res.json({ received: true });
+    } catch (err) {
+        console.error("Stripe webhook error:", err.message);
+        res.status(400).json({ error: err.message });
+    }
+});
+
+app.get("/credits/me", auth, async (req, res) => {
+    try {
+        const balanceRow = await ensureUserCreditBalance(req.user_id);
+        res.json({
+            balance: asWholeCredits(balanceRow.balance, 0),
+            free_starter_credits: DEFAULT_FREE_CREDITS,
+            lifetime_credits_granted: asWholeCredits(balanceRow.lifetime_credits_granted, 0),
+            lifetime_credits_spent: asWholeCredits(balanceRow.lifetime_credits_spent, 0),
+            monthly_fee_cents: Number(process.env.MONTHLY_MEMBERSHIP_FEE_CENTS || 0)
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.post("/billing/create-checkout-session", auth, async (req, res) => {
+    try {
+        if (!stripe) return res.status(400).json({ error: "Stripe is not configured yet" });
+
+        const credits = asWholeCredits(req.body?.credits, 0);
+        if (credits <= 0) return res.status(400).json({ error: "credits must be greater than 0" });
+
+        const user = await getCurrentUser(req);
+        const successUrl = buildAppUrl("/dashboard.html?credits=success");
+        const cancelUrl = buildAppUrl("/dashboard.html?credits=cancel");
+
+        const session = await stripe.checkout.sessions.create({
+            mode: "payment",
+            client_reference_id: user.id,
+            customer_email: user.email,
+            success_url: successUrl,
+            cancel_url: cancelUrl,
+            metadata: {
+                user_id: user.id,
+                user_email: user.email,
+                credits: String(credits)
+            },
+            line_items: [{
+                quantity: 1,
+                price_data: {
+                    currency: (process.env.STRIPE_CURRENCY || "usd"),
+                    unit_amount: credits * 100,
+                    product_data: {
+                        name: `${credits} Credits`,
+                        description: `$1 = 1 credit`
+                    }
+                }
+            }]
+        });
+
+        res.json({ url: session.url, id: session.id });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+async function validateInboundWebhookToken(req) {
+    const active = await getActiveInboundWebhook();
+    if (!active?.token) return true;
+    const token = String(req.params.token || req.query.token || '').trim();
+    return token && token === active.token;
+}
+
+app.post(["/webhooks/orders", "/webhooks/orders/:token"], async (req, res) => {
+    try {
+        const allowed = await validateInboundWebhookToken(req);
+        if (!allowed) return res.status(401).json({ error: "Invalid webhook url" });
+        const result = await recordSuccessfulCheckout(req.body || {});
+        res.json({ success: true, ...result });
+    } catch (err) {
+        res.status(400).json({ error: err.message });
+    }
+});
+
+app.get("/admin/credits/users", auth, admin, async (req, res) => {
+    try {
+        const currentUser = await getCurrentUser(req);
+        const scopedUserIds = await getScopeUserIdsForAdmin(currentUser);
+
+        let query = supabase.from("users").select("id, email, role, owner_admin_id, created_at").order("created_at", { ascending: false });
+        if (scopedUserIds && scopedUserIds.length) query = query.in("id", scopedUserIds);
+
+        const { data: users, error } = await query;
+        if (error) return res.status(500).json({ error: error.message });
+
+        const userIds = (users || []).map((row) => row.id);
+        const balancesByUser = new Map();
+        if (userIds.length) {
+            const { data: balances, error: balanceError } = await maybeMany("user_credit_balances", (qb) =>
+                qb.select("*").in("user_id", userIds)
+            );
+            if (balanceError) return res.status(500).json({ error: balanceError.message });
+            (balances || []).forEach((row) => balancesByUser.set(row.user_id, row));
+        }
+
+        const insufficientCounts = new Map();
+        if (userIds.length) {
+            const { data: flaggedOrders, error: flaggedError } = await supabase
+                .from("orders")
+                .select("user_id, status")
+                .in("user_id", userIds)
+                .eq("status", "insufficient_credits");
+            if (flaggedError) return res.status(500).json({ error: flaggedError.message });
+            for (const row of flaggedOrders || []) {
+                insufficientCounts.set(row.user_id, (insufficientCounts.get(row.user_id) || 0) + 1);
+            }
+        }
+
+        const items = [];
+        for (const user of users || []) {
+            const balance = balancesByUser.get(user.id) || await ensureUserCreditBalance(user.id);
+            items.push({
+                ...user,
+                credits_balance: asWholeCredits(balance.balance, 0),
+                lifetime_credits_granted: asWholeCredits(balance.lifetime_credits_granted, 0),
+                lifetime_credits_spent: asWholeCredits(balance.lifetime_credits_spent, 0),
+                insufficient_orders: insufficientCounts.get(user.id) || 0
+            });
+        }
+
+        res.json({ items });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.post("/admin/users/:id/credits", auth, admin, async (req, res) => {
+    try {
+        const currentUser = await getCurrentUser(req);
+        const targetUser = await getUserById(req.params.id);
+        if (!(await canManageTarget(currentUser, targetUser))) {
+            return res.status(403).json({ error: "You do not have access to this user." });
+        }
+
+        const amount = Math.trunc(Number(req.body?.amount || 0));
+        if (!Number.isFinite(amount) || amount === 0) return res.status(400).json({ error: "amount must be a non-zero integer" });
+
+        const balance = await adjustUserCredits({
+            userId: targetUser.id,
+            delta: amount,
+            reason: amount > 0 ? "admin_adjustment_add" : "admin_adjustment_remove",
+            note: String(req.body?.note || "").trim(),
+            metadata: { admin_email: currentUser.email },
+            createdBy: currentUser.id
+        });
+
+        res.json({ success: true, balance });
+    } catch (err) {
+        const status = err.message === "Insufficient credits" ? 400 : 500;
+        res.status(status).json({ error: err.message });
+    }
+});
+
+app.get("/admin/orders", auth, admin, async (req, res) => {
+    try {
+        const currentUser = await getCurrentUser(req);
+        const scopedUserIds = await getScopeUserIdsForAdmin(currentUser);
+
+        let query = supabase.from("orders").select("*").order("created_at", { ascending: false }).limit(250);
+        if (scopedUserIds && scopedUserIds.length) query = query.in("user_id", scopedUserIds);
+
+        const { data: orders, error } = await query;
+        if (error) return res.status(500).json({ error: error.message });
+
+        const userIds = [...new Set((orders || []).map((row) => row.user_id).filter(Boolean))];
+        const userMap = new Map();
+        if (userIds.length) {
+            const { data: users, error: usersError } = await supabase.from("users").select("id, email").in("id", userIds);
+            if (usersError) return res.status(500).json({ error: usersError.message });
+            (users || []).forEach((row) => userMap.set(row.id, row.email));
+        }
+
+        res.json({
+            items: (orders || []).map((row) => ({
+                ...row,
+                user_email: userMap.get(row.user_id) || row.user_id
+            }))
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.post("/admin/orders/:id/refund-credits", auth, admin, async (req, res) => {
+    try {
+        const currentUser = await getCurrentUser(req);
+        const { data: order, error } = await supabase.from("orders").select("*").eq("id", req.params.id).maybeSingle();
+        if (error) return res.status(500).json({ error: error.message });
+        if (!order?.id) return res.status(404).json({ error: "Order not found" });
+
+        const targetUser = await getUserById(order.user_id);
+        if (!(await canManageTarget(currentUser, targetUser))) {
+            return res.status(403).json({ error: "You do not have access to this user." });
+        }
+
+        const amount = asWholeCredits(req.body?.amount, order.credits_charged || 0);
+        if (amount <= 0) return res.status(400).json({ error: "Refund amount must be greater than 0" });
+
+        const balance = await adjustUserCredits({
+            userId: order.user_id,
+            delta: amount,
+            reason: "order_refund_credit",
+            note: String(req.body?.note || "Manual credit refund").trim(),
+            metadata: { order_id: order.id, external_order_id: order.external_order_id, refunded_by: currentUser.email },
+            createdBy: currentUser.id,
+            orderId: order.id
+        });
+
+        const { error: updateError } = await supabase.from("orders").update({
+            metadata: { ...(order.metadata || {}), refund_credits: amount, refund_note: String(req.body?.note || "").trim() },
+            status: order.status === "refunded" ? "refunded" : `${order.status || "success"}_credited`
+        }).eq("id", order.id);
+        if (updateError) return res.status(500).json({ error: updateError.message });
+
+        res.json({ success: true, balance });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+
+app.get('/admin/webhooks/settings', auth, admin, async (req, res) => {
+    try {
+        const active = await getActiveInboundWebhook();
+        const settings = await getAppSetting('webhook_settings', {});
+        res.json({
+            inbound_webhook_url: active?.token ? `${getApiBaseUrl(req)}/webhooks/orders/${active.token}` : '',
+            discord_webhook_url: String(settings?.discord_webhook_url || ''),
+            has_inbound_webhook: !!active?.token
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.post('/admin/webhooks/incoming/create', auth, admin, async (req, res) => {
+    try {
+        const webhook = await createInboundWebhook(req, req.user_id);
+        res.json({ success: true, inbound_webhook_url: webhook.url });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.post('/admin/webhooks/settings', auth, admin, async (req, res) => {
+    try {
+        const discordWebhookUrl = String(req.body?.discord_webhook_url || '').trim();
+        await setAppSetting('webhook_settings', { discord_webhook_url: discordWebhookUrl });
+        res.json({ success: true, discord_webhook_url: discordWebhookUrl });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
 /* ================= AUTH ROUTES ================= */
 
 app.post("/auth/signup", async (req, res) => {
@@ -417,6 +1311,12 @@ app.post("/auth/signup", async (req, res) => {
         console.error("Welcome email failed:", mailErr.message);
     }
 
+    try {
+        await ensureUserCreditBalance(user.id);
+    } catch (creditErr) {
+        console.error("Credit balance init failed:", creditErr.message);
+    }
+
     res.json({ success: true });
 });
 
@@ -449,6 +1349,8 @@ app.post("/auth/login", async (req, res) => {
         { expiresIn: "7d" }
     );
 
+    const creditBalance = await getUserCreditBalance(user.id);
+
     res.json({
         token,
         user: {
@@ -456,7 +1358,8 @@ app.post("/auth/login", async (req, res) => {
             email: user.email,
             role: user.role,
             owner_admin_id: user.owner_admin_id || null,
-            revoked: !!user.revoked
+            revoked: !!user.revoked,
+            credits_balance: creditBalance
         }
     });
 });
@@ -465,13 +1368,16 @@ app.get("/auth/me", auth, async (req, res) => {
     try {
         const user = req.currentUser || await getCurrentUser(req);
 
+        const creditBalance = await getUserCreditBalance(user.id);
+
         res.json({
             user: {
                 id: user.id,
                 email: user.email,
                 role: user.role,
                 owner_admin_id: user.owner_admin_id || null,
-                revoked: !!user.revoked
+                revoked: !!user.revoked,
+                credits_balance: creditBalance
             }
         });
     } catch (err) {
@@ -1293,66 +2199,6 @@ app.delete("/admin/invites/:id", auth, admin, async (req, res) => {
 
 /* ================= EXPORT ================= */
 
-function pickAccountSecret(profile, account) {
-    if (!account) return "";
-
-    if (profile?.account_type === "amazon") {
-        return (account.amazon_2fa_secret || "").trim();
-    }
-
-    return (account.gmail_app_password || "").trim();
-}
-
-function buildAccountLoginExport(profile) {
-    const account = profile?.accounts?.[0] || {};
-    const type = (profile?.account_type || "").trim().toLowerCase();
-    const email = (account.login_email || "").trim();
-    const password = (account.login_password || "").trim();
-    const secret = pickAccountSecret(profile, account);
-
-    if (!email && !password && !secret) return null;
-
-    if (type === "target") {
-        if (!email && !password) return null;
-        return `${email};${password};;`;
-    }
-
-    if (type === "walmart") {
-        if (!email && !password) return null;
-        return `${email};${password};`;
-    }
-
-    if (type === "amazon") {
-        if (!email && !password && !secret) return null;
-        return `${email};${password};${secret}`;
-    }
-
-    if (!email && !password && !secret) return null;
-    return `${type || "general"};${email};${password};${secret}`;
-}
-
-function getAccountLoginHeader(group) {
-    const normalized = (group || "").trim().toLowerCase();
-
-    if (normalized === "target") return "email;password;token;loginMethod";
-    if (normalized === "walmart") return "email;password;loginIp";
-    if (normalized === "amazon") return "email;password;2faPassword";
-
-    return "accountType;email;password;gmailOr2faPassword";
-}
-
-function buildImapExportRow(profile) {
-    const account = profile?.accounts?.[0] || {};
-    const type = (profile?.account_type || account.provider || "").trim().toLowerCase();
-    const email = (account.login_email || "").trim();
-    const secret = pickAccountSecret(profile, account);
-
-    if (!email || !secret) return null;
-
-    const host = type === "amazon" ? "Amazon" : "Gmail";
-    return `${host};${email};${secret}`;
-}
-
 app.get("/admin/export/accounts", auth, admin, async (req, res) => {
     try {
         const currentUser = await getCurrentUser(req);
@@ -1600,65 +2446,18 @@ app.get("/admin/export/accounts-txt", auth, admin, async (req, res) => {
         }
 
         const rows = (profiles || [])
-            .map((profile) => buildAccountLoginExport(profile))
+            .map((profile) => {
+                const account = profile.accounts?.[0] || {};
+                const email = (account.login_email || "").trim();
+                const password = (account.login_password || "").trim();
+
+                if (!email && !password) return null;
+
+                return `${email}:::${password}:::proxie`;
+            })
             .filter(Boolean);
 
-        const output = [getAccountLoginHeader(group), ...rows].join("\n");
-
-        res.setHeader("Content-Type", "text/plain; charset=utf-8");
-        res.setHeader("Content-Disposition", `attachment; filename="${filename}.txt"`);
-        res.send(output);
-    } catch (err) {
-        console.error(err);
-        res.status(500).json({ error: err.message });
-    }
-});
-
-
-app.get("/admin/export/accounts-imap", auth, admin, async (req, res) => {
-    try {
-        const currentUser = await getCurrentUser(req);
-        const { user_id, group } = req.query;
-        const filename = (req.query.filename || "imap").replace(/[^a-zA-Z0-9-_]/g, "");
-
-        let query = supabase
-            .from("profiles")
-            .select(`
-                id,
-                user_id,
-                account_type,
-                created_at,
-                accounts(*)
-            `)
-            .order("created_at", { ascending: false });
-
-        if (currentUser.role === "super_admin") {
-            if (user_id) query = query.eq("user_id", user_id);
-            if (group) query = query.eq("account_type", group);
-        } else {
-            const ownedUserIds = await getScopeUserIdsForAdmin(currentUser);
-
-            if (user_id && !ownedUserIds.includes(user_id)) {
-                return res.status(403).json({ error: "Cannot export that account" });
-            }
-
-            query = query.in("user_id", safeIn(ownedUserIds));
-
-            if (user_id) query = query.eq("user_id", user_id);
-            if (group) query = query.eq("account_type", group);
-        }
-
-        const { data: profiles, error } = await query;
-
-        if (error) {
-            return res.status(500).json({ error: error.message });
-        }
-
-        const rows = (profiles || [])
-            .map((profile) => buildImapExportRow(profile))
-            .filter(Boolean);
-
-        const output = ["host;email;app/2fapassword", ...rows].join("\n");
+        const output = ["account email:account password", ...rows].join("\n");
 
         res.setHeader("Content-Type", "text/plain; charset=utf-8");
         res.setHeader("Content-Disposition", `attachment; filename="${filename}.txt"`);

@@ -36,6 +36,8 @@
         <button class="admin-nav-button" type="button" data-admin-nav="exports">Exports</button>
         <button class="admin-nav-button" type="button" data-admin-nav="selections">User Product Selections</button>
         <button class="admin-nav-button" type="button" data-admin-nav="users">Current Users</button>
+        <button class="admin-nav-button" type="button" data-admin-nav="credits">Credits + Orders</button>
+        <button class="admin-nav-button" type="button" data-admin-nav="webhooks">Webhooks</button>
       </aside>
 
       <div class="admin-content-stack">
@@ -85,6 +87,8 @@
               <div class="field"><label for="countdownLabel">Display Name</label><input class="input" id="countdownLabel" placeholder="Walmart Friday Restock" /></div>
               <div class="field"><label for="countdownWhen">Release Date & Time (ET)</label><input class="input" type="datetime-local" id="countdownWhen" /></div>
               <div class="field"><label for="countdownOrder">Sort Order</label><input class="input" type="number" id="countdownOrder" value="0" /></div>
+              <div class="field"><label for="countdownBaseCreditCost">Base Credit Cost</label><input class="input" type="number" id="countdownBaseCreditCost" min="0" step="1" value="0" /></div>
+              <div class="field field--full"><label for="countdownProductCredits">Countdown Product Credits</label><textarea class="input" id="countdownProductCredits" rows="4" placeholder="One per line: catalogProductId|creditCost"></textarea><div class="subtle-text">Use this when you already know the products in a countdown. Example: uuid-1|2</div></div>
               <div class="field field--full"><label class="checkbox-inline"><input type="checkbox" id="countdownActive" checked /><span>Active</span></label></div>
               <div class="field field--full panel-actions"><button class="btn btn-primary" type="submit">Save Countdown</button></div>
             </form>
@@ -107,6 +111,7 @@
                 <div class="field field--full"><label for="manualProductName">Product Name</label><input class="input" id="manualProductName" placeholder="Run Next Amazon Release" /></div>
                 <div class="field"><label for="manualProductPrice">Price</label><input class="input" id="manualProductPrice" type="number" min="0" step="0.01" placeholder="0.00" /></div>
                 <div class="field"><label for="manualProductBrand">Brand</label><input class="input" id="manualProductBrand" placeholder="Amazon" /></div>
+                <div class="field"><label for="manualProductCreditCost">Credit Cost</label><input class="input" id="manualProductCreditCost" type="number" min="0" step="1" placeholder="2" /></div>
                 <div class="field"><label for="manualProductImage">Image URL</label><input class="input" id="manualProductImage" placeholder="https://..." /></div>
                 <div class="field"><label for="manualProductUrl">Product URL</label><input class="input" id="manualProductUrl" placeholder="https://..." /></div>
                 <div class="field"><label class="checkbox-inline"><input type="checkbox" id="manualProductPlaceholder" /><span>Create as placeholder / next release card</span></label></div>
@@ -130,13 +135,13 @@
 
         <section class="admin-pane" data-admin-pane="exports">
           <section class="panel">
-            <div class="panel-header"><div><h2>Export Profiles / Accounts</h2><p class="subtle-text">Export saved profiles as JSON, account logins by site format, or IMAP / 2FA exports as TXT.</p></div></div>
+            <div class="panel-header"><div><h2>Export Profiles / Accounts</h2><p class="subtle-text">Export saved profiles as JSON or account logins as TXT.</p></div></div>
             <div class="form-grid">
               <div class="field"><label for="exportUserFilter">Account</label><select class="input" id="exportUserFilter" onchange="updateExportCount()"><option value="">All Accounts</option></select></div>
               <div class="field"><label for="exportGroupFilter">Group</label><select class="input" id="exportGroupFilter" onchange="updateExportCount()"><option value="">All Groups</option><option value="general">General</option><option value="walmart">Walmart</option><option value="target">Target</option><option value="amazon">Amazon</option></select></div>
             </div>
-            <div class="toolbar-row toolbar-row--spread"><span id="exportCountBanner" class="subtle-text">Checking export count...</span><span class="subtle-text">Site formats: Walmart = email;password; | Target = email;password;; | Amazon = email;password;2faPassword | IMAP = host;email;app/2fapassword</span></div>
-            <div class="panel-actions"><button class="btn" onclick="exportProfilesJson()">Export Profiles JSON</button><button class="btn btn-primary" onclick="exportAccountsTxt()">Export Account Logins</button><button class="btn" onclick="exportImapTxt()">Export IMAP / 2FA</button></div>
+            <div class="toolbar-row toolbar-row--spread"><span id="exportCountBanner" class="subtle-text">Checking export count...</span><span class="subtle-text">Account export format: username:::password:::proxie</span></div>
+            <div class="panel-actions"><button class="btn" onclick="exportProfilesJson()">Export Profiles JSON</button><button class="btn btn-primary" onclick="exportAccountsTxt()">Export Account Logins</button></div>
           </section>
         </section>
 
@@ -169,6 +174,19 @@
           </section>
         </section>
 
+
+        <section class="admin-pane" data-admin-pane="credits">
+          <section class="panel">
+            <div class="panel-header"><div><h2>Credits + Orders</h2><p class="subtle-text">Manage manual credits, Stripe purchases, and successful checkout credit charges.</p></div></div>
+            <div class="banner banner-soft"><strong>Webhook endpoints</strong><p class="subtle-text">Stripe credits purchase webhook: <code>/webhooks/stripe</code>. Successful checkout webhook: <code>/webhooks/orders</code>. The order webhook should include <code>external_order_id</code> plus either <code>user_id</code> or user email.</p></div>
+            <div class="toolbar-row toolbar-row--spread"><span class="subtle-text">Credits are manually granted by admin</span><button class="btn btn-primary" type="button" onclick="loadCreditsAdminPane()">Refresh Credits + Orders</button></div>
+            <div class="table-wrap table-wrap--admin-scroll"><table class="admin-table"><thead><tr><th>User</th><th>Role</th><th>Credits</th><th>Granted</th><th>Spent</th><th>Needs Removal</th><th>Adjust</th></tr></thead><tbody id="creditsUsersTableBody"><tr><td colspan="7">Loading credit balances...</td></tr></tbody></table></div>
+            <div id="creditsAdminMessage" class="subtle-text"></div>
+            <div class="panel-header panel-header--nested"><div><h3>Successful Orders</h3><p class="subtle-text">Every successful checkout webhook is stored here. Refund credits manually when you need to reverse a charge.</p></div></div>
+            <div class="table-wrap table-wrap--admin-scroll"><table class="admin-table"><thead><tr><th>When</th><th>User</th><th>Source</th><th>Product</th><th>Status</th><th>Credits</th><th>Order</th><th>Action</th></tr></thead><tbody id="ordersTableBody"><tr><td colspan="8">Loading orders...</td></tr></tbody></table></div>
+          </section>
+        </section>
+
         <section class="admin-pane" data-admin-pane="users">
           <section class="panel">
             <div class="panel-header"><div><h2>Current Users</h2><p class="subtle-text">Review current users and filter by owner, role, and date.</p></div></div>
@@ -182,6 +200,21 @@
             <div class="panel-actions" id="usersPagination" style="display:none"></div>
           </section>
         </section>
+
+        <section class="admin-pane" data-admin-pane="webhooks">
+          <section class="panel">
+            <div class="panel-header"><div><h2>Webhook Setup</h2><p class="subtle-text">Create your website webhook URL for Stellar/Refract, then set the Discord webhook your website will forward sanitized checkout messages to.</p></div></div>
+            <div class="banner banner-soft"><strong>How it works</strong><p class="subtle-text">Paste the generated website webhook URL into your bot. When the bot sends a checkout payload, your website logs the order, moves credits in your database, and then posts a cleaned Discord success message without order number, proxy, or account secrets.</p></div>
+            <div class="form-grid">
+              <div class="field field--full"><label>Website Receiver Webhook</label><div class="panel-actions"><button class="btn btn-primary" type="button" onclick="createWebsiteWebhook()">Create Webhook</button><button class="btn" type="button" onclick="loadWebhookSettings()">Refresh</button></div></div>
+              <div class="field field--full"><label for="websiteWebhookUrl">Bot Webhook URL To Paste Into Stellar / Refract</label><input class="input" id="websiteWebhookUrl" readonly placeholder="Click Create Webhook" /><div class="subtle-text">This is the URL your bot should send checkout webhooks to.</div></div>
+              <div class="field field--full"><label for="discordRelayWebhookUrl">Discord Webhook URL For Cleaned Checkout Posts</label><input class="input" id="discordRelayWebhookUrl" placeholder="https://discord.com/api/webhooks/..." /></div>
+              <div class="field field--full panel-actions"><button class="btn btn-primary" type="button" onclick="saveWebhookSettings()">Save Discord Webhook</button></div>
+            </div>
+            <div id="webhookSettingsMessage" class="subtle-text"></div>
+          </section>
+        </section>
+
       </div>
     </div>
   </div>

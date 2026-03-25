@@ -129,6 +129,7 @@
                 ${row.brand ? `<span class="product-pill">${escapeHTML(row.brand)}</span>` : ""}
                 <span class="product-pill">${escapeHTML(categoryFromProduct(row))}</span>
                 <span class="product-pill">${escapeHTML(PRODUCT_STATE.site.toUpperCase())}</span>
+                <span class="product-pill">${escapeHTML(String(row.credit_cost || 0))} credits</span>
               </div>
               <div class="product-sku">SKU: ${escapeHTML(row.sku)}</div>
             </div>

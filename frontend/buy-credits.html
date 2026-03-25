@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Buy Credits</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body class="app-page">
+  <div class="app-shell">
+    <header class="topbar">
+      <div><p class="eyebrow">The Shore Shack TCG</p><h1>Buy Credits</h1><p class="subtle-text">$1 = 1 credit. Credits are added after Stripe confirms payment.</p></div>
+      <div class="topbar-actions"><button class="btn" onclick="window.location.href='dashboard.html'">Back to Dashboard</button><button class="btn btn-danger" onclick="logout()">Logout</button></div>
+    </header>
+    <section class="panel">
+      <div class="panel-header"><div><h2>Current Balance</h2><p class="subtle-text">Use preset amounts or enter a custom number of credits.</p></div></div>
+      <div class="stats-grid"><div class="stat-card"><span class="stat-label">Credits</span><strong class="stat-value" id="creditsBalanceStat">0</strong><span class="stat-help" id="creditsBalanceHelp">Available to spend</span></div></div>
+      <div class="panel-actions" style="flex-wrap:wrap;gap:12px;margin-top:16px;">
+        <button class="btn btn-primary" type="button" onclick="purchasePresetCredits(10)">Buy 10</button>
+        <button class="btn btn-primary" type="button" onclick="purchasePresetCredits(20)">Buy 20</button>
+        <button class="btn btn-primary" type="button" onclick="purchasePresetCredits(50)">Buy 50</button>
+        <button class="btn btn-primary" type="button" onclick="purchasePresetCredits(100)">Buy 100</button>
+      </div>
+      <div class="form-grid" style="margin-top:16px;">
+        <div class="field"><label for="customCreditsAmount">Custom Credits</label><input class="input" id="customCreditsAmount" type="number" min="1" step="1" value="25" /></div>
+        <div class="field panel-actions"><button class="btn btn-primary" type="button" onclick="purchaseCustomCredits()">Buy Custom Amount</button></div>
+      </div>
+      <div id="creditsPurchaseMessage" class="subtle-text"></div>
+    </section>
+  </div>
+  <script src="script.js?v=20260325a"></script>
+</body>
+</html>

@@ -73,6 +73,13 @@ function normalizeMaxPrice(value) {
     return Number(parsed.toFixed(2));
 }
 
+function normalizeCreditCost(value) {
+    if (value === "" || value === null || value === undefined) return 0;
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed) || parsed < 0) throw new Error("Invalid credit cost");
+    return Math.round(parsed);
+}
+
 function sanitizeLike(value) {
     return String(value || "").replace(/[%_]/g, "").trim();
 }
@@ -473,18 +480,56 @@ async function upsertCatalogProductManual(supabase, payloadInput) {
     return data;
 }
 
+async function syncCountdownProducts(supabase, countdownId, countdownProducts) {
+    const rows = Array.isArray(countdownProducts) ? countdownProducts : [];
+    try {
+        await supabase.from('countdown_products').delete().eq('countdown_id', countdownId);
+    } catch (err) {
+        if (!String(err.message || '').toLowerCase().includes('does not exist')) throw err;
+        return [];
+    }
+
+    const payload = rows.filter((row) => row && row.catalog_product_id).map((row) => ({
+        countdown_id: countdownId,
+        catalog_product_id: row.catalog_product_id,
+        credit_cost: normalizeCreditCost(row.credit_cost)
+    }));
+
+    if (!payload.length) return [];
+    const { data, error } = await supabase.from('countdown_products').insert(payload).select('*');
+    if (error) throw new Error(error.message);
+    return data || [];
+}
+
+async function getCountdownProducts(supabase, countdownId) {
+    try {
+        const { data, error } = await supabase
+            .from('countdown_products')
+            .select('id, credit_cost, catalog_product_id, catalog_products(id, site, sku, product_name)')
+            .eq('countdown_id', countdownId);
+        if (error) throw error;
+        return data || [];
+    } catch (err) {
+        if (String(err.message || '').toLowerCase().includes('does not exist')) return [];
+        throw err;
+    }
+}
+
 module.exports = function registerProductCatalogRoutes({ app, supabase, auth, admin, getCurrentUser, ensureUserNotRevoked }) {
     app.get('/public/countdowns', async (req, res) => {
         try {
             const { data, error } = await supabase
                 .from('drop_countdowns')
-                .select('*')
+                .select('*, base_credit_cost')
                 .eq('is_active', true)
                 .order('sort_order', { ascending: true })
                 .order('scheduled_for', { ascending: true });
             if (error && String(error.message || '').toLowerCase().includes('drop_countdowns')) return res.json({ items: [] });
             if (error) return res.status(500).json({ error: error.message });
-            const items = (data || []).sort((a, b) => { const av = a.metadata && a.metadata.virtual ? 1 : 0; const bv = b.metadata && b.metadata.virtual ? 1 : 0; if (av !== bv) return bv - av; return String(a.product_name || a.sku || '').localeCompare(String(b.product_name || b.sku || '')); });
+            const items = [];
+            for (const row of data || []) {
+                items.push({ ...row, countdown_products: await getCountdownProducts(supabase, row.id) });
+            }
             res.json({ items });
         } catch (err) {
             res.json({ items: [] });
@@ -492,9 +537,13 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
     });
 
     app.get('/admin/countdowns', auth, admin, async (req, res) => {
-        const { data, error } = await supabase.from('drop_countdowns').select('*').order('sort_order', { ascending: true }).order('scheduled_for', { ascending: true });
+        const { data, error } = await supabase.from('drop_countdowns').select('*, base_credit_cost').order('sort_order', { ascending: true }).order('scheduled_for', { ascending: true });
         if (error) return res.status(500).json({ error: error.message });
-        res.json({ items: data || [] });
+        const items = [];
+        for (const row of data || []) {
+            items.push({ ...row, countdown_products: await getCountdownProducts(supabase, row.id) });
+        }
+        res.json({ items });
     });
 
     app.post('/admin/countdowns', auth, admin, async (req, res) => {
@@ -510,11 +559,13 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
                 scheduled_for,
                 sort_order: Number(req.body.sort_order || 0),
                 is_active: req.body.is_active !== false,
-                created_by: currentUser.id
+                created_by: currentUser.id,
+                base_credit_cost: normalizeCreditCost(req.body.base_credit_cost)
             };
-            const { data, error } = await supabase.from('drop_countdowns').insert(payload).select('*').single();
+            const { data, error } = await supabase.from('drop_countdowns').insert(payload).select('*, base_credit_cost').single();
             if (error) return res.status(500).json({ error: error.message });
-            res.json({ item: data });
+            const countdownProducts = await syncCountdownProducts(supabase, data.id, req.body.countdown_products || []);
+            res.json({ item: { ...data, countdown_products: countdownProducts } });
         } catch (err) {
             res.status(500).json({ error: err.message });
         }
@@ -527,11 +578,13 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
                 label: String(req.body.label || '').trim(),
                 scheduled_for: req.body.scheduled_for,
                 sort_order: Number(req.body.sort_order || 0),
-                is_active: req.body.is_active !== false
+                is_active: req.body.is_active !== false,
+                base_credit_cost: normalizeCreditCost(req.body.base_credit_cost)
             };
-            const { data, error } = await supabase.from('drop_countdowns').update(payload).eq('id', req.params.id).select('*').single();
+            const { data, error } = await supabase.from('drop_countdowns').update(payload).eq('id', req.params.id).select('*, base_credit_cost').single();
             if (error) return res.status(500).json({ error: error.message });
-            res.json({ item: data });
+            const countdownProducts = await syncCountdownProducts(supabase, data.id, req.body.countdown_products || []);
+            res.json({ item: { ...data, countdown_products: countdownProducts } });
         } catch (err) {
             res.status(500).json({ error: err.message });
         }
@@ -597,7 +650,7 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
                 .from('catalog_products')
                 .select(`
           id, site, sku, product_name, brand, image_url, product_url,
-          default_max_price, release_mode_default, is_enabled, metadata,
+          default_max_price, credit_cost, release_mode_default, is_enabled, metadata,
           user_product_preferences!left ( id, selected, run_mode, max_price )
         `)
                 .eq('catalog_id', activeCatalog.id)
@@ -619,6 +672,7 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
                     image_url: row.image_url || '',
                     product_url: row.product_url || '',
                     default_max_price: row.default_max_price,
+                    credit_cost: normalizeCreditCost(row.credit_cost),
                     release_mode_default: row.release_mode_default,
                     selected: pref ? !!pref.selected : false,
                     run_mode: pref?.run_mode || row.release_mode_default || 'current',
@@ -795,7 +849,7 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
             const search = sanitizeLike(req.query.search);
             let query = supabase
                 .from('catalog_products')
-                .select('id, site, sku, product_name, default_max_price, metadata, is_enabled, created_at')
+                .select('id, site, sku, product_name, default_max_price, credit_cost, metadata, is_enabled, created_at')
                 .order('created_at', { ascending: false })
                 .limit(200);
             if (site) query = query.eq('site', site);

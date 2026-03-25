@@ -19,6 +19,7 @@
         <button class="btn" id="adminPanelButton" style="display:none" onclick="openAdminPanel()">Admin Panel</button>
         <button class="btn" onclick="location='profile.html'">Create / Edit Profiles</button>
         <button class="btn" onclick="goToChangePassword()">Change Password</button>
+        <button class="btn btn-primary" onclick="window.location.href='buy-credits.html'">Buy Credits</button>
         <button class="btn btn-danger" onclick="logout()">Logout</button>
       </div>
     </header>
@@ -28,6 +29,16 @@
       <div class="stat-card"><span class="stat-label">Amazon</span><strong class="stat-value" id="amazonProfileCountStat">0</strong><span class="stat-help">Amazon-ready profiles</span></div>
       <div class="stat-card"><span class="stat-label">Retail</span><strong class="stat-value" id="retailProfileCountStat">0</strong><span class="stat-help">Target + Walmart profiles</span></div>
       <div class="stat-card"><span class="stat-label">General</span><strong class="stat-value" id="generalProfileCountStat">0</strong><span class="stat-help">Supreme or custom releases</span></div>
+      <div class="stat-card"><span class="stat-label">Credits</span><strong class="stat-value" id="creditsBalanceStat">100</strong><span class="stat-help" id="creditsBalanceHelp">Available to spend</span></div>
+    </section>
+
+    <section class="panel banner banner-soft" id="creditsPanel">
+      <strong>Credit system</strong>
+      <p class="subtle-text">Credits are manually managed by admin and can also be purchased through Stripe. Successful bot checkouts spend from this balance.</p>
+      <div class="panel-actions">
+        <button class="btn btn-primary" type="button" onclick="window.location.href='buy-credits.html'">Buy Credits</button>
+        <span id="creditsPurchaseMessage" class="subtle-text"></span>
+      </div>
     </section>
 
     <section class="panel countdown-panel">

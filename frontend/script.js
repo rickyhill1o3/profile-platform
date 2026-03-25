@@ -37,6 +37,26 @@ function formatMoney(value) {
     return Number.isFinite(n) ? "$" + n.toFixed(2) : "—";
 }
 
+function formatCredits(value) {
+    const n = Number(value);
+    return Number.isFinite(n) ? `${Math.round(n)} credits` : "0 credits";
+}
+
+function parseCountdownProductCredits(textValue) {
+    return String(textValue || "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean).map((line) => {
+        const [catalog_product_id, credit_cost] = line.split('|').map((part) => String(part || '').trim());
+        return { catalog_product_id, credit_cost: Number(credit_cost || 0) };
+    }).filter((row) => row.catalog_product_id);
+}
+
+function formatCountdownProductCredits(rows) {
+    return (Array.isArray(rows) ? rows : []).map((row) => {
+        const product = row.catalog_products || {};
+        const label = product.product_name || product.sku || row.catalog_product_id;
+        return `${row.catalog_product_id}|${Number(row.credit_cost || 0)}${label ? `  # ${label}` : ''}`;
+    }).join("\n");
+}
+
 
 function token() {
     return localStorage.getItem("token");
@@ -1181,21 +1201,6 @@ async function exportAccountsTxt() {
     }
 }
 
-async function exportImapTxt() {
-    try {
-        const { params } = await getExportCountAndParams();
-        const filename = promptForExportFilename("imap");
-        if (!filename) return;
-
-        params.append("filename", filename);
-
-        const url = API + "/admin/export/accounts-imap" + (params.toString() ? "?" + params.toString() : "");
-        await downloadExportFile(url, filename + ".txt");
-    } catch (err) {
-        if (err.message) alert(err.message);
-    }
-}
-
 /* ================= CHANGE PASSWORD ================= */
 
 const passwordForm = document.getElementById("changePasswordForm");
@@ -1417,7 +1422,7 @@ async function loadCountdownAdminList() {
             <div class="stack-item">
               <div class="stack-item-meta">
                 <strong>${escapeHTML(item.label || countdownSiteLabel(item.site))}</strong>
-                <span class="subtle-text">${escapeHTML(countdownSiteLabel(item.site))} • ${escapeHTML(formatEasternTime(item.scheduled_for))} ET</span>
+                <span class="subtle-text">${escapeHTML(countdownSiteLabel(item.site))} • ${escapeHTML(formatEasternTime(item.scheduled_for))} ET • ${escapeHTML(formatCredits(item.base_credit_cost || 0))}</span>
               </div>
               <div class="countdown-admin-actions">
                 <button class="btn" type="button" data-edit-countdown="${escapeHTML(item.id)}">Edit</button>
@@ -1433,6 +1438,8 @@ async function loadCountdownAdminList() {
                 document.getElementById('countdownLabel').value = item.label || '';
                 document.getElementById('countdownWhen').value = toEasternInputValue(item.scheduled_for);
                 document.getElementById('countdownOrder').value = item.sort_order || 0;
+                document.getElementById('countdownBaseCreditCost').value = Number(item.base_credit_cost || 0);
+                document.getElementById('countdownProductCredits').value = formatCountdownProductCredits(item.countdown_products || []);
                 document.getElementById('countdownActive').checked = !!item.is_active;
                 document.getElementById('countdownManagerMessage').textContent = 'Editing countdown.';
             });
@@ -1466,6 +1473,8 @@ async function initCountdownManager() {
             label: document.getElementById('countdownLabel').value,
             scheduled_for: fromEasternInputValue(document.getElementById('countdownWhen').value),
             sort_order: Number(document.getElementById('countdownOrder').value || 0),
+            base_credit_cost: Number(document.getElementById('countdownBaseCreditCost').value || 0),
+            countdown_products: parseCountdownProductCredits(document.getElementById('countdownProductCredits').value),
             is_active: document.getElementById('countdownActive').checked
         };
         const editingId = form.dataset.editingId;
@@ -1480,6 +1489,8 @@ async function initCountdownManager() {
             form.reset();
             form.dataset.editingId = '';
             document.getElementById('countdownActive').checked = true;
+            document.getElementById('countdownBaseCreditCost').value = 0;
+            document.getElementById('countdownProductCredits').value = ''; 
             await loadCountdownAdminList();
             await loadPublicCountdowns();
         } catch (err) {
@@ -1585,7 +1596,7 @@ async function loadCatalogProducts() {
               <td>${escapeHTML(item.site)}</td>
               <td>${escapeHTML(item.product_name || '-')}</td>
               <td>${escapeHTML(item.sku || '-')}</td>
-              <td>${escapeHTML(formatMoney(item.default_max_price))}</td>
+              <td>${escapeHTML(formatMoney(item.default_max_price))} / ${escapeHTML(formatCredits(item.credit_cost || 0))}</td>
               <td>${item.metadata && item.metadata.virtual ? 'Virtual' : 'Live'}</td>
               <td>${superAdmin ? `<button class="btn btn-danger" type="button" data-delete-catalog-product="${escapeHTML(item.id)}">Delete</button>` : '<span class="subtle-text">Super admin only</span>'}</td>
             </tr>`).join('');
@@ -1655,6 +1666,7 @@ async function initCatalogTools() {
                         sku: document.getElementById('manualProductSku').value,
                         product_name: document.getElementById('manualProductName').value,
                         default_max_price: document.getElementById('manualProductPrice').value,
+                        credit_cost: document.getElementById('manualProductCreditCost').value,
                         brand: document.getElementById('manualProductBrand').value,
                         image_url: document.getElementById('manualProductImage').value,
                         product_url: document.getElementById('manualProductUrl').value,
@@ -1708,6 +1720,195 @@ function initAdminSidebar() {
 }
 /* ================= PAGE LOAD ================= */
 
+
+async function loadCreditsBalance() {
+    const stat = document.getElementById('creditsBalanceStat');
+    if (!stat || !token()) return;
+    try {
+        const data = await authJSON(API + '/credits/me');
+        stat.textContent = Number(data.balance || 0);
+        const help = document.getElementById('creditsBalanceHelp');
+        if (help) help.textContent = 'Available to spend';
+        const current = currentUser() || {};
+        current.credits_balance = Number(data.balance || 0);
+        localStorage.user = JSON.stringify(current);
+    } catch (err) {
+        const msg = document.getElementById('creditsPurchaseMessage');
+        if (msg) msg.textContent = err.message;
+    }
+}
+
+async function promptBuyCredits() {
+    const amountText = window.prompt('How many credits would you like to buy? $1 = 1 credit', '25');
+    if (amountText === null) return;
+    const credits = Math.round(Number(amountText || 0));
+    const msg = document.getElementById('creditsPurchaseMessage');
+    if (!Number.isFinite(credits) || credits <= 0) {
+        if (msg) msg.textContent = 'Enter a valid credit amount.';
+        return;
+    }
+    try {
+        if (msg) msg.textContent = 'Opening Stripe checkout...';
+        const data = await authJSON(API + '/billing/create-checkout-session', { method: 'POST', body: JSON.stringify({ credits }) });
+        if (data.url) {
+            window.location.href = data.url;
+            return;
+        }
+        if (msg) msg.textContent = 'Stripe checkout URL was not returned.';
+    } catch (err) {
+        if (msg) msg.textContent = err.message;
+        else alert(err.message);
+    }
+}
+
+
+async function startCreditPurchase(credits) {
+    const msg = document.getElementById('creditsPurchaseMessage');
+    if (!Number.isFinite(Number(credits)) || Number(credits) <= 0) {
+        if (msg) msg.textContent = 'Enter a valid credit amount.';
+        return;
+    }
+    try {
+        if (msg) msg.textContent = 'Opening Stripe checkout...';
+        const data = await authJSON(API + '/billing/create-checkout-session', { method: 'POST', body: JSON.stringify({ credits: Math.round(Number(credits)) }) });
+        if (data.url) {
+            window.location.href = data.url;
+            return;
+        }
+        if (msg) msg.textContent = 'Stripe checkout URL was not returned.';
+    } catch (err) {
+        if (msg) msg.textContent = err.message;
+        else alert(err.message);
+    }
+}
+
+function purchasePresetCredits(credits) {
+    startCreditPurchase(credits);
+}
+
+function purchaseCustomCredits() {
+    const input = document.getElementById('customCreditsAmount');
+    startCreditPurchase(input ? input.value : 0);
+}
+
+async function loadWebhookSettings() {
+    const urlInput = document.getElementById('websiteWebhookUrl');
+    const discordInput = document.getElementById('discordRelayWebhookUrl');
+    const message = document.getElementById('webhookSettingsMessage');
+    if (!urlInput || !discordInput) return;
+    try {
+        const data = await authJSON(API + '/admin/webhooks/settings');
+        urlInput.value = data.inbound_webhook_url || '';
+        discordInput.value = data.discord_webhook_url || '';
+        if (message) message.textContent = data.inbound_webhook_url ? 'Webhook settings loaded.' : 'No website webhook created yet.';
+    } catch (err) {
+        if (message) message.textContent = err.message;
+    }
+}
+
+async function createWebsiteWebhook() {
+    const urlInput = document.getElementById('websiteWebhookUrl');
+    const message = document.getElementById('webhookSettingsMessage');
+    try {
+        if (message) message.textContent = 'Creating website webhook...';
+        const data = await authJSON(API + '/admin/webhooks/incoming/create', { method: 'POST' });
+        if (urlInput) urlInput.value = data.inbound_webhook_url || '';
+        if (message) message.textContent = 'Webhook created. Paste this URL into your bot.';
+    } catch (err) {
+        if (message) message.textContent = err.message;
+    }
+}
+
+async function saveWebhookSettings() {
+    const discordInput = document.getElementById('discordRelayWebhookUrl');
+    const message = document.getElementById('webhookSettingsMessage');
+    try {
+        await authJSON(API + '/admin/webhooks/settings', { method: 'POST', body: JSON.stringify({ discord_webhook_url: discordInput ? discordInput.value : '' }) });
+        if (message) message.textContent = 'Discord webhook saved.';
+    } catch (err) {
+        if (message) message.textContent = err.message;
+    }
+}
+
+async function loadCreditsAdminPane() {
+    const usersBody = document.getElementById('creditsUsersTableBody');
+    const ordersBody = document.getElementById('ordersTableBody');
+    const message = document.getElementById('creditsAdminMessage');
+    if (!usersBody || !ordersBody) return;
+    try {
+        const [usersData, ordersData] = await Promise.all([
+            authJSON(API + '/admin/credits/users'),
+            authJSON(API + '/admin/orders')
+        ]);
+
+        const users = Array.isArray(usersData.items) ? usersData.items : [];
+        usersBody.innerHTML = users.length ? users.map((item) => `
+            <tr>
+              <td>${escapeHTML(item.email || '-')}</td>
+              <td>${escapeHTML(item.role || '-')}</td>
+              <td>${escapeHTML(String(item.credits_balance || 0))}</td>
+              <td>${escapeHTML(String(item.lifetime_credits_granted || 0))}</td>
+              <td>${escapeHTML(String(item.lifetime_credits_spent || 0))}</td>
+              <td>${Number(item.insufficient_orders || 0) > 0 ? `<span class="status-tag status-tag--danger">${escapeHTML(String(item.insufficient_orders))} flagged</span>` : '<span class="subtle-text">No</span>'}</td>
+              <td class="table-actions">
+                <button class="btn" type="button" data-credit-user="${escapeHTML(item.id)}" data-credit-action="add">Add</button>
+                <button class="btn btn-danger" type="button" data-credit-user="${escapeHTML(item.id)}" data-credit-action="remove">Remove</button>
+              </td>
+            </tr>`).join('') : '<tr><td colspan="7">No users found.</td></tr>';
+
+        usersBody.querySelectorAll('[data-credit-user]').forEach((button) => {
+            button.addEventListener('click', async () => {
+                const amountText = window.prompt(`${button.dataset.creditAction === 'add' ? 'Add' : 'Remove'} how many credits?`, '10');
+                if (amountText === null) return;
+                const amount = Math.round(Number(amountText || 0));
+                if (!Number.isFinite(amount) || amount <= 0) return;
+                const signedAmount = button.dataset.creditAction === 'remove' ? -amount : amount;
+                const note = window.prompt('Reason / note for this adjustment', button.dataset.creditAction === 'remove' ? 'Manual removal' : 'Manual credit grant') || '';
+                try {
+                    await authJSON(API + '/admin/users/' + button.dataset.creditUser + '/credits', { method: 'POST', body: JSON.stringify({ amount: signedAmount, note }) });
+                    if (message) message.textContent = 'Credits updated.';
+                    await loadCreditsAdminPane();
+                } catch (err) {
+                    if (message) message.textContent = err.message;
+                }
+            });
+        });
+
+        const orders = Array.isArray(ordersData.items) ? ordersData.items : [];
+        ordersBody.innerHTML = orders.length ? orders.map((item) => `
+            <tr>
+              <td>${escapeHTML(formatEasternTime(item.created_at || ''))} ET</td>
+              <td>${escapeHTML(item.user_email || '-')}</td>
+              <td>${escapeHTML(item.source || '-')}</td>
+              <td>${escapeHTML(item.product_name || item.sku || '-')}</td>
+              <td>${String(item.status || '') === 'insufficient_credits' ? '<span class="status-tag status-tag--danger">Insufficient Credits</span>' : '<span class="status-tag status-tag--success">Charged</span>'}</td>
+              <td>${escapeHTML(String(item.credits_charged || 0))}</td>
+              <td>${escapeHTML(item.external_order_id || '-')}</td>
+              <td>${Number(item.credits_charged || 0) > 0 ? `<button class="btn" type="button" data-refund-order="${escapeHTML(item.id)}" data-refund-amount="${escapeHTML(String(item.credits_charged || 0))}">Refund Credits</button>` : '<span class="subtle-text">No charge</span>'}</td>
+            </tr>`).join('') : '<tr><td colspan="8">No orders found yet.</td></tr>';
+
+        ordersBody.querySelectorAll('[data-refund-order]').forEach((button) => {
+            button.addEventListener('click', async () => {
+                const amountText = window.prompt('Refund how many credits?', button.dataset.refundAmount || '0');
+                if (amountText === null) return;
+                const amount = Math.round(Number(amountText || 0));
+                if (!Number.isFinite(amount) || amount <= 0) return;
+                const note = window.prompt('Refund note', 'Order canceled') || '';
+                try {
+                    await authJSON(API + '/admin/orders/' + button.dataset.refundOrder + '/refund-credits', { method: 'POST', body: JSON.stringify({ amount, note }) });
+                    if (message) message.textContent = 'Credits refunded.';
+                    await loadCreditsAdminPane();
+                } catch (err) {
+                    if (message) message.textContent = err.message;
+                }
+            });
+        });
+    } catch (err) {
+        usersBody.innerHTML = `<tr><td colspan="6">${escapeHTML(err.message)}</td></tr>`;
+        ordersBody.innerHTML = `<tr><td colspan="7">${escapeHTML(err.message)}</td></tr>`;
+    }
+}
+
 document.addEventListener("DOMContentLoaded", async () => {
     if (!requireAuthForPrivatePages()) return;
     try {
@@ -1717,6 +1918,7 @@ document.addEventListener("DOMContentLoaded", async () => {
 
     if (document.getElementById("dashboard")) {
         await loadProfiles();
+        try { await loadCreditsBalance(); } catch (_) {}
     }
 
     if (document.getElementById("profileForm")) {
@@ -1736,6 +1938,11 @@ document.addEventListener("DOMContentLoaded", async () => {
         try { updateExportCount(); } catch (_) {}
         try { await initCountdownManager(); } catch (_) {}
         try { await initCatalogTools(); } catch (_) {}
+        try { await loadCreditsAdminPane(); } catch (_) {}
+        try { await loadWebhookSettings(); } catch (_) {}
+    }
+    if (document.getElementById('customCreditsAmount')) {
+        try { await loadCreditsBalance(); } catch (_) {}
     }
     try { await initSkuRequestForm(); } catch (_) {}
 });
