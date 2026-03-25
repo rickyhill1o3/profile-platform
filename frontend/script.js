@@ -1422,7 +1422,7 @@ async function loadCountdownAdminList() {
             <div class="stack-item">
               <div class="stack-item-meta">
                 <strong>${escapeHTML(item.label || countdownSiteLabel(item.site))}</strong>
-                <span class="subtle-text">${escapeHTML(countdownSiteLabel(item.site))} • ${escapeHTML(formatEasternTime(item.scheduled_for))} ET • ${escapeHTML(formatCredits(item.base_credit_cost || 0))}</span>
+                <span class="subtle-text">${escapeHTML(countdownSiteLabel(item.site))} • ${escapeHTML(formatEasternTime(item.scheduled_for))} ET • ${escapeHTML(formatCredits(item.default_credit_cost || 0))}
               </div>
               <div class="countdown-admin-actions">
                 <button class="btn" type="button" data-edit-countdown="${escapeHTML(item.id)}">Edit</button>
@@ -1438,7 +1438,7 @@ async function loadCountdownAdminList() {
                 document.getElementById('countdownLabel').value = item.label || '';
                 document.getElementById('countdownWhen').value = toEasternInputValue(item.scheduled_for);
                 document.getElementById('countdownOrder').value = item.sort_order || 0;
-                document.getElementById('countdownBaseCreditCost').value = Number(item.base_credit_cost || 0);
+                document.getElementById('countdownBaseCreditCost').value = Number(item.default_credit_cost || 0);
                 document.getElementById('countdownProductCredits').value = formatCountdownProductCredits(item.countdown_products || []);
                 document.getElementById('countdownActive').checked = !!item.is_active;
                 document.getElementById('countdownManagerMessage').textContent = 'Editing countdown.';
@@ -1473,7 +1473,7 @@ async function initCountdownManager() {
             label: document.getElementById('countdownLabel').value,
             scheduled_for: fromEasternInputValue(document.getElementById('countdownWhen').value),
             sort_order: Number(document.getElementById('countdownOrder').value || 0),
-            base_credit_cost: Number(document.getElementById('countdownBaseCreditCost').value || 0),
+            default_credit_cost: Number(document.getElementById('countdownBaseCreditCost').value || 0),
             countdown_products: parseCountdownProductCredits(document.getElementById('countdownProductCredits').value),
             is_active: document.getElementById('countdownActive').checked
         };
