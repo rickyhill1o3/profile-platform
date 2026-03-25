@@ -9,8 +9,6 @@ const bodyParser = require("body-parser");
 const Stripe = require("stripe");
 const registerProductCatalogRoutes = require("./product-catalog-routes");
 
-const fetch = require("node-fetch");
-
 const supabase = require("./database");
 const { encrypt, decrypt } = require("./encryption");
 
@@ -916,7 +914,7 @@ async function sendSanitizedDiscordWebhook(order, userEmail = '') {
     for (let attempt = 1; attempt <= 3; attempt++) {
         console.log(`Discord relay attempt ${attempt} -> ${webhookUrl.slice(0, 40)}...`);
 
-        const response = await fetch(webhookUrl, {
+        const response = await globalThis.fetch(webhookUrl, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body
