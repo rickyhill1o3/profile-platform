@@ -1122,11 +1122,32 @@ async function validateInboundWebhookToken(req) {
 
 app.post(["/webhooks/orders", "/webhooks/orders/:token"], async (req, res) => {
     try {
+        console.log("Inbound webhook hit", {
+            path: req.originalUrl,
+            hasToken: !!req.params.token,
+            tokenPreview: req.params.token ? String(req.params.token).slice(0, 8) : null
+        });
+
+        const active = await getActiveInboundWebhook();
+        console.log("Active webhook token preview:", active?.token ? String(active.token).slice(0, 8) : null);
+
         const allowed = await validateInboundWebhookToken(req);
-        if (!allowed) return res.status(401).json({ error: "Invalid webhook url" });
+
+        if (!allowed) {
+            console.log("Inbound webhook rejected: invalid token", {
+                provided: req.params.token ? String(req.params.token).slice(0, 8) : null,
+                expected: active?.token ? String(active.token).slice(0, 8) : null
+            });
+            return res.status(401).json({ error: "Invalid webhook url" });
+        }
+
+        console.log("Inbound webhook accepted");
+
         const result = await recordSuccessfulCheckout(req.body || {});
+        console.log("Inbound webhook processed successfully");
         res.json({ success: true, ...result });
     } catch (err) {
+        console.error("Inbound webhook error:", err);
         res.status(400).json({ error: err.message });
     }
 });
