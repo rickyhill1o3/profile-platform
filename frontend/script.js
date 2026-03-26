@@ -1822,13 +1822,33 @@ function purchaseCustomCredits() {
 async function loadWebhookSettings() {
     const urlInput = document.getElementById('websiteWebhookUrl');
     const discordInput = document.getElementById('discordRelayWebhookUrl');
+    const adminDiscordInput = document.getElementById('adminDiscordRelayWebhookUrl');
+    const adminBrandInput = document.getElementById('adminBrandLabel');
     const message = document.getElementById('webhookSettingsMessage');
-    if (!urlInput || !discordInput) return;
+    const createButton = document.getElementById('createWebhookButton');
+    const superAdminField = document.getElementById('superAdminDiscordField');
+
+    if (!urlInput) return;
+
     try {
         const data = await authJSON(API + '/admin/webhooks/settings');
         urlInput.value = data.inbound_webhook_url || '';
-        discordInput.value = data.discord_webhook_url || '';
-        if (message) message.textContent = data.inbound_webhook_url ? 'Webhook settings loaded.' : 'No website webhook created yet.';
+        if (discordInput) discordInput.value = data.discord_webhook_url || '';
+        if (adminDiscordInput) adminDiscordInput.value = data.admin_discord_webhook_url || '';
+        if (adminBrandInput) adminBrandInput.value = data.admin_brand_label || '';
+
+        if (createButton) {
+            createButton.style.display = data.can_create_inbound ? '' : 'none';
+        }
+        if (superAdminField) {
+            superAdminField.style.display = data.is_super_admin ? '' : 'none';
+        }
+
+        if (message) {
+            message.textContent = data.inbound_webhook_url
+                ? 'Webhook settings loaded.'
+                : 'No shared website webhook created yet.';
+        }
     } catch (err) {
         if (message) message.textContent = err.message;
     }
@@ -1849,15 +1869,59 @@ async function createWebsiteWebhook() {
 
 async function saveWebhookSettings() {
     const discordInput = document.getElementById('discordRelayWebhookUrl');
+    const adminDiscordInput = document.getElementById('adminDiscordRelayWebhookUrl');
+    const adminBrandInput = document.getElementById('adminBrandLabel');
     const message = document.getElementById('webhookSettingsMessage');
+
     try {
-        await authJSON(API + '/admin/webhooks/settings', { method: 'POST', body: JSON.stringify({ discord_webhook_url: discordInput ? discordInput.value : '' }) });
-        if (message) message.textContent = 'Discord webhook saved.';
+        await authJSON(API + '/admin/webhooks/settings', {
+            method: 'POST',
+            body: JSON.stringify({
+                discord_webhook_url: discordInput ? discordInput.value : '',
+                admin_discord_webhook_url: adminDiscordInput ? adminDiscordInput.value : '',
+                admin_brand_label: adminBrandInput ? adminBrandInput.value : ''
+            })
+        });
+
+        if (message) message.textContent = 'Webhook settings saved.';
     } catch (err) {
         if (message) message.textContent = err.message;
     }
 }
 
+async function loadUserSettings() {
+    const input = document.getElementById('userDiscordHandle');
+    const message = document.getElementById('userSettingsMessage');
+    if (!input) return;
+
+    try {
+        const data = await authJSON(API + '/user/settings');
+        input.value = data.discord_handle || '';
+        if (message) message.textContent = 'Discord settings loaded.';
+    } catch (err) {
+        if (message) message.textContent = err.message;
+    }
+}
+
+async function saveUserSettings() {
+    const input = document.getElementById('userDiscordHandle');
+    const message = document.getElementById('userSettingsMessage');
+    if (!input) return;
+
+    try {
+        const data = await authJSON(API + '/user/settings', {
+            method: 'POST',
+            body: JSON.stringify({
+                discord_handle: input.value || ''
+            })
+        });
+
+        input.value = data.discord_handle || '';
+        if (message) message.textContent = 'Discord handle saved.';
+    } catch (err) {
+        if (message) message.textContent = err.message;
+    }
+}
 
 async function loadUserCreditReceipt(userId) {
     const summary = document.getElementById('creditReceiptSummary');
@@ -1874,7 +1938,7 @@ async function loadUserCreditReceipt(userId) {
         const user = data.user || {};
         const balance = Number(data.balance || 0);
         summary.innerHTML = `
-            <strong>${escapeHTML(user.email || '-') }</strong>
+            <strong>${escapeHTML(user.email || '-')}</strong>
             <span class="subtle-text"> • Balance: ${escapeHTML(String(balance))} credits • Granted: ${escapeHTML(String(data.lifetime_credits_granted || 0))} • Spent: ${escapeHTML(String(data.lifetime_credits_spent || 0))} • ${data.needs_removal ? 'Needs removal until positive balance' : 'Eligible / positive balance'}</span>
         `;
 
@@ -2021,6 +2085,9 @@ document.addEventListener("DOMContentLoaded", async () => {
         try { await initCatalogTools(); } catch (_) { }
         try { await loadCreditsAdminPane(); } catch (_) { }
         try { await loadWebhookSettings(); } catch (_) { }
+    }
+    if (document.getElementById('userDiscordHandle')) {
+        try { await loadUserSettings(); } catch (_) { }
     }
     if (document.getElementById('customCreditsAmount')) {
         try { await loadCreditsBalance(); } catch (_) { }

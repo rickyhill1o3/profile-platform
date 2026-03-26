@@ -819,6 +819,45 @@ async function setAppSetting(key, value) {
     return value;
 }
 
+function getAdminWebhookSettingKey(userId) {
+    return `admin_webhook_settings:${userId}`;
+}
+
+function getUserSettingsKey(userId) {
+    return `user_settings:${userId}`;
+}
+
+async function getAdminWebhookSettings(userId) {
+    if (!userId) return {};
+    return await getAppSetting(getAdminWebhookSettingKey(userId), {});
+}
+
+async function setAdminWebhookSettings(userId, value) {
+    if (!userId) throw new Error("Admin user id is required");
+    return await setAppSetting(getAdminWebhookSettingKey(userId), value || {});
+}
+
+async function getUserSettings(userId) {
+    if (!userId) return {};
+    return await getAppSetting(getUserSettingsKey(userId), {});
+}
+
+async function setUserSettings(userId, value) {
+    if (!userId) throw new Error("User id is required");
+    return await setAppSetting(getUserSettingsKey(userId), value || {});
+}
+
+function normalizeDiscordHandle(value = '') {
+    return String(value || '').trim();
+}
+
+function getCheckoutBannerText(brandLabel = '') {
+    const extra = String(brandLabel || '').trim();
+    return extra
+        ? `THANK YOU FOR CHECKING OUT WITH THE SHORE SHACK x ${extra.toUpperCase()}`
+        : 'THANK YOU FOR CHECKING OUT WITH THE SHORE SHACK';
+}
+
 function getApiBaseUrl(req) {
     const configured = String(process.env.PUBLIC_API_BASE_URL || process.env.API_BASE_URL || '').trim().replace(/\/$/, '');
     if (configured) return configured;
@@ -858,18 +897,23 @@ function maskEmail(email = '') {
     return `${maskedName}@${domain}`;
 }
 
-async function sendSanitizedDiscordWebhook(order, userEmail = '') {
-    const settings = await getAppSetting('webhook_settings', {});
-    const webhookUrl = String(settings?.discord_webhook_url || '').trim();
-
-    if (!webhookUrl) {
-        console.log('Discord relay skipped: no discord_webhook_url saved in webhook_settings');
+async function sendDiscordWebhookToTarget({
+    webhookUrl,
+    order,
+    userEmail = '',
+    discordHandle = '',
+    brandLabel = '',
+    username = 'The Shore Shack'
+}) {
+    const trimmedWebhookUrl = String(webhookUrl || '').trim();
+    if (!trimmedWebhookUrl) {
         return { skipped: 'discord_webhook_not_configured' };
     }
 
     const payload = order.raw_payload || {};
     const normalized = normalizeIncomingOrderPayload(payload);
     const isInsufficient = String(order.status || '') === 'insufficient_credits';
+    const mentionText = normalizeDiscordHandle(discordHandle) || maskEmail(userEmail);
 
     const embed = {
         title: isInsufficient
@@ -877,22 +921,17 @@ async function sendSanitizedDiscordWebhook(order, userEmail = '') {
             : `Successful Checkout • ${order.site || normalized.site || order.source || 'Bot'}`,
         description: normalized.product_name || order.product_name || 'Checkout received',
         fields: [
-            {
-                name: 'Message',
-                value: 'Thank you for checking out with The Shore Shack',
-                inline: false
-            },
             { name: 'Site', value: String(order.site || normalized.site || '-'), inline: true },
             { name: 'Source', value: String(order.source || normalized.source || '-'), inline: true },
             { name: 'Quantity', value: String(normalized.quantity || 1), inline: true },
             { name: 'Price', value: normalized.price ? `$${Number(normalized.price).toFixed(2)}` : '-', inline: true },
             { name: 'Credits', value: String(order.credits_charged || 0), inline: true },
-            { name: 'User', value: maskEmail(userEmail), inline: true }
+            { name: 'User', value: mentionText || '-', inline: true }
         ],
         footer: {
             text: isInsufficient
                 ? 'Order saved without charging credits'
-                : 'Private order details removed'
+                : 'Youve Been Served by The Shore Shack'
         },
         timestamp: new Date().toISOString()
     };
@@ -911,15 +950,15 @@ async function sendSanitizedDiscordWebhook(order, userEmail = '') {
     }
 
     const body = JSON.stringify({
-        username: 'The Shore Shack',
-        content: 'Thank You',
+        username,
+        content: getCheckoutBannerText(brandLabel),
         embeds: [embed]
     });
 
     for (let attempt = 1; attempt <= 3; attempt++) {
-        console.log(`Discord relay attempt ${attempt} -> ${webhookUrl.slice(0, 40)}...`);
+        console.log(`Discord relay attempt ${attempt} -> ${trimmedWebhookUrl.slice(0, 40)}...`);
 
-        const response = await globalThis.fetch(webhookUrl, {
+        const response = await globalThis.fetch(trimmedWebhookUrl, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body
@@ -931,7 +970,6 @@ async function sendSanitizedDiscordWebhook(order, userEmail = '') {
         }
 
         const text = await response.text().catch(() => '');
-
         console.error(`Discord relay response ${response.status} on attempt ${attempt}: ${text}`);
 
         if (response.status === 429 && attempt < 3) {
@@ -943,6 +981,63 @@ async function sendSanitizedDiscordWebhook(order, userEmail = '') {
     }
 
     return { skipped: 'unknown' };
+}
+
+async function sendCheckoutDiscordNotifications(order, user) {
+    const results = [];
+    const userEmail = String(user?.email || '');
+    const userSettings = user?.id ? await getUserSettings(user.id) : {};
+    const discordHandle = normalizeDiscordHandle(userSettings?.discord_handle || '');
+
+    // Always send to super admin / global webhook
+    const globalSettings = await getAppSetting('webhook_settings', {});
+    const globalWebhookUrl = String(globalSettings?.discord_webhook_url || '').trim();
+
+    if (globalWebhookUrl) {
+        results.push({
+            scope: 'super_admin',
+            ...(await sendDiscordWebhookToTarget({
+                webhookUrl: globalWebhookUrl,
+                order,
+                userEmail,
+                discordHandle,
+                brandLabel: '',
+                username: 'The Shore Shack'
+            }))
+        });
+    } else {
+        results.push({ scope: 'super_admin', skipped: 'discord_webhook_not_configured' });
+    }
+
+    // Also send to owner admin webhook if the user belongs to an admin
+    if (user?.owner_admin_id) {
+        const adminSettings = await getAdminWebhookSettings(user.owner_admin_id);
+        const adminWebhookUrl = String(adminSettings?.discord_webhook_url || '').trim();
+        const brandLabel = String(adminSettings?.brand_label || '').trim();
+
+        if (adminWebhookUrl) {
+            results.push({
+                scope: 'owner_admin',
+                admin_user_id: user.owner_admin_id,
+                ...(await sendDiscordWebhookToTarget({
+                    webhookUrl: adminWebhookUrl,
+                    order,
+                    userEmail,
+                    discordHandle,
+                    brandLabel,
+                    username: brandLabel || 'The Shore Shack'
+                }))
+            });
+        } else {
+            results.push({
+                scope: 'owner_admin',
+                admin_user_id: user.owner_admin_id,
+                skipped: 'discord_webhook_not_configured'
+            });
+        }
+    }
+
+    return results;
 }
 
 async function recordSuccessfulCheckout(payload) {
@@ -1001,12 +1096,12 @@ async function recordSuccessfulCheckout(payload) {
         });
     }
 
-    let discordRelay = { skipped: "not_attempted" };
+    let discordRelay = [{ skipped: "not_attempted" }];
     try {
-        discordRelay = await sendSanitizedDiscordWebhook(order, user.email);
+        discordRelay = await sendCheckoutDiscordNotifications(order, user);
     } catch (discordErr) {
         console.error("Discord relay failed:", discordErr);
-        discordRelay = { error: discordErr.message || String(discordErr) };
+        discordRelay = [{ error: discordErr.message || String(discordErr) }];
     }
 
     return {
@@ -1401,12 +1496,18 @@ app.post("/admin/orders/:id/refund-credits", auth, admin, async (req, res) => {
 
 app.get('/admin/webhooks/settings', auth, admin, async (req, res) => {
     try {
+        const currentUser = await getCurrentUser(req);
         const active = await getActiveInboundWebhook();
-        const settings = await getAppSetting('webhook_settings', {});
+        const globalSettings = await getAppSetting('webhook_settings', {});
+        const adminSettings = await getAdminWebhookSettings(currentUser.id);
+
         res.json({
             inbound_webhook_url: active?.token ? `${getApiBaseUrl(req)}/webhooks/orders/${active.token}` : '',
-            discord_webhook_url: String(settings?.discord_webhook_url || ''),
-            has_inbound_webhook: !!active?.token
+            discord_webhook_url: String(globalSettings?.discord_webhook_url || ''),
+            admin_discord_webhook_url: String(adminSettings?.discord_webhook_url || ''),
+            admin_brand_label: String(adminSettings?.brand_label || ''),
+            can_create_inbound: currentUser.role === 'super_admin',
+            is_super_admin: currentUser.role === 'super_admin'
         });
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -1415,8 +1516,43 @@ app.get('/admin/webhooks/settings', auth, admin, async (req, res) => {
 
 app.post('/admin/webhooks/incoming/create', auth, admin, async (req, res) => {
     try {
-        const webhook = await createInboundWebhook(req, req.user_id);
+        const currentUser = await getCurrentUser(req);
+        if (currentUser.role !== 'super_admin') {
+            return res.status(403).json({ error: 'Only super admin can create the shared website webhook.' });
+        }
+
+        const webhook = await createInboundWebhook(req, currentUser.id);
         res.json({ success: true, inbound_webhook_url: webhook.url });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.post('/admin/webhooks/settings', auth, admin, async (req, res) => {
+    try {
+        const currentUser = await getCurrentUser(req);
+
+        const adminDiscordWebhookUrl = String(req.body?.admin_discord_webhook_url || '').trim();
+        const adminBrandLabel = String(req.body?.admin_brand_label || '').trim();
+
+        await setAdminWebhookSettings(currentUser.id, {
+            discord_webhook_url: adminDiscordWebhookUrl,
+            brand_label: adminBrandLabel
+        });
+
+        const response = {
+            success: true,
+            admin_discord_webhook_url: adminDiscordWebhookUrl,
+            admin_brand_label: adminBrandLabel
+        };
+
+        if (currentUser.role === 'super_admin') {
+            const discordWebhookUrl = String(req.body?.discord_webhook_url || '').trim();
+            await setAppSetting('webhook_settings', { discord_webhook_url: discordWebhookUrl });
+            response.discord_webhook_url = discordWebhookUrl;
+        }
+
+        res.json(response);
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
@@ -1537,7 +1673,8 @@ app.post("/auth/login", async (req, res) => {
             role: user.role,
             owner_admin_id: user.owner_admin_id || null,
             revoked: !!user.revoked,
-            credits_balance: creditBalance
+            credits_balance: creditBalance,
+            discord_handle: normalizeDiscordHandle((await getUserSettings(user.id))?.discord_handle || '')
         }
     });
 });
@@ -1555,7 +1692,8 @@ app.get("/auth/me", auth, async (req, res) => {
                 role: user.role,
                 owner_admin_id: user.owner_admin_id || null,
                 revoked: !!user.revoked,
-                credits_balance: creditBalance
+                credits_balance: creditBalance,
+                discord_handle: normalizeDiscordHandle((await getUserSettings(user.id))?.discord_handle || '')
             }
         });
     } catch (err) {
@@ -1563,6 +1701,29 @@ app.get("/auth/me", auth, async (req, res) => {
     }
 });
 
+app.get("/user/settings", auth, async (req, res) => {
+    try {
+        const settings = await getUserSettings(req.user_id);
+        res.json({
+            discord_handle: normalizeDiscordHandle(settings?.discord_handle || '')
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.post("/user/settings", auth, async (req, res) => {
+    try {
+        const discordHandle = normalizeDiscordHandle(req.body?.discord_handle || '');
+        const updated = await setUserSettings(req.user_id, { discord_handle: discordHandle });
+        res.json({
+            success: true,
+            discord_handle: normalizeDiscordHandle(updated?.discord_handle || discordHandle)
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
 
 app.post("/auth/forgot-password", async (req, res) => {
     try {

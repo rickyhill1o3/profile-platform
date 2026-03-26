@@ -52,6 +52,21 @@
       </div>
     </section>
 
+    <section class="panel banner banner-soft" id="userDiscordSettingsPanel">
+      <strong>Discord notifications</strong>
+      <p class="subtle-text">Add your Discord handle so checkout webhooks can tag you instead of masking your email.</p>
+      <div class="form-grid">
+        <div class="field field--full">
+          <label for="userDiscordHandle">Discord Handle</label>
+          <input class="input" id="userDiscordHandle" placeholder="@yourname or your Discord mention text" />
+        </div>
+        <div class="field field--full panel-actions">
+          <button class="btn btn-primary" type="button" onclick="saveUserSettings()">Save Discord Handle</button>
+          <span id="userSettingsMessage" class="subtle-text"></span>
+        </div>
+      </div>
+    </section>
+
     <section class="panel countdown-panel">
       <div class="panel-header">
         <div>
