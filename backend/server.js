@@ -925,8 +925,7 @@ async function sendDiscordWebhookToTarget({
             { name: 'Source', value: String(order.source || normalized.source || '-'), inline: true },
             { name: 'Quantity', value: String(normalized.quantity || 1), inline: true },
             { name: 'Price', value: normalized.price ? `$${Number(normalized.price).toFixed(2)}` : '-', inline: true },
-            { name: 'Credits', value: String(order.credits_charged || 0), inline: true },
-            { name: 'User', value: mentionText || '-', inline: true }
+            { name: 'Credits', value: String(order.credits_charged || 0), inline: true }
         ],
         footer: {
             text: isInsufficient
@@ -951,7 +950,7 @@ async function sendDiscordWebhookToTarget({
 
     const body = JSON.stringify({
         username,
-        content: getCheckoutBannerText(brandLabel),
+        content: `Thank you ${mentionText} for checking out with The Shore Shack${brandLabel ? ` x ${brandLabel.toUpperCase()}` : ''}`,
         embeds: [embed]
     });
 
