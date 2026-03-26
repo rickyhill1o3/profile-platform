@@ -851,11 +851,70 @@ function normalizeDiscordHandle(value = '') {
     return String(value || '').trim();
 }
 
-function getCheckoutBannerText(brandLabel = '') {
-    const extra = String(brandLabel || '').trim();
-    return extra
-        ? `THANK YOU FOR CHECKING OUT WITH THE SHORE SHACK x ${extra.toUpperCase()}`
-        : 'THANK YOU FOR CHECKING OUT WITH THE SHORE SHACK';
+function normalizeDiscordUserId(value = '') {
+    return String(value || '').trim();
+}
+
+function formatDiscordMention(value = '', fallbackEmail = '') {
+    const raw = String(value || '').trim();
+    if (!raw) return maskEmail(fallbackEmail);
+    if (/^<@!?\d{17,20}>$/.test(raw)) return raw;
+    if (/^\d{17,20}$/.test(raw)) return `<@${raw}>`;
+    return raw;
+}
+
+function getCheckoutBannerText(mentionText = '', brandLabel = '') {
+    const brand = String(brandLabel || '').trim();
+    const mention = String(mentionText || '').trim() || 'there';
+    return brand
+        ? `Thank you ${mention} for checking out with The Shore Shack x ${brand.toUpperCase()}`
+        : `Thank you ${mention} for checking out with The Shore Shack`;
+}
+
+const discordWebhookQueues = new Map();
+
+function getDiscordQueue(webhookUrl) {
+    const key = String(webhookUrl || '').trim();
+    if (!key) throw new Error('Webhook URL is required for queue');
+    if (!discordWebhookQueues.has(key)) {
+        discordWebhookQueues.set(key, { running: false, jobs: [], lastSentAt: 0 });
+    }
+    return discordWebhookQueues.get(key);
+}
+
+function enqueueDiscordWebhookJob(webhookUrl, job) {
+    return new Promise((resolve, reject) => {
+        const queue = getDiscordQueue(webhookUrl);
+        queue.jobs.push({ webhookUrl, job, resolve, reject, enqueuedAt: Date.now() });
+        processDiscordQueue(webhookUrl).catch((err) => {
+            console.error('Discord queue processor error:', err);
+        });
+    });
+}
+
+async function processDiscordQueue(webhookUrl) {
+    const queue = getDiscordQueue(webhookUrl);
+    if (queue.running) return;
+    queue.running = true;
+    try {
+        while (queue.jobs.length) {
+            const item = queue.jobs.shift();
+            try {
+                const now = Date.now();
+                const minGapMs = 1200;
+                const waitMs = Math.max(0, minGapMs - (now - queue.lastSentAt));
+                if (waitMs > 0) await new Promise((resolve) => setTimeout(resolve, waitMs));
+                const result = await item.job();
+                queue.lastSentAt = Date.now();
+                item.resolve(result);
+            } catch (err) {
+                queue.lastSentAt = Date.now();
+                item.reject(err);
+            }
+        }
+    } finally {
+        queue.running = false;
+    }
 }
 
 function getApiBaseUrl(req) {
@@ -897,71 +956,6 @@ function maskEmail(email = '') {
     return `${maskedName}@${domain}`;
 }
 
-const discordWebhookQueues = new Map();
-
-function getDiscordQueue(webhookUrl) {
-    const key = String(webhookUrl || '').trim();
-    if (!key) throw new Error('Webhook URL is required for queue');
-
-    if (!discordWebhookQueues.has(key)) {
-        discordWebhookQueues.set(key, {
-            running: false,
-            jobs: [],
-            lastSentAt: 0
-        });
-    }
-
-    return discordWebhookQueues.get(key);
-}
-
-function enqueueDiscordWebhookJob(webhookUrl, job) {
-    return new Promise((resolve, reject) => {
-        const queue = getDiscordQueue(webhookUrl);
-        queue.jobs.push({
-            webhookUrl,
-            job,
-            resolve,
-            reject,
-            enqueuedAt: Date.now()
-        });
-        processDiscordQueue(webhookUrl).catch((err) => {
-            console.error('Discord queue processor error:', err);
-        });
-    });
-}
-
-async function processDiscordQueue(webhookUrl) {
-    const queue = getDiscordQueue(webhookUrl);
-    if (queue.running) return;
-
-    queue.running = true;
-
-    try {
-        while (queue.jobs.length) {
-            const item = queue.jobs.shift();
-
-            try {
-                // small spacing between sends on the same webhook
-                const now = Date.now();
-                const minGapMs = 1200;
-                const waitMs = Math.max(0, minGapMs - (now - queue.lastSentAt));
-                if (waitMs > 0) {
-                    await new Promise((resolve) => setTimeout(resolve, waitMs));
-                }
-
-                const result = await item.job();
-                queue.lastSentAt = Date.now();
-                item.resolve(result);
-            } catch (err) {
-                queue.lastSentAt = Date.now();
-                item.reject(err);
-            }
-        }
-    } finally {
-        queue.running = false;
-    }
-}
-
 async function sendDiscordWebhookToTarget({
     webhookUrl,
     order,
@@ -978,7 +972,7 @@ async function sendDiscordWebhookToTarget({
     const payload = order.raw_payload || {};
     const normalized = normalizeIncomingOrderPayload(payload);
     const isInsufficient = String(order.status || '') === 'insufficient_credits';
-    const mentionText = normalizeDiscordHandle(discordHandle) || maskEmail(userEmail);
+    const mentionText = formatDiscordMention(discordHandle, userEmail);
 
     const embed = {
         title: isInsufficient
@@ -1013,70 +1007,55 @@ async function sendDiscordWebhookToTarget({
         embed.thumbnail = { url: normalized.image_url };
     }
 
-    const contentText = `Thank you ${mentionText} for checking out with The Shore Shack${brandLabel ? ` x ${brandLabel.toUpperCase()}` : ''}`;
-
     const body = JSON.stringify({
         username,
-        content: contentText,
+        content: getCheckoutBannerText(mentionText, brandLabel),
+        allowed_mentions: { parse: ['users'] },
         embeds: [embed]
     });
 
     return enqueueDiscordWebhookJob(trimmedWebhookUrl, async () => {
         for (let attempt = 1; attempt <= 5; attempt++) {
             console.log(`Discord queue send attempt ${attempt} -> ${trimmedWebhookUrl.slice(0, 40)}...`);
-
             const response = await globalThis.fetch(trimmedWebhookUrl, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body
             });
-
             if (response.ok) {
                 console.log(`Discord queue send success on attempt ${attempt}`);
                 return { success: true, attempt, queued: true };
             }
-
             const contentType = response.headers.get('content-type') || '';
-            let text = '';
+            let bodyText = '';
             let json = null;
-
             if (contentType.includes('application/json')) {
                 json = await response.json().catch(() => null);
-                text = JSON.stringify(json || {});
+                bodyText = JSON.stringify(json || {});
             } else {
-                text = await response.text().catch(() => '');
+                bodyText = await response.text().catch(() => '');
             }
-
-            console.error(`Discord queue send response ${response.status} on attempt ${attempt}: ${text}`);
-
+            console.error(`Discord queue send response ${response.status} on attempt ${attempt}: ${bodyText}`);
             if (response.status === 429) {
                 let retryAfterMs = 5000;
-
                 if (json?.retry_after != null) {
                     retryAfterMs = Math.ceil(Number(json.retry_after) * 1000);
                 } else {
                     const retryAfterHeader = response.headers.get('retry-after');
-                    if (retryAfterHeader) {
-                        retryAfterMs = Math.ceil(Number(retryAfterHeader) * 1000) || retryAfterMs;
-                    }
+                    if (retryAfterHeader) retryAfterMs = Math.ceil(Number(retryAfterHeader) * 1000) || retryAfterMs;
                 }
-
                 console.log(`Discord queue rate limited. Waiting ${retryAfterMs}ms before retry...`);
                 await new Promise((resolve) => setTimeout(resolve, retryAfterMs));
                 continue;
             }
-
-            // Cloudflare / hard block: back off harder
-            if (response.status === 403 || response.status === 1015 || text.includes('Error 1015') || text.includes('rate limited')) {
+            if (response.status === 403 || bodyText.includes('Error 1015') || bodyText.includes('rate limited')) {
                 const backoffMs = 15000 * attempt;
                 console.log(`Discord queue Cloudflare/backoff wait ${backoffMs}ms...`);
                 await new Promise((resolve) => setTimeout(resolve, backoffMs));
                 continue;
             }
-
-            throw new Error(`Discord webhook failed (${response.status}): ${text || response.statusText}`);
+            throw new Error(`Discord webhook failed (${response.status}): ${bodyText || response.statusText}`);
         }
-
         throw new Error('Discord webhook failed after maximum retry attempts');
     });
 }
@@ -1085,8 +1064,9 @@ async function sendCheckoutDiscordNotifications(order, user) {
     const results = [];
     const userEmail = String(user?.email || '');
     const userSettings = user?.id ? await getUserSettings(user.id) : {};
-    const discordHandle = normalizeDiscordHandle(userSettings?.discord_handle || '');
+    const discordHandle = normalizeDiscordUserId(userSettings?.discord_user_id || '');
 
+    // Always send to super admin / global webhook
     const globalSettings = await getAppSetting('webhook_settings', {});
     const globalWebhookUrl = String(globalSettings?.discord_webhook_url || '').trim();
 
@@ -1106,6 +1086,7 @@ async function sendCheckoutDiscordNotifications(order, user) {
         results.push({ scope: 'super_admin', skipped: 'discord_webhook_not_configured' });
     }
 
+    // Also send to owner admin webhook if the user belongs to an admin
     if (user?.owner_admin_id) {
         const adminSettings = await getAdminWebhookSettings(user.owner_admin_id);
         const adminWebhookUrl = String(adminSettings?.discord_webhook_url || '').trim();
@@ -1121,7 +1102,7 @@ async function sendCheckoutDiscordNotifications(order, user) {
                     userEmail,
                     discordHandle,
                     brandLabel,
-                    username: 'The Shore Shack'
+                    username: brandLabel || 'The Shore Shack'
                 }))
             });
         } else {
@@ -1770,7 +1751,7 @@ app.post("/auth/login", async (req, res) => {
             owner_admin_id: user.owner_admin_id || null,
             revoked: !!user.revoked,
             credits_balance: creditBalance,
-            discord_handle: normalizeDiscordHandle((await getUserSettings(user.id))?.discord_handle || '')
+            discord_user_id: normalizeDiscordUserId((await getUserSettings(user.id))?.discord_user_id || '')
         }
     });
 });
@@ -1789,7 +1770,7 @@ app.get("/auth/me", auth, async (req, res) => {
                 owner_admin_id: user.owner_admin_id || null,
                 revoked: !!user.revoked,
                 credits_balance: creditBalance,
-                discord_handle: normalizeDiscordHandle((await getUserSettings(user.id))?.discord_handle || '')
+                discord_user_id: normalizeDiscordUserId((await getUserSettings(user.id))?.discord_user_id || '')
             }
         });
     } catch (err) {
@@ -1801,7 +1782,7 @@ app.get("/user/settings", auth, async (req, res) => {
     try {
         const settings = await getUserSettings(req.user_id);
         res.json({
-            discord_handle: normalizeDiscordHandle(settings?.discord_handle || '')
+            discord_user_id: normalizeDiscordUserId(settings?.discord_user_id || '')
         });
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -1810,11 +1791,11 @@ app.get("/user/settings", auth, async (req, res) => {
 
 app.post("/user/settings", auth, async (req, res) => {
     try {
-        const discordHandle = normalizeDiscordHandle(req.body?.discord_handle || '');
-        const updated = await setUserSettings(req.user_id, { discord_handle: discordHandle });
+        const discordUserId = normalizeDiscordUserId(req.body?.discord_user_id || '');
+        const updated = await setUserSettings(req.user_id, { discord_user_id: discordUserId });
         res.json({
             success: true,
-            discord_handle: normalizeDiscordHandle(updated?.discord_handle || discordHandle)
+            discord_user_id: normalizeDiscordUserId(updated?.discord_user_id || discordUserId)
         });
     } catch (err) {
         res.status(500).json({ error: err.message });

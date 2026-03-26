@@ -1,162 +1,203 @@
 <!DOCTYPE html>
 <html lang="en">
-
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>User Dashboard</title>
   <link rel="stylesheet" href="styles.css" />
 </head>
-
 <body class="app-page">
   <div class="app-shell">
     <header class="topbar">
       <div>
         <p class="eyebrow">The Shore Shack TCG</p>
-        <h1>Dashboard</h1>
-        <p class="subtle-text">Create your store profiles, select your products, request missing SKUs, and track the
-          next release.</p>
+        <h1>User Dashboard</h1>
+        <p class="subtle-text">Manage your profiles, selections, credits, Discord notifications, and order history in one place.</p>
       </div>
       <div class="topbar-actions">
         <a class="btn" href="guide.html">User Guide</a>
         <button class="btn" id="adminPanelButton" style="display:none" onclick="openAdminPanel()">Admin Panel</button>
-        <button class="btn" onclick="location='profile.html'">Create / Edit Profiles</button>
         <button class="btn" onclick="goToChangePassword()">Change Password</button>
-        <button class="btn btn-primary" onclick="window.location.href='buy-credits.html'">Buy Credits</button>
         <button class="btn btn-danger" onclick="logout()">Logout</button>
       </div>
     </header>
 
     <section class="stats-grid">
-      <div class="stat-card"><span class="stat-label">All Profiles</span><strong class="stat-value"
-          id="profileCountStat">0</strong><span class="stat-help">Saved checkout profiles</span></div>
-      <div class="stat-card"><span class="stat-label">Amazon</span><strong class="stat-value"
-          id="amazonProfileCountStat">0</strong><span class="stat-help">Amazon-ready profiles</span></div>
-      <div class="stat-card"><span class="stat-label">Retail</span><strong class="stat-value"
-          id="retailProfileCountStat">0</strong><span class="stat-help">Target + Walmart profiles</span></div>
-      <div class="stat-card"><span class="stat-label">General</span><strong class="stat-value"
-          id="generalProfileCountStat">0</strong><span class="stat-help">Supreme or custom releases</span></div>
-      <div class="stat-card"><span class="stat-label">Credits</span><strong class="stat-value"
-          id="creditsBalanceStat">0</strong><span class="stat-help" id="creditsBalanceHelp">Available to spend</span>
-      </div>
+      <div class="stat-card"><span class="stat-label">All Profiles</span><strong class="stat-value" id="profileCountStat">0</strong><span class="stat-help">Saved checkout profiles</span></div>
+      <div class="stat-card"><span class="stat-label">Amazon</span><strong class="stat-value" id="amazonProfileCountStat">0</strong><span class="stat-help">Amazon-ready profiles</span></div>
+      <div class="stat-card"><span class="stat-label">Retail</span><strong class="stat-value" id="retailProfileCountStat">0</strong><span class="stat-help">Target + Walmart profiles</span></div>
+      <div class="stat-card"><span class="stat-label">General</span><strong class="stat-value" id="generalProfileCountStat">0</strong><span class="stat-help">Supreme or custom releases</span></div>
+      <div class="stat-card"><span class="stat-label">Credits</span><strong class="stat-value" id="creditsBalanceStat">0</strong><span class="stat-help" id="creditsBalanceHelp">Available to spend</span></div>
     </section>
 
-    <section class="panel banner banner-soft" id="creditsPanel">
-      <strong>Credit system</strong>
-      <p class="subtle-text">Credits are manually managed by admin and can also be purchased through Stripe. Successful
-        bot checkouts spend from this balance.</p>
-      <div class="panel-actions">
-        <button class="btn btn-primary" type="button" onclick="window.location.href='buy-credits.html'">Buy
-          Credits</button>
-        <span id="creditsPurchaseMessage" class="subtle-text"></span>
-      </div>
-    </section>
-
-    <section class="panel banner banner-soft" id="userDiscordSettingsPanel">
-      <strong>Discord notifications</strong>
-      <p class="subtle-text">Add your Discord handle so checkout webhooks can tag you instead of masking your email.</p>
-      <div class="form-grid">
-        <div class="field field--full">
-          <label for="userDiscordHandle">Discord Handle</label>
-          <input class="input" id="userDiscordHandle" placeholder="@yourname or your Discord mention text" />
-        </div>
-        <div class="field field--full panel-actions">
-          <button class="btn btn-primary" type="button" onclick="saveUserSettings()">Save Discord Handle</button>
-          <span id="userSettingsMessage" class="subtle-text"></span>
-        </div>
-      </div>
-    </section>
-
-    <section class="panel countdown-panel">
-      <div class="panel-header">
-        <div>
-          <p class="eyebrow">Live drop board</p>
-          <h2>Upcoming countdowns</h2>
-          <p class="subtle-text">These timers are visible to all users and update in real time.</p>
-        </div>
-      </div>
-      <div class="countdown-grid" data-countdown-feed data-empty-text="No countdowns are live yet."></div>
-    </section>
-
-    <div class="dashboard-layout">
-      <section class="panel" id="dashboard">
-        <div class="panel-header">
-          <div>
-            <h2>Your Profiles</h2>
-            <p class="subtle-text">Profiles are grouped by store. These saved checkout details are what the software
-              will use when it runs for your selected products.</p>
-          </div>
-          <div class="panel-actions">
-            <button class="btn btn-primary" onclick="location='profile.html'">Add Profile</button>
-          </div>
-        </div>
-      </section>
-
-      <aside class="panel products-panel">
-        <div class="panel-header">
-          <div>
-            <h2>Product Selections</h2>
-            <p class="subtle-text">Choose the products you want the software to run for. Profiles control checkout.
-              Product selections control what gets targeted.</p>
-          </div>
-          <div class="panel-actions">
-            <button class="btn btn-primary" id="saveProductPreferencesButton" type="button">Save Changes</button>
-          </div>
-        </div>
-
-        <div class="product-toolbar">
-          <div class="segmented segmented--wide">
-            <button type="button" class="segmented-btn is-active" data-product-site="amazon">Amazon</button>
-            <button type="button" class="segmented-btn" data-product-site="target">Target</button>
-            <button type="button" class="segmented-btn" data-product-site="walmart">Walmart</button>
-            <button type="button" class="segmented-btn" data-product-site="supreme">Supreme</button>
-            <button type="button" class="segmented-btn" data-product-site="pokemon">Pokémon Center</button>
-            <button type="button" class="segmented-btn" data-product-site="general">General</button>
-          </div>
-
-          <div class="toolbar-row">
-            <input id="productSearch" class="input" type="search" placeholder="Search product name, brand, or SKU" />
-            <label class="checkbox-inline">
-              <input id="productSelectedOnly" type="checkbox" />
-              <span>Selected only</span>
-            </label>
-          </div>
-
-          <div class="banner banner-soft">
-            <strong>Missing a SKU?</strong>
-            <p class="subtle-text">Request any Amazon, Target, Walmart, Supreme, Pokémon Center, or General item. All
-              requests stay pending until an admin reviews and approves them.</p>
-            <form id="skuRequestForm" class="sku-request-form">
-              <select class="input" id="skuRequestSite">
-                <option value="amazon">Amazon</option>
-                <option value="target">Target</option>
-                <option value="walmart">Walmart</option>
-                <option value="supreme">Supreme</option>
-                <option value="pokemon">Pokémon Center</option>
-                <option value="general">General</option>
-              </select>
-              <input class="input" id="skuRequestValue" type="text"
-                placeholder="Enter SKU / ASIN / DPCI / release label" />
-              <button class="btn btn-primary" type="submit">Request SKU</button>
-            </form>
-            <div id="skuRequestMessage" class="subtle-text"></div>
-          </div>
-
-          <div id="productCategoryChips" class="chip-row"></div>
-
-          <div class="toolbar-row toolbar-row--spread">
-            <span id="productSelectionSummary" class="subtle-text"></span>
-            <span id="productSaveMessage" class="success-text"></span>
-          </div>
-        </div>
-
-        <div id="productSelectionTableBody" class="product-list"></div>
+    <div class="admin-layout-shell">
+      <aside class="admin-sidebar panel">
+        <p class="eyebrow">Dashboard Navigation</p>
+        <button class="admin-nav-button is-active" type="button" data-user-nav="profiles">Profiles</button>
+        <button class="admin-nav-button" type="button" data-user-nav="selections">Products + Countdowns</button>
+        <button class="admin-nav-button" type="button" data-user-nav="credits">Buy Credits</button>
+        <button class="admin-nav-button" type="button" data-user-nav="history">Order History</button>
+        <button class="admin-nav-button" type="button" data-user-nav="discord">Discord Settings</button>
       </aside>
+
+      <div class="admin-content-stack">
+        <section class="admin-pane is-active" data-user-pane="profiles">
+          <section class="panel banner banner-soft">
+            <strong>Profile generator</strong>
+            <p class="subtle-text">Create or edit the checkout profiles your bot uses for Walmart, Target, Amazon, Supreme, and general releases.</p>
+            <div class="panel-actions">
+              <button class="btn btn-primary" onclick="location='profile.html'">Create / Edit Profiles</button>
+            </div>
+          </section>
+          <section class="panel" id="dashboard">
+            <div class="panel-header">
+              <div>
+                <h2>Your Profiles</h2>
+                <p class="subtle-text">Profiles are grouped by store. These saved checkout details are what the software will use when it runs for your selected products.</p>
+              </div>
+              <div class="panel-actions">
+                <button class="btn btn-primary" onclick="location='profile.html'">Add Profile</button>
+              </div>
+            </div>
+          </section>
+        </section>
+
+        <section class="admin-pane" data-user-pane="selections">
+          <section class="panel countdown-panel">
+            <div class="panel-header">
+              <div>
+                <p class="eyebrow">Live drop board</p>
+                <h2>Upcoming countdowns</h2>
+                <p class="subtle-text">These timers are visible to all users and update in real time.</p>
+              </div>
+            </div>
+            <div class="countdown-grid" data-countdown-feed data-empty-text="No countdowns are live yet."></div>
+          </section>
+
+          <section class="panel products-panel">
+            <div class="panel-header">
+              <div>
+                <h2>Product Selections</h2>
+                <p class="subtle-text">Choose the products you want the software to run for. Profiles control checkout. Product selections control what gets targeted.</p>
+              </div>
+              <div class="panel-actions">
+                <button class="btn btn-primary" id="saveProductPreferencesButton" type="button">Save Changes</button>
+              </div>
+            </div>
+
+            <div class="product-toolbar">
+              <div class="segmented segmented--wide">
+                <button type="button" class="segmented-btn is-active" data-product-site="amazon">Amazon</button>
+                <button type="button" class="segmented-btn" data-product-site="target">Target</button>
+                <button type="button" class="segmented-btn" data-product-site="walmart">Walmart</button>
+                <button type="button" class="segmented-btn" data-product-site="supreme">Supreme</button>
+                <button type="button" class="segmented-btn" data-product-site="pokemon">Pokémon Center</button>
+                <button type="button" class="segmented-btn" data-product-site="general">General</button>
+              </div>
+
+              <div class="toolbar-row">
+                <input id="productSearch" class="input" type="search" placeholder="Search product name, brand, or SKU" />
+                <label class="checkbox-inline">
+                  <input id="productSelectedOnly" type="checkbox" />
+                  <span>Selected only</span>
+                </label>
+              </div>
+
+              <div class="banner banner-soft">
+                <strong>Missing a SKU?</strong>
+                <p class="subtle-text">Request any Amazon, Target, Walmart, Supreme, Pokémon Center, or General item. All requests stay pending until an admin reviews and approves them.</p>
+                <form id="skuRequestForm" class="sku-request-form">
+                  <select class="input" id="skuRequestSite">
+                    <option value="amazon">Amazon</option>
+                    <option value="target">Target</option>
+                    <option value="walmart">Walmart</option>
+                    <option value="supreme">Supreme</option>
+                    <option value="pokemon">Pokémon Center</option>
+                    <option value="general">General</option>
+                  </select>
+                  <input class="input" id="skuRequestValue" type="text" placeholder="Enter SKU / ASIN / DPCI / release label" />
+                  <button class="btn btn-primary" type="submit">Request SKU</button>
+                </form>
+                <div id="skuRequestMessage" class="subtle-text"></div>
+              </div>
+
+              <div id="productCategoryChips" class="chip-row"></div>
+
+              <div class="toolbar-row toolbar-row--spread">
+                <span id="productSelectionSummary" class="subtle-text"></span>
+                <span id="productSaveMessage" class="success-text"></span>
+              </div>
+            </div>
+
+            <div id="productSelectionTableBody" class="product-list"></div>
+          </section>
+        </section>
+
+        <section class="admin-pane" data-user-pane="credits">
+          <section class="panel banner banner-soft" id="creditsPanel">
+            <strong>Credit system</strong>
+            <p class="subtle-text">Credits are manually managed by admin and can also be purchased through Stripe. Successful bot checkouts spend from this balance.</p>
+            <div class="panel-actions">
+              <button class="btn btn-primary" type="button" onclick="window.location.href='buy-credits.html'">Buy Credits</button>
+              <span id="creditsPurchaseMessage" class="subtle-text"></span>
+            </div>
+          </section>
+        </section>
+
+        <section class="admin-pane" data-user-pane="history">
+          <section class="panel">
+            <div class="panel-header">
+              <div>
+                <h2>Your Order History</h2>
+                <p class="subtle-text">Review successful checkouts and all credit activity linked to your account.</p>
+              </div>
+            </div>
+            <div class="banner banner-soft" id="userHistorySummary">Loading your history...</div>
+            <div class="selection-grid-two">
+              <div class="selection-card">
+                <h3>Orders</h3>
+                <div class="table-wrap table-wrap--admin-scroll">
+                  <table class="admin-table">
+                    <thead><tr><th>When</th><th>Site</th><th>Product</th><th>Status</th><th>Credits</th></tr></thead>
+                    <tbody id="userHistoryOrdersBody"><tr><td colspan="5">Loading...</td></tr></tbody>
+                  </table>
+                </div>
+              </div>
+              <div class="selection-card">
+                <h3>Credit Transactions</h3>
+                <div class="table-wrap table-wrap--admin-scroll">
+                  <table class="admin-table">
+                    <thead><tr><th>When</th><th>Change</th><th>Reason</th><th>Note</th></tr></thead>
+                    <tbody id="userHistoryTransactionsBody"><tr><td colspan="4">Loading...</td></tr></tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          </section>
+        </section>
+
+        <section class="admin-pane" data-user-pane="discord">
+          <section class="panel banner banner-soft" id="userDiscordSettingsPanel">
+            <strong>Discord notifications</strong>
+            <p class="subtle-text">Paste your Discord User ID so checkout webhooks can truly ping you. In Discord, turn on Developer Mode, right click your profile, and choose Copy User ID.</p>
+            <div class="form-grid">
+              <div class="field field--full">
+                <label for="userDiscordHandle">Discord User ID</label>
+                <input class="input" id="userDiscordHandle" placeholder="123456789012345678" />
+                <div class="subtle-text">Accepted formats: raw user ID or a full mention like &lt;@123456789012345678&gt;.</div>
+              </div>
+              <div class="field field--full panel-actions">
+                <button class="btn btn-primary" type="button" onclick="saveUserSettings()">Save Discord User ID</button>
+                <span id="userSettingsMessage" class="subtle-text"></span>
+              </div>
+            </div>
+          </section>
+        </section>
+      </div>
     </div>
   </div>
 
   <script src="products.js?v=20260323b" defer></script>
-  <script src="script.js?v=20260322b" defer></script>
+  <script src="script.js?v=20260326a" defer></script>
 </body>
-
 </html>

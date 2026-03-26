@@ -57,6 +57,15 @@ function formatCountdownProductCredits(rows) {
     }).join("\n");
 }
 
+function formatDateTime(value) {
+    if (!value) return '—';
+    try {
+        return new Date(value).toLocaleString();
+    } catch {
+        return String(value);
+    }
+}
+
 
 function token() {
     return localStorage.getItem("token");
@@ -1896,7 +1905,7 @@ async function loadUserSettings() {
 
     try {
         const data = await authJSON(API + '/user/settings');
-        input.value = data.discord_handle || '';
+        input.value = data.discord_user_id || '';
         if (message) message.textContent = 'Discord settings loaded.';
     } catch (err) {
         if (message) message.textContent = err.message;
@@ -1912,14 +1921,50 @@ async function saveUserSettings() {
         const data = await authJSON(API + '/user/settings', {
             method: 'POST',
             body: JSON.stringify({
-                discord_handle: input.value || ''
+                discord_user_id: input.value || ''
             })
         });
 
-        input.value = data.discord_handle || '';
-        if (message) message.textContent = 'Discord handle saved.';
+        input.value = data.discord_user_id || '';
+        if (message) message.textContent = 'Discord user ID saved.';
     } catch (err) {
         if (message) message.textContent = err.message;
+    }
+}
+
+
+function initUserDashboardNavigation() {
+    const buttons = Array.from(document.querySelectorAll('[data-user-nav]'));
+    const panes = Array.from(document.querySelectorAll('[data-user-pane]'));
+    if (!buttons.length || !panes.length) return;
+    const activate = (key) => {
+        buttons.forEach((button) => button.classList.toggle('is-active', button.dataset.userNav === key));
+        panes.forEach((pane) => pane.classList.toggle('is-active', pane.dataset.userPane === key));
+    };
+    buttons.forEach((button) => button.addEventListener('click', () => activate(button.dataset.userNav)));
+}
+
+async function loadUserActivity() {
+    const summary = document.getElementById('userHistorySummary');
+    const ordersBody = document.getElementById('userHistoryOrdersBody');
+    const txBody = document.getElementById('userHistoryTransactionsBody');
+    if (!summary || !ordersBody || !txBody) return;
+    try {
+        const data = await authJSON(API + '/user/activity');
+        const balance = Number(data.balance || 0);
+        summary.textContent = `Current balance: ${balance} credits • Lifetime granted: ${Number(data.lifetime_credits_granted || 0)} • Lifetime spent: ${Number(data.lifetime_credits_spent || 0)}${data.needs_removal ? ' • Flagged for removal until positive balance is restored' : ''}`;
+        const orders = Array.isArray(data.orders) ? data.orders : [];
+        ordersBody.innerHTML = orders.length ? orders.map((order) => `
+            <tr><td>${escapeHTML(formatDateTime(order.created_at))}</td><td>${escapeHTML(order.site || '-')}</td><td>${escapeHTML(order.product_name || '-')}</td><td>${escapeHTML(order.status || '-')}</td><td>${escapeHTML(String(order.credits_charged || 0))}</td></tr>
+        `).join('') : '<tr><td colspan="5">No orders yet.</td></tr>';
+        const txs = Array.isArray(data.transactions) ? data.transactions : [];
+        txBody.innerHTML = txs.length ? txs.map((tx) => `
+            <tr><td>${escapeHTML(formatDateTime(tx.created_at))}</td><td>${escapeHTML(String((tx.delta || 0) > 0 ? '+' : '') + String(tx.delta || 0))}</td><td>${escapeHTML(tx.reason || '-')}</td><td>${escapeHTML(tx.note || '-')}</td></tr>
+        `).join('') : '<tr><td colspan="4">No credit transactions yet.</td></tr>';
+    } catch (err) {
+        summary.textContent = err.message;
+        ordersBody.innerHTML = '<tr><td colspan="5">Could not load orders.</td></tr>';
+        txBody.innerHTML = '<tr><td colspan="4">Could not load credit transactions.</td></tr>';
     }
 }
 
