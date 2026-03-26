@@ -897,6 +897,71 @@ function maskEmail(email = '') {
     return `${maskedName}@${domain}`;
 }
 
+const discordWebhookQueues = new Map();
+
+function getDiscordQueue(webhookUrl) {
+    const key = String(webhookUrl || '').trim();
+    if (!key) throw new Error('Webhook URL is required for queue');
+
+    if (!discordWebhookQueues.has(key)) {
+        discordWebhookQueues.set(key, {
+            running: false,
+            jobs: [],
+            lastSentAt: 0
+        });
+    }
+
+    return discordWebhookQueues.get(key);
+}
+
+function enqueueDiscordWebhookJob(webhookUrl, job) {
+    return new Promise((resolve, reject) => {
+        const queue = getDiscordQueue(webhookUrl);
+        queue.jobs.push({
+            webhookUrl,
+            job,
+            resolve,
+            reject,
+            enqueuedAt: Date.now()
+        });
+        processDiscordQueue(webhookUrl).catch((err) => {
+            console.error('Discord queue processor error:', err);
+        });
+    });
+}
+
+async function processDiscordQueue(webhookUrl) {
+    const queue = getDiscordQueue(webhookUrl);
+    if (queue.running) return;
+
+    queue.running = true;
+
+    try {
+        while (queue.jobs.length) {
+            const item = queue.jobs.shift();
+
+            try {
+                // small spacing between sends on the same webhook
+                const now = Date.now();
+                const minGapMs = 1200;
+                const waitMs = Math.max(0, minGapMs - (now - queue.lastSentAt));
+                if (waitMs > 0) {
+                    await new Promise((resolve) => setTimeout(resolve, waitMs));
+                }
+
+                const result = await item.job();
+                queue.lastSentAt = Date.now();
+                item.resolve(result);
+            } catch (err) {
+                queue.lastSentAt = Date.now();
+                item.reject(err);
+            }
+        }
+    } finally {
+        queue.running = false;
+    }
+}
+
 async function sendDiscordWebhookToTarget({
     webhookUrl,
     order,
@@ -948,48 +1013,72 @@ async function sendDiscordWebhookToTarget({
         embed.thumbnail = { url: normalized.image_url };
     }
 
+    const contentText = `Thank you ${mentionText} for checking out with The Shore Shack${brandLabel ? ` x ${brandLabel.toUpperCase()}` : ''}`;
+
     const body = JSON.stringify({
         username,
-        content: `Thank you ${mentionText} for checking out with The Shore Shack${brandLabel ? ` x ${brandLabel.toUpperCase()}` : ''}`,
+        content: contentText,
         embeds: [embed]
     });
 
-    for (let attempt = 1; attempt <= 3; attempt++) {
-        console.log(`Discord relay attempt ${attempt} -> ${trimmedWebhookUrl.slice(0, 40)}...`);
+    return enqueueDiscordWebhookJob(trimmedWebhookUrl, async () => {
+        for (let attempt = 1; attempt <= 5; attempt++) {
+            console.log(`Discord queue send attempt ${attempt} -> ${trimmedWebhookUrl.slice(0, 40)}...`);
 
-        const response = await globalThis.fetch(trimmedWebhookUrl, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body
-        });
+            const response = await globalThis.fetch(trimmedWebhookUrl, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body
+            });
 
-        if (response.ok) {
-            console.log(`Discord relay success on attempt ${attempt}`);
-            return { success: true, attempt };
-        }
+            if (response.ok) {
+                console.log(`Discord queue send success on attempt ${attempt}`);
+                return { success: true, attempt, queued: true };
+            }
 
-        const text = await response.text().catch(() => '');
-        console.error(`Discord relay response ${response.status} on attempt ${attempt}: ${text}`);
+            const contentType = response.headers.get('content-type') || '';
+            let text = '';
+            let json = null;
 
-        if (response.status === 429) {
-            let retryAfter = 2000;
+            if (contentType.includes('application/json')) {
+                json = await response.json().catch(() => null);
+                text = JSON.stringify(json || {});
+            } else {
+                text = await response.text().catch(() => '');
+            }
 
-            try {
-                const data = await response.json();
-                if (data?.retry_after) {
-                    retryAfter = Math.ceil(data.retry_after * 1000);
+            console.error(`Discord queue send response ${response.status} on attempt ${attempt}: ${text}`);
+
+            if (response.status === 429) {
+                let retryAfterMs = 5000;
+
+                if (json?.retry_after != null) {
+                    retryAfterMs = Math.ceil(Number(json.retry_after) * 1000);
+                } else {
+                    const retryAfterHeader = response.headers.get('retry-after');
+                    if (retryAfterHeader) {
+                        retryAfterMs = Math.ceil(Number(retryAfterHeader) * 1000) || retryAfterMs;
+                    }
                 }
-            } catch (_) { }
 
-            console.log(`Rate limited. Waiting ${retryAfter}ms...`);
-            await new Promise((resolve) => setTimeout(resolve, retryAfter));
-            continue;
+                console.log(`Discord queue rate limited. Waiting ${retryAfterMs}ms before retry...`);
+                await new Promise((resolve) => setTimeout(resolve, retryAfterMs));
+                continue;
+            }
+
+            // Cloudflare / hard block: back off harder
+            if (response.status === 403 || response.status === 1015 || text.includes('Error 1015') || text.includes('rate limited')) {
+                const backoffMs = 15000 * attempt;
+                console.log(`Discord queue Cloudflare/backoff wait ${backoffMs}ms...`);
+                await new Promise((resolve) => setTimeout(resolve, backoffMs));
+                continue;
+            }
+
+            throw new Error(`Discord webhook failed (${response.status}): ${text || response.statusText}`);
         }
 
-        throw new Error(`Discord webhook failed (${response.status}): ${text || response.statusText}`);
-    }
-
-    return { skipped: 'unknown' };
+        throw new Error('Discord webhook failed after maximum retry attempts');
+    });
 }
 
 async function sendCheckoutDiscordNotifications(order, user) {
@@ -998,7 +1087,6 @@ async function sendCheckoutDiscordNotifications(order, user) {
     const userSettings = user?.id ? await getUserSettings(user.id) : {};
     const discordHandle = normalizeDiscordHandle(userSettings?.discord_handle || '');
 
-    // Always send to super admin / global webhook
     const globalSettings = await getAppSetting('webhook_settings', {});
     const globalWebhookUrl = String(globalSettings?.discord_webhook_url || '').trim();
 
@@ -1018,9 +1106,6 @@ async function sendCheckoutDiscordNotifications(order, user) {
         results.push({ scope: 'super_admin', skipped: 'discord_webhook_not_configured' });
     }
 
-    await new Promise(r => setTimeout(r, 500));
-
-    // Also send to owner admin webhook if the user belongs to an admin
     if (user?.owner_admin_id) {
         const adminSettings = await getAdminWebhookSettings(user.owner_admin_id);
         const adminWebhookUrl = String(adminSettings?.discord_webhook_url || '').trim();
@@ -1036,7 +1121,7 @@ async function sendCheckoutDiscordNotifications(order, user) {
                     userEmail,
                     discordHandle,
                     brandLabel,
-                    username: brandLabel || 'The Shore Shack'
+                    username: 'The Shore Shack'
                 }))
             });
         } else {
