@@ -17,7 +17,7 @@ const stripe = process.env.STRIPE_SECRET_KEY ? new Stripe(process.env.STRIPE_SEC
 
 app.use(cors());
 app.use((req, res, next) => {
-    if (req.originalUrl === "/webhooks/stripe") {
+    if (req.originalUrl.startsWith("/webhooks/stripe")) {
         return next();
     }
     express.json()(req, res, next);
@@ -912,7 +912,7 @@ async function sendSanitizedDiscordWebhook(order, userEmail = '') {
 
     const body = JSON.stringify({
         username: 'The Shore Shack',
-        content: 'Thank you for checking out with The Shore Shack',
+        content: 'Thank You',
         embeds: [embed]
     });
 
@@ -1036,6 +1036,14 @@ app.post("/webhooks/stripe", bodyParser.raw({ type: "application/json" }), async
         if (!signature || !secret) {
             throw new Error("Missing Stripe signature or webhook secret");
         }
+
+        console.log("Stripe webhook info:", {
+            hasSignature: !!signature,
+            hasSecret: !!secret,
+            secretPrefix: secret ? String(secret).slice(0, 8) : null,
+            bodyIsBuffer: Buffer.isBuffer(req.body),
+            bodyLength: Buffer.isBuffer(req.body) ? req.body.length : null
+        });
 
         const event = stripe.webhooks.constructEvent(req.body, signature, secret);
 
