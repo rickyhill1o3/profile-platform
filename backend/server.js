@@ -971,8 +971,18 @@ async function sendDiscordWebhookToTarget({
         const text = await response.text().catch(() => '');
         console.error(`Discord relay response ${response.status} on attempt ${attempt}: ${text}`);
 
-        if (response.status === 429 && attempt < 3) {
-            await new Promise((resolve) => setTimeout(resolve, 1500 * attempt));
+        if (response.status === 429) {
+            let retryAfter = 2000;
+
+            try {
+                const data = await response.json();
+                if (data?.retry_after) {
+                    retryAfter = Math.ceil(data.retry_after * 1000);
+                }
+            } catch (_) { }
+
+            console.log(`Rate limited. Waiting ${retryAfter}ms...`);
+            await new Promise((resolve) => setTimeout(resolve, retryAfter));
             continue;
         }
 
@@ -1007,6 +1017,8 @@ async function sendCheckoutDiscordNotifications(order, user) {
     } else {
         results.push({ scope: 'super_admin', skipped: 'discord_webhook_not_configured' });
     }
+
+    await new Promise(r => setTimeout(r, 500));
 
     // Also send to owner admin webhook if the user belongs to an admin
     if (user?.owner_admin_id) {
