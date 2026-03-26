@@ -17,8 +17,10 @@ const stripe = process.env.STRIPE_SECRET_KEY ? new Stripe(process.env.STRIPE_SEC
 
 app.use(cors());
 app.use((req, res, next) => {
-    if (req.originalUrl === "/webhooks/stripe") return next();
-    return express.json()(req, res, next);
+    if (req.originalUrl === "/webhooks/stripe") {
+        return next();
+    }
+    express.json()(req, res, next);
 });
 
 const phoneRegex = /^[0-9]{10}$/;
@@ -1021,64 +1023,85 @@ async function recordSuccessfulCheckout(payload) {
 
 app.post("/webhooks/stripe", bodyParser.raw({ type: "application/json" }), async (req, res) => {
     if (!stripe) {
+        console.error("Stripe webhook hit but Stripe is not configured");
         return res.status(400).json({ error: "Stripe is not configured" });
     }
 
     try {
-        let event = null;
+        console.log("Stripe webhook hit");
+
         const signature = req.headers["stripe-signature"];
         const secret = process.env.STRIPE_WEBHOOK_SECRET;
 
-        if (secret && signature) {
-            event = stripe.webhooks.constructEvent(req.body, signature, secret);
-        } else {
-            event = JSON.parse(Buffer.isBuffer(req.body) ? req.body.toString("utf8") : String(req.body || "{}"));
+        if (!signature || !secret) {
+            throw new Error("Missing Stripe signature or webhook secret");
         }
+
+        const event = stripe.webhooks.constructEvent(req.body, signature, secret);
+
+        console.log("Stripe event type:", event.type);
 
         if (event.type === "checkout.session.completed") {
             const session = event.data.object || {};
+            console.log("Stripe checkout session completed:", {
+                sessionId: session.id,
+                customer_email: session.customer_email || session.customer_details?.email || null,
+                metadata: session.metadata || {}
+            });
+
             const user = await findUserForWebhook(session);
             if (!user?.id) {
+                console.error("Stripe webhook user not found");
                 return res.json({ received: true, skipped: "user_not_found" });
             }
 
             const credits = asWholeCredits(session.metadata?.credits, 0);
             const externalOrderId = String(session.id || "");
+
             const { data: existing } = await maybeSingle("orders", (qb) =>
                 qb.select("id").eq("external_order_id", externalOrderId).maybeSingle()
             );
-            if (!existing?.id) {
-                await createOrderRecord({
-                    user_id: user.id,
-                    external_order_id: externalOrderId,
-                    source: "stripe",
-                    status: "paid",
-                    product_name: `${credits} credit purchase`,
-                    credits_charged: 0,
-                    metadata: {
-                        checkout_type: "credit_purchase",
-                        credits_purchased: credits,
-                        customer_email: session.customer_details?.email || session.customer_email || ""
-                    },
-                    raw_payload: session
+
+            if (existing?.id) {
+                console.log("Stripe purchase already processed:", existing.id);
+                return res.json({ received: true, duplicate: true });
+            }
+
+            await createOrderRecord({
+                user_id: user.id,
+                external_order_id: externalOrderId,
+                source: "stripe",
+                status: "paid",
+                product_name: `${credits} credit purchase`,
+                credits_charged: 0,
+                metadata: {
+                    checkout_type: "credit_purchase",
+                    credits_purchased: credits,
+                    customer_email: session.customer_details?.email || session.customer_email || ""
+                },
+                raw_payload: session
+            });
+
+            if (credits > 0) {
+                const balance = await adjustUserCredits({
+                    userId: user.id,
+                    delta: credits,
+                    reason: "stripe_purchase",
+                    note: `Purchased ${credits} credits via Stripe`,
+                    metadata: { stripe_checkout_session_id: session.id },
+                    createdBy: null
                 });
 
-                if (credits > 0) {
-                    await adjustUserCredits({
-                        userId: user.id,
-                        delta: credits,
-                        reason: "stripe_purchase",
-                        note: `Purchased ${credits} credits via Stripe`,
-                        metadata: { stripe_checkout_session_id: session.id },
-                        createdBy: null
-                    });
-                }
+                console.log("Stripe credits added successfully:", {
+                    creditsAdded: credits,
+                    balanceAfter: balance?.balance
+                });
             }
         }
 
         res.json({ received: true });
     } catch (err) {
-        console.error("Stripe webhook error:", err.message);
+        console.error("Stripe webhook error:", err);
         res.status(400).json({ error: err.message });
     }
 });
