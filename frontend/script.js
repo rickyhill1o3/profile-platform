@@ -1937,11 +1937,26 @@ function initUserDashboardNavigation() {
     const buttons = Array.from(document.querySelectorAll('[data-user-nav]'));
     const panes = Array.from(document.querySelectorAll('[data-user-pane]'));
     if (!buttons.length || !panes.length) return;
+
     const activate = (key) => {
-        buttons.forEach((button) => button.classList.toggle('is-active', button.dataset.userNav === key));
-        panes.forEach((pane) => pane.classList.toggle('is-active', pane.dataset.userPane === key));
+        buttons.forEach((button) => {
+            button.classList.toggle('is-active', button.dataset.userNav === key);
+        });
+        panes.forEach((pane) => {
+            pane.classList.toggle('is-active', pane.dataset.userPane === key);
+        });
     };
-    buttons.forEach((button) => button.addEventListener('click', () => activate(button.dataset.userNav)));
+
+    buttons.forEach((button) => {
+        button.addEventListener('click', () => activate(button.dataset.userNav));
+    });
+
+    const activeButton =
+        buttons.find((button) => button.classList.contains('is-active')) || buttons[0];
+
+    if (activeButton) {
+        activate(activeButton.dataset.userNav);
+    }
 }
 
 async function loadUserActivity() {
@@ -2107,8 +2122,10 @@ document.addEventListener("DOMContentLoaded", async () => {
     try { await loadPublicCountdowns(); } catch (_) { }
 
     if (document.getElementById("dashboard")) {
+        initUserDashboardNavigation();
         await loadProfiles();
         try { await loadCreditsBalance(); } catch (_) { }
+        try { await loadUserActivity(); } catch (_) { }
     }
 
     if (document.getElementById("profileForm")) {
