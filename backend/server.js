@@ -2885,6 +2885,72 @@ app.get("/admin/export/accounts-txt", auth, admin, async (req, res) => {
 });
 
 
+
+app.get("/admin/export/gmail-imap-txt", auth, admin, async (req, res) => {
+    try {
+        const currentUser = await getCurrentUser(req);
+        const { user_id, group } = req.query;
+        const filename = (req.query.filename || "gmail-imap").replace(/[^a-zA-Z0-9-_]/g, "");
+
+        let query = supabase
+            .from("profiles")
+            .select(`
+                id,
+                user_id,
+                account_type,
+                created_at,
+                accounts(*)
+            `)
+            .order("created_at", { ascending: false });
+
+        if (currentUser.role === "super_admin") {
+            if (user_id) query = query.eq("user_id", user_id);
+            if (group) query = query.eq("account_type", group);
+        } else {
+            const ownedUserIds = await getScopeUserIdsForAdmin(currentUser);
+
+            if (user_id && !ownedUserIds.includes(user_id)) {
+                return res.status(403).json({ error: "Cannot export that account" });
+            }
+
+            query = query.in("user_id", safeIn(ownedUserIds));
+
+            if (user_id) query = query.eq("user_id", user_id);
+            if (group) query = query.eq("account_type", group);
+        }
+
+        const { data: profiles, error } = await query;
+
+        if (error) {
+            return res.status(500).json({ error: error.message });
+        }
+
+        const rows = (profiles || [])
+            .map((profile) => {
+                const account = profile.accounts?.[0] || {};
+                const email = String(account.login_email || "").trim();
+                const appPassOr2fa = String(account.gmail_app_password || account.amazon_2fa_secret || "").trim();
+
+                if (!email && !appPassOr2fa) return null;
+
+                return `Gmail;${email};${appPassOr2fa}`;
+            })
+            .filter(Boolean);
+
+        const output = ["Gmail;email;app/2fapass", ...rows].join("
+");
+
+        res.setHeader("Content-Type", "text/plain; charset=utf-8");
+        res.setHeader("Content-Disposition", `attachment; filename="${filename}.txt"`);
+        res.send(output);
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+
+
 /* ================= SUPER ADMIN BOOTSTRAP ================= */
 
 async function ensureSuperAdmin() {

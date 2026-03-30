@@ -1338,6 +1338,21 @@ function tickCountdownCards() {
     });
 }
 
+async function exportGmailImapTxt() {
+    try {
+        const { params } = await getExportCountAndParams();
+        const filename = promptForExportFilename("gmail-imap");
+        if (!filename) return;
+
+        params.append("filename", filename);
+
+        const url = API + "/admin/export/gmail-imap-txt" + (params.toString() ? "?" + params.toString() : "");
+        await downloadExportFile(url, filename + ".txt");
+    } catch (err) {
+        if (err.message) alert(err.message);
+    }
+}
+
 async function loadPublicCountdowns() {
     const feeds = document.querySelectorAll('[data-countdown-feed]');
     if (!feeds.length) return;
