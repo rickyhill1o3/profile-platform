@@ -2937,8 +2937,7 @@ app.get("/admin/export/gmail-imap-txt", auth, admin, async (req, res) => {
             })
             .filter(Boolean);
 
-        const output = ["Gmail;email;app/2fapass", ...rows].join("
-");
+        const output = ["Gmail;email;app/2fapass", ...rows].join("\n");
 
         res.setHeader("Content-Type", "text/plain; charset=utf-8");
         res.setHeader("Content-Disposition", `attachment; filename="${filename}.txt"`);
