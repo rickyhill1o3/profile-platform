@@ -1,1 +1,54 @@
-<!-- public shop page placeholder -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>The Shore Shack | Shop</title>
+  <meta name="description" content="Public storefront for The Shore Shack." />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body class="marketing-page">
+  <header class="marketing-header">
+    <div class="marketing-shell marketing-nav">
+      <a href="index.html" class="brand-mark">
+        <span class="brand-mark__logo">TSS</span>
+        <span>
+          <strong>The Shore Shack</strong>
+          <small>Public storefront</small>
+        </span>
+      </a>
+      <nav class="marketing-links">
+        <a href="index.html">Main</a>
+        <a href="shop.html">Shop</a>
+        <a href="guide.html">User Guide</a>
+        <a href="login.html">Login</a>
+      </nav>
+    </div>
+  </header>
+
+  <main>
+    <section class="marketing-section shop-page-shell">
+      <div class="marketing-shell">
+        <div class="section-heading marketing-heading">
+          <div>
+            <p class="eyebrow">Public shop</p>
+            <h1>Shop products available to everyone.</h1>
+          </div>
+          <p class="subtle-text marketing-heading-copy">This page loads active storefront products from the public shop endpoint.</p>
+        </div>
+
+        <div class="shop-toolbar">
+          <a class="btn" href="index.html">Back to Main</a>
+          <a class="btn" href="guide.html">User Guide</a>
+          <a class="btn btn-primary" href="login.html">User Login</a>
+        </div>
+
+        <div id="shop-status" class="shop-status">Loading products...</div>
+        <div id="shop-grid" class="products-grid"></div>
+      </div>
+    </section>
+  </main>
+
+  <script src="shop.js"></script>
+</body>
+</html>
