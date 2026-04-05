@@ -370,3 +370,8 @@ h1,h2,h3,h4,p{margin:0}
 .text-link{display:inline-flex;align-items:center;gap:6px;font-weight:600;color:#2563eb;text-decoration:none}
 .text-link:hover{text-decoration:underline}
 @media (max-width:980px){.homepage-access-grid{grid-template-columns:1fr}}
+
+.storefront-admin-layout{align-items:start}
+.store-merge-cell{display:grid;gap:8px;min-width:180px}
+.stats-grid--store{grid-template-columns:repeat(auto-fit,minmax(180px,1fr))}
+.storefront-admin-shell .banner{margin-top:16px}

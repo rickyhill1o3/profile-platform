@@ -1,1 +1,301 @@
-<!-- admin page placeholder -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Storefront Admin</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body class="app-page">
+  <div class="app-shell storefront-admin-shell">
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">The Shore Shack TCG</p>
+        <h1>Storefront Admin</h1>
+        <p class="subtle-text">Manage storefront inventory, pricing, receipts, imports, and accounting.</p>
+      </div>
+      <div class="topbar-actions">
+        <a class="btn" href="index.html">Main</a>
+        <a class="btn" href="shop.html">Public Shop</a>
+        <a class="btn" href="admin.html">Admin Dashboard</a>
+        <button class="btn btn-danger" type="button" onclick="logout()">Logout</button>
+      </div>
+    </header>
+
+    <section class="stats-grid">
+      <div class="stat-card"><span class="stat-label">Live Products</span><strong class="stat-value" id="storeStatProducts">0</strong></div>
+      <div class="stat-card"><span class="stat-label">Units In Stock</span><strong class="stat-value" id="storeStatStock">0</strong></div>
+      <div class="stat-card"><span class="stat-label">Receipts</span><strong class="stat-value" id="storeStatReceipts">0</strong></div>
+      <div class="stat-card"><span class="stat-label">Gross Profit</span><strong class="stat-value" id="storeStatProfit">$0.00</strong></div>
+    </section>
+
+    <div class="admin-layout-shell storefront-admin-layout">
+      <aside class="admin-sidebar panel">
+        <p class="eyebrow">Store Tools</p>
+        <button class="admin-nav-button is-active" type="button" data-store-nav="overview">Overview</button>
+        <button class="admin-nav-button" type="button" data-store-nav="inventory">Add Inventory</button>
+        <button class="admin-nav-button" type="button" data-store-nav="pricing">Pricing</button>
+        <button class="admin-nav-button" type="button" data-store-nav="receipts">Receipts</button>
+        <button class="admin-nav-button" type="button" data-store-nav="accounting">Accounting</button>
+      </aside>
+
+      <div class="admin-content-stack">
+        <section class="admin-pane is-active" data-store-pane="overview">
+          <section class="panel">
+            <div class="panel-header">
+              <div>
+                <h2>Storefront Products</h2>
+                <p class="subtle-text">Every active storefront item, current stock level, and price.</p>
+              </div>
+              <div class="toolbar-row">
+                <button class="btn" type="button" id="refreshStoreDataButton">Refresh</button>
+              </div>
+            </div>
+            <div class="banner" id="storeAdminMessage">Loading storefront data...</div>
+            <div class="table-wrap table-wrap--admin-scroll">
+              <table class="admin-table">
+                <thead>
+                  <tr>
+                    <th>Title</th>
+                    <th>Site</th>
+                    <th>SKU</th>
+                    <th>Stock</th>
+                    <th>Sale Price</th>
+                    <th>Purchased</th>
+                    <th>Sold</th>
+                    <th>Status</th>
+                    <th>Merge</th>
+                  </tr>
+                </thead>
+                <tbody id="storeProductsBody">
+                  <tr><td colspan="9">Loading products...</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+        </section>
+
+        <section class="admin-pane" data-store-pane="inventory">
+          <section class="panel">
+            <div class="panel-header">
+              <div>
+                <h2>Manual Inventory Entry</h2>
+                <p class="subtle-text">Add purchased inventory into the storefront and automatically update stock on hand.</p>
+              </div>
+            </div>
+            <form id="manualInventoryForm" class="form-grid">
+              <div class="field">
+                <label for="storeManualSite">Site</label>
+                <select class="input" id="storeManualSite">
+                  <option value="pokemon">Pokémon Center</option>
+                  <option value="target">Target</option>
+                  <option value="walmart">Walmart</option>
+                  <option value="amazon">Amazon</option>
+                  <option value="supreme">Supreme</option>
+                  <option value="manual">Manual</option>
+                  <option value="general">General</option>
+                </select>
+              </div>
+              <div class="field">
+                <label for="storeManualSku">SKU / ASIN / DPCI</label>
+                <input class="input" id="storeManualSku" placeholder="151-BOOSTER-BUNDLE" />
+              </div>
+              <div class="field field--full">
+                <label for="storeManualTitle">Product Title</label>
+                <input class="input" id="storeManualTitle" placeholder="Pokémon 151 Booster Bundle" />
+              </div>
+              <div class="field">
+                <label for="storeManualQuantity">Quantity</label>
+                <input class="input" id="storeManualQuantity" type="number" min="1" step="1" value="1" />
+              </div>
+              <div class="field">
+                <label for="storeManualPurchaseUnitPrice">Purchase Unit Price</label>
+                <input class="input" id="storeManualPurchaseUnitPrice" type="number" min="0" step="0.01" placeholder="26.99" />
+              </div>
+              <div class="field">
+                <label for="storeManualSalePrice">Sale Price</label>
+                <input class="input" id="storeManualSalePrice" type="number" min="0" step="0.01" placeholder="34.99" />
+              </div>
+              <div class="field">
+                <label for="storeManualSourceOrderId">Order / Receipt Ref</label>
+                <input class="input" id="storeManualSourceOrderId" placeholder="ORDER-12345" />
+              </div>
+              <div class="field">
+                <label for="storeManualImageUrl">Image URL</label>
+                <input class="input" id="storeManualImageUrl" placeholder="https://..." />
+              </div>
+              <div class="field">
+                <label for="storeManualProductUrl">Source Product URL</label>
+                <input class="input" id="storeManualProductUrl" placeholder="https://..." />
+              </div>
+              <div class="field field--full">
+                <label for="storeManualDescription">Description / Notes</label>
+                <textarea class="input" id="storeManualDescription" rows="4" placeholder="Optional description or notes"></textarea>
+              </div>
+              <div class="field field--full panel-actions">
+                <button class="btn btn-primary" type="submit">Save Inventory Entry</button>
+              </div>
+            </form>
+            <div class="subtle-text" id="manualInventoryMessage"></div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-header">
+              <div>
+                <h2>Target Import Seed</h2>
+                <p class="subtle-text">Import the saved Target list from the backend seed file and create storefront records.</p>
+              </div>
+            </div>
+            <div class="panel-actions">
+              <button class="btn" type="button" id="importTargetListButton">Import Target Seed List</button>
+            </div>
+            <div class="subtle-text" id="importTargetListMessage"></div>
+          </section>
+        </section>
+
+        <section class="admin-pane" data-store-pane="pricing">
+          <section class="panel">
+            <div class="panel-header">
+              <div>
+                <h2>Manual Price Override</h2>
+                <p class="subtle-text">Set or update storefront sale pricing for a specific site and SKU.</p>
+              </div>
+            </div>
+            <form id="pricingOverrideForm" class="form-grid">
+              <div class="field">
+                <label for="pricingSite">Site</label>
+                <select class="input" id="pricingSite">
+                  <option value="pokemon">Pokémon Center</option>
+                  <option value="target">Target</option>
+                  <option value="walmart">Walmart</option>
+                  <option value="amazon">Amazon</option>
+                  <option value="supreme">Supreme</option>
+                  <option value="general">General</option>
+                  <option value="manual">Manual</option>
+                </select>
+              </div>
+              <div class="field">
+                <label for="pricingSku">SKU</label>
+                <input class="input" id="pricingSku" placeholder="151-BOOSTER-BUNDLE" />
+              </div>
+              <div class="field">
+                <label for="pricingSalePrice">Sale Price</label>
+                <input class="input" id="pricingSalePrice" type="number" min="0" step="0.01" placeholder="39.99" />
+              </div>
+              <div class="field field--full">
+                <label for="pricingNotes">Notes</label>
+                <input class="input" id="pricingNotes" placeholder="Optional notes for this override" />
+              </div>
+              <div class="field field--full panel-actions">
+                <button class="btn btn-primary" type="submit">Save Override</button>
+              </div>
+            </form>
+            <div class="subtle-text" id="pricingOverrideMessage"></div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-header">
+              <div>
+                <h2>Current Price Overrides</h2>
+                <p class="subtle-text">Latest manual pricing rules stored in the system.</p>
+              </div>
+            </div>
+            <div class="table-wrap table-wrap--admin-scroll">
+              <table class="admin-table">
+                <thead>
+                  <tr>
+                    <th>Site</th>
+                    <th>SKU</th>
+                    <th>Sale Price</th>
+                    <th>Notes</th>
+                    <th>Updated</th>
+                  </tr>
+                </thead>
+                <tbody id="storePricingBody">
+                  <tr><td colspan="5">Loading price overrides...</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+        </section>
+
+        <section class="admin-pane" data-store-pane="receipts">
+          <section class="panel">
+            <div class="panel-header">
+              <div>
+                <h2>Purchase Receipts</h2>
+                <p class="subtle-text">Inventory receipts used to calculate cost basis and stock totals.</p>
+              </div>
+            </div>
+            <div class="table-wrap table-wrap--admin-scroll">
+              <table class="admin-table">
+                <thead>
+                  <tr>
+                    <th>Purchased</th>
+                    <th>Product</th>
+                    <th>Site</th>
+                    <th>SKU</th>
+                    <th>Qty</th>
+                    <th>Unit Cost</th>
+                    <th>Total Cost</th>
+                    <th>Order Ref</th>
+                  </tr>
+                </thead>
+                <tbody id="storeReceiptsBody">
+                  <tr><td colspan="8">Loading receipts...</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+        </section>
+
+        <section class="admin-pane" data-store-pane="accounting">
+          <section class="panel">
+            <div class="panel-header">
+              <div>
+                <h2>Accounting Summary</h2>
+                <p class="subtle-text">Revenue, purchase cost, tax, shipping, and profit from storefront activity.</p>
+              </div>
+              <div class="panel-actions">
+                <a class="btn" id="accountingExportLink" href="#" download>Download CSV Export</a>
+              </div>
+            </div>
+            <div class="stats-grid stats-grid--store" id="storeAccountingSummaryCards"></div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-header">
+              <div>
+                <h2>Accounting by Product</h2>
+                <p class="subtle-text">Product-level cost, revenue, and profit rollup.</p>
+              </div>
+            </div>
+            <div class="table-wrap table-wrap--admin-scroll">
+              <table class="admin-table">
+                <thead>
+                  <tr>
+                    <th>Title</th>
+                    <th>Sale Price</th>
+                    <th>Purchased</th>
+                    <th>Sold</th>
+                    <th>In Stock</th>
+                    <th>Purchase Cost</th>
+                    <th>Revenue</th>
+                    <th>Profit</th>
+                  </tr>
+                </thead>
+                <tbody id="storeAccountingBody">
+                  <tr><td colspan="8">Loading accounting...</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+        </section>
+      </div>
+    </div>
+  </div>
+
+  <script src="script.js"></script>
+  <script src="admin-store.js"></script>
+</body>
+</html>
