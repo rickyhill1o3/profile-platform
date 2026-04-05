@@ -317,3 +317,43 @@ h1,h2,h3,h4,p{margin:0}
 @media (max-width: 980px){.selection-grid-two{grid-template-columns:1fr}}
 
 .status-tag{display:inline-flex;align-items:center;padding:4px 10px;border-radius:999px;font-size:12px;font-weight:600;background:rgba(255,255,255,0.08);color:#f2f2f2}.status-tag--danger{background:rgba(255,77,77,0.18);color:#ffb3b3}.status-tag--success{background:rgba(0,200,120,0.18);color:#9af0c8}
+
+.products-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 16px;
+}
+.product-card-storefront {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.product-card-storefront__media {
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  background: rgba(255,255,255,0.04);
+  border-radius: 12px;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.product-card-storefront__media img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.product-card-storefront__placeholder {
+  color: rgba(255,255,255,0.6);
+}
+.product-card-storefront__body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.product-card-storefront__meta {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}

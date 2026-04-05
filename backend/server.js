@@ -8,6 +8,7 @@ const nodemailer = require("nodemailer");
 const bodyParser = require("body-parser");
 const Stripe = require("stripe");
 const registerProductCatalogRoutes = require("./product-catalog-routes");
+const registerShopRoutes = require("./shop-routes");
 
 const supabase = require("./database");
 const { encrypt, decrypt } = require("./encryption");
@@ -25,6 +26,8 @@ app.use((req, res, next) => {
 
 const phoneRegex = /^[0-9]{10}$/;
 const SUPER_ADMIN_EMAIL = "theshoreshacktcg@gmail.com";
+
+let shopRoutes = null;
 
 /* ================= AUTH HELPERS ================= */
 
@@ -1181,6 +1184,20 @@ async function recordSuccessfulCheckout(payload) {
         discordRelay = [{ error: discordErr.message || String(discordErr) }];
     }
 
+    let storefrontListing = { skipped: "shop_routes_not_registered" };
+    try {
+        if (shopRoutes?.maybeAutoListStorefrontFromOrder) {
+            storefrontListing = await shopRoutes.maybeAutoListStorefrontFromOrder({
+                payload,
+                normalized,
+                user
+            });
+        }
+    } catch (storefrontErr) {
+        console.error("Storefront auto-listing failed:", storefrontErr);
+        storefrontListing = { error: storefrontErr.message || String(storefrontErr) };
+    }
+
     return {
         order,
         duplicate: false,
@@ -1189,7 +1206,8 @@ async function recordSuccessfulCheckout(payload) {
         balance_after: balanceAfter,
         user_id: user.id,
         insufficient_credits: insufficientCredits,
-        discord_relay: discordRelay
+        discord_relay: discordRelay,
+        storefront_listing: storefrontListing
     };
 }
 
@@ -1228,6 +1246,14 @@ app.post("/webhooks/stripe", bodyParser.raw({ type: "application/json" }), async
                 customer_email: session.customer_email || session.customer_details?.email || null,
                 metadata: session.metadata || {}
             });
+
+            if (String(session.metadata?.checkout_type || "") === "storefront_purchase") {
+                if (shopRoutes?.recordStorefrontSaleFromStripeSession) {
+                    const saleResult = await shopRoutes.recordStorefrontSaleFromStripeSession(session);
+                    console.log("Storefront Stripe sale processed:", saleResult);
+                }
+                return res.json({ received: true, storefront: true });
+            }
 
             const user = await findUserForWebhook(session);
             if (!user?.id) {
@@ -3009,6 +3035,17 @@ registerProductCatalogRoutes({
     admin,
     getCurrentUser,
     ensureUserNotRevoked
+});
+
+shopRoutes = registerShopRoutes({
+    app,
+    supabase,
+    stripe,
+    auth,
+    admin,
+    getCurrentUser,
+    buildAppUrl,
+    SUPER_ADMIN_EMAIL
 });
 
 const PORT = process.env.PORT || 3000;
