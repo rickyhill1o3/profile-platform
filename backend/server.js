@@ -3060,6 +3060,7 @@ shopRoutes = registerShopRoutes({
     admin,
     getCurrentUser,
     buildAppUrl,
+    sendEmail,
     SUPER_ADMIN_EMAIL
 });
 

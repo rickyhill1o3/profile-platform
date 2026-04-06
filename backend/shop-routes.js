@@ -1022,7 +1022,11 @@ async function recordStorefrontSaleFromStripeSession({ supabase, session }) {
           stripe_payment_intent: session.payment_intent || null,
           allocations,
           raw_session: session,
-          cart_items: saleItems
+          cart_items: saleItems,
+          fulfillment_status: 'paid',
+          customer_name: session.customer_details?.name || null,
+          shipping_name: session.shipping_details?.name || session.customer_details?.name || null,
+          shipping_address: shippingAddress
         },
         sold_at: new Date().toISOString()
       })
@@ -1033,7 +1037,8 @@ async function recordStorefrontSaleFromStripeSession({ supabase, session }) {
   }
 
   await Promise.all(saleItems.map((entry) => recalculateProductInventory(supabase, entry.storefront_product_id)));
-  return { recorded: true, sales: insertedSales };
+  const emailResult = await sendStorefrontOrderConfirmation({ sales: insertedSales });
+  return { recorded: true, sales: insertedSales, email: emailResult };
 }
 
 function withMoney(product) {
@@ -1082,6 +1087,7 @@ function registerShopRoutes({
   admin,
   getCurrentUser,
   buildAppUrl,
+  sendEmail,
   SUPER_ADMIN_EMAIL
 }) {
   app.get('/public/store/products', async (req, res) => {
@@ -1539,6 +1545,91 @@ function registerShopRoutes({
     }
   });
 
+
+
+  app.get('/admin/store/orders', auth, admin, async (req, res) => {
+    try {
+      const { data, error } = await supabase
+        .from('storefront_sales')
+        .select('*, storefront_products(id, title, image_url, primary_site, primary_sku)')
+        .order('sold_at', { ascending: false })
+        .limit(500);
+      if (error) return res.status(500).json({ error: error.message });
+
+      const grouped = new Map();
+      for (const row of data || []) {
+        const key = String(row.stripe_session_id || row.id);
+        if (!grouped.has(key)) grouped.set(key, []);
+        grouped.get(key).push(row);
+      }
+
+      const orders = Array.from(grouped.values()).map((rows) => mapSalesToOrder(rows)).filter(Boolean);
+      const activeOnly = String(req.query.active_only || 'true').toLowerCase() !== 'false';
+      const activeStatuses = new Set(['paid', 'processing', 'packed', 'shipped']);
+      const filtered = activeOnly ? orders.filter((order) => activeStatuses.has(String(order.status || '').toLowerCase())) : orders;
+      res.json({ orders: filtered });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post('/admin/store/orders/:sessionId/tracking', auth, admin, async (req, res) => {
+    try {
+      const sessionId = String(req.params.sessionId || '').trim();
+      if (!sessionId) return res.status(400).json({ error: 'Order session id is required' });
+      const trackingNumber = normalizeText(req.body?.tracking_number);
+      const trackingCarrier = normalizeText(req.body?.tracking_carrier);
+      const trackingUrl = normalizeText(req.body?.tracking_url);
+      const fulfillmentStatus = normalizeText(req.body?.status || 'shipped') || 'shipped';
+      if (!trackingNumber) return res.status(400).json({ error: 'Tracking number is required' });
+
+      const { data: sales, error } = await supabase
+        .from('storefront_sales')
+        .select('*, storefront_products(id, title, image_url, primary_site, primary_sku)')
+        .eq('stripe_session_id', sessionId)
+        .order('created_at', { ascending: true });
+      if (error) return res.status(500).json({ error: error.message });
+      if (!sales || !sales.length) return res.status(404).json({ error: 'Order not found' });
+
+      for (const sale of sales) {
+        const mergedMetadata = {
+          ...(sale.metadata || {}),
+          tracking_number: trackingNumber,
+          tracking_carrier: trackingCarrier,
+          tracking_url: trackingUrl,
+          fulfillment_status: fulfillmentStatus,
+          tracking_updated_at: new Date().toISOString()
+        };
+        const { error: updateError } = await supabase
+          .from('storefront_sales')
+          .update({ metadata: mergedMetadata })
+          .eq('id', sale.id);
+        if (updateError) return res.status(500).json({ error: updateError.message });
+      }
+
+      const refreshed = sales.map((sale) => ({
+        ...sale,
+        metadata: {
+          ...(sale.metadata || {}),
+          tracking_number: trackingNumber,
+          tracking_carrier: trackingCarrier,
+          tracking_url: trackingUrl,
+          fulfillment_status: fulfillmentStatus,
+          tracking_updated_at: new Date().toISOString()
+        }
+      }));
+      const emailResult = await sendStorefrontTrackingEmail({
+        sales: refreshed,
+        trackingNumber,
+        trackingCarrier,
+        trackingUrl
+      });
+      res.json({ success: true, order: mapSalesToOrder(refreshed), email: emailResult });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   app.get('/admin/store/accounting/summary', auth, admin, async (req, res) => {
     try {
       const { data: products, error } = await supabase.from('storefront_products').select('*').neq('status', 'merged');
@@ -1691,7 +1782,10 @@ function registerShopRoutes({
         mode: 'payment',
         success_url: successUrl,
         cancel_url: cancelUrl,
+        customer_creation: 'always',
+        billing_address_collection: 'required',
         shipping_address_collection: { allowed_countries: ['US'] },
+        phone_number_collection: { enabled: true },
         automatic_tax: { enabled: true },
         line_items: lineItems,
         metadata: {

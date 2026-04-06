@@ -36,6 +36,7 @@
         <button class="admin-nav-button" type="button" data-store-nav="inventory">Add Inventory</button>
         <button class="admin-nav-button" type="button" data-store-nav="pricing">Pricing</button>
         <button class="admin-nav-button" type="button" data-store-nav="edit">Edit Product</button>
+        <button class="admin-nav-button" type="button" data-store-nav="orders">Orders</button>
         <button class="admin-nav-button" type="button" data-store-nav="receipts">Receipts</button>
         <button class="admin-nav-button" type="button" data-store-nav="accounting">Accounting</button>
       </aside>
@@ -278,6 +279,41 @@
               </div>
             </form>
             <div class="subtle-text" id="storeEditMessage">Choose a product from Overview to edit it.</div>
+          </section>
+        </section>
+
+        
+        <section class="admin-pane" data-store-pane="orders">
+          <section class="panel">
+            <div class="panel-header">
+              <div>
+                <h2>Active Store Orders</h2>
+                <p class="subtle-text">Review paid and shipped storefront orders, then add tracking when you mail them out.</p>
+              </div>
+              <div class="toolbar-row">
+                <button class="btn" type="button" id="refreshStoreOrdersButton">Refresh Orders</button>
+              </div>
+            </div>
+            <div class="banner" id="storeOrdersMessage">Loading active orders...</div>
+            <div class="table-wrap table-wrap--admin-scroll">
+              <table class="admin-table">
+                <thead>
+                  <tr>
+                    <th>Placed</th>
+                    <th>Order</th>
+                    <th>Customer</th>
+                    <th>Items</th>
+                    <th>Total</th>
+                    <th>Status</th>
+                    <th>Tracking</th>
+                    <th>Actions</th>
+                  </tr>
+                </thead>
+                <tbody id="storeOrdersBody">
+                  <tr><td colspan="8">Loading orders...</td></tr>
+                </tbody>
+              </table>
+            </div>
           </section>
         </section>
 

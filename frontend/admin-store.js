@@ -3,6 +3,7 @@
   const navButtons = Array.from(document.querySelectorAll('[data-store-nav]'));
   const state = {
     products: [],
+    orders: [],
     receipts: [],
     overrides: [],
     accounting: null,
@@ -262,6 +263,76 @@
     });
   }
 
+
+  function renderOrders() {
+    const body = document.getElementById('storeOrdersBody');
+    if (!body) return;
+    const orders = state.orders || [];
+    if (!orders.length) {
+      body.innerHTML = '<tr><td colspan="8">No active orders found.</td></tr>';
+      return;
+    }
+    body.innerHTML = orders.map((order) => {
+      const itemSummary = (order.items || []).map((item) => `${escape(item.title || 'Item')} × ${escape(item.quantity || 0)}`).join('<br>');
+      return `
+        <tr>
+          <td>${escape(dateTime(order.placed_at))}</td>
+          <td><div><strong>${escape(order.order_number || order.session_id || 'Order')}</strong></div></td>
+          <td>
+            <div>${escape(order.customer_email || '—')}</div>
+            <div class="subtle-text">${escape(order.shipping_name || '')}</div>
+          </td>
+          <td>${itemSummary || '—'}</td>
+          <td>${money(order.total)}</td>
+          <td><span class="badge">${escape(order.status || 'paid')}</span></td>
+          <td>
+            <div>${escape(order.tracking_number || '—')}</div>
+            <div class="subtle-text">${escape(order.tracking_carrier || '')}</div>
+          </td>
+          <td>
+            <div class="form-grid storefront-order-inline-form">
+              <div class="field"><input class="input input--sm" placeholder="Carrier" data-order-tracking-carrier="${escape(order.session_id)}" value="${escape(order.tracking_carrier || '')}" /></div>
+              <div class="field"><input class="input input--sm" placeholder="Tracking number" data-order-tracking-number="${escape(order.session_id)}" value="${escape(order.tracking_number || '')}" /></div>
+              <div class="field"><input class="input input--sm" placeholder="Tracking URL (optional)" data-order-tracking-url="${escape(order.session_id)}" value="${escape(order.tracking_url || '')}" /></div>
+              <div class="field"><button class="btn btn-primary" type="button" data-save-order-tracking="${escape(order.session_id)}">Save Tracking + Email</button></div>
+            </div>
+          </td>
+        </tr>`;
+    }).join('');
+
+    body.querySelectorAll('[data-save-order-tracking]').forEach((button) => {
+      button.addEventListener('click', async () => {
+        const sessionId = button.dataset.saveOrderTracking;
+        const carrier = body.querySelector(`[data-order-tracking-carrier="${CSS.escape(sessionId)}"]`)?.value || '';
+        const number = body.querySelector(`[data-order-tracking-number="${CSS.escape(sessionId)}"]`)?.value || '';
+        const url = body.querySelector(`[data-order-tracking-url="${CSS.escape(sessionId)}"]`)?.value || '';
+        if (!number.trim()) {
+          showMessage('storeOrdersMessage', 'Tracking number is required before saving.', true);
+          return;
+        }
+        button.disabled = true;
+        showMessage('storeOrdersMessage', 'Saving tracking and sending customer email...');
+        try {
+          await authJSON(API + '/admin/store/orders/' + encodeURIComponent(sessionId) + '/tracking', {
+            method: 'POST',
+            body: JSON.stringify({
+              tracking_number: number,
+              tracking_carrier: carrier,
+              tracking_url: url,
+              status: 'shipped'
+            })
+          });
+          showMessage('storeOrdersMessage', 'Tracking saved and customer email sent.');
+          await loadOrders();
+        } catch (err) {
+          showMessage('storeOrdersMessage', err.message || 'Could not save tracking.', true);
+        } finally {
+          button.disabled = false;
+        }
+      });
+    });
+  }
+
   function renderReceipts() {
     const body = document.getElementById('storeReceiptsBody');
     if (!body) return;
@@ -350,6 +421,12 @@
     if (exportLink) exportLink.href = API + '/admin/store/accounting/export.csv';
   }
 
+  async function loadOrders() {
+    const data = await authJSON(API + '/admin/store/orders');
+    state.orders = Array.isArray(data.orders) ? data.orders : [];
+    renderOrders();
+  }
+
   async function loadProducts() {
     const data = await authJSON(API + '/admin/store/products');
     state.products = Array.isArray(data.products) ? data.products : [];
@@ -377,7 +454,7 @@
   async function refreshAll() {
     showMessage('storeAdminMessage', 'Refreshing storefront data...');
     try {
-      await Promise.all([loadProducts(), loadReceipts(), loadOverrides(), loadAccounting()]);
+      await Promise.all([loadProducts(), loadOrders(), loadReceipts(), loadOverrides(), loadAccounting()]);
       renderTopStats();
       showMessage('storeAdminMessage', 'Storefront data is up to date.');
     } catch (err) {
@@ -450,6 +527,7 @@
 
   function bindActions() {
     document.getElementById('refreshStoreDataButton')?.addEventListener('click', refreshAll);
+    document.getElementById('refreshStoreOrdersButton')?.addEventListener('click', loadOrders);
     bindEditForm();
     document.getElementById('storeLookupButton')?.addEventListener('click', () => lookupManualProductDetails(true));
     document.getElementById('storeManualSite')?.addEventListener('change', () => { if (selectedManualSku()) lookupManualProductDetails(false); });
