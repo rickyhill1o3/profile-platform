@@ -965,7 +965,171 @@ async function allocateCostFIFO({ supabase, storefrontProductId, quantity }) {
   return { allocatedCostCents, allocations };
 }
 
-async function recordStorefrontSaleFromStripeSession({ supabase, session }) {
+async function sendStorefrontOrderConfirmation({ supabase, sendEmail, sales, notificationEmail = "" }) {
+  if (!Array.isArray(sales) || !sales.length || typeof sendEmail !== 'function') {
+    return { skipped: 'missing_sales_or_email' };
+  }
+
+  const productIds = [...new Set(sales.map((sale) => sale.storefront_product_id).filter(Boolean))];
+  const { data: productRows, error: productError } = await supabase
+    .from('storefront_products')
+    .select('id, title, image_url, primary_sku, primary_site')
+    .in('id', productIds);
+  if (productError) throw new Error(productError.message);
+  const productsById = new Map((productRows || []).map((row) => [String(row.id), row]));
+
+  const firstSale = sales[0] || {};
+  const customerEmail = String(firstSale.customer_email || '').trim();
+  const metadata = firstSale.metadata || {};
+  const shippingAddress = metadata.shipping_address || {};
+  const shippingName = metadata.shipping_name || metadata.customer_name || '';
+  const orderNumber = String(firstSale.stripe_session_id || firstSale.id || '').trim();
+
+  const items = sales.map((sale) => {
+    const product = productsById.get(String(sale.storefront_product_id)) || {};
+    return {
+      title: product.title || 'Storefront product',
+      image_url: product.image_url || '',
+      sku: product.primary_sku || '',
+      site: product.primary_site || '',
+      quantity: Number(sale.quantity || 0),
+      unit_price: centsToDollars(sale.sale_unit_price_cents),
+      subtotal: centsToDollars(sale.sale_subtotal_cents),
+      shipping: centsToDollars(sale.shipping_cents),
+      tax: centsToDollars(sale.tax_cents),
+      total: centsToDollars(sale.total_cents)
+    };
+  });
+
+  const subtotal = items.reduce((sum, item) => sum + Number(item.subtotal || 0), 0);
+  const shippingTotal = items.reduce((sum, item) => sum + Number(item.shipping || 0), 0);
+  const taxTotal = items.reduce((sum, item) => sum + Number(item.tax || 0), 0);
+  const grandTotal = items.reduce((sum, item) => sum + Number(item.total || 0), 0);
+
+  const addressLines = [
+    shippingName,
+    shippingAddress.line1,
+    shippingAddress.line2,
+    [shippingAddress.city, shippingAddress.state, shippingAddress.postal_code].filter(Boolean).join(', '),
+    shippingAddress.country
+  ].filter(Boolean);
+
+  const customerHtml = `
+    <div style="font-family:Arial,sans-serif;line-height:1.5;color:#111">
+      <h2>Thanks for your order from The Shore Shack TCG</h2>
+      <p>We received your order and will get it packed soon.</p>
+      <p><strong>Order #:</strong> ${orderNumber}</p>
+      <table style="width:100%;border-collapse:collapse;margin-top:16px">
+        <thead>
+          <tr>
+            <th style="text-align:left;padding:8px;border-bottom:1px solid #ddd">Item</th>
+            <th style="text-align:left;padding:8px;border-bottom:1px solid #ddd">Qty</th>
+            <th style="text-align:left;padding:8px;border-bottom:1px solid #ddd">Price</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${items.map((item) => `
+            <tr>
+              <td style="padding:8px;border-bottom:1px solid #eee;vertical-align:top">
+                <div style="display:flex;gap:12px;align-items:flex-start">
+                  ${item.image_url ? `<img src="${item.image_url}" alt="" style="width:56px;height:56px;object-fit:contain;border:1px solid #ddd;border-radius:6px" />` : ''}
+                  <div>
+                    <div style="font-weight:600">${item.title}</div>
+                    <div style="color:#666;font-size:12px">${item.site ? item.site.toUpperCase() + ' ' : ''}${item.sku ? 'SKU ' + item.sku : ''}</div>
+                  </div>
+                </div>
+              </td>
+              <td style="padding:8px;border-bottom:1px solid #eee">${item.quantity}</td>
+              <td style="padding:8px;border-bottom:1px solid #eee">$${item.total.toFixed(2)}</td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
+      <div style="margin-top:16px">
+        <div><strong>Subtotal:</strong> $${subtotal.toFixed(2)}</div>
+        <div><strong>Shipping:</strong> $${shippingTotal.toFixed(2)}</div>
+        <div><strong>Tax:</strong> $${taxTotal.toFixed(2)}</div>
+        <div style="font-size:18px;margin-top:8px"><strong>Total:</strong> $${grandTotal.toFixed(2)}</div>
+      </div>
+      ${addressLines.length ? `<div style="margin-top:16px"><strong>Shipping to:</strong><br />${addressLines.join('<br />')}</div>` : ''}
+    </div>
+  `;
+
+  const customerText = [
+    'Thanks for your order from The Shore Shack TCG',
+    `Order #: ${orderNumber}`,
+    '',
+    ...items.map((item) => `${item.title} x${item.quantity} - $${item.total.toFixed(2)}`),
+    '',
+    `Subtotal: $${subtotal.toFixed(2)}`,
+    `Shipping: $${shippingTotal.toFixed(2)}`,
+    `Tax: $${taxTotal.toFixed(2)}`,
+    `Total: $${grandTotal.toFixed(2)}`,
+    '',
+    addressLines.length ? `Ship to:\n${addressLines.join('\n')}` : ''
+  ].filter(Boolean).join('\n');
+
+  let customerResult = null;
+  if (customerEmail) {
+    customerResult = await sendEmail({
+      to: customerEmail,
+      subject: `Your Shore Shack order receipt - ${orderNumber}`,
+      html: customerHtml,
+      text: customerText
+    });
+  }
+
+  let adminResult = null;
+  const adminEmail = String(notificationEmail || process.env.STORE_ORDER_NOTIFICATION_EMAIL || 'theshoreshacktcg@gmail.com').trim();
+  if (adminEmail) {
+    const adminHtml = `
+      <div style="font-family:Arial,sans-serif;line-height:1.5;color:#111">
+        <h2>New storefront order received</h2>
+        <p><strong>Order #:</strong> ${orderNumber}</p>
+        <p><strong>Customer:</strong> ${shippingName || '-'}<br /><strong>Email:</strong> ${customerEmail || '-'}</p>
+        ${addressLines.length ? `<p><strong>Ship to:</strong><br />${addressLines.join('<br />')}</p>` : ''}
+        ${customerHtml}
+      </div>
+    `;
+    const adminText = [
+      'New storefront order received',
+      `Order #: ${orderNumber}`,
+      `Customer: ${shippingName || '-'}`,
+      `Email: ${customerEmail || '-'}`,
+      '',
+      ...items.map((item) => `${item.title} x${item.quantity} - $${item.total.toFixed(2)}`),
+      '',
+      `Subtotal: $${subtotal.toFixed(2)}`,
+      `Shipping: $${shippingTotal.toFixed(2)}`,
+      `Tax: $${taxTotal.toFixed(2)}`,
+      `Total: $${grandTotal.toFixed(2)}`,
+      '',
+      addressLines.length ? `Ship to:\n${addressLines.join('\n')}` : ''
+    ].filter(Boolean).join('\n');
+
+    try {
+      adminResult = await sendEmail({
+        to: adminEmail,
+        subject: `New Shore Shack order - ${orderNumber}`,
+        html: adminHtml,
+        text: adminText
+      });
+    } catch (err) {
+      console.error('Admin storefront order email failed:', err);
+      adminResult = { error: err.message || String(err) };
+    }
+  }
+
+  return {
+    sent: true,
+    customer_email: customerEmail || null,
+    admin_email: adminEmail || null,
+    customer_result: customerResult,
+    admin_result: adminResult
+  };
+}
+
+async function recordStorefrontSaleFromStripeSession({ supabase, sendEmail, session, notificationEmail = '' }) {
   const metadata = session?.metadata || {};
   if (String(metadata.checkout_type || '') !== 'storefront_purchase') {
     return { skipped: 'not_storefront_checkout' };
@@ -1090,7 +1254,7 @@ async function recordStorefrontSaleFromStripeSession({ supabase, session }) {
   }
 
   await Promise.all(saleItems.map((entry) => recalculateProductInventory(supabase, entry.storefront_product_id)));
-  const emailResult = await sendStorefrontOrderConfirmation({ sales: insertedSales });
+  const emailResult = await sendStorefrontOrderConfirmation({ supabase, sendEmail, sales: insertedSales, notificationEmail: process.env.STORE_ORDER_NOTIFICATION_EMAIL || SUPER_ADMIN_EMAIL });
   return { recorded: true, sales: insertedSales, email: emailResult };
 }
 
@@ -1945,7 +2109,7 @@ function registerShopRoutes({
         superAdminEmail: SUPER_ADMIN_EMAIL
       }),
     recordStorefrontSaleFromStripeSession: async (session) =>
-      recordStorefrontSaleFromStripeSession({ supabase, session })
+      recordStorefrontSaleFromStripeSession({ supabase, sendEmail, session, notificationEmail: process.env.STORE_ORDER_NOTIFICATION_EMAIL || SUPER_ADMIN_EMAIL })
   };
 }
 
