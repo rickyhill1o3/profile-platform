@@ -55,6 +55,7 @@ app.post("/api/discounts", auth, admin, async (req, res) => {
         type: d.type,
         value: Number(d.value || 0),
         usage_limit: Number(d.usage_limit || 0),
+        one_time_per_user: !!d.one_time_per_user,
         expires_at: d.expires_at || null,
         min_cart_value: Number(d.min_cart_value || 0),
         active: true,
@@ -88,6 +89,10 @@ app.post("/api/discounts/apply", async (req, res) => {
     const { code, cartTotal, email, shippingTotal = 0 } = req.body;
 
     const d = await getDiscount(code);
+
+    if (d.one_time_per_user && d.used_by.includes(email)) {
+        return res.json({ error: "Already used" });
+    }
 
     if (!d || !d.active) return res.json({ error: "Invalid code" });
 
@@ -1330,6 +1335,7 @@ app.post("/webhooks/stripe", bodyParser.raw({ type: "application/json" }), async
                     const saleResult = await shopRoutes.recordStorefrontSaleFromStripeSession(session);
                     console.log("Storefront Stripe sale processed:", saleResult);
                 }
+
                 if (session.metadata?.discount_code) {
                     const d = await getDiscount(session.metadata.discount_code);
 
@@ -1343,6 +1349,8 @@ app.post("/webhooks/stripe", bodyParser.raw({ type: "application/json" }), async
                             .eq("code", session.metadata.discount_code);
                     }
                 }
+
+                return res.json({ received: true, storefront: true });
             }
 
             const user = await findUserForWebhook(session);
