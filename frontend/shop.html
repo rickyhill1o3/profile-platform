@@ -49,8 +49,32 @@
           </div>
         </div>
 
-        <div id="shop-status" class="shop-status">Loading products...</div>
-        <div id="shop-grid" class="products-grid products-grid--shop"></div>
+        <div class="shop-layout">
+          <div class="shop-main-column">
+            <div id="shop-status" class="shop-status">Loading products...</div>
+            <div id="shop-grid" class="products-grid products-grid--shop"></div>
+          </div>
+          <aside class="panel shop-cart-panel" id="shop-cart-panel">
+            <div class="panel-header">
+              <div>
+                <h2>Your cart</h2>
+                <p class="subtle-text">Add multiple items, then check out once.</p>
+              </div>
+            </div>
+            <div id="shop-cart-items" class="shop-cart-items">
+              <div class="shop-empty-state">Your cart is empty.</div>
+            </div>
+            <div class="shop-cart-summary">
+              <div class="shop-cart-summary__row"><span>Items</span><strong id="shop-cart-count">0</strong></div>
+              <div class="shop-cart-summary__row"><span>Subtotal</span><strong id="shop-cart-subtotal">$0.00</strong></div>
+              <p class="subtle-text">Tax is calculated at Stripe checkout. Shipping is added based on total item quantity.</p>
+            </div>
+            <div class="panel-actions">
+              <button class="btn" type="button" id="shop-cart-clear">Clear cart</button>
+              <button class="btn btn-primary" type="button" id="shop-cart-checkout">Checkout cart</button>
+            </div>
+          </aside>
+        </div>
       </div>
     </section>
   </main>

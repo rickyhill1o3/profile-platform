@@ -35,6 +35,7 @@
         <button class="admin-nav-button is-active" type="button" data-store-nav="overview">Overview</button>
         <button class="admin-nav-button" type="button" data-store-nav="inventory">Add Inventory</button>
         <button class="admin-nav-button" type="button" data-store-nav="pricing">Pricing</button>
+        <button class="admin-nav-button" type="button" data-store-nav="edit">Edit Product</button>
         <button class="admin-nav-button" type="button" data-store-nav="receipts">Receipts</button>
         <button class="admin-nav-button" type="button" data-store-nav="accounting">Accounting</button>
       </aside>
@@ -221,6 +222,62 @@
                 </tbody>
               </table>
             </div>
+          </section>
+        </section>
+
+        <section class="admin-pane" data-store-pane="edit">
+          <section class="panel">
+            <div class="panel-header">
+              <div>
+                <h2>Edit Storefront Product</h2>
+                <p class="subtle-text">Update product details without adding more inventory.</p>
+              </div>
+            </div>
+            <form id="storeEditProductForm" class="form-grid">
+              <input type="hidden" id="storeEditProductId" />
+              <div class="field field--full">
+                <label for="storeEditTitle">Product Title</label>
+                <input class="input" id="storeEditTitle" placeholder="Product title" />
+              </div>
+              <div class="field">
+                <label for="storeEditSite">Site</label>
+                <input class="input" id="storeEditSite" disabled />
+              </div>
+              <div class="field">
+                <label for="storeEditSku">SKU</label>
+                <input class="input" id="storeEditSku" disabled />
+              </div>
+              <div class="field">
+                <label for="storeEditSalePrice">Sale Price</label>
+                <input class="input" id="storeEditSalePrice" type="number" min="0" step="0.01" />
+              </div>
+              <div class="field">
+                <label for="storeEditStatus">Status</label>
+                <select class="input" id="storeEditStatus">
+                  <option value="active">active</option>
+                  <option value="draft">draft</option>
+                  <option value="deleted">deleted</option>
+                  <option value="merged">merged</option>
+                </select>
+              </div>
+              <div class="field">
+                <label for="storeEditImageUrl">Image URL</label>
+                <input class="input" id="storeEditImageUrl" placeholder="https://..." />
+              </div>
+              <div class="field">
+                <label for="storeEditProductUrl">Source Product URL</label>
+                <input class="input" id="storeEditProductUrl" placeholder="https://..." />
+              </div>
+              <div class="field field--full">
+                <label for="storeEditDescription">Description</label>
+                <textarea class="input" id="storeEditDescription" rows="5"></textarea>
+              </div>
+              <div class="field field--full panel-actions panel-actions--split">
+                <button class="btn" type="button" id="storeEditCancelButton">Cancel</button>
+                <button class="btn btn-primary" type="submit">Save Product Changes</button>
+              </div>
+            </form>
+            <div class="subtle-text" id="storeEditMessage">Choose a product from Overview to edit it.</div>
           </section>
         </section>
 

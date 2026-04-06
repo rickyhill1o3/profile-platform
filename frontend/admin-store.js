@@ -5,7 +5,8 @@
     products: [],
     receipts: [],
     overrides: [],
-    accounting: null
+    accounting: null,
+    editingProductId: ''
   };
 
   function setPane(name) {
@@ -100,7 +101,7 @@
         </td>
         <td>
           <div class="store-merge-cell">
-            <button class="btn" type="button" data-refresh-product="${escape(item.id)}">Refresh Details</button>
+            <button class="btn" type="button" data-open-edit="${escape(item.id)}">Edit</button><button class="btn" type="button" data-refresh-product="${escape(item.id)}">Refresh Details</button>
             <button class="btn" type="button" data-save-product="${escape(item.id)}">Save</button>
             <button class="btn btn-danger" type="button" data-delete-product="${escape(item.id)}">Delete</button>
           </div>
@@ -135,6 +136,11 @@
           button.disabled = false;
         }
       });
+    });
+
+
+    body.querySelectorAll('[data-open-edit]').forEach((button) => {
+      button.addEventListener('click', () => openEditPane(button.dataset.openEdit));
     });
 
     body.querySelectorAll('[data-refresh-product]').forEach((button) => {
@@ -196,6 +202,63 @@
           button.disabled = false;
         }
       });
+    });
+  }
+
+  function openEditPane(productId) {
+    const product = state.products.find((item) => String(item.id) === String(productId));
+    if (!product) {
+      showMessage('storeAdminMessage', 'Product not found.', true);
+      return;
+    }
+    state.editingProductId = String(product.id);
+    const byId = (id) => document.getElementById(id);
+    byId('storeEditProductId').value = product.id || '';
+    byId('storeEditTitle').value = product.title || '';
+    byId('storeEditSite').value = product.primary_site || '';
+    byId('storeEditSku').value = product.primary_sku || '';
+    byId('storeEditSalePrice').value = product.sale_price ?? 0;
+    byId('storeEditStatus').value = product.status || 'active';
+    byId('storeEditImageUrl').value = product.image_url || '';
+    byId('storeEditProductUrl').value = product.source_product_url || '';
+    byId('storeEditDescription').value = product.description || '';
+    showMessage('storeEditMessage', `Editing ${product.title || product.primary_sku || 'product'}.`);
+    setPane('edit');
+  }
+
+  function bindEditForm() {
+    const form = document.getElementById('storeEditProductForm');
+    const cancel = document.getElementById('storeEditCancelButton');
+    cancel?.addEventListener('click', () => {
+      state.editingProductId = '';
+      setPane('overview');
+    });
+    form?.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const productId = document.getElementById('storeEditProductId')?.value || state.editingProductId;
+      if (!productId) {
+        showMessage('storeEditMessage', 'Pick a product from Overview first.', true);
+        return;
+      }
+      showMessage('storeEditMessage', 'Saving product changes...');
+      try {
+        await authJSON(API + '/admin/store/products/' + encodeURIComponent(productId), {
+          method: 'PATCH',
+          body: JSON.stringify({
+            title: document.getElementById('storeEditTitle')?.value || '',
+            description: document.getElementById('storeEditDescription')?.value || '',
+            image_url: document.getElementById('storeEditImageUrl')?.value || '',
+            source_product_url: document.getElementById('storeEditProductUrl')?.value || '',
+            sale_price: document.getElementById('storeEditSalePrice')?.value || '',
+            status: document.getElementById('storeEditStatus')?.value || 'active'
+          })
+        });
+        showMessage('storeEditMessage', 'Product updated successfully.');
+        await refreshAll();
+        setPane('overview');
+      } catch (err) {
+        showMessage('storeEditMessage', err.message || 'Could not update product.', true);
+      }
     });
   }
 
@@ -387,6 +450,7 @@
 
   function bindActions() {
     document.getElementById('refreshStoreDataButton')?.addEventListener('click', refreshAll);
+    bindEditForm();
     document.getElementById('storeLookupButton')?.addEventListener('click', () => lookupManualProductDetails(true));
     document.getElementById('storeManualSite')?.addEventListener('change', () => { if (selectedManualSku()) lookupManualProductDetails(false); });
     document.getElementById('storeManualSku')?.addEventListener('input', () => {

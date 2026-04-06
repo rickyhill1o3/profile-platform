@@ -918,29 +918,55 @@ async function recordStorefrontSaleFromStripeSession({ supabase, session }) {
     return { skipped: 'not_storefront_checkout' };
   }
 
-  const storefrontProductId = String(metadata.storefront_product_id || '').trim();
-  const quantity = Math.max(1, Number(metadata.quantity || 1) || 1);
   const stripeSessionId = String(session.id || '').trim();
-  if (!storefrontProductId || !stripeSessionId) {
+  if (!stripeSessionId) {
+    return { skipped: 'missing_session_id' };
+  }
+
+  const { data: anyExisting } = await supabase
+    .from('storefront_sales')
+    .select('id, storefront_product_id')
+    .eq('stripe_session_id', stripeSessionId)
+    .limit(1);
+  if (Array.isArray(anyExisting) && anyExisting.length) {
+    return { duplicate: true, sale_id: anyExisting[0].id };
+  }
+
+  const parsedCart = String(metadata.cart_items || '').trim()
+    ? String(metadata.cart_items).split(',').map((entry) => {
+        const [productId, qty] = String(entry || '').split(':');
+        return {
+          storefront_product_id: String(productId || '').trim(),
+          quantity: Math.max(1, Number(qty || 1) || 1)
+        };
+      }).filter((entry) => entry.storefront_product_id)
+    : [];
+
+  const saleItems = parsedCart.length
+    ? parsedCart
+    : [{
+        storefront_product_id: String(metadata.storefront_product_id || '').trim(),
+        quantity: Math.max(1, Number(metadata.quantity || 1) || 1)
+      }].filter((entry) => entry.storefront_product_id);
+
+  if (!saleItems.length) {
     return { skipped: 'missing_product_or_session' };
   }
 
-  const { data: existing } = await supabase
-    .from('storefront_sales')
-    .select('id')
-    .eq('stripe_session_id', stripeSessionId)
-    .maybeSingle();
-  if (existing?.id) return { duplicate: true, sale_id: existing.id };
-
-  const { data: product, error: productError } = await supabase
+  const productIds = saleItems.map((entry) => entry.storefront_product_id);
+  const { data: productRows, error: productError } = await supabase
     .from('storefront_products')
     .select('*')
-    .eq('id', storefrontProductId)
-    .maybeSingle();
-  if (productError || !product) throw new Error(productError?.message || 'Storefront product not found');
+    .in('id', productIds);
+  if (productError) throw new Error(productError.message);
+  const productsById = new Map((productRows || []).map((row) => [String(row.id), row]));
 
-  if (quantity > Number(product.stock_on_hand || 0)) {
-    throw new Error('Stripe sale quantity exceeds stock on hand');
+  for (const entry of saleItems) {
+    const product = productsById.get(String(entry.storefront_product_id));
+    if (!product) throw new Error('Storefront product not found');
+    if (entry.quantity > Number(product.stock_on_hand || 0)) {
+      throw new Error(`Stripe sale quantity exceeds stock on hand for ${product.title || product.id}`);
+    }
   }
 
   const amountSubtotal = Number(session.amount_subtotal || 0);
@@ -948,44 +974,66 @@ async function recordStorefrontSaleFromStripeSession({ supabase, session }) {
   const shippingCents = Number(session.total_details?.amount_shipping || 0);
   const taxCents = Number(session.total_details?.amount_tax || 0);
   const saleSubtotalExShipping = Math.max(0, amountSubtotal - shippingCents);
-  const saleUnitPriceCents = quantity > 0 ? Math.round(saleSubtotalExShipping / quantity) : 0;
 
-  const { allocatedCostCents, allocations } = await allocateCostFIFO({
-    supabase,
-    storefrontProductId,
-    quantity
+  const lineSubtotalByProduct = saleItems.map((entry) => {
+    const product = productsById.get(String(entry.storefront_product_id));
+    return {
+      ...entry,
+      product,
+      subtotal_cents: Number(product.sale_price_cents || 0) * Number(entry.quantity || 0)
+    };
   });
+  const subtotalBase = lineSubtotalByProduct.reduce((sum, entry) => sum + Number(entry.subtotal_cents || 0), 0) || 1;
 
   const shippingAddress = session.customer_details?.address || session.shipping_details?.address || {};
+  const insertedSales = [];
 
-  const { data: sale, error: saleError } = await supabase
-    .from('storefront_sales')
-    .insert({
-      storefront_product_id: storefrontProductId,
-      stripe_session_id: stripeSessionId,
-      quantity,
-      sale_unit_price_cents: saleUnitPriceCents,
-      sale_subtotal_cents: saleSubtotalExShipping,
-      shipping_cents: shippingCents,
-      tax_cents: taxCents,
-      total_cents: amountTotal,
-      allocated_cost_cents: allocatedCostCents,
-      customer_email: session.customer_details?.email || session.customer_email || null,
-      shipping_zip: shippingAddress.postal_code || null,
-      shipping_state: shippingAddress.state || null,
-      metadata: {
-        stripe_payment_intent: session.payment_intent || null,
-        allocations,
-        raw_session: session
-      },
-      sold_at: new Date().toISOString()
-    })
-    .select('*')
-    .single();
-  if (saleError) throw new Error(saleError.message);
+  for (let index = 0; index < lineSubtotalByProduct.length; index += 1) {
+    const entry = lineSubtotalByProduct[index];
+    const isLast = index === lineSubtotalByProduct.length - 1;
+    const priorShipping = insertedSales.reduce((sum, row) => sum + Number(row.shipping_cents || 0), 0);
+    const priorTax = insertedSales.reduce((sum, row) => sum + Number(row.tax_cents || 0), 0);
+    const lineShipping = isLast ? Math.max(0, shippingCents - priorShipping) : Math.round((entry.subtotal_cents / subtotalBase) * shippingCents);
+    const lineTax = isLast ? Math.max(0, taxCents - priorTax) : Math.round((entry.subtotal_cents / subtotalBase) * taxCents);
+    const saleUnitPriceCents = entry.quantity > 0 ? Math.round(entry.subtotal_cents / entry.quantity) : 0;
 
-  const updatedProduct = await recalculateProductInventory(supabase, storefrontProductId);
-  return { recorded: true, sale, product: updatedProduct };
+    const { allocatedCostCents, allocations } = await allocateCostFIFO({
+      supabase,
+      storefrontProductId: entry.storefront_product_id,
+      quantity: entry.quantity
+    });
+
+    const { data: sale, error: saleError } = await supabase
+      .from('storefront_sales')
+      .insert({
+        storefront_product_id: entry.storefront_product_id,
+        stripe_session_id: stripeSessionId,
+        quantity: entry.quantity,
+        sale_unit_price_cents: saleUnitPriceCents,
+        sale_subtotal_cents: entry.subtotal_cents,
+        shipping_cents: lineShipping,
+        tax_cents: lineTax,
+        total_cents: entry.subtotal_cents + lineShipping + lineTax,
+        allocated_cost_cents: allocatedCostCents,
+        customer_email: session.customer_details?.email || session.customer_email || null,
+        shipping_zip: shippingAddress.postal_code || null,
+        shipping_state: shippingAddress.state || null,
+        metadata: {
+          stripe_payment_intent: session.payment_intent || null,
+          allocations,
+          raw_session: session,
+          cart_items: saleItems
+        },
+        sold_at: new Date().toISOString()
+      })
+      .select('*')
+      .single();
+    if (saleError) throw new Error(saleError.message);
+    insertedSales.push(sale);
+  }
+
+  await Promise.all(saleItems.map((entry) => recalculateProductInventory(supabase, entry.storefront_product_id)));
+  return { recorded: true, sales: insertedSales };
 }
 
 function withMoney(product) {
@@ -1559,24 +1607,85 @@ function registerShopRoutes({
   app.post('/public/store/checkout-session', async (req, res) => {
     try {
       if (!stripe) return res.status(400).json({ error: 'Stripe is not configured yet' });
-      const productId = req.body?.product_id || req.body?.storefront_product_id || req.body?.inventory_id;
-      const quantity = Math.max(1, Number(req.body?.quantity || 1) || 1);
 
-      const { data: item, error } = await supabase
-        .from('storefront_products')
-        .select('*')
-        .eq('id', productId)
-        .eq('status', 'active')
-        .single();
-      if (error || !item) return res.status(404).json({ error: 'Product not found' });
-      if (quantity > Number(item.stock_on_hand || 0)) return res.status(400).json({ error: 'Not enough inventory available' });
-      if (!Number.isFinite(Number(item.sale_price_cents)) || Number(item.sale_price_cents) <= 0) {
-        return res.status(400).json({ error: 'This product does not have a valid sale price yet' });
+      const requestedItems = Array.isArray(req.body?.items) && req.body.items.length
+        ? req.body.items
+        : [{
+            product_id: req.body?.product_id || req.body?.storefront_product_id || req.body?.inventory_id,
+            quantity: req.body?.quantity || 1
+          }];
+
+      const normalizedItems = requestedItems
+        .map((entry) => ({
+          product_id: String(entry?.product_id || '').trim(),
+          quantity: Math.max(1, Number(entry?.quantity || 1) || 1)
+        }))
+        .filter((entry) => entry.product_id);
+
+      if (!normalizedItems.length) {
+        return res.status(400).json({ error: 'At least one product is required for checkout' });
       }
 
-      const shipping = shippingTierForQuantity(quantity);
+      const grouped = new Map();
+      for (const entry of normalizedItems) {
+        const current = grouped.get(entry.product_id) || 0;
+        grouped.set(entry.product_id, current + entry.quantity);
+      }
+      const compactItems = Array.from(grouped.entries()).map(([product_id, quantity]) => ({ product_id, quantity }));
+      const productIds = compactItems.map((entry) => entry.product_id);
+
+      const { data: items, error } = await supabase
+        .from('storefront_products')
+        .select('*')
+        .in('id', productIds)
+        .eq('status', 'active');
+      if (error) return res.status(500).json({ error: error.message });
+      const productsById = new Map((items || []).map((item) => [String(item.id), item]));
+      if (productsById.size !== compactItems.length) {
+        return res.status(404).json({ error: 'One or more products could not be found' });
+      }
+
+      const lineItems = [];
+      let totalQuantity = 0;
+      for (const entry of compactItems) {
+        const item = productsById.get(entry.product_id);
+        if (entry.quantity > Number(item.stock_on_hand || 0)) {
+          return res.status(400).json({ error: `Not enough inventory available for ${item.title}` });
+        }
+        if (!Number.isFinite(Number(item.sale_price_cents)) || Number(item.sale_price_cents) <= 0) {
+          return res.status(400).json({ error: `${item.title} does not have a valid sale price yet` });
+        }
+        totalQuantity += entry.quantity;
+        lineItems.push({
+          quantity: entry.quantity,
+          price_data: {
+            currency: process.env.STRIPE_CURRENCY || 'usd',
+            unit_amount: Number(item.sale_price_cents),
+            product_data: {
+              name: item.title,
+              description: item.description || `${item.primary_site} SKU ${item.primary_sku}`,
+              images: item.image_url ? [item.image_url] : []
+            }
+          }
+        });
+      }
+
+      const shipping = shippingTierForQuantity(totalQuantity);
+      lineItems.push({
+        quantity: 1,
+        price_data: {
+          currency: process.env.STRIPE_CURRENCY || 'usd',
+          unit_amount: shipping.amount_cents,
+          product_data: {
+            name: `Shipping (${shipping.label})`
+          }
+        }
+      });
+
       const successUrl = buildAppUrl('/shop.html?checkout=success');
       const cancelUrl = buildAppUrl('/shop.html?checkout=cancel');
+      const compactMetadata = compactItems.map((entry) => `${entry.product_id}:${entry.quantity}`).join(',');
+      const firstItem = productsById.get(compactItems[0].product_id);
 
       const session = await stripe.checkout.sessions.create({
         mode: 'payment',
@@ -1584,36 +1693,14 @@ function registerShopRoutes({
         cancel_url: cancelUrl,
         shipping_address_collection: { allowed_countries: ['US'] },
         automatic_tax: { enabled: true },
-        line_items: [
-          {
-            quantity,
-            price_data: {
-              currency: process.env.STRIPE_CURRENCY || 'usd',
-              unit_amount: Number(item.sale_price_cents),
-              product_data: {
-                name: item.title,
-                description: item.description || `${item.primary_site} SKU ${item.primary_sku}`,
-                images: item.image_url ? [item.image_url] : []
-              }
-            }
-          },
-          {
-            quantity: 1,
-            price_data: {
-              currency: process.env.STRIPE_CURRENCY || 'usd',
-              unit_amount: shipping.amount_cents,
-              product_data: {
-                name: `Shipping (${shipping.label})`
-              }
-            }
-          }
-        ],
+        line_items: lineItems,
         metadata: {
           checkout_type: 'storefront_purchase',
-          storefront_product_id: String(item.id),
-          site: String(item.primary_site || ''),
-          sku: String(item.primary_sku || ''),
-          quantity: String(quantity)
+          storefront_product_id: String(firstItem.id),
+          site: String(firstItem.primary_site || ''),
+          sku: String(firstItem.primary_sku || ''),
+          quantity: String(compactItems[0].quantity),
+          cart_items: compactMetadata
         }
       });
 
