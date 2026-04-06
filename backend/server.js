@@ -90,11 +90,14 @@ app.post("/api/discounts/apply", async (req, res) => {
 
     const d = await getDiscount(code);
 
-    if (d.one_time_per_user && d.used_by.includes(email)) {
+    if (!d || !d.active) return res.json({ error: "Invalid code" });
+
+    const normalizedEmail = String(email || "").trim().toLowerCase();
+    const usedBy = Array.isArray(d.used_by) ? d.used_by.map((value) => String(value || "").trim().toLowerCase()) : [];
+
+    if (d.one_time_per_user && normalizedEmail && usedBy.includes(normalizedEmail)) {
         return res.json({ error: "Already used" });
     }
-
-    if (!d || !d.active) return res.json({ error: "Invalid code" });
 
     if (d.expires_at && new Date() > new Date(d.expires_at))
         return res.json({ error: "Expired code" });
@@ -102,22 +105,22 @@ app.post("/api/discounts/apply", async (req, res) => {
     if (d.usage_limit && d.usage_count >= d.usage_limit)
         return res.json({ error: "Usage limit reached" });
 
-    if (cartTotal < d.min_cart_value)
+    if (Number(cartTotal || 0) < Number(d.min_cart_value || 0))
         return res.json({ error: "Minimum not met" });
 
     let discountAmount = 0;
     let shippingDiscount = 0;
 
     if (d.type === "percent") {
-        discountAmount = cartTotal * (d.value / 100);
+        discountAmount = Number(cartTotal || 0) * (Number(d.value || 0) / 100);
     }
 
     if (d.type === "fixed") {
-        discountAmount = d.value;
+        discountAmount = Number(d.value || 0);
     }
 
     if (d.type === "free_shipping") {
-        shippingDiscount = shippingTotal;
+        shippingDiscount = Number(shippingTotal || 0);
     }
 
     return res.json({
@@ -459,7 +462,7 @@ async function sendEmail({ to, subject, text, html }) {
 }
 
 function buildAppUrl(pathname) {
-    const base = (process.env.APP_BASE_URL || "").replace(/\/$/, "");
+    const base = (process.env.APP_BASE_URL || "https://theshoreshacktcg.com").replace(/\/$/, "");
     if (!base) return pathname;
     return base + pathname;
 }

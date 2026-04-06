@@ -1254,7 +1254,7 @@ async function recordStorefrontSaleFromStripeSession({ supabase, sendEmail, sess
   }
 
   await Promise.all(saleItems.map((entry) => recalculateProductInventory(supabase, entry.storefront_product_id)));
-  const emailResult = await sendStorefrontOrderConfirmation({ supabase, sendEmail, sales: insertedSales, notificationEmail: process.env.STORE_ORDER_NOTIFICATION_EMAIL || SUPER_ADMIN_EMAIL });
+  const emailResult = await sendStorefrontOrderConfirmation({ supabase, sendEmail, sales: insertedSales, notificationEmail: notificationEmail || process.env.STORE_ORDER_NOTIFICATION_EMAIL || 'theshoreshacktcg@gmail.com' });
   return { recorded: true, sales: insertedSales, email: emailResult };
 }
 
@@ -2056,7 +2056,7 @@ function registerShopRoutes({
         discounts = [{ coupon: coupon.id }];
       }
 
-      const successUrl = buildAppUrl('/shop.html?checkout=success');
+      const successUrl = buildAppUrl('/order-confirmation.html?session_id={CHECKOUT_SESSION_ID}');
       const cancelUrl = buildAppUrl('/shop.html?checkout=cancel');
       const compactMetadata = compactItems.map((entry) => `${entry.product_id}:${entry.quantity}`).join(',');
       const firstItem = productsById.get(compactItems[0].product_id);
