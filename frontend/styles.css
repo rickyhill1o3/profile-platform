@@ -375,3 +375,16 @@ h1,h2,h3,h4,p{margin:0}
 .store-merge-cell{display:grid;gap:8px;min-width:180px}
 .stats-grid--store{grid-template-columns:repeat(auto-fit,minmax(180px,1fr))}
 .storefront-admin-shell .banner{margin-top:16px}
+
+
+.selection-chip{display:inline-flex;align-items:center;border-radius:999px;padding:6px 10px;background:#eff6ff;border:1px solid #bfdbfe;color:#1d4ed8;font-size:12px;font-weight:600}
+.product-card-storefront__actions{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+.storefront-admin-shell .admin-table{table-layout:auto}
+.storefront-admin-shell .admin-table td:nth-child(1){min-width:180px}
+.storefront-admin-shell .admin-table td:nth-child(4),
+.storefront-admin-shell .admin-table td:nth-child(5),
+.storefront-admin-shell .admin-table td:nth-child(7){min-width:92px}
+.storefront-admin-shell .input--sm{max-width:none;width:100%;min-width:88px}
+.storefront-admin-shell .store-status-select{min-width:96px}
+.storefront-admin-shell .store-merge-select{min-width:154px}
+.storefront-admin-shell .btn{white-space:nowrap}

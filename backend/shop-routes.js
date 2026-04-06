@@ -784,11 +784,16 @@ function registerShopRoutes({
       const { data, error } = await supabase
         .from('storefront_products')
         .select('*')
-        .eq('status', 'active')
         .gt('stock_on_hand', 0)
         .order('created_at', { ascending: false });
       if (error) return res.status(500).json({ error: error.message });
-      res.json({ products: (data || []).map(withMoney) });
+
+      const visibleProducts = (data || []).filter((row) => {
+        const status = String(row?.status || 'active').trim().toLowerCase();
+        return status === 'active' && Number(row?.stock_on_hand || 0) > 0;
+      });
+
+      res.json({ products: visibleProducts.map(withMoney) });
     } catch (err) {
       res.status(500).json({ error: err.message });
     }
@@ -986,7 +991,7 @@ function registerShopRoutes({
       if (req.body?.description != null) updates.description = normalizeText(req.body.description);
       if (req.body?.image_url != null) updates.image_url = normalizeText(req.body.image_url);
       if (req.body?.source_product_url != null) updates.source_product_url = normalizeText(req.body.source_product_url);
-      if (req.body?.status != null) updates.status = normalizeText(req.body.status) || existing.status;
+      if (req.body?.status != null) updates.status = normalizeText(req.body.status) || existing.status || 'active';
       if (req.body?.sale_price != null && req.body.sale_price !== '') {
         const salePriceCents = dollarsToCents(req.body.sale_price);
         if (salePriceCents == null) return res.status(400).json({ error: 'sale_price must be a valid number' });

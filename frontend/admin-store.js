@@ -86,12 +86,12 @@
         </td>
         <td>${escape(item.primary_site || '—')}</td>
         <td>${escape(item.primary_sku || '—')}</td>
-        <td><input class="input input--sm" type="number" min="0" step="1" value="${escape(item.stock_on_hand ?? 0)}" data-edit-stock="${escape(item.id)}" /></td>
-        <td><input class="input input--sm" type="number" min="0" step="0.01" value="${escape(item.sale_price ?? 0)}" data-edit-price="${escape(item.id)}" /></td>
+        <td><input class="input input--sm" type="number" min="0" step="1" value="${escape(item.stock_on_hand ?? 0)}" aria-label="Stock on hand" data-edit-stock="${escape(item.id)}" /></td>
+        <td><input class="input input--sm" type="number" min="0" step="0.01" value="${escape(item.sale_price ?? 0)}" aria-label="Sale price" data-edit-price="${escape(item.id)}" /></td>
         <td>${escape(item.total_purchased_qty ?? 0)}</td>
         <td>${escape(item.total_sold_qty ?? 0)}</td>
         <td>
-          <select class="input input--sm" data-edit-status="${escape(item.id)}">
+          <select class="input input--sm store-status-select" aria-label="Status" data-edit-status="${escape(item.id)}">
             <option value="active" ${item.status === 'active' ? 'selected' : ''}>active</option>
             <option value="draft" ${item.status === 'draft' ? 'selected' : ''}>draft</option>
             <option value="deleted" ${item.status === 'deleted' ? 'selected' : ''}>deleted</option>
@@ -107,7 +107,7 @@
         </td>
         <td>
           <div class="store-merge-cell">
-            <select class="input input--sm" data-merge-target="${escape(item.id)}">${buildMergeOptions(item.id)}</select>
+            <select class="input input--sm store-merge-select" aria-label="Merge source product" data-merge-target="${escape(item.id)}">${buildMergeOptions(item.id)}</select>
             <button class="btn btn-danger" type="button" data-merge-button="${escape(item.id)}">Merge Into This</button>
           </div>
         </td>

@@ -1,3 +1,8 @@
+const SHOP_API =
+  window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1"
+    ? "http://localhost:3000"
+    : "https://profile-platform.onrender.com";
+
 const shopStatus = document.getElementById('shop-status');
 const shopGrid = document.getElementById('shop-grid');
 
@@ -49,12 +54,12 @@ function productCard(product) {
 
 async function loadShop() {
   try {
-    const response = await fetch('/public/store/products', { headers: { Accept: 'application/json' } });
+    const response = await fetch(SHOP_API + '/public/store/products', { headers: { Accept: 'application/json' } });
+    const payload = await response.json().catch(() => ({}));
     if (!response.ok) {
-      throw new Error(`Unable to load shop (${response.status})`);
+      throw new Error(payload.error || `Unable to load shop (${response.status})`);
     }
 
-    const payload = await response.json();
     const products = Array.isArray(payload.products) ? payload.products : [];
 
     if (!products.length) {
@@ -71,12 +76,12 @@ async function loadShop() {
         button.disabled = true;
         button.textContent = 'Starting checkout...';
         try {
-          const response = await fetch('/public/store/checkout-session', {
+          const response = await fetch(SHOP_API + '/public/store/checkout-session', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
             body: JSON.stringify({ product_id: id, quantity: 1 })
           });
-          const payload = await response.json();
+          const payload = await response.json().catch(() => ({}));
           if (!response.ok) throw new Error(payload.error || `Checkout failed (${response.status})`);
           if (payload.url) window.location.href = payload.url;
           else throw new Error('Stripe checkout link was not returned');
@@ -90,7 +95,7 @@ async function loadShop() {
     });
   } catch (error) {
     console.error(error);
-    shopStatus.textContent = 'The shop could not load products right now. Please try again later.';
+    shopStatus.textContent = error.message || 'The shop could not load products right now. Please try again later.';
     shopGrid.innerHTML = '';
   }
 }
