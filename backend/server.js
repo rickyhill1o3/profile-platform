@@ -102,9 +102,6 @@ app.post("/api/discounts/apply", async (req, res) => {
     if (d.usage_limit && d.usage_count >= d.usage_limit)
         return res.json({ error: "Usage limit reached" });
 
-    if (d.used_by.includes(email))
-        return res.json({ error: "Already used" });
-
     if (cartTotal < d.min_cart_value)
         return res.json({ error: "Minimum not met" });
 
