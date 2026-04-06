@@ -15,7 +15,9 @@ function centsToDollars(value) {
 }
 
 function normalizeSite(value = '') {
-  return String(value || '').trim().toLowerCase();
+  const site = String(value || '').trim().toLowerCase();
+  if (site === "sam's club" || site === 'sams club' || site === 'samclub') return 'samsclub';
+  return site;
 }
 
 function normalizeSku(value = '') {
@@ -119,6 +121,20 @@ async function fetchHtml(url) {
   return await response.text();
 }
 
+async function tryLookupUrls(urls) {
+  for (const url of urls.filter(Boolean)) {
+    try {
+      const html = await fetchHtml(url);
+      if (html && html.length > 1000) return { url, html };
+    } catch {}
+  }
+  return null;
+}
+
+function extractMeta($, name) {
+  return $('meta[property="' + name + '"]').attr('content') || $('meta[name="' + name + '"]').attr('content') || '';
+}
+
 async function maybeFetchCatalogProduct(supabase, site, sku) {
   if (!site || !sku) return null;
   const { data } = await supabase
@@ -157,53 +173,58 @@ async function bestEffortLookupBySku(site, sku) {
     };
   }
 
-  const searchUrls = {
-    target: `https://www.target.com/s?searchTerm=${encodeURIComponent(cleanSku)}`,
-    walmart: `https://www.walmart.com/search?q=${encodeURIComponent(cleanSku)}`,
-    samsclub: `https://www.samsclub.com/s/${encodeURIComponent(cleanSku)}`,
-    'sam\'s club': `https://www.samsclub.com/s/${encodeURIComponent(cleanSku)}`,
-    amazon: `https://www.amazon.com/s?k=${encodeURIComponent(cleanSku)}`
+  const lookupCandidates = {
+    target: [
+      `https://www.target.com/p/-/A-${encodeURIComponent(cleanSku)}`,
+      `https://www.target.com/s?searchTerm=${encodeURIComponent(cleanSku)}`
+    ],
+    walmart: [
+      `https://www.walmart.com/ip/${encodeURIComponent(cleanSku)}`,
+      `https://www.walmart.com/search?q=${encodeURIComponent(cleanSku)}`
+    ],
+    samsclub: [
+      `https://www.samsclub.com/p/${encodeURIComponent(cleanSku)}`,
+      `https://www.samsclub.com/s/${encodeURIComponent(cleanSku)}`
+    ],
+    amazon: [`https://www.amazon.com/s?k=${encodeURIComponent(cleanSku)}`]
   };
 
-  const url = searchUrls[cleanSite];
-  if (!url) return null;
+  const result = await tryLookupUrls(lookupCandidates[cleanSite] || []);
+  if (!result) return null;
 
-  const html = await fetchHtml(url);
+  const { url, html } = result;
   const $ = cheerio.load(html);
 
   if (cleanSite === 'target') {
     const structured = productInfoFromJsonLd(html, 'https://www.target.com');
-    let title = structured.title || $('a[data-test="product-title"]').first().text().trim();
-    let href = structured.product_url || $('a[data-test="product-title"]').first().attr('href') || $('meta[property="og:url"]').attr('content') || '';
-    let image = structured.image_url || $('meta[property="og:image"]').attr('content') || $('img[alt]').filter((_, el) => ($(el).attr('alt') || '').trim() === title).first().attr('src') || '';
-    let priceText = structured.price || $('[data-test="current-price"]').first().text().trim() || $('[class*="styles__CurrentPriceFontSize"]').first().text().trim();
-    if (href && href.startsWith('/')) href = `https://www.target.com${href}`;
-    if (image) image = absolutizeUrl(image, 'https://www.target.com');
+    let title = structured.title || extractMeta($, 'og:title') || $('a[data-test="product-title"]').first().text().trim() || $('h1').first().text().trim();
+    let href = structured.product_url || extractMeta($, 'og:url') || $('link[rel="canonical"]').attr('href') || $('a[data-test="product-title"]').first().attr('href') || url;
+    let image = structured.image_url || extractMeta($, 'og:image') || $('img[src*="target.scene7"]').first().attr('src') || $('img').first().attr('src') || '';
+    const description = structured.description || extractMeta($, 'description') || '';
+    const priceText = structured.price || $('[data-test="current-price"]').first().text().trim() || $('[class*="CurrentPrice"]').first().text().trim();
     return {
       title,
-      image_url: image,
-      description: structured.description || $('meta[name="description"]').attr('content') || '',
-      product_url: href,
+      image_url: absolutizeUrl(image, 'https://www.target.com'),
+      description,
+      product_url: absolutizeUrl(href, 'https://www.target.com'),
       price: typeof priceText === 'number' ? priceText : parseMoney(priceText),
-      metadata: { source: 'target_search' }
+      metadata: { source: url.includes('/p/-/A-') ? 'target_direct' : 'target_search' }
     };
   }
 
   if (cleanSite === 'walmart') {
     const structured = productInfoFromJsonLd(html, 'https://www.walmart.com');
-    let title = structured.title || $('a[data-testid="product-title"]').first().text().trim() || $('span[data-automation-id="product-title"]').first().text().trim() || $('meta[property="og:title"]').attr('content') || '';
-    let href = structured.product_url || $('a[data-testid="product-title"]').first().attr('href') || $('a[href*="/ip/"]').first().attr('href') || $('meta[property="og:url"]').attr('content') || '';
-    let image = structured.image_url || $('meta[property="og:image"]').attr('content') || $('img[data-testid="productTileImage"]').first().attr('src') || $('img[loading="lazy"]').first().attr('src') || '';
-    let priceText = structured.price || $('[data-automation-id="product-price"]').first().text().trim() || $('div[data-testid="price-wrap"] span').first().text().trim();
-    if (href && href.startsWith('/')) href = `https://www.walmart.com${href}`;
-    if (image) image = absolutizeUrl(image, 'https://www.walmart.com');
+    let title = structured.title || extractMeta($, 'og:title') || $('h1').first().text().trim() || $('span[data-automation-id="product-title"]').first().text().trim();
+    let href = structured.product_url || extractMeta($, 'og:url') || $('link[rel="canonical"]').attr('href') || $('a[href*="/ip/"]').first().attr('href') || url;
+    let image = structured.image_url || extractMeta($, 'og:image') || $('img').filter((_, el) => String($(el).attr('src') || '').includes('i5.walmartimages.com')).first().attr('src') || $('img').first().attr('src') || '';
+    const description = structured.description || extractMeta($, 'description') || '';
     return {
       title,
-      image_url: image,
-      description: structured.description || $('meta[name="description"]').attr('content') || '',
-      product_url: href,
-      price: typeof priceText === 'number' ? priceText : parseMoney(priceText),
-      metadata: { source: 'walmart_search' }
+      image_url: absolutizeUrl(image, 'https://www.walmart.com'),
+      description,
+      product_url: absolutizeUrl(href, 'https://www.walmart.com'),
+      price: null,
+      metadata: { source: url.includes('/ip/') ? 'walmart_direct' : 'walmart_search' }
     };
   }
 
@@ -214,29 +235,23 @@ async function bestEffortLookupBySku(site, sku) {
     const image = first.find('img.s-image').attr('src') || '';
     const priceText = first.find('.a-price .a-offscreen').first().text().trim();
     if (href && href.startsWith('/')) href = `https://www.amazon.com${href}`;
-    return {
-      title,
-      image_url: image,
-      description: '',
-      product_url: href,
-      price: parseMoney(priceText),
-      metadata: { source: 'amazon_search' }
-    };
+    return { title, image_url: image, description: '', product_url: href, price: parseMoney(priceText), metadata: { source: 'amazon_search' } };
   }
 
-  if (cleanSite === 'samsclub' || cleanSite === "sam's club") {
-    const title = $('a[data-testid="product-title"]').first().text().trim() || $('img[alt]').first().attr('alt') || '';
-    let href = $('a[href*="/p/"]').first().attr('href') || '';
-    const image = $('img').filter((_, el) => String($(el).attr('src') || '').includes('image')).first().attr('src') || '';
-    const priceText = $('[data-testid="price"]').first().text().trim();
-    if (href && href.startsWith('/')) href = `https://www.samsclub.com${href}`;
+  if (cleanSite === 'samsclub') {
+    const structured = productInfoFromJsonLd(html, 'https://www.samsclub.com');
+    let title = structured.title || extractMeta($, 'og:title') || $('h1').first().text().trim() || $('a[data-testid="product-title"]').first().text().trim();
+    let href = structured.product_url || extractMeta($, 'og:url') || $('link[rel="canonical"]').attr('href') || $('a[href*="/p/"]').first().attr('href') || url;
+    let image = structured.image_url || extractMeta($, 'og:image') || $('img[src*="image"]').first().attr('src') || $('img').first().attr('src') || '';
+    const description = structured.description || extractMeta($, 'description') || '';
+    const priceText = structured.price || $('[data-testid="price"]').first().text().trim() || $('[class*="Price"]').first().text().trim();
     return {
       title,
-      image_url: image,
-      description: '',
-      product_url: href,
-      price: parseMoney(priceText),
-      metadata: { source: 'samsclub_search' }
+      image_url: absolutizeUrl(image, 'https://www.samsclub.com'),
+      description,
+      product_url: absolutizeUrl(href, 'https://www.samsclub.com'),
+      price: typeof priceText === 'number' ? priceText : parseMoney(priceText),
+      metadata: { source: url.includes('/p/') ? 'samsclub_direct' : 'samsclub_search' }
     };
   }
 
@@ -919,6 +934,23 @@ function registerShopRoutes({
     }
   });
 
+  app.get('/admin/store/lookup-product', auth, admin, async (req, res) => {
+    try {
+      const site = normalizeSite(req.query?.site);
+      const sku = normalizeSku(req.query?.sku);
+      if (!site || !sku) return res.status(400).json({ error: 'site and sku are required' });
+      const product = await resolveCatalogOrSiteProduct(supabase, site, sku);
+      if (!product || !(product.title || product.image_url || product.product_url)) {
+        return res.status(404).json({ error: 'Could not find product details for that site and SKU' });
+      }
+      const responseProduct = { ...product };
+      if (site === 'walmart') responseProduct.price = null;
+      res.json({ success: true, product: responseProduct });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   app.post('/admin/store/products/manual', auth, admin, async (req, res) => {
     try {
       const currentUser = await getCurrentUser(req);
@@ -931,7 +963,8 @@ function registerShopRoutes({
       const imageUrl = normalizeText(req.body?.image_url || live?.image_url || '');
       const description = normalizeText(req.body?.description || live?.description || '');
       const sourceProductUrl = normalizeText(req.body?.source_product_url || live?.product_url || '');
-      const purchaseUnitPriceCents = req.body?.purchase_unit_price != null ? dollarsToCents(req.body.purchase_unit_price) : (live?.price != null ? dollarsToCents(live.price) : null);
+      const shouldUseLivePrice = site !== 'walmart';
+      const purchaseUnitPriceCents = req.body?.purchase_unit_price != null ? dollarsToCents(req.body.purchase_unit_price) : (shouldUseLivePrice && live?.price != null ? dollarsToCents(live.price) : null);
       const purchaseTotalPriceCents = purchaseUnitPriceCents != null ? purchaseUnitPriceCents * quantity : null;
       const salePriceCents = req.body?.sale_price != null
         ? dollarsToCents(req.body.sale_price)

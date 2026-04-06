@@ -328,8 +328,61 @@
     });
   }
 
+
+  let lookupTimer = null;
+
+  function selectedManualSite() {
+    return document.getElementById('storeManualSite')?.value || '';
+  }
+
+  function selectedManualSku() {
+    return (document.getElementById('storeManualSku')?.value || '').trim();
+  }
+
+  function applyLookupResult(product) {
+    if (!product) return;
+    const titleEl = document.getElementById('storeManualTitle');
+    const imageEl = document.getElementById('storeManualImageUrl');
+    const urlEl = document.getElementById('storeManualProductUrl');
+    const descEl = document.getElementById('storeManualDescription');
+    const purchaseEl = document.getElementById('storeManualPurchaseUnitPrice');
+    if (titleEl && !titleEl.value.trim() && product.title) titleEl.value = product.title;
+    if (imageEl && product.image_url) imageEl.value = product.image_url;
+    if (urlEl && product.product_url) urlEl.value = product.product_url;
+    if (descEl && !descEl.value.trim() && product.description) descEl.value = product.description;
+    const site = String(selectedManualSite() || '').toLowerCase();
+    if (purchaseEl && !purchaseEl.value.trim() && product.price != null && site !== 'walmart') purchaseEl.value = String(product.price);
+  }
+
+  async function lookupManualProductDetails(forceMessage = true) {
+    const site = selectedManualSite();
+    const sku = selectedManualSku();
+    if (!site || !sku) {
+      if (forceMessage) showMessage('manualInventoryMessage', 'Choose a site and enter a SKU first.', true);
+      return null;
+    }
+    if (forceMessage) showMessage('manualInventoryMessage', 'Looking up source product details...');
+    try {
+      const payload = await authJSON(API + '/admin/store/lookup-product?' + new URLSearchParams({ site, sku }).toString());
+      applyLookupResult(payload.product || null);
+      const product = payload.product || {};
+      const details = [product.title, product.image_url ? 'image found' : '', product.price != null && site !== 'walmart' ? 'price found' : ''].filter(Boolean).join(' • ');
+      showMessage('manualInventoryMessage', details ? `Loaded product details: ${details}` : 'Lookup completed, but only partial details were found.');
+      return payload.product || null;
+    } catch (err) {
+      if (forceMessage) showMessage('manualInventoryMessage', err.message || 'Could not load source product details.', true);
+      return null;
+    }
+  }
+
   function bindActions() {
     document.getElementById('refreshStoreDataButton')?.addEventListener('click', refreshAll);
+    document.getElementById('storeLookupButton')?.addEventListener('click', () => lookupManualProductDetails(true));
+    document.getElementById('storeManualSite')?.addEventListener('change', () => { if (selectedManualSku()) lookupManualProductDetails(false); });
+    document.getElementById('storeManualSku')?.addEventListener('input', () => {
+      clearTimeout(lookupTimer);
+      lookupTimer = setTimeout(() => { if (selectedManualSku().length >= 6) lookupManualProductDetails(false); }, 700);
+    });
 
     document.getElementById('manualInventoryForm')?.addEventListener('submit', async (event) => {
       event.preventDefault();

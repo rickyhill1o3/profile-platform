@@ -91,6 +91,7 @@
                   <option value="pokemon">Pokémon Center</option>
                   <option value="target">Target</option>
                   <option value="walmart">Walmart</option>
+                  <option value="samsclub">Sam's Club</option>
                   <option value="amazon">Amazon</option>
                   <option value="supreme">Supreme</option>
                   <option value="manual">Manual</option>
@@ -100,6 +101,7 @@
               <div class="field">
                 <label for="storeManualSku">SKU / ASIN / DPCI</label>
                 <input class="input" id="storeManualSku" placeholder="151-BOOSTER-BUNDLE" />
+                <div class="subtle-text" id="storeManualLookupHint">Enter a SKU and the form will try to load the source product details.</div>
               </div>
               <div class="field field--full">
                 <label for="storeManualTitle">Product Title</label>
@@ -133,7 +135,8 @@
                 <label for="storeManualDescription">Description / Notes</label>
                 <textarea class="input" id="storeManualDescription" rows="4" placeholder="Optional description or notes"></textarea>
               </div>
-              <div class="field field--full panel-actions">
+              <div class="field field--full panel-actions panel-actions--split">
+                <button class="btn" type="button" id="storeLookupButton">Lookup Product Details</button>
                 <button class="btn btn-primary" type="submit">Save Inventory Entry</button>
               </div>
             </form>
@@ -169,6 +172,7 @@
                   <option value="pokemon">Pokémon Center</option>
                   <option value="target">Target</option>
                   <option value="walmart">Walmart</option>
+                  <option value="samsclub">Sam's Club</option>
                   <option value="amazon">Amazon</option>
                   <option value="supreme">Supreme</option>
                   <option value="general">General</option>

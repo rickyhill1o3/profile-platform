@@ -29,22 +29,28 @@
   <main>
     <section class="marketing-section shop-page-shell">
       <div class="marketing-shell">
-        <div class="section-heading marketing-heading">
+        <div class="section-heading marketing-heading shop-hero">
           <div>
             <p class="eyebrow">Public shop</p>
             <h1>Shop products available to everyone.</h1>
+            <p class="subtle-text shop-hero-copy">Browse inventory by category, then open checkout for any active item.</p>
           </div>
-          <p class="subtle-text marketing-heading-copy">This page loads active storefront products from the public shop endpoint.</p>
+          <div class="shop-toolbar shop-toolbar--inline">
+            <a class="btn" href="index.html">Back to Main</a>
+            <a class="btn" href="guide.html">User Guide</a>
+            <a class="btn btn-primary" href="login.html">User Login</a>
+          </div>
         </div>
 
-        <div class="shop-toolbar">
-          <a class="btn" href="index.html">Back to Main</a>
-          <a class="btn" href="guide.html">User Guide</a>
-          <a class="btn btn-primary" href="login.html">User Login</a>
+        <div class="shop-filter-bar">
+          <div id="shop-category-tabs" class="shop-category-tabs"></div>
+          <div class="shop-search-wrap">
+            <input id="shop-search" class="input" type="search" placeholder="Search title or SKU" />
+          </div>
         </div>
 
         <div id="shop-status" class="shop-status">Loading products...</div>
-        <div id="shop-grid" class="products-grid"></div>
+        <div id="shop-grid" class="products-grid products-grid--shop"></div>
       </div>
     </section>
   </main>
