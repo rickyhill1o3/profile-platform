@@ -259,10 +259,30 @@ async function bestEffortLookupBySku(site, sku) {
 }
 
 async function resolveCatalogOrSiteProduct(supabase, site, sku) {
-  const catalog = await maybeFetchCatalogProduct(supabase, site, sku);
-  if (catalog?.title || catalog?.image_url) return catalog;
+  const cleanSite = normalizeSite(site);
+  const cleanSku = normalizeSku(sku);
+  const catalog = await maybeFetchCatalogProduct(supabase, cleanSite, cleanSku);
+  if (catalog?.title || catalog?.image_url) {
+    return { ...catalog, metadata: { ...(catalog.metadata || {}), lookup_strategy: 'catalog' } };
+  }
+
+  if (cleanSite === 'walmart') {
+    return {
+      title: '',
+      image_url: '',
+      description: '',
+      product_url: cleanSku ? `https://www.walmart.com/ip/${encodeURIComponent(cleanSku)}` : '',
+      price: null,
+      metadata: {
+        source: 'walmart_manual',
+        lookup_strategy: 'catalog_or_manual',
+        note: 'Live Walmart scraping is disabled because Walmart serves anti-bot challenges. Use catalog imports or fill title/image manually.'
+      }
+    };
+  }
+
   try {
-    const siteLookup = await bestEffortLookupBySku(site, sku);
+    const siteLookup = await bestEffortLookupBySku(cleanSite, cleanSku);
     return siteLookup || null;
   } catch {
     return catalog || null;

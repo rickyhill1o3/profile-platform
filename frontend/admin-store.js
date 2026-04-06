@@ -366,7 +366,17 @@
       const payload = await authJSON(API + '/admin/store/lookup-product?' + new URLSearchParams({ site, sku }).toString());
       applyLookupResult(payload.product || null);
       const product = payload.product || {};
-      const details = [product.title, product.image_url ? 'image found' : '', product.price != null && site !== 'walmart' ? 'price found' : ''].filter(Boolean).join(' • ');
+
+      if (String(site).toLowerCase() === 'walmart') {
+        if (product.title || product.image_url) {
+          showMessage('manualInventoryMessage', 'Loaded Walmart details from your catalog cache. Walmart live scraping is disabled to avoid CAPTCHA blocks.');
+        } else {
+          showMessage('manualInventoryMessage', 'Walmart live lookup is disabled to avoid CAPTCHA blocks. The product URL was filled in for you. Add the title and image manually, or load Walmart items from your webhook/catalog pipeline.');
+        }
+        return payload.product || null;
+      }
+
+      const details = [product.title, product.image_url ? 'image found' : '', product.price != null ? 'price found' : ''].filter(Boolean).join(' • ');
       showMessage('manualInventoryMessage', details ? `Loaded product details: ${details}` : 'Lookup completed, but only partial details were found.');
       return payload.product || null;
     } catch (err) {
