@@ -4,6 +4,8 @@ const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const { v4: uuidv4 } = require("uuid");
 const crypto = require("crypto");
+const fs = require("fs");
+const path = require("path");
 const nodemailer = require("nodemailer");
 const bodyParser = require("body-parser");
 const Stripe = require("stripe");
@@ -27,9 +29,106 @@ app.use((req, res, next) => {
 const phoneRegex = /^[0-9]{10}$/;
 const SUPER_ADMIN_EMAIL = "theshoreshacktcg@gmail.com";
 
+
 let shopRoutes = null;
 
+// =========================
+// SUPABASE DISCOUNTS SYSTEM (FINAL CLEAN)
+// =========================
+
+async function getDiscount(code) {
+    const { data } = await supabase
+        .from("discounts")
+        .select("*")
+        .eq("code", code.toUpperCase())
+        .single();
+
+    return data;
+}
+
+// CREATE (ADMIN)
+app.post("/api/discounts", auth, admin, async (req, res) => {
+    const d = req.body;
+
+    const { error } = await supabase.from("discounts").insert([{
+        code: d.code.toUpperCase(),
+        type: d.type,
+        value: Number(d.value || 0),
+        usage_limit: Number(d.usage_limit || 0),
+        expires_at: d.expires_at || null,
+        min_cart_value: Number(d.min_cart_value || 0),
+        active: true,
+        usage_count: 0,
+        used_by: []
+    }]);
+
+    if (error) return res.json({ error: error.message });
+
+    res.json({ success: true });
+});
+
+// GET ALL (ADMIN)
+app.get("/api/discounts", auth, admin, async (req, res) => {
+    const { data } = await supabase.from("discounts").select("*");
+    res.json(data);
+});
+
+// DELETE
+app.delete("/api/discounts/:code", auth, admin, async (req, res) => {
+    await supabase
+        .from("discounts")
+        .delete()
+        .eq("code", req.params.code.toUpperCase());
+
+    res.json({ success: true });
+});
+
+// APPLY (PUBLIC)
+app.post("/api/discounts/apply", async (req, res) => {
+    const { code, cartTotal, email, shippingTotal = 0 } = req.body;
+
+    const d = await getDiscount(code);
+
+    if (!d || !d.active) return res.json({ error: "Invalid code" });
+
+    if (d.expires_at && new Date() > new Date(d.expires_at))
+        return res.json({ error: "Expired code" });
+
+    if (d.usage_limit && d.usage_count >= d.usage_limit)
+        return res.json({ error: "Usage limit reached" });
+
+    if (d.used_by.includes(email))
+        return res.json({ error: "Already used" });
+
+    if (cartTotal < d.min_cart_value)
+        return res.json({ error: "Minimum not met" });
+
+    let discountAmount = 0;
+    let shippingDiscount = 0;
+
+    if (d.type === "percent") {
+        discountAmount = cartTotal * (d.value / 100);
+    }
+
+    if (d.type === "fixed") {
+        discountAmount = d.value;
+    }
+
+    if (d.type === "free_shipping") {
+        shippingDiscount = shippingTotal;
+    }
+
+    return res.json({
+        success: true,
+        code: d.code,
+        discountType: d.type,
+        discountAmount,
+        shippingDiscount,
+        totalDiscount: discountAmount + shippingDiscount
+    });
+});
 /* ================= AUTH HELPERS ================= */
+
 
 async function auth(req, res, next) {
     const header = req.headers.authorization;
@@ -1123,29 +1222,43 @@ async function sendCheckoutDiscordNotifications(order, user) {
 async function recordSuccessfulCheckout(payload) {
     const normalized = normalizeIncomingOrderPayload(payload);
     const externalOrderId = normalized.external_order_id;
-    if (!externalOrderId) throw new Error("external_order_id could not be determined");
 
-    const { data: existing, error: existingError } = await maybeSingle("orders", (qb) =>
+    if (!externalOrderId) {
+        throw new Error("external_order_id could not be determined");
+    }
+
+    // Prevent duplicates
+    const { data: existing } = await maybeSingle("orders", (qb) =>
         qb.select("*").eq("external_order_id", externalOrderId).maybeSingle()
     );
-    if (existingError) throw new Error(existingError.message);
-    if (existing?.id) return { order: existing, duplicate: true };
 
+    if (existing?.id) {
+        return { order: existing, duplicate: true };
+    }
+
+    // Find user
     const user = await findUserForWebhook({ ...payload, ...normalized });
-    if (!user?.id) throw new Error("Could not match webhook payload to a user");
+    if (!user?.id) {
+        throw new Error("Could not match webhook payload to a user");
+    }
 
+    // Ensure credit balance
     await ensureUserCreditBalance(user.id);
+
+    // Calculate credits
     const resolvedCost = await resolveOrderCreditCost({ ...payload, ...normalized });
     const creditsToCharge = asWholeCredits(resolvedCost.credits, 0);
+
     const currentBalance = await getUserCreditBalance(user.id);
     const insufficientCredits = creditsToCharge > currentBalance;
 
+    // Create order
     const order = await createOrderRecord({
         ...payload,
         ...normalized,
         user_id: user.id,
         external_order_id: externalOrderId,
-        status: insufficientCredits ? 'insufficient_credits' : 'success',
+        status: insufficientCredits ? "insufficient_credits" : "success",
         credits_charged: creditsToCharge,
         metadata: {
             ...(payload.metadata || {}),
@@ -1157,72 +1270,23 @@ async function recordSuccessfulCheckout(payload) {
     });
 
     let balanceAfter = currentBalance;
-    if (creditsToCharge > 0) {
+
+    // Charge credits
+    if (creditsToCharge > 0 && !insufficientCredits) {
         balanceAfter = await adjustUserCredits({
             userId: user.id,
             delta: -creditsToCharge,
-            reason: insufficientCredits ? "successful_checkout_negative_balance" : "successful_checkout",
-            note: insufficientCredits
-                ? `Credits charged into negative balance for checkout ${externalOrderId}`
-                : `Credits charged for successful checkout ${externalOrderId}`,
-            metadata: {
-                source: normalized.source || payload.source || "bot_webhook",
-                site: normalized.site || payload.site || "",
-                sku: normalized.sku || payload.sku || payload.product_sku || "",
-                countdown_id: normalized.countdown_id || payload.countdown_id || null,
-                charged_while_negative: insufficientCredits
-            },
+            reason: "successful_checkout",
+            note: `Credits charged for checkout ${externalOrderId}`,
             orderId: order.id
         });
-    }
-
-    let discordRelay = [{ skipped: "not_attempted" }];
-    try {
-        discordRelay = await sendCheckoutDiscordNotifications(order, user);
-    } catch (discordErr) {
-        console.error("Discord relay failed:", discordErr);
-        discordRelay = [{ error: discordErr.message || String(discordErr) }];
-    }
-
-    let productCache = { skipped: "shop_routes_not_registered" };
-    try {
-        if (shopRoutes?.maybeCacheWebhookProductFromOrder) {
-            productCache = await shopRoutes.maybeCacheWebhookProductFromOrder({
-                payload,
-                normalized,
-                user
-            });
-        }
-    } catch (cacheErr) {
-        console.error("Webhook product cache failed:", cacheErr);
-        productCache = { error: cacheErr.message || String(cacheErr) };
-    }
-
-    let storefrontListing = { skipped: "shop_routes_not_registered" };
-    try {
-        if (shopRoutes?.maybeAutoListStorefrontFromOrder) {
-            storefrontListing = await shopRoutes.maybeAutoListStorefrontFromOrder({
-                payload,
-                normalized,
-                user
-            });
-        }
-    } catch (storefrontErr) {
-        console.error("Storefront auto-listing failed:", storefrontErr);
-        storefrontListing = { error: storefrontErr.message || String(storefrontErr) };
     }
 
     return {
         order,
         duplicate: false,
         credits_charged: creditsToCharge,
-        requested_credits: creditsToCharge,
-        balance_after: balanceAfter,
-        user_id: user.id,
-        insufficient_credits: insufficientCredits,
-        discord_relay: discordRelay,
-        product_cache: productCache,
-        storefront_listing: storefrontListing
+        balance_after: balanceAfter
     };
 }
 
@@ -1231,7 +1295,6 @@ app.post("/webhooks/stripe", bodyParser.raw({ type: "application/json" }), async
         console.error("Stripe webhook hit but Stripe is not configured");
         return res.status(400).json({ error: "Stripe is not configured" });
     }
-
     try {
         console.log("Stripe webhook hit");
 
@@ -1267,7 +1330,19 @@ app.post("/webhooks/stripe", bodyParser.raw({ type: "application/json" }), async
                     const saleResult = await shopRoutes.recordStorefrontSaleFromStripeSession(session);
                     console.log("Storefront Stripe sale processed:", saleResult);
                 }
-                return res.json({ received: true, storefront: true });
+                if (session.metadata?.discount_code) {
+                    const d = await getDiscount(session.metadata.discount_code);
+
+                    if (d) {
+                        await supabase
+                            .from("discounts")
+                            .update({
+                                usage_count: d.usage_count + 1,
+                                used_by: [...(d.used_by || []), session.customer_details?.email || ""]
+                            })
+                            .eq("code", session.metadata.discount_code);
+                    }
+                }
             }
 
             const user = await findUserForWebhook(session);
@@ -3061,7 +3136,8 @@ shopRoutes = registerShopRoutes({
     getCurrentUser,
     buildAppUrl,
     sendEmail,
-    SUPER_ADMIN_EMAIL
+    SUPER_ADMIN_EMAIL,
+    validateDiscountCode
 });
 
 const PORT = process.env.PORT || 3000;

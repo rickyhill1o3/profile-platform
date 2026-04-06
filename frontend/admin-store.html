@@ -35,6 +35,7 @@
         <button class="admin-nav-button is-active" type="button" data-store-nav="overview">Overview</button>
         <button class="admin-nav-button" type="button" data-store-nav="inventory">Add Inventory</button>
         <button class="admin-nav-button" type="button" data-store-nav="pricing">Pricing</button>
+        <button class="admin-nav-button" type="button" data-store-nav="discounts">Discount Codes</button>
         <button class="admin-nav-button" type="button" data-store-nav="edit">Edit Product</button>
         <button class="admin-nav-button" type="button" data-store-nav="orders">Orders</button>
         <button class="admin-nav-button" type="button" data-store-nav="receipts">Receipts</button>
@@ -221,6 +222,36 @@
                 <tbody id="storePricingBody">
                   <tr><td colspan="5">Loading price overrides...</td></tr>
                 </tbody>
+              </table>
+            </div>
+          </section>
+        </section>
+
+
+        <section class="admin-pane" data-store-pane="discounts">
+          <section class="panel">
+            <div class="panel-header">
+              <div><h2>Discount Code Manager</h2><p class="subtle-text">Create % off, $ off, and free shipping codes with limits and expiration rules.</p></div>
+            </div>
+            <form id="discountForm" class="form-grid">
+              <div class="field"><label for="discountCode">Code</label><input class="input" id="discountCode" placeholder="SAVE10" /></div>
+              <div class="field"><label for="discountType">Type</label><select class="input" id="discountType"><option value="percent">% Off</option><option value="fixed">$ Off</option><option value="free_shipping">Free Shipping</option></select></div>
+              <div class="field"><label for="discountValue">Value</label><input class="input" id="discountValue" type="number" min="0" step="0.01" placeholder="10 or 5" /></div>
+              <div class="field"><label for="discountUsageLimit">Usage limit</label><input class="input" id="discountUsageLimit" type="number" min="0" step="1" placeholder="0 = unlimited" /></div>
+              <div class="field"><label for="discountMinCart">Minimum cart value</label><input class="input" id="discountMinCart" type="number" min="0" step="0.01" placeholder="0.00" /></div>
+              <div class="field"><label for="discountExpiresAt">Expiration date</label><input class="input" id="discountExpiresAt" type="date" /></div>
+              <div class="field"><label for="discountActive">Status</label><select class="input" id="discountActive"><option value="true">Active</option><option value="false">Inactive</option></select></div>
+              <div class="field checkbox-field"><label class="checkbox-row"><input id="discountOneTime" type="checkbox" /><span>One time per user email</span></label></div>
+              <div class="field field--full panel-actions panel-actions--split"><button class="btn btn-primary" type="submit">Save Discount Code</button><button class="btn" type="button" id="discountFormReset">Clear Form</button></div>
+            </form>
+            <div class="subtle-text" id="discountMessage">Discount codes save to the backend and appear on the storefront cart.</div>
+          </section>
+          <section class="panel">
+            <div class="panel-header"><div><h2>Existing Codes</h2><p class="subtle-text">Review status, usage, and delete or disable codes.</p></div></div>
+            <div class="table-wrap table-wrap--admin-scroll">
+              <table class="admin-table">
+                <thead><tr><th>Code</th><th>Type</th><th>Value</th><th>Usage</th><th>Rules</th><th>Status</th><th>Actions</th></tr></thead>
+                <tbody id="storeDiscountsBody"><tr><td colspan="7">Loading discount codes...</td></tr></tbody>
               </table>
             </div>
           </section>

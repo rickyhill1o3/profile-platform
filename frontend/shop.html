@@ -12,28 +12,21 @@
     <div class="marketing-shell marketing-nav">
       <a href="index.html" class="brand-mark">
         <span class="brand-mark__logo">TSS</span>
-        <span>
-          <strong>The Shore Shack</strong>
-          <small>Public storefront</small>
-        </span>
+        <span><strong>The Shore Shack</strong><small>Public storefront</small></span>
       </a>
       <nav class="marketing-links">
-        <a href="index.html">Main</a>
-        <a href="shop.html">Shop</a>
-        <a href="guide.html">User Guide</a>
-        <a href="login.html">Login</a>
+        <a href="index.html">Main</a><a href="shop.html">Shop</a><a href="guide.html">User Guide</a><a href="login.html">Login</a>
       </nav>
     </div>
   </header>
-
   <main>
     <section class="marketing-section shop-page-shell">
       <div class="marketing-shell">
         <div class="section-heading marketing-heading shop-hero">
           <div>
             <p class="eyebrow">Public shop</p>
-            <h1>Shop products available to everyone.</h1>
-            <p class="subtle-text shop-hero-copy">Browse inventory by category, then open checkout for any active item.</p>
+            <h1>Build a cart and check out once.</h1>
+            <p class="subtle-text shop-hero-copy">Shop by category, add multiple items to your cart, and apply promo codes before checkout.</p>
           </div>
           <div class="shop-toolbar shop-toolbar--inline">
             <a class="btn" href="index.html">Back to Main</a>
@@ -41,33 +34,37 @@
             <a class="btn btn-primary" href="login.html">User Login</a>
           </div>
         </div>
-
         <div class="shop-filter-bar">
           <div id="shop-category-tabs" class="shop-category-tabs"></div>
-          <div class="shop-search-wrap">
-            <input id="shop-search" class="input" type="search" placeholder="Search title or SKU" />
-          </div>
+          <div class="shop-search-wrap"><input id="shop-search" class="input" type="search" placeholder="Search title or SKU" /></div>
         </div>
-
         <div class="shop-layout">
           <div class="shop-main-column">
             <div id="shop-status" class="shop-status">Loading products...</div>
             <div id="shop-grid" class="products-grid products-grid--shop"></div>
           </div>
-          <aside class="panel shop-cart-panel" id="shop-cart-panel">
-            <div class="panel-header">
-              <div>
-                <h2>Your cart</h2>
-                <p class="subtle-text">Add multiple items, then check out once.</p>
-              </div>
+          <aside class="panel shop-cart-panel">
+            <div class="panel-header"><div><h2>Your cart</h2><p class="subtle-text">Discounts, shipping estimate, and secure Stripe checkout.</p></div></div>
+            <div class="shop-cart-contact">
+              <label for="shop-customer-email">Email for receipt + discount validation</label>
+              <input class="input" id="shop-customer-email" type="email" placeholder="you@example.com" />
             </div>
-            <div id="shop-cart-items" class="shop-cart-items">
-              <div class="shop-empty-state">Your cart is empty.</div>
+            <div id="shop-cart-items" class="shop-cart-items"><div class="shop-empty-state">Your cart is empty.</div></div>
+            <div class="shop-discount-box">
+              <label for="shop-discount-code">Discount code</label>
+              <div class="shop-discount-row">
+                <input class="input" id="shop-discount-code" type="text" placeholder="SAVE10" />
+                <button class="btn" type="button" id="shop-apply-discount">Apply</button>
+              </div>
+              <div class="subtle-text" id="shop-discount-message">You can use % off, $ off, or free shipping codes.</div>
             </div>
             <div class="shop-cart-summary">
               <div class="shop-cart-summary__row"><span>Items</span><strong id="shop-cart-count">0</strong></div>
               <div class="shop-cart-summary__row"><span>Subtotal</span><strong id="shop-cart-subtotal">$0.00</strong></div>
-              <p class="subtle-text">Tax is calculated at Stripe checkout. Shipping is added based on total item quantity.</p>
+              <div class="shop-cart-summary__row"><span>Shipping estimate</span><strong id="shop-cart-shipping">$0.00</strong></div>
+              <div class="shop-cart-summary__row shop-cart-summary__row--discount"><span>Discount</span><strong id="shop-cart-discount">-$0.00</strong></div>
+              <div class="shop-cart-summary__row shop-cart-summary__row--total"><span>Estimated total</span><strong id="shop-cart-total">$0.00</strong></div>
+              <p class="subtle-text">Tax is calculated at Stripe checkout based on the shipping address.</p>
             </div>
             <div class="panel-actions">
               <button class="btn" type="button" id="shop-cart-clear">Clear cart</button>
@@ -78,7 +75,6 @@
       </div>
     </section>
   </main>
-
   <script src="shop.js"></script>
 </body>
 </html>
