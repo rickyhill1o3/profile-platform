@@ -1023,7 +1023,7 @@ async function allocateCostFIFO({ supabase, storefrontProductId, quantity }) {
   return { allocatedCostCents, allocations };
 }
 
-async function sendStorefrontOrderConfirmation({ supabase, sendEmail, sales, notificationEmail = "" }) {
+async function sendStorefrontOrderConfirmation({ supabase, sendEmail, sales, notificationEmail = "", notifyAdmin = true }) {
   if (!Array.isArray(sales) || !sales.length || typeof sendEmail !== 'function') {
     return { skipped: 'missing_sales_or_email' };
   }
@@ -1139,7 +1139,7 @@ async function sendStorefrontOrderConfirmation({ supabase, sendEmail, sales, not
 
   let adminResult = null;
   const adminEmail = String(notificationEmail || process.env.STORE_ORDER_NOTIFICATION_EMAIL || 'theshoreshacktcg@gmail.com').trim();
-  if (adminEmail) {
+  if (notifyAdmin && adminEmail) {
     const adminHtml = `
       <div style="font-family:Arial,sans-serif;line-height:1.5;color:#111">
         <h2>New storefront order received</h2>
@@ -1185,6 +1185,73 @@ async function sendStorefrontOrderConfirmation({ supabase, sendEmail, sales, not
     customer_result: customerResult,
     admin_result: adminResult
   };
+}
+
+async function sendStorefrontTrackingEmail({ supabase, sendEmail, sales, trackingNumber, trackingCarrier = '', trackingUrl = '' }) {
+  if (!Array.isArray(sales) || !sales.length || typeof sendEmail !== 'function') {
+    return { skipped: 'missing_sales_or_email' };
+  }
+
+  const firstSale = sales[0] || {};
+  const customerEmail = String(firstSale.customer_email || '').trim();
+  if (!customerEmail) return { skipped: 'missing_customer_email' };
+
+  const order = mapSalesToOrder(sales);
+  if (!order) return { skipped: 'missing_order' };
+
+  const carrier = trackingCarrier || order.tracking_carrier || '';
+  const number = trackingNumber || order.tracking_number || '';
+  const url = trackingUrl || order.tracking_url || '';
+
+  const html = `
+    <div style="font-family:Arial,sans-serif;line-height:1.5;color:#111">
+      <h2>Your order from The Shore Shack TCG has shipped</h2>
+      <p><strong>Order #:</strong> ${order.order_id}</p>
+      <p><strong>Carrier:</strong> ${carrier || '—'}<br /><strong>Tracking number:</strong> ${number || '—'}</p>
+      ${url ? `<p><a href="${url}">Track your package</a></p>` : ''}
+      <p>Thanks again for shopping with us.</p>
+    </div>
+  `;
+  const text = [
+    'Your order from The Shore Shack TCG has shipped',
+    `Order #: ${order.order_id}`,
+    `Carrier: ${carrier || '—'}`,
+    `Tracking number: ${number || '—'}`,
+    url ? `Track package: ${url}` : ''
+  ].filter(Boolean).join('\n');
+
+  const result = await sendEmail({
+    to: customerEmail,
+    subject: `Your Shore Shack order has shipped - ${order.order_id}`,
+    html,
+    text
+  });
+
+  return { sent: true, customer_email: customerEmail, result };
+}
+
+async function restoreInventoryFromSaleAllocations({ supabase, sale }) {
+  const allocations = Array.isArray(sale?.metadata?.allocations) ? sale.metadata.allocations : [];
+  for (const allocation of allocations) {
+    const receiptId = allocation?.receipt_id;
+    const quantity = Number(allocation?.quantity || 0);
+    if (!receiptId || quantity <= 0) continue;
+
+    const { data: receipt, error } = await supabase
+      .from('storefront_receipts')
+      .select('*')
+      .eq('id', receiptId)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    if (!receipt) continue;
+
+    const nextRemaining = Number(receipt.quantity_remaining || 0) + quantity;
+    const { error: updateError } = await supabase
+      .from('storefront_receipts')
+      .update({ quantity_remaining: nextRemaining, updated_at: new Date().toISOString() })
+      .eq('id', receiptId);
+    if (updateError) throw new Error(updateError.message);
+  }
 }
 
 async function recordStorefrontSaleFromStripeSession({ supabase, sendEmail, session, notificationEmail = '' }) {
@@ -1971,6 +2038,100 @@ function registerShopRoutes({
         trackingUrl
       });
       res.json({ success: true, order: mapSalesToOrder(refreshed), email: emailResult });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post('/admin/store/orders/:sessionId/resend-receipt', auth, admin, async (req, res) => {
+    try {
+      const sessionId = String(req.params.sessionId || '').trim();
+      if (!sessionId) return res.status(400).json({ error: 'Order session id is required' });
+
+      const { data: sales, error } = await supabase
+        .from('storefront_sales')
+        .select('*, storefront_products(id, title, image_url, primary_site, primary_sku)')
+        .eq('stripe_session_id', sessionId)
+        .order('created_at', { ascending: true });
+      if (error) return res.status(500).json({ error: error.message });
+      if (!sales || !sales.length) return res.status(404).json({ error: 'Order not found' });
+
+      const emailResult = await sendStorefrontOrderConfirmation({
+        supabase,
+        sendEmail,
+        sales,
+        notificationEmail: process.env.STORE_ORDER_NOTIFICATION_EMAIL || 'theshoreshacktcg@gmail.com',
+        notifyAdmin: false
+      });
+
+      res.json({ success: true, email: emailResult, order: mapSalesToOrder(sales) });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post('/admin/store/orders/:sessionId/cancel-refund', auth, admin, async (req, res) => {
+    try {
+      const sessionId = String(req.params.sessionId || '').trim();
+      if (!sessionId) return res.status(400).json({ error: 'Order session id is required' });
+      if (!stripe) return res.status(400).json({ error: 'Stripe is not configured' });
+
+      const { data: sales, error } = await supabase
+        .from('storefront_sales')
+        .select('*, storefront_products(id, title, image_url, primary_site, primary_sku)')
+        .eq('stripe_session_id', sessionId)
+        .order('created_at', { ascending: true });
+      if (error) return res.status(500).json({ error: error.message });
+      if (!sales || !sales.length) return res.status(404).json({ error: 'Order not found' });
+
+      const firstSale = sales[0];
+      const paymentIntent = String(firstSale?.metadata?.stripe_payment_intent || '').trim();
+      if (!paymentIntent) return res.status(400).json({ error: 'Missing Stripe payment intent for this order' });
+
+      const order = mapSalesToOrder(sales);
+      const currentStatus = String(order?.status || '').toLowerCase();
+      if (['cancelled', 'cancelled_refunded', 'refunded'].includes(currentStatus)) {
+        return res.status(400).json({ error: 'Order is already cancelled or refunded' });
+      }
+
+      const refund = await stripe.refunds.create({ payment_intent: paymentIntent });
+
+      for (const sale of sales) {
+        await restoreInventoryFromSaleAllocations({ supabase, sale });
+        const mergedMetadata = {
+          ...(sale.metadata || {}),
+          fulfillment_status: 'cancelled_refunded',
+          refunded_at: new Date().toISOString(),
+          refund_id: refund.id,
+          refund_status: refund.status || 'succeeded'
+        };
+        const { error: updateError } = await supabase
+          .from('storefront_sales')
+          .update({ metadata: mergedMetadata })
+          .eq('id', sale.id);
+        if (updateError) return res.status(500).json({ error: updateError.message });
+      }
+
+      await Promise.all(sales.map((sale) => recalculateProductInventory(supabase, sale.storefront_product_id)));
+
+      const customerEmail = String(firstSale.customer_email || '').trim();
+      let emailResult = { skipped: 'missing_customer_email' };
+      if (customerEmail) {
+        emailResult = await sendEmail({
+          to: customerEmail,
+          subject: `Your Shore Shack order has been refunded - ${order.order_id}`,
+          html: `<div style="font-family:Arial,sans-serif;line-height:1.5;color:#111"><h2>Your order has been refunded</h2><p><strong>Order #:</strong> ${order.order_id}</p><p>Your payment has been refunded. Please allow your bank a few business days to post the credit.</p></div>`,
+          text: `Your Shore Shack order has been refunded\nOrder #: ${order.order_id}\nYour payment has been refunded. Please allow your bank a few business days to post the credit.`
+        });
+      }
+
+      const { data: refreshed } = await supabase
+        .from('storefront_sales')
+        .select('*, storefront_products(id, title, image_url, primary_site, primary_sku)')
+        .eq('stripe_session_id', sessionId)
+        .order('created_at', { ascending: true });
+
+      res.json({ success: true, refund: { id: refund.id, status: refund.status }, email: emailResult, order: mapSalesToOrder(refreshed || sales) });
     } catch (err) {
       res.status(500).json({ error: err.message });
     }

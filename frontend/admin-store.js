@@ -110,18 +110,77 @@
   function renderOrders() {
     const body = $('storeOrdersBody'); if (!body) return;
     body.innerHTML = state.orders.length ? state.orders.map((order) => {
+      const sessionId = escape(order.session_id || order.order_id || '');
       const itemSummary = (order.items || []).map((item) => `${escape(item.title || 'Item')} × ${escape(item.quantity || 0)}`).join('<br>');
-      return `<tr><td>${escape(dateTime(order.placed_at))}</td><td><strong>${escape(order.order_number || order.session_id || 'Order')}</strong></td><td><div>${escape(order.customer_email || '—')}</div><div class="subtle-text">${escape(order.shipping_name || '')}</div></td><td>${itemSummary || '—'}</td><td>${money(order.total)}</td><td><span class="badge">${escape(order.status || 'paid')}</span></td><td><div>${escape(order.tracking_number || '—')}</div><div class="subtle-text">${escape(order.tracking_carrier || '')}</div></td><td><div class="form-grid storefront-order-inline-form"><div class="field"><input class="input input--sm" placeholder="Carrier" data-order-tracking-carrier="${escape(order.session_id)}" value="${escape(order.tracking_carrier || '')}" /></div><div class="field"><input class="input input--sm" placeholder="Tracking number" data-order-tracking-number="${escape(order.session_id)}" value="${escape(order.tracking_number || '')}" /></div><div class="field"><input class="input input--sm" placeholder="Tracking URL (optional)" data-order-tracking-url="${escape(order.session_id)}" value="${escape(order.tracking_url || '')}" /></div><div class="field"><button class="btn btn-primary" type="button" data-save-order-tracking="${escape(order.session_id)}">Save Tracking + Email</button></div></div></td></tr>`;
+      const shippingName = order.customer_name || order.shipping_name || '';
+      const carrierValue = String(order.tracking_carrier || '').toLowerCase();
+      return `<tr>
+        <td>${escape(dateTime(order.sold_at || order.placed_at))}</td>
+        <td><strong>${escape(order.order_id || order.session_id || 'Order')}</strong></td>
+        <td><div>${escape(order.customer_email || '—')}</div><div class="subtle-text">${escape(shippingName)}</div></td>
+        <td>${itemSummary || '—'}</td>
+        <td>${money(order.total)}</td>
+        <td><span class="badge">${escape(order.status || 'paid')}</span></td>
+        <td><div>${escape(order.tracking_number || '—')}</div><div class="subtle-text">${escape(order.tracking_carrier || '')}</div></td>
+        <td>
+          <div style="display:grid;gap:8px;min-width:230px;">
+            <select class="input input--sm" data-order-tracking-carrier="${sessionId}">
+              <option value="" ${carrierValue ? '' : 'selected'}>Select carrier</option>
+              <option value="USPS" ${carrierValue === 'usps' ? 'selected' : ''}>USPS</option>
+              <option value="UPS" ${carrierValue === 'ups' ? 'selected' : ''}>UPS</option>
+              <option value="FedEx" ${carrierValue === 'fedex' ? 'selected' : ''}>FedEx</option>
+            </select>
+            <input class="input input--sm" placeholder="Tracking number" data-order-tracking-number="${sessionId}" value="${escape(order.tracking_number || '')}" />
+            <input class="input input--sm" placeholder="Tracking URL (optional)" data-order-tracking-url="${sessionId}" value="${escape(order.tracking_url || '')}" />
+            <div style="display:grid;gap:8px;grid-template-columns:1fr;">
+              <button class="btn btn-primary" type="button" data-save-order-tracking="${sessionId}">Save Tracking + Email</button>
+              <button class="btn" type="button" data-resend-order-receipt="${sessionId}">Send Receipt Again</button>
+              <button class="btn btn-danger" type="button" data-cancel-order="${sessionId}">Cancel + Refund</button>
+            </div>
+          </div>
+        </td>
+      </tr>`;
     }).join('') : '<tr><td colspan="8">No active orders found.</td></tr>';
+
     body.querySelectorAll('[data-save-order-tracking]').forEach((button) => button.addEventListener('click', async () => {
       const sessionId = button.dataset.saveOrderTracking;
       const carrier = body.querySelector(`[data-order-tracking-carrier="${CSS.escape(sessionId)}"]`)?.value || '';
       const number = body.querySelector(`[data-order-tracking-number="${CSS.escape(sessionId)}"]`)?.value || '';
       const url = body.querySelector(`[data-order-tracking-url="${CSS.escape(sessionId)}"]`)?.value || '';
+      if (!carrier) return showMessage('storeOrdersMessage', 'Please select a carrier.', true);
       if (!number) return showMessage('storeOrdersMessage', 'Tracking number is required.', true);
       button.disabled = true; showMessage('storeOrdersMessage', 'Saving tracking and sending email...');
-      try { await authJSON(API + '/admin/store/orders/' + encodeURIComponent(sessionId) + '/tracking', { method: 'POST', body: JSON.stringify({ tracking_carrier: carrier, tracking_number: number, tracking_url: url }) }); showMessage('storeOrdersMessage', 'Tracking saved and customer email sent.'); await loadOrders(); }
-      catch (error) { showMessage('storeOrdersMessage', error.message || 'Could not save tracking.', true); } finally { button.disabled = false; }
+      try {
+        await authJSON(API + '/admin/store/orders/' + encodeURIComponent(sessionId) + '/tracking', { method: 'POST', body: JSON.stringify({ tracking_carrier: carrier, tracking_number: number, tracking_url: url, status: 'shipped' }) });
+        showMessage('storeOrdersMessage', 'Tracking saved and customer email sent.');
+        await loadOrders();
+      } catch (error) {
+        showMessage('storeOrdersMessage', error.message || 'Could not save tracking.', true);
+      } finally { button.disabled = false; }
+    }));
+
+    body.querySelectorAll('[data-resend-order-receipt]').forEach((button) => button.addEventListener('click', async () => {
+      const sessionId = button.dataset.resendOrderReceipt;
+      button.disabled = true; showMessage('storeOrdersMessage', 'Sending receipt email...');
+      try {
+        await authJSON(API + '/admin/store/orders/' + encodeURIComponent(sessionId) + '/resend-receipt', { method: 'POST' });
+        showMessage('storeOrdersMessage', 'Receipt email sent to the customer.');
+      } catch (error) {
+        showMessage('storeOrdersMessage', error.message || 'Could not resend receipt.', true);
+      } finally { button.disabled = false; }
+    }));
+
+    body.querySelectorAll('[data-cancel-order]').forEach((button) => button.addEventListener('click', async () => {
+      const sessionId = button.dataset.cancelOrder;
+      if (!window.confirm('Cancel this order, refund the payment, and restore inventory?')) return;
+      button.disabled = true; showMessage('storeOrdersMessage', 'Refunding order and restoring inventory...');
+      try {
+        await authJSON(API + '/admin/store/orders/' + encodeURIComponent(sessionId) + '/cancel-refund', { method: 'POST' });
+        showMessage('storeOrdersMessage', 'Order cancelled, refunded, and customer emailed.');
+        await refreshAll();
+      } catch (error) {
+        showMessage('storeOrdersMessage', error.message || 'Could not cancel and refund order.', true);
+      } finally { button.disabled = false; }
     }));
   }
   function renderDiscounts() {
