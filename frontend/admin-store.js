@@ -369,9 +369,9 @@
 
       if (String(site).toLowerCase() === 'walmart') {
         if (product.title || product.image_url) {
-          showMessage('manualInventoryMessage', 'Loaded Walmart details from your catalog cache. Walmart live scraping is disabled to avoid CAPTCHA blocks.');
+          showMessage('manualInventoryMessage', 'Loaded Walmart details from your saved catalog/webhook cache. Walmart live scraping is disabled to avoid CAPTCHA blocks.');
         } else {
-          showMessage('manualInventoryMessage', 'Walmart live lookup is disabled to avoid CAPTCHA blocks. The product URL was filled in for you. Add the title and image manually, or load Walmart items from your webhook/catalog pipeline.');
+          showMessage('manualInventoryMessage', 'Walmart live lookup is disabled to avoid CAPTCHA blocks. The product URL was filled in for you. If a past webhook for this SKU included title or image data, future lookups will auto-fill from your saved cache.');
         }
         return payload.product || null;
       }

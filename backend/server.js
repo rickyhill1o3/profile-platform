@@ -1184,6 +1184,20 @@ async function recordSuccessfulCheckout(payload) {
         discordRelay = [{ error: discordErr.message || String(discordErr) }];
     }
 
+    let productCache = { skipped: "shop_routes_not_registered" };
+    try {
+        if (shopRoutes?.maybeCacheWebhookProductFromOrder) {
+            productCache = await shopRoutes.maybeCacheWebhookProductFromOrder({
+                payload,
+                normalized,
+                user
+            });
+        }
+    } catch (cacheErr) {
+        console.error("Webhook product cache failed:", cacheErr);
+        productCache = { error: cacheErr.message || String(cacheErr) };
+    }
+
     let storefrontListing = { skipped: "shop_routes_not_registered" };
     try {
         if (shopRoutes?.maybeAutoListStorefrontFromOrder) {
@@ -1207,6 +1221,7 @@ async function recordSuccessfulCheckout(payload) {
         user_id: user.id,
         insufficient_credits: insufficientCredits,
         discord_relay: discordRelay,
+        product_cache: productCache,
         storefront_listing: storefrontListing
     };
 }

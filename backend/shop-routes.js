@@ -157,6 +157,179 @@ async function maybeFetchCatalogProduct(supabase, site, sku) {
   };
 }
 
+
+
+async function ensureCatalogForSite(supabase, site) {
+  if (!site) return null;
+  const existing = await supabase
+    .from('product_catalogs')
+    .select('id, site, name')
+    .eq('site', site)
+    .eq('is_active', true)
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (existing.error) throw new Error(existing.error.message);
+  if (existing.data?.id) return existing.data;
+
+  const created = await supabase
+    .from('product_catalogs')
+    .insert({
+      site,
+      name: `${site.charAt(0).toUpperCase() + site.slice(1)} webhook cache`,
+      is_active: true,
+      export_date: new Date().toISOString()
+    })
+    .select('id, site, name')
+    .single();
+  if (created.error) throw new Error(created.error.message);
+  return created.data;
+}
+
+async function cacheCatalogProductFromWebhook({ supabase, site, sku, title, imageUrl, productUrl, description, price, metadata = {} }) {
+  const cleanSite = normalizeSite(site);
+  const cleanSku = normalizeSku(sku);
+  if (!cleanSite || !cleanSku) return { skipped: 'missing_site_or_sku' };
+
+  const meaningfulTitle = normalizeText(title);
+  const meaningfulImage = normalizeText(imageUrl);
+  const meaningfulUrl = normalizeText(productUrl);
+  const meaningfulDescription = normalizeText(description);
+  const cleanPrice = Number.isFinite(Number(price)) && !isPlaceholderPrice(price)
+    ? Number(Number(price).toFixed(2))
+    : null;
+
+  if (!(meaningfulTitle || meaningfulImage || meaningfulUrl || meaningfulDescription || cleanPrice != null)) {
+    return { skipped: 'no_product_details' };
+  }
+
+  const catalog = await ensureCatalogForSite(supabase, cleanSite);
+  const existing = await supabase
+    .from('catalog_products')
+    .select('*')
+    .eq('site', cleanSite)
+    .ilike('sku', cleanSku)
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (existing.error) throw new Error(existing.error.message);
+
+  const prior = existing.data || {};
+  const priorMeta = typeof prior.metadata === 'object' && prior.metadata ? prior.metadata : {};
+  const mergedMeta = {
+    ...priorMeta,
+    ...metadata,
+    description: meaningfulDescription || priorMeta.description || '',
+    image_url: meaningfulImage || prior.image_url || priorMeta.image_url || '',
+    product_url: meaningfulUrl || prior.product_url || priorMeta.product_url || '',
+    last_cached_at: new Date().toISOString(),
+    source: metadata.source || priorMeta.source || 'webhook_cache'
+  };
+
+  const payload = {
+    catalog_id: catalog.id,
+    site: cleanSite,
+    sku: cleanSku,
+    product_name: meaningfulTitle || prior.product_name || `${cleanSite.toUpperCase()} ${cleanSku}`,
+    brand: prior.brand || cleanSite.charAt(0).toUpperCase() + cleanSite.slice(1),
+    image_url: meaningfulImage || prior.image_url || '',
+    product_url: meaningfulUrl || prior.product_url || '',
+    default_max_price: cleanSite === 'walmart'
+      ? (prior.default_max_price ?? null)
+      : (cleanPrice ?? prior.default_max_price ?? null),
+    credit_cost: prior.credit_cost ?? 0,
+    release_mode_default: prior.release_mode_default || 'current',
+    is_enabled: prior.is_enabled !== false,
+    metadata: mergedMeta,
+    updated_at: new Date().toISOString()
+  };
+
+  if (prior.id) {
+    const updated = await supabase
+      .from('catalog_products')
+      .update(payload)
+      .eq('id', prior.id)
+      .select('*')
+      .single();
+    if (updated.error) throw new Error(updated.error.message);
+    return { cached: true, updated: true, product: updated.data };
+  }
+
+  const created = await supabase
+    .from('catalog_products')
+    .insert(payload)
+    .select('*')
+    .single();
+  if (created.error) throw new Error(created.error.message);
+  return { cached: true, created: true, product: created.data };
+}
+
+async function lookupWebhookCachedProduct(supabase, site, sku) {
+  const cleanSite = normalizeSite(site);
+  const cleanSku = normalizeSku(sku);
+  if (!cleanSite || !cleanSku) return null;
+
+  const orderLookup = await supabase
+    .from('orders')
+    .select('product_name, raw_payload, metadata')
+    .eq('site', cleanSite)
+    .ilike('sku', cleanSku)
+    .order('created_at', { ascending: false })
+    .limit(10);
+  if (orderLookup.error) throw new Error(orderLookup.error.message);
+
+  for (const row of orderLookup.data || []) {
+    const raw = row.raw_payload || {};
+    const meta = row.metadata || {};
+    const title = normalizeText(raw.product_name || raw.product?.name || row.product_name || meta.product_name || '');
+    const imageUrl = normalizeText(raw.image_url || raw.product?.image_url || meta.image_url || '');
+    const productUrl = normalizeText(raw.product_url || raw.url || meta.product_url || '');
+    const description = normalizeText(raw.description || raw.product?.description || meta.description || '');
+    const price = Number.isFinite(Number(raw.price)) ? Number(raw.price) : null;
+    if (title || imageUrl || productUrl || description || price != null) {
+      return {
+        title,
+        image_url: imageUrl,
+        description,
+        product_url: productUrl,
+        price: cleanSite === 'walmart' ? null : price,
+        metadata: { source: 'orders_webhook_cache', lookup_strategy: 'orders_cache' }
+      };
+    }
+  }
+
+  const receiptLookup = await supabase
+    .from('storefront_receipts')
+    .select('receipt_data')
+    .eq('site', cleanSite)
+    .eq('sku', cleanSku)
+    .order('created_at', { ascending: false })
+    .limit(10);
+  if (receiptLookup.error) throw new Error(receiptLookup.error.message);
+
+  for (const row of receiptLookup.data || []) {
+    const receiptData = row.receipt_data || {};
+    const raw = receiptData.raw_payload || {};
+    const title = normalizeText(raw.product_name || raw.product?.name || receiptData.title || '');
+    const imageUrl = normalizeText(raw.image_url || raw.product?.image_url || receiptData.image_url || '');
+    const productUrl = normalizeText(raw.product_url || raw.url || receiptData.product_url || '');
+    const description = normalizeText(raw.description || receiptData.description || '');
+    const price = Number.isFinite(Number(raw.price)) ? Number(raw.price) : null;
+    if (title || imageUrl || productUrl || description || price != null) {
+      return {
+        title,
+        image_url: imageUrl,
+        description,
+        product_url: productUrl,
+        price: cleanSite === 'walmart' ? null : price,
+        metadata: { source: 'storefront_receipt_cache', lookup_strategy: 'receipt_cache' }
+      };
+    }
+  }
+
+  return null;
+}
+
 async function bestEffortLookupBySku(site, sku) {
   const cleanSite = normalizeSite(site);
   const cleanSku = normalizeSku(sku);
@@ -261,9 +434,15 @@ async function bestEffortLookupBySku(site, sku) {
 async function resolveCatalogOrSiteProduct(supabase, site, sku) {
   const cleanSite = normalizeSite(site);
   const cleanSku = normalizeSku(sku);
+
   const catalog = await maybeFetchCatalogProduct(supabase, cleanSite, cleanSku);
-  if (catalog?.title || catalog?.image_url) {
+  if (catalog?.title || catalog?.image_url || catalog?.product_url) {
     return { ...catalog, metadata: { ...(catalog.metadata || {}), lookup_strategy: 'catalog' } };
+  }
+
+  const webhookCache = await lookupWebhookCachedProduct(supabase, cleanSite, cleanSku);
+  if (webhookCache?.title || webhookCache?.image_url || webhookCache?.product_url) {
+    return webhookCache;
   }
 
   if (cleanSite === 'walmart') {
@@ -275,8 +454,8 @@ async function resolveCatalogOrSiteProduct(supabase, site, sku) {
       price: null,
       metadata: {
         source: 'walmart_manual',
-        lookup_strategy: 'catalog_or_manual',
-        note: 'Live Walmart scraping is disabled because Walmart serves anti-bot challenges. Use catalog imports or fill title/image manually.'
+        lookup_strategy: 'catalog_webhook_or_manual',
+        note: 'Walmart live scraping is disabled. This lookup uses your catalog cache or past webhook/order data first, then falls back to a product URL only.'
       }
     };
   }
@@ -285,7 +464,7 @@ async function resolveCatalogOrSiteProduct(supabase, site, sku) {
     const siteLookup = await bestEffortLookupBySku(cleanSite, cleanSku);
     return siteLookup || null;
   } catch {
-    return catalog || null;
+    return webhookCache || catalog || null;
   }
 }
 
@@ -564,6 +743,49 @@ async function createReceipt({
     .single();
   if (error) throw new Error(error.message);
   return data;
+}
+
+async function maybeCacheWebhookProductFromOrder({ supabase, payload, normalized, user, superAdminEmail }) {
+  const site = normalizeSite(normalized.site || payload.site || '');
+  const sku = normalizeSku(normalized.sku || payload.sku || payload.product_sku || '');
+  if (!site || !sku) return { skipped: 'missing_site_or_sku' };
+
+  const raw = payload || {};
+  const rawProduct = raw.product || {};
+  const title = normalizeText(
+    normalized.product_name || raw.product_name || rawProduct.name || raw.metadata?.product_name || ''
+  );
+  const imageUrl = normalizeText(
+    normalized.image_url || raw.image_url || rawProduct.image_url || raw.metadata?.image_url || ''
+  );
+  const productUrl = normalizeText(
+    normalized.product_url || raw.product_url || raw.url || rawProduct.url || raw.metadata?.product_url || ''
+  );
+  const description = normalizeText(
+    normalized.description || raw.description || rawProduct.description || raw.metadata?.description || ''
+  );
+  const price = Number.isFinite(Number(raw.purchase_unit_price))
+    ? Number(raw.purchase_unit_price)
+    : (Number.isFinite(Number(raw.price)) ? Number(raw.price) : null);
+
+  return await cacheCatalogProductFromWebhook({
+    supabase,
+    site,
+    sku,
+    title,
+    imageUrl,
+    productUrl,
+    description,
+    price,
+    metadata: {
+      source: 'webhook_cache',
+      cached_from_user_id: user?.id || null,
+      cached_from_user_email: user?.email || null,
+      external_order_id: normalized.external_order_id || raw.external_order_id || null,
+      webhook_site: site,
+      webhook_sku: sku
+    }
+  });
 }
 
 async function maybeAutoListStorefrontFromOrder({ supabase, payload, normalized, user, superAdminEmail }) {
@@ -1402,6 +1624,14 @@ function registerShopRoutes({
   });
 
   return {
+    maybeCacheWebhookProductFromOrder: async ({ payload, normalized, user }) =>
+      maybeCacheWebhookProductFromOrder({
+        supabase,
+        payload,
+        normalized,
+        user,
+        superAdminEmail: SUPER_ADMIN_EMAIL
+      }),
     maybeAutoListStorefrontFromOrder: async ({ payload, normalized, user }) =>
       maybeAutoListStorefrontFromOrder({
         supabase,
