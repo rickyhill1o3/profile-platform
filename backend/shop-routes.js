@@ -2,6 +2,8 @@ const fs = require('fs');
 const path = require('path');
 const cheerio = require('cheerio');
 
+
+
 function dollarsToCents(value) {
   const num = Number(value);
   if (!Number.isFinite(num)) return null;
@@ -105,6 +107,62 @@ function productInfoFromJsonLd(html, baseUrl) {
     image_url: absolutizeUrl(imageValue || '', baseUrl),
     product_url: absolutizeUrl(item.url || '', baseUrl),
     price: parseMoney(offer?.price || item.price || '')
+  };
+}
+
+function mapSalesToOrder(rows = []) {
+  if (!Array.isArray(rows) || !rows.length) return null;
+
+  const first = rows[0];
+  const metadata = first.metadata || {};
+  const shippingAddress = metadata.shipping_address || {};
+
+  const items = rows.map((sale) => ({
+    id: sale.id,
+    quantity: Number(sale.quantity || 0),
+    sale_unit_price: centsToDollars(sale.sale_unit_price_cents),
+    sale_subtotal: centsToDollars(sale.sale_subtotal_cents),
+    shipping: centsToDollars(sale.shipping_cents),
+    tax: centsToDollars(sale.tax_cents),
+    total: centsToDollars(sale.total_cents),
+    allocated_cost: centsToDollars(sale.allocated_cost_cents),
+    product: {
+      id: sale.storefront_products?.id || sale.storefront_product_id,
+      title: sale.storefront_products?.title || '',
+      image_url: sale.storefront_products?.image_url || '',
+      primary_site: sale.storefront_products?.primary_site || '',
+      primary_sku: sale.storefront_products?.primary_sku || ''
+    }
+  }));
+
+  const subtotal = rows.reduce((sum, sale) => sum + Number(sale.sale_subtotal_cents || 0), 0);
+  const shipping = rows.reduce((sum, sale) => sum + Number(sale.shipping_cents || 0), 0);
+  const tax = rows.reduce((sum, sale) => sum + Number(sale.tax_cents || 0), 0);
+  const total = rows.reduce((sum, sale) => sum + Number(sale.total_cents || 0), 0);
+
+  return {
+    session_id: first.stripe_session_id || first.id,
+    order_id: first.stripe_session_id || first.id,
+    sold_at: first.sold_at || first.created_at,
+    status: metadata.fulfillment_status || 'paid',
+    customer_email: first.customer_email || '',
+    customer_name: metadata.customer_name || metadata.shipping_name || '',
+    shipping_address: {
+      line1: shippingAddress.line1 || '',
+      line2: shippingAddress.line2 || '',
+      city: shippingAddress.city || '',
+      state: shippingAddress.state || '',
+      postal_code: shippingAddress.postal_code || '',
+      country: shippingAddress.country || ''
+    },
+    tracking_number: metadata.tracking_number || '',
+    tracking_carrier: metadata.tracking_carrier || '',
+    tracking_url: metadata.tracking_url || '',
+    subtotal: centsToDollars(subtotal),
+    shipping_total: centsToDollars(shipping),
+    tax_total: centsToDollars(tax),
+    total: centsToDollars(total),
+    items
   };
 }
 
