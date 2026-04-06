@@ -1847,7 +1847,6 @@ function registerShopRoutes({
   });
 
   return {
-
     maybeCacheWebhookProductFromOrder: async ({ payload, normalized, user }) =>
       maybeCacheWebhookProductFromOrder({
         supabase,
@@ -1867,6 +1866,6 @@ function registerShopRoutes({
     recordStorefrontSaleFromStripeSession: async (session) =>
       recordStorefrontSaleFromStripeSession({ supabase, session })
   };
-
-  module.exports = registerShopRoutes; pp, supabase
 }
+
+module.exports = registerShopRoutes;
