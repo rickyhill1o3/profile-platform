@@ -21,8 +21,9 @@ function productCard(product) {
     ? `<img src="${escapeHtml(product.image_url)}" alt="${escapeHtml(product.title || 'Product image')}" loading="lazy" />`
     : `<div class="product-card-storefront__placeholder">No image available</div>`;
 
-  const productUrl = product.product_url
-    ? `<a class="text-link" href="${escapeHtml(product.product_url)}" target="_blank" rel="noopener noreferrer">View source listing</a>`
+  const productUrlValue = product.source_product_url || product.product_url || '';
+  const productUrl = productUrlValue
+    ? `<a class="text-link" href="${escapeHtml(productUrlValue)}" target="_blank" rel="noopener noreferrer">View source listing</a>`
     : '';
 
   return `
@@ -37,7 +38,10 @@ function productCard(product) {
           <strong>${money(product.sale_price)}</strong>
           <span class="selection-chip">${Number(product.stock_on_hand || 0)} in stock</span>
         </div>
-        ${productUrl}
+        <div class="product-card-storefront__actions">
+          <button class="btn btn-primary" type="button" data-buy-product="${escapeHtml(product.id)}">Buy now</button>
+          ${productUrl}
+        </div>
       </div>
     </article>
   `;
@@ -61,6 +65,29 @@ async function loadShop() {
 
     shopStatus.textContent = `${products.length} product${products.length === 1 ? '' : 's'} available in the public shop.`;
     shopGrid.innerHTML = products.map(productCard).join('');
+    shopGrid.querySelectorAll('[data-buy-product]').forEach((button) => {
+      button.addEventListener('click', async () => {
+        const id = button.dataset.buyProduct;
+        button.disabled = true;
+        button.textContent = 'Starting checkout...';
+        try {
+          const response = await fetch('/public/store/checkout-session', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+            body: JSON.stringify({ product_id: id, quantity: 1 })
+          });
+          const payload = await response.json();
+          if (!response.ok) throw new Error(payload.error || `Checkout failed (${response.status})`);
+          if (payload.url) window.location.href = payload.url;
+          else throw new Error('Stripe checkout link was not returned');
+        } catch (error) {
+          console.error(error);
+          shopStatus.textContent = error.message || 'Could not start checkout.';
+          button.disabled = false;
+          button.textContent = 'Buy now';
+        }
+      });
+    });
   } catch (error) {
     console.error(error);
     shopStatus.textContent = 'The shop could not load products right now. Please try again later.';

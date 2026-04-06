@@ -61,6 +61,51 @@ function parseMoney(value) {
   return Number.isFinite(num) ? Number(num.toFixed(2)) : null;
 }
 
+function absolutizeUrl(url, base) {
+  if (!url) return '';
+  try {
+    return new URL(url, base).toString();
+  } catch {
+    return String(url || '');
+  }
+}
+
+function safeJsonParse(value) {
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
+}
+
+function flattenJsonLd(value) {
+  if (!value) return [];
+  if (Array.isArray(value)) return value.flatMap(flattenJsonLd);
+  if (typeof value !== 'object') return [];
+  const graph = Array.isArray(value['@graph']) ? value['@graph'] : [];
+  return [value, ...graph.flatMap(flattenJsonLd)];
+}
+
+function productInfoFromJsonLd(html, baseUrl) {
+  const $ = cheerio.load(html);
+  const blocks = $('script[type="application/ld+json"]').map((_, el) => $(el).contents().text()).get();
+  const items = blocks.flatMap((block) => flattenJsonLd(safeJsonParse(block)));
+  const candidates = items.filter((item) => {
+    const kind = String(item?.['@type'] || '').toLowerCase();
+    return kind.includes('product');
+  });
+  const item = candidates.find(Boolean) || {};
+  const imageValue = Array.isArray(item.image) ? item.image[0] : item.image;
+  const offer = Array.isArray(item.offers) ? item.offers[0] : item.offers;
+  return {
+    title: item.name || '',
+    description: item.description || '',
+    image_url: absolutizeUrl(imageValue || '', baseUrl),
+    product_url: absolutizeUrl(item.url || '', baseUrl),
+    price: parseMoney(offer?.price || item.price || '')
+  };
+}
+
 async function fetchHtml(url) {
   const response = await globalThis.fetch(url, {
     headers: {
@@ -127,40 +172,37 @@ async function bestEffortLookupBySku(site, sku) {
   const $ = cheerio.load(html);
 
   if (cleanSite === 'target') {
-    let title = $('a[data-test="product-title"]').first().text().trim();
-    let href = $('a[data-test="product-title"]').first().attr('href') || '';
-    let image = $('img[alt]').filter((_, el) => ($(el).attr('alt') || '').trim() === title).first().attr('src') || '';
-    let priceText = $('[data-test="current-price"]').first().text().trim() || $('[class*="styles__CurrentPriceFontSize"]').first().text().trim();
-
-    if (!title) {
-      title = $('script[type="application/ld+json"]').map((_, el) => $(el).contents().text()).get().map((text) => {
-        try { return JSON.parse(text); } catch { return null; }
-      }).flat().find((obj) => obj && obj.name)?.name || '';
-    }
-
+    const structured = productInfoFromJsonLd(html, 'https://www.target.com');
+    let title = structured.title || $('a[data-test="product-title"]').first().text().trim();
+    let href = structured.product_url || $('a[data-test="product-title"]').first().attr('href') || $('meta[property="og:url"]').attr('content') || '';
+    let image = structured.image_url || $('meta[property="og:image"]').attr('content') || $('img[alt]').filter((_, el) => ($(el).attr('alt') || '').trim() === title).first().attr('src') || '';
+    let priceText = structured.price || $('[data-test="current-price"]').first().text().trim() || $('[class*="styles__CurrentPriceFontSize"]').first().text().trim();
     if (href && href.startsWith('/')) href = `https://www.target.com${href}`;
+    if (image) image = absolutizeUrl(image, 'https://www.target.com');
     return {
       title,
       image_url: image,
-      description: '',
+      description: structured.description || $('meta[name="description"]').attr('content') || '',
       product_url: href,
-      price: parseMoney(priceText),
+      price: typeof priceText === 'number' ? priceText : parseMoney(priceText),
       metadata: { source: 'target_search' }
     };
   }
 
   if (cleanSite === 'walmart') {
-    let title = $('a[data-testid="product-title"]').first().text().trim() || $('span[data-automation-id="product-title"]').first().text().trim();
-    let href = $('a[data-testid="product-title"]').first().attr('href') || $('a[href*="/ip/"]').first().attr('href') || '';
-    let image = $('img[data-testid="productTileImage"]').first().attr('src') || $('img[loading="lazy"]').first().attr('src') || '';
-    let priceText = $('[data-automation-id="product-price"]').first().text().trim() || $('div[data-testid="price-wrap"] span').first().text().trim();
+    const structured = productInfoFromJsonLd(html, 'https://www.walmart.com');
+    let title = structured.title || $('a[data-testid="product-title"]').first().text().trim() || $('span[data-automation-id="product-title"]').first().text().trim() || $('meta[property="og:title"]').attr('content') || '';
+    let href = structured.product_url || $('a[data-testid="product-title"]').first().attr('href') || $('a[href*="/ip/"]').first().attr('href') || $('meta[property="og:url"]').attr('content') || '';
+    let image = structured.image_url || $('meta[property="og:image"]').attr('content') || $('img[data-testid="productTileImage"]').first().attr('src') || $('img[loading="lazy"]').first().attr('src') || '';
+    let priceText = structured.price || $('[data-automation-id="product-price"]').first().text().trim() || $('div[data-testid="price-wrap"] span').first().text().trim();
     if (href && href.startsWith('/')) href = `https://www.walmart.com${href}`;
+    if (image) image = absolutizeUrl(image, 'https://www.walmart.com');
     return {
       title,
       image_url: image,
-      description: '',
+      description: structured.description || $('meta[name="description"]').attr('content') || '',
       product_url: href,
-      price: parseMoney(priceText),
+      price: typeof priceText === 'number' ? priceText : parseMoney(priceText),
       metadata: { source: 'walmart_search' }
     };
   }
@@ -922,6 +964,156 @@ function registerShopRoutes({
 
       const updatedProduct = await recalculateProductInventory(supabase, product.id);
       res.json({ success: true, product: withMoney(updatedProduct), receipt });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.patch('/admin/store/products/:id', auth, admin, async (req, res) => {
+    try {
+      const productId = String(req.params.id || '').trim();
+      if (!productId) return res.status(400).json({ error: 'product id is required' });
+
+      const { data: existing, error: existingError } = await supabase
+        .from('storefront_products')
+        .select('*')
+        .eq('id', productId)
+        .maybeSingle();
+      if (existingError || !existing) return res.status(404).json({ error: existingError?.message || 'Product not found' });
+
+      const updates = { updated_at: new Date().toISOString() };
+      if (req.body?.title != null) updates.title = normalizeText(req.body.title) || existing.title;
+      if (req.body?.description != null) updates.description = normalizeText(req.body.description);
+      if (req.body?.image_url != null) updates.image_url = normalizeText(req.body.image_url);
+      if (req.body?.source_product_url != null) updates.source_product_url = normalizeText(req.body.source_product_url);
+      if (req.body?.status != null) updates.status = normalizeText(req.body.status) || existing.status;
+      if (req.body?.sale_price != null && req.body.sale_price !== '') {
+        const salePriceCents = dollarsToCents(req.body.sale_price);
+        if (salePriceCents == null) return res.status(400).json({ error: 'sale_price must be a valid number' });
+        updates.sale_price_cents = salePriceCents;
+        updates.pricing_source = 'manual_override';
+      }
+
+      const requestedStock = req.body?.stock_on_hand;
+      if (requestedStock != null && requestedStock !== '') {
+        const targetStock = Math.max(0, Number(requestedStock) || 0);
+        const currentStock = Number(existing.stock_on_hand || 0);
+        if (targetStock > currentStock) {
+          const delta = targetStock - currentStock;
+          await createReceipt({
+            supabase,
+            storefrontProductId: existing.id,
+            site: existing.primary_site || 'manual_adjustment',
+            sku: existing.primary_sku || existing.id,
+            sourceOrderId: 'MANUAL-STOCK-ADJUSTMENT',
+            sourceUserId: null,
+            quantity: delta,
+            purchaseUnitPriceCents: existing.purchase_reference_unit_cents || null,
+            purchaseTotalPriceCents: existing.purchase_reference_unit_cents != null ? Number(existing.purchase_reference_unit_cents) * delta : null,
+            receiptData: { manual_stock_adjustment: true, action: 'increase' }
+          });
+        } else if (targetStock < currentStock) {
+          let remove = currentStock - targetStock;
+          const { data: receipts, error: receiptError } = await supabase
+            .from('storefront_receipts')
+            .select('*')
+            .eq('storefront_product_id', existing.id)
+            .gt('quantity_remaining', 0)
+            .order('purchased_at', { ascending: false });
+          if (receiptError) return res.status(500).json({ error: receiptError.message });
+          for (const receipt of receipts || []) {
+            if (remove <= 0) break;
+            const available = Number(receipt.quantity_remaining || 0);
+            const take = Math.min(remove, available);
+            const { error: receiptUpdateError } = await supabase
+              .from('storefront_receipts')
+              .update({ quantity_remaining: available - take, updated_at: new Date().toISOString() })
+              .eq('id', receipt.id);
+            if (receiptUpdateError) return res.status(500).json({ error: receiptUpdateError.message });
+            remove -= take;
+          }
+          if (remove > 0) return res.status(400).json({ error: 'Could not reduce stock to the requested amount' });
+        }
+      }
+
+      const { data: updatedRow, error: updateError } = await supabase
+        .from('storefront_products')
+        .update(updates)
+        .eq('id', existing.id)
+        .select('*')
+        .single();
+      if (updateError) return res.status(500).json({ error: updateError.message });
+
+      const recalculated = await recalculateProductInventory(supabase, existing.id);
+      const finalProduct = {
+        ...recalculated,
+        title: updatedRow.title,
+        description: updatedRow.description,
+        image_url: updatedRow.image_url,
+        source_product_url: updatedRow.source_product_url,
+        status: updatedRow.status,
+        sale_price_cents: updatedRow.sale_price_cents,
+        pricing_source: updatedRow.pricing_source
+      };
+      res.json({ success: true, product: withMoney(finalProduct) });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post('/admin/store/products/:id/refresh-details', auth, admin, async (req, res) => {
+    try {
+      const productId = String(req.params.id || '').trim();
+      const { data: existing, error } = await supabase.from('storefront_products').select('*').eq('id', productId).maybeSingle();
+      if (error || !existing) return res.status(404).json({ error: error?.message || 'Product not found' });
+
+      const live = await resolveCatalogOrSiteProduct(supabase, existing.primary_site, existing.primary_sku);
+      if (!live) return res.status(404).json({ error: 'Could not refresh product details from source site' });
+
+      const { data: updated, error: updateError } = await supabase
+        .from('storefront_products')
+        .update({
+          title: normalizeText(live.title || existing.title),
+          description: normalizeText(live.description || existing.description || ''),
+          image_url: normalizeText(live.image_url || existing.image_url || ''),
+          source_product_url: normalizeText(live.product_url || existing.source_product_url || ''),
+          purchase_reference_unit_cents: existing.purchase_reference_unit_cents ?? dollarsToCents(live.price),
+          updated_at: new Date().toISOString(),
+          metadata: { ...(existing.metadata || {}), last_refresh_lookup_source: live.metadata?.source || null }
+        })
+        .eq('id', existing.id)
+        .select('*')
+        .single();
+      if (updateError) return res.status(500).json({ error: updateError.message });
+      res.json({ success: true, product: withMoney(updated) });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.delete('/admin/store/products/:id', auth, admin, async (req, res) => {
+    try {
+      const productId = String(req.params.id || '').trim();
+      const { data: existing, error } = await supabase.from('storefront_products').select('*').eq('id', productId).maybeSingle();
+      if (error || !existing) return res.status(404).json({ error: error?.message || 'Product not found' });
+
+      const { data: sales } = await supabase.from('storefront_sales').select('id').eq('storefront_product_id', productId).limit(1);
+      if (sales?.length) {
+        const { data: updated, error: updateError } = await supabase
+          .from('storefront_products')
+          .update({ status: 'deleted', updated_at: new Date().toISOString() })
+          .eq('id', productId)
+          .select('*')
+          .single();
+        if (updateError) return res.status(500).json({ error: updateError.message });
+        return res.json({ success: true, mode: 'soft_delete', product: withMoney(updated) });
+      }
+
+      const { error: receiptDeleteError } = await supabase.from('storefront_receipts').delete().eq('storefront_product_id', productId);
+      if (receiptDeleteError) return res.status(500).json({ error: receiptDeleteError.message });
+      const { error: deleteError } = await supabase.from('storefront_products').delete().eq('id', productId);
+      if (deleteError) return res.status(500).json({ error: deleteError.message });
+      res.json({ success: true, mode: 'hard_delete' });
     } catch (err) {
       res.status(500).json({ error: err.message });
     }

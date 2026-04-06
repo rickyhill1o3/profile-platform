@@ -73,27 +73,104 @@
     if (!body) return;
     const products = state.products || [];
     if (!products.length) {
-      body.innerHTML = '<tr><td colspan="9">No storefront products found.</td></tr>';
+      body.innerHTML = '<tr><td colspan="10">No storefront products found.</td></tr>';
       return;
     }
-    body.innerHTML = products.map((item) => `
+    body.innerHTML = products.map((item) => {
+      const hiddenReason = Number(item.stock_on_hand || 0) <= 0 ? 'Hidden from public shop until stock is above 0.' : '';
+      return `
       <tr>
-        <td>${escape(item.title || 'Untitled')}</td>
+        <td>
+          <strong>${escape(item.title || 'Untitled')}</strong>
+          <div class="subtle-text">${hiddenReason ? escape(hiddenReason) : 'Visible in public shop when active and in stock.'}</div>
+        </td>
         <td>${escape(item.primary_site || '—')}</td>
         <td>${escape(item.primary_sku || '—')}</td>
-        <td>${escape(item.stock_on_hand ?? 0)}</td>
-        <td>${money(item.sale_price)}</td>
+        <td><input class="input input--sm" type="number" min="0" step="1" value="${escape(item.stock_on_hand ?? 0)}" data-edit-stock="${escape(item.id)}" /></td>
+        <td><input class="input input--sm" type="number" min="0" step="0.01" value="${escape(item.sale_price ?? 0)}" data-edit-price="${escape(item.id)}" /></td>
         <td>${escape(item.total_purchased_qty ?? 0)}</td>
         <td>${escape(item.total_sold_qty ?? 0)}</td>
-        <td>${escape(item.status || 'active')}</td>
+        <td>
+          <select class="input input--sm" data-edit-status="${escape(item.id)}">
+            <option value="active" ${item.status === 'active' ? 'selected' : ''}>active</option>
+            <option value="draft" ${item.status === 'draft' ? 'selected' : ''}>draft</option>
+            <option value="deleted" ${item.status === 'deleted' ? 'selected' : ''}>deleted</option>
+            <option value="merged" ${item.status === 'merged' ? 'selected' : ''}>merged</option>
+          </select>
+        </td>
+        <td>
+          <div class="store-merge-cell">
+            <button class="btn" type="button" data-refresh-product="${escape(item.id)}">Refresh Details</button>
+            <button class="btn" type="button" data-save-product="${escape(item.id)}">Save</button>
+            <button class="btn btn-danger" type="button" data-delete-product="${escape(item.id)}">Delete</button>
+          </div>
+        </td>
         <td>
           <div class="store-merge-cell">
             <select class="input input--sm" data-merge-target="${escape(item.id)}">${buildMergeOptions(item.id)}</select>
             <button class="btn btn-danger" type="button" data-merge-button="${escape(item.id)}">Merge Into This</button>
           </div>
         </td>
-      </tr>
-    `).join('');
+      </tr>`;
+    }).join('');
+
+    body.querySelectorAll('[data-save-product]').forEach((button) => {
+      button.addEventListener('click', async () => {
+        const id = button.dataset.saveProduct;
+        const stock = body.querySelector(`[data-edit-stock="${CSS.escape(id)}"]`)?.value;
+        const salePrice = body.querySelector(`[data-edit-price="${CSS.escape(id)}"]`)?.value;
+        const status = body.querySelector(`[data-edit-status="${CSS.escape(id)}"]`)?.value;
+        button.disabled = true;
+        showMessage('storeAdminMessage', 'Saving product changes...');
+        try {
+          await authJSON(API + '/admin/store/products/' + encodeURIComponent(id), {
+            method: 'PATCH',
+            body: JSON.stringify({ stock_on_hand: stock, sale_price: salePrice, status })
+          });
+          showMessage('storeAdminMessage', 'Product updated successfully.');
+          await refreshAll();
+        } catch (err) {
+          showMessage('storeAdminMessage', err.message || 'Could not update product.', true);
+        } finally {
+          button.disabled = false;
+        }
+      });
+    });
+
+    body.querySelectorAll('[data-refresh-product]').forEach((button) => {
+      button.addEventListener('click', async () => {
+        const id = button.dataset.refreshProduct;
+        button.disabled = true;
+        showMessage('storeAdminMessage', 'Refreshing product details from source site...');
+        try {
+          await authJSON(API + '/admin/store/products/' + encodeURIComponent(id) + '/refresh-details', { method: 'POST' });
+          showMessage('storeAdminMessage', 'Product details refreshed.');
+          await refreshAll();
+        } catch (err) {
+          showMessage('storeAdminMessage', err.message || 'Could not refresh product details.', true);
+        } finally {
+          button.disabled = false;
+        }
+      });
+    });
+
+    body.querySelectorAll('[data-delete-product]').forEach((button) => {
+      button.addEventListener('click', async () => {
+        const id = button.dataset.deleteProduct;
+        if (!confirm('Delete this product from the storefront?')) return;
+        button.disabled = true;
+        showMessage('storeAdminMessage', 'Deleting product...');
+        try {
+          await authJSON(API + '/admin/store/products/' + encodeURIComponent(id), { method: 'DELETE' });
+          showMessage('storeAdminMessage', 'Product deleted.');
+          await refreshAll();
+        } catch (err) {
+          showMessage('storeAdminMessage', err.message || 'Could not delete product.', true);
+        } finally {
+          button.disabled = false;
+        }
+      });
+    });
 
     body.querySelectorAll('[data-merge-button]').forEach((button) => {
       button.addEventListener('click', async () => {
