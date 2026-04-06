@@ -24,7 +24,7 @@ const elements = {
   discountMessage: document.getElementById('shop-discount-message'),
   customerEmail: document.getElementById('shop-customer-email')
 };
-const state = { products: [], activeCategory: 'all', search: '', cart: loadCart(), appliedDiscount: null };
+const state = { products: [], activeCategory: 'all', search: '', cart: loadCart(), appliedDiscount: null, shippingTiers: [] };
 
 function escapeHtml(value) {
   return String(value || '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
@@ -61,11 +61,15 @@ function quantityOptions(maxStock, selectedQty) {
 }
 function shippingEstimateForQuantity(totalQuantity) {
   const qty = Math.max(0, Number(totalQuantity || 0));
+  const tiers = Array.isArray(state.shippingTiers) && state.shippingTiers.length ? state.shippingTiers : [
+    { tier_name: '1-2 items', min_qty: 1, max_qty: 2, amount: 8.95 },
+    { tier_name: '3-4 items', min_qty: 3, max_qty: 4, amount: 12.95 },
+    { tier_name: '5-10 items', min_qty: 5, max_qty: 10, amount: 19.95 },
+    { tier_name: '11+ items', min_qty: 11, max_qty: null, amount: 29.95 }
+  ];
   if (!qty) return { label: 'No items', amount: 0 };
-  if (qty <= 2) return { label: '1-2 items', amount: 6.99 };
-  if (qty <= 4) return { label: '3-4 items', amount: 9.99 };
-  if (qty <= 10) return { label: '5-10 items', amount: 14.99 };
-  return { label: '11+ items', amount: 19.99 };
+  const match = tiers.find((row) => qty >= Number(row.min_qty || 0) && (row.max_qty == null || row.max_qty === '' || qty <= Number(row.max_qty || 0))) || tiers[tiers.length - 1];
+  return { label: match.tier_name || 'Shipping', amount: Number(match.amount || 0) };
 }
 function cartQuantity() { return state.cart.reduce((sum, item) => sum + Number(item.quantity || 0), 0); }
 function cartSubtotal() { return state.cart.reduce((sum, item) => sum + Number(item.sale_price || 0) * Number(item.quantity || 0), 0); }
@@ -217,6 +221,16 @@ function renderShop() {
   if (!products.length) { elements.grid.innerHTML = '<div class="shop-empty-state">No products matched this category or search.</div>'; renderCart(); return; }
   elements.grid.innerHTML = products.map(productCard).join(''); bindProductButtons(); renderCart();
 }
+async function loadShippingSettings() {
+  try {
+    const response = await fetch(SHOP_API + '/public/store/shipping-settings');
+    const payload = await response.json();
+    state.shippingTiers = Array.isArray(payload.tiers) ? payload.tiers : [];
+  } catch {
+    state.shippingTiers = [];
+  }
+}
+
 async function loadShop() {
   try {
     const response = await fetch(SHOP_API + '/public/store/products', { headers: { Accept: 'application/json' } });
@@ -241,4 +255,4 @@ elements.cartCheckout?.addEventListener('click', async () => {
   catch (error) { console.error(error); elements.status.textContent = error.message || 'Could not start cart checkout.'; }
   finally { elements.cartCheckout.disabled = false; elements.cartCheckout.textContent = 'Checkout cart'; }
 });
-loadShop();
+loadShippingSettings().then(loadShop);

@@ -866,11 +866,64 @@ async function maybeAutoListStorefrontFromOrder({ supabase, payload, normalized,
   return { listed: true, product: updatedProduct, receipt, pricing, site_lookup: siteProduct };
 }
 
-function shippingTierForQuantity(quantity) {
-  if (quantity <= 2) return { label: '1-2 items', amount_cents: 895 };
-  if (quantity <= 4) return { label: '3-4 items', amount_cents: 1295 };
-  if (quantity <= 10) return { label: '5-10 items', amount_cents: 1995 };
-  return { label: '11+ items', amount_cents: 2995 };
+const DEFAULT_SHIPPING_TIERS = [
+  { tier_name: '1-2 items', min_qty: 1, max_qty: 2, amount_cents: 895, is_active: true },
+  { tier_name: '3-4 items', min_qty: 3, max_qty: 4, amount_cents: 1295, is_active: true },
+  { tier_name: '5-10 items', min_qty: 5, max_qty: 10, amount_cents: 1995, is_active: true },
+  { tier_name: '11+ items', min_qty: 11, max_qty: null, amount_cents: 2995, is_active: true }
+];
+
+function normalizeShippingTiers(raw) {
+  const source = Array.isArray(raw) && raw.length ? raw : DEFAULT_SHIPPING_TIERS;
+  const tiers = source
+    .map((row, index) => ({
+      tier_name: normalizeText(row.tier_name || row.label || `Tier ${index + 1}`),
+      min_qty: Math.max(1, Number(row.min_qty || 1) || 1),
+      max_qty: row.max_qty === null || row.max_qty === '' || row.max_qty === undefined ? null : Math.max(1, Number(row.max_qty || 1) || 1),
+      amount_cents: Math.max(0, Math.round(Number(row.amount_cents != null ? row.amount_cents : dollarsToCents(row.amount || row.price || 0)) || 0)),
+      is_active: row.is_active !== false
+    }))
+    .filter((row) => row.is_active)
+    .sort((a, b) => a.min_qty - b.min_qty);
+  return tiers.length ? tiers : DEFAULT_SHIPPING_TIERS;
+}
+
+async function getStoreShippingTiers(supabase) {
+  const { data, error } = await supabase
+    .from('app_settings')
+    .select('value_json')
+    .eq('key', 'storefront_shipping_tiers')
+    .maybeSingle();
+  if (error && !String(error.message || '').toLowerCase().includes('does not exist')) {
+    throw new Error(error.message);
+  }
+  return normalizeShippingTiers(data?.value_json);
+}
+
+async function saveStoreShippingTiers(supabase, tiers) {
+  const normalized = normalizeShippingTiers(tiers);
+  const { error } = await supabase
+    .from('app_settings')
+    .upsert({
+      key: 'storefront_shipping_tiers',
+      value_json: normalized,
+      updated_at: new Date().toISOString()
+    }, { onConflict: 'key' });
+  if (error) throw new Error(error.message);
+  return normalized;
+}
+
+async function shippingTierForQuantity(supabase, quantity) {
+  const qty = Math.max(0, Number(quantity || 0));
+  const tiers = await getStoreShippingTiers(supabase);
+  if (!qty) return { label: 'No items', amount_cents: 0, min_qty: 0, max_qty: 0 };
+  const match = tiers.find((row) => qty >= row.min_qty && (row.max_qty == null || qty <= row.max_qty)) || tiers[tiers.length - 1];
+  return {
+    label: match.tier_name,
+    amount_cents: Number(match.amount_cents || 0),
+    min_qty: match.min_qty,
+    max_qty: match.max_qty
+  };
 }
 
 async function allocateCostFIFO({ supabase, storefrontProductId, quantity }) {
@@ -1138,6 +1191,34 @@ function registerShopRoutes({
           purchase_total_price: centsToDollars(row.purchase_total_price_cents)
         }))
       });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+
+  app.get('/public/store/shipping-settings', async (req, res) => {
+    try {
+      const tiers = await getStoreShippingTiers(supabase);
+      res.json({ tiers: tiers.map((row) => ({ ...row, amount: centsToDollars(row.amount_cents) })) });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.get('/admin/store/shipping-settings', auth, admin, async (req, res) => {
+    try {
+      const tiers = await getStoreShippingTiers(supabase);
+      res.json({ tiers: tiers.map((row) => ({ ...row, amount: centsToDollars(row.amount_cents) })) });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post('/admin/store/shipping-settings', auth, admin, async (req, res) => {
+    try {
+      const tiers = await saveStoreShippingTiers(supabase, req.body?.tiers || []);
+      res.json({ success: true, tiers: tiers.map((row) => ({ ...row, amount: centsToDollars(row.amount_cents) })) });
     } catch (err) {
       res.status(500).json({ error: err.message });
     }
@@ -1765,7 +1846,7 @@ function registerShopRoutes({
         });
       }
 
-      const shipping = shippingTierForQuantity(totalQuantity);
+      const shipping = await shippingTierForQuantity(supabase, totalQuantity);
       const discountCode = String(req.body?.discount_code || '').trim().toUpperCase();
       const customerEmail = String(req.body?.customer_email || '').trim().toLowerCase();
 
