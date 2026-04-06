@@ -1851,6 +1851,48 @@ function registerShopRoutes({
 
 
 
+  app.get('/public/store/order-confirmation', async (req, res) => {
+    try {
+      const sessionId = String(req.query?.session_id || '').trim();
+      if (!sessionId) return res.status(400).json({ success: false, error: 'session_id is required' });
+
+      const { data, error } = await supabase
+        .from('storefront_sales')
+        .select('*, storefront_products(id, title, image_url, primary_site, primary_sku)')
+        .eq('stripe_session_id', sessionId)
+        .order('sold_at', { ascending: true })
+        .limit(100);
+      if (error) return res.status(500).json({ success: false, error: error.message });
+      if (!data || !data.length) return res.status(404).json({ success: false, error: 'Order not found' });
+
+      const order = mapSalesToOrder(data);
+      if (!order) return res.status(404).json({ success: false, error: 'Order not found' });
+
+      const normalizedItems = (order.items || []).map((item) => ({
+        ...item,
+        unit_price: item.sale_unit_price,
+        line_total: item.sale_subtotal,
+        total: item.sale_subtotal
+      }));
+
+      res.json({
+        success: true,
+        order: {
+          ...order,
+          order_number: order.order_id,
+          shipping_name: order.customer_name,
+          shipping: order.shipping_total,
+          tax: order.tax_total
+        },
+        items: normalizedItems
+      });
+    } catch (err) {
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+
+
   app.get('/admin/store/orders', auth, admin, async (req, res) => {
     try {
       const { data, error } = await supabase

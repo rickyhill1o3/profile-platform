@@ -1,7 +1,7 @@
 const SHOP_API = (() => {
   const isLocal = location.hostname === 'localhost' || location.hostname === '127.0.0.1';
   if (isLocal) return 'http://localhost:3000';
-  return 'https://theshoreshacktcg.com';
+  return 'https://profile-platform.onrender.com';
 })();
 
 function fmt(value) {
@@ -32,7 +32,7 @@ async function loadOrderConfirmation() {
         <div>
           <div style="font-weight:700; font-size:18px">${item.product?.title || 'Item'}</div>
           <div style="color:#64748b; margin-top:4px">${(item.product?.primary_site || '').toUpperCase()} ${item.product?.primary_sku ? `SKU ${item.product.primary_sku}` : ''}</div>
-          <div style="margin-top:8px">Qty ${item.quantity} · ${fmt(item.unit_price)} each</div>
+          <div style="margin-top:8px">Qty ${item.quantity} · ${fmt(item.unit_price ?? item.sale_unit_price)} each</div>
           <div style="margin-top:4px; font-weight:600">Line total ${fmt(item.total)}</div>
         </div>
       </div>
@@ -40,12 +40,12 @@ async function loadOrderConfirmation() {
 
     document.getElementById('confirmOrderMeta').innerHTML = `Order <strong>${order.order_number || ''}</strong><br>${order.customer_email || ''}`;
     document.getElementById('sumSubtotal').textContent = fmt(order.subtotal);
-    document.getElementById('sumShipping').textContent = fmt(order.shipping);
-    document.getElementById('sumTax').textContent = fmt(order.tax);
+    document.getElementById('sumShipping').textContent = fmt(order.shipping ?? order.shipping_total);
+    document.getElementById('sumTax').textContent = fmt(order.tax ?? order.tax_total);
     document.getElementById('sumTotal').textContent = fmt(order.total);
 
     const ship = order.shipping_address || {};
-    const shipParts = [order.shipping_name, ship.line1, ship.line2, [ship.city, ship.state, ship.postal_code].filter(Boolean).join(', '), ship.country].filter(Boolean);
+    const shipParts = [order.shipping_name || order.customer_name, ship.line1, ship.line2, [ship.city, ship.state, ship.postal_code].filter(Boolean).join(', '), ship.country].filter(Boolean);
     document.getElementById('confirmShipTo').innerHTML = shipParts.length ? `<strong>Shipping to</strong><br>${shipParts.join('<br>')}` : '';
 
     state.style.display = 'none';
