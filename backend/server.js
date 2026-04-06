@@ -3132,6 +3132,74 @@ registerProductCatalogRoutes({
     ensureUserNotRevoked
 });
 
+function validateDiscountCode({ code, cartTotal = 0, shippingTotal = 0, email = "" }) {
+    const normalizedCode = String(code || "").trim().toUpperCase();
+    if (!normalizedCode) {
+        return { ok: false, error: "Discount code is required" };
+    }
+
+    return getDiscount(normalizedCode)
+        .then((discount) => {
+            if (!discount || !discount.active) {
+                return { ok: false, error: "Invalid code" };
+            }
+
+            const now = Date.now();
+            if (
+                discount.expires_at &&
+                Number.isFinite(new Date(discount.expires_at).getTime()) &&
+                new Date(discount.expires_at).getTime() < now
+            ) {
+                return { ok: false, error: "Expired code" };
+            }
+
+            if (Number(discount.usage_limit || 0) > 0 && Number(discount.usage_count || 0) >= Number(discount.usage_limit || 0)) {
+                return { ok: false, error: "Usage limit reached" };
+            }
+
+            const normalizedEmail = String(email || "").trim().toLowerCase();
+            const usedBy = Array.isArray(discount.used_by) ? discount.used_by : [];
+
+            if (discount.one_time_per_user && normalizedEmail && usedBy.includes(normalizedEmail)) {
+                return { ok: false, error: "This code has already been used by this email" };
+            }
+
+            const subtotal = Number(cartTotal || 0);
+            if (subtotal < Number(discount.min_cart_value || 0)) {
+                return {
+                    ok: false,
+                    error: `Minimum cart value is $${Number(discount.min_cart_value || 0).toFixed(2)}`
+                };
+            }
+
+            let discountAmount = 0;
+            let shippingDiscount = 0;
+
+            if (discount.type === "percent") {
+                discountAmount = subtotal * (Number(discount.value || 0) / 100);
+            } else if (discount.type === "fixed") {
+                discountAmount = Number(discount.value || 0);
+            } else if (discount.type === "free_shipping") {
+                shippingDiscount = Math.max(0, Number(shippingTotal || 0));
+            }
+
+            discountAmount = Math.min(subtotal, Number(discountAmount.toFixed(2)));
+            shippingDiscount = Math.min(Number(shippingTotal || 0), Number(shippingDiscount.toFixed(2)));
+
+            return {
+                ok: true,
+                discount,
+                code: discount.code,
+                discountAmount,
+                shippingDiscount,
+                totalDiscount: Number((discountAmount + shippingDiscount).toFixed(2))
+            };
+        })
+        .catch((err) => {
+            return { ok: false, error: err.message || "Could not validate code" };
+        });
+}
+
 shopRoutes = registerShopRoutes({
     app,
     supabase,
