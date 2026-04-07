@@ -23,7 +23,7 @@ app.use((req, res, next) => {
     if (req.originalUrl.startsWith("/webhooks/stripe")) {
         return next();
     }
-    express.json()(req, res, next);
+    express.json({ limit: "5mb" })(req, res, next);
 });
 
 const phoneRegex = /^[0-9]{10}$/;
@@ -321,6 +321,47 @@ function findDuplicateInSameGroup(
     return null;
 }
 
+function normalizeImportedProfilePayload(raw = {}, forcedAccountType = "walmart") {
+    const shipping = raw.shipping || {};
+    const billing = raw.billing || {};
+    const payment = raw.payment || {};
+    const accountType = String(raw.account_type || forcedAccountType || "walmart").trim().toLowerCase();
+    const sameAsShipping = billing.sameAsShipping !== false;
+
+    return {
+        profile_name: String(raw.name || raw.profile_name || raw.email || "Imported Profile").trim(),
+        account_type: accountType,
+        first_name: String(shipping.firstName || shipping.first_name || "").trim(),
+        last_name: String(shipping.lastName || shipping.last_name || "").trim(),
+        email: String(raw.email || shipping.email || raw.profile_email || "").trim(),
+        phone: String(shipping.phone || "").replace(/\D/g, ""),
+        address1: String(shipping.address1 || "").trim(),
+        address2: String(shipping.address2 || "").trim(),
+        city: String(shipping.city || "").trim(),
+        state: String(shipping.province || shipping.state || "").trim(),
+        zip: String(shipping.postalCode || shipping.zip || "").trim(),
+        country: String(shipping.country || "United States").trim(),
+        billing_first_name: sameAsShipping ? "" : String(billing.firstName || "").trim(),
+        billing_last_name: sameAsShipping ? "" : String(billing.lastName || "").trim(),
+        billing_address1: sameAsShipping ? "" : String(billing.address1 || "").trim(),
+        billing_address2: sameAsShipping ? "" : String(billing.address2 || "").trim(),
+        billing_city: sameAsShipping ? "" : String(billing.city || "").trim(),
+        billing_state: sameAsShipping ? "" : String(billing.province || billing.state || "").trim(),
+        billing_zip: sameAsShipping ? "" : String(billing.postalCode || billing.zip || "").trim(),
+        billing_country: sameAsShipping ? "" : String(billing.country || "").trim(),
+        billing_phone: sameAsShipping ? "" : String(billing.phone || "").replace(/\D/g, ""),
+        card_name: String(payment.name || "").trim(),
+        card: String(payment.num || payment.card || "").replace(/\s+/g, ""),
+        exp_month: String(payment.month || "").trim(),
+        exp_year: String(payment.year || "").trim(),
+        cvv: String(payment.cvv || "").trim(),
+        refract_profile_id: String(raw.id || "").trim(),
+        refract_created_at: raw.createdAt || null,
+        refract_updated_at: raw.updatedAt || null,
+        refract_one_time_use: !!raw.oneTimeUse
+    };
+}
+
 async function upsertProfileRelations(profileId, payload) {
     const encryptedCard = encrypt(payload.card || "");
     const encryptedCVV = encrypt(payload.cvv || "");
@@ -339,9 +380,20 @@ async function upsertProfileRelations(profileId, payload) {
         email: payload.email,
         phone: payload.phone,
         address1: payload.address1,
+        address2: payload.address2 || "",
         city: payload.city,
         state: payload.state,
-        zip: payload.zip
+        zip: payload.zip,
+        country: payload.country || "United States",
+        billing_first_name: payload.billing_first_name || "",
+        billing_last_name: payload.billing_last_name || "",
+        billing_address1: payload.billing_address1 || "",
+        billing_address2: payload.billing_address2 || "",
+        billing_city: payload.billing_city || "",
+        billing_state: payload.billing_state || "",
+        billing_zip: payload.billing_zip || "",
+        billing_country: payload.billing_country || "",
+        billing_phone: payload.billing_phone || ""
     };
 
     if (existingAddress?.id) {
@@ -374,6 +426,7 @@ async function upsertProfileRelations(profileId, payload) {
         card_encrypted: encryptedCard,
         cvv_encrypted: encryptedCVV,
         card_last4: cardLast4,
+        card_name: payload.card_name || "",
         exp_month: payload.exp_month,
         exp_year: payload.exp_year
     };
@@ -2119,6 +2172,116 @@ app.post("/profiles", auth, async (req, res) => {
         res.json({ success: true });
     } catch (err) {
         res.status(500).json({ error: err.message || "Profile creation failed" });
+    }
+});
+
+app.post("/profiles/import", auth, async (req, res) => {
+    try {
+        await ensureUserNotRevoked(req.user_id);
+
+        const rows = Array.isArray(req.body?.profiles) ? req.body.profiles : (Array.isArray(req.body) ? req.body : []);
+        const accountType = String(req.body?.account_type || "walmart").trim().toLowerCase();
+        const overwriteExisting = !!req.body?.overwrite_existing;
+
+        if (!rows.length) {
+            return res.status(400).json({ error: "No profiles were provided for import" });
+        }
+
+        const results = { imported: 0, skipped: 0, errors: [] };
+
+        for (let index = 0; index < rows.length; index += 1) {
+            const source = rows[index] || {};
+            const data = normalizeImportedProfilePayload(source, accountType);
+
+            if (!data.profile_name) {
+                results.skipped += 1;
+                results.errors.push({ index, profile: source?.name || source?.email || `Row ${index + 1}`, error: "Missing profile name" });
+                continue;
+            }
+
+            if (!phoneRegex.test(data.phone || "")) {
+                results.skipped += 1;
+                results.errors.push({ index, profile: data.profile_name, error: "Phone must be 10 digits" });
+                continue;
+            }
+
+            if (!data.card || !data.exp_month || !data.exp_year || !data.cvv) {
+                results.skipped += 1;
+                results.errors.push({ index, profile: data.profile_name, error: "Card details are incomplete" });
+                continue;
+            }
+
+            const existingProfiles = await getUserProfilesWithRelations(req.user_id);
+            const duplicateError = findDuplicateInSameGroup(
+                existingProfiles,
+                null,
+                data.account_type,
+                data.profile_name,
+                data.email,
+                data.phone,
+                (data.card || "").slice(-4)
+            );
+
+            if (duplicateError && !overwriteExisting) {
+                results.skipped += 1;
+                results.errors.push({ index, profile: data.profile_name, error: duplicateError });
+                continue;
+            }
+
+            if (duplicateError && overwriteExisting) {
+                const existingMatch = existingProfiles.find((profile) => {
+                    if (profile.account_type !== data.account_type) return false;
+                    if (profile.profile_name && profile.profile_name === data.profile_name) return true;
+                    if (profile.addresses?.[0]?.email && profile.addresses[0].email === data.email) return true;
+                    return false;
+                });
+
+                if (existingMatch?.id) {
+                    const { error: profileUpdateError } = await supabase
+                        .from("profiles")
+                        .update({
+                            profile_name: data.profile_name,
+                            account_type: data.account_type,
+                            updated_at: new Date().toISOString()
+                        })
+                        .eq("id", existingMatch.id)
+                        .eq("user_id", req.user_id);
+
+                    if (profileUpdateError) {
+                        results.skipped += 1;
+                        results.errors.push({ index, profile: data.profile_name, error: profileUpdateError.message });
+                        continue;
+                    }
+
+                    await upsertProfileRelations(existingMatch.id, data);
+                    results.imported += 1;
+                    continue;
+                }
+            }
+
+            const { data: createdProfile, error: profileError } = await supabase
+                .from("profiles")
+                .insert({
+                    user_id: req.user_id,
+                    profile_name: data.profile_name,
+                    account_type: data.account_type
+                })
+                .select()
+                .single();
+
+            if (profileError || !createdProfile) {
+                results.skipped += 1;
+                results.errors.push({ index, profile: data.profile_name, error: profileError?.message || "Profile creation failed" });
+                continue;
+            }
+
+            await upsertProfileRelations(createdProfile.id, data);
+            results.imported += 1;
+        }
+
+        res.json({ success: true, ...results, total: rows.length });
+    } catch (err) {
+        res.status(500).json({ error: err.message || "Profile import failed" });
     }
 });
 

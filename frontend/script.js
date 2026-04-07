@@ -271,6 +271,8 @@ async function loadProfiles() {
         adminButton.style.display = isAdminRole(user?.role) ? "inline-flex" : "none";
     }
 
+    initProfileImportPanel();
+
     try {
         const res = await fetch(API + "/profiles", {
             headers: { Authorization: "Bearer " + token() }
@@ -385,6 +387,65 @@ async function loadProfiles() {
         dashboardEl.innerHTML = html;
     } catch {
         dashboardEl.innerHTML = `<p>Could not connect to the server.</p>`;
+    }
+}
+
+async function importProfilesFromFile() {
+    const fileInput = document.getElementById("profileImportFile");
+    const typeSelect = document.getElementById("profileImportType");
+    const overwriteCheckbox = document.getElementById("profileImportOverwrite");
+    const messageEl = document.getElementById("profileImportMessage");
+
+    if (!fileInput || !typeSelect || !messageEl) return;
+    const file = fileInput.files?.[0];
+    if (!file) {
+        messageEl.textContent = "Choose a Refract / Prism JSON export file first.";
+        return;
+    }
+
+    try {
+        messageEl.textContent = "Reading import file...";
+        const rawText = await file.text();
+        const rows = JSON.parse(rawText);
+        if (!Array.isArray(rows) || !rows.length) {
+            messageEl.textContent = "That file did not contain any profiles.";
+            return;
+        }
+
+        messageEl.textContent = `Importing ${rows.length} profiles...`;
+        const res = await fetch(API + "/profiles/import", {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+                Authorization: "Bearer " + token()
+            },
+            body: JSON.stringify({
+                profiles: rows,
+                account_type: typeSelect.value,
+                overwrite_existing: !!overwriteCheckbox?.checked
+            })
+        });
+
+        const result = await res.json();
+        if (!res.ok || result.error) {
+            messageEl.textContent = result.error || "Profile import failed.";
+            return;
+        }
+
+        const skippedText = result.skipped ? ` ${result.skipped} skipped.` : "";
+        messageEl.textContent = `Imported ${result.imported} of ${result.total} profiles.${skippedText}`;
+        fileInput.value = "";
+        await loadProfiles();
+    } catch (err) {
+        messageEl.textContent = err.message || "Could not import the profile file.";
+    }
+}
+
+function initProfileImportPanel() {
+    const importButton = document.getElementById("profileImportButton");
+    if (importButton && !importButton.dataset.bound) {
+        importButton.dataset.bound = "true";
+        importButton.addEventListener("click", importProfilesFromFile);
     }
 }
 
