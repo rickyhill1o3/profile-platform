@@ -67,6 +67,16 @@ function formatDateTime(value) {
 }
 
 
+function readTextFile(file) {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result || ''));
+        reader.onerror = () => reject(new Error('Could not read file.'));
+        reader.readAsText(file);
+    });
+}
+
+
 function token() {
     return localStorage.getItem("token");
 }
@@ -271,6 +281,8 @@ async function loadProfiles() {
         adminButton.style.display = isAdminRole(user?.role) ? "inline-flex" : "none";
     }
 
+    initProfileImportPanel();
+
     try {
         const res = await fetch(API + "/profiles", {
             headers: { Authorization: "Bearer " + token() }
@@ -385,6 +397,65 @@ async function loadProfiles() {
         dashboardEl.innerHTML = html;
     } catch {
         dashboardEl.innerHTML = `<p>Could not connect to the server.</p>`;
+    }
+}
+
+async function importProfilesFromFile() {
+    const fileInput = document.getElementById("profileImportFile");
+    const typeSelect = document.getElementById("profileImportType");
+    const overwriteCheckbox = document.getElementById("profileImportOverwrite");
+    const messageEl = document.getElementById("profileImportMessage");
+
+    if (!fileInput || !typeSelect || !messageEl) return;
+    const file = fileInput.files?.[0];
+    if (!file) {
+        messageEl.textContent = "Choose a Refract / Prism JSON export file first.";
+        return;
+    }
+
+    try {
+        messageEl.textContent = "Reading import file...";
+        const rawText = await file.text();
+        const rows = JSON.parse(rawText);
+        if (!Array.isArray(rows) || !rows.length) {
+            messageEl.textContent = "That file did not contain any profiles.";
+            return;
+        }
+
+        messageEl.textContent = `Importing ${rows.length} profiles...`;
+        const res = await fetch(API + "/profiles/import", {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+                Authorization: "Bearer " + token()
+            },
+            body: JSON.stringify({
+                profiles: rows,
+                account_type: typeSelect.value,
+                overwrite_existing: !!overwriteCheckbox?.checked
+            })
+        });
+
+        const result = await res.json();
+        if (!res.ok || result.error) {
+            messageEl.textContent = result.error || "Profile import failed.";
+            return;
+        }
+
+        const skippedText = result.skipped ? ` ${result.skipped} skipped.` : "";
+        messageEl.textContent = `Imported ${result.imported} of ${result.total} profiles.${skippedText}`;
+        fileInput.value = "";
+        await loadProfiles();
+    } catch (err) {
+        messageEl.textContent = err.message || "Could not import the profile file.";
+    }
+}
+
+function initProfileImportPanel() {
+    const importButton = document.getElementById("profileImportButton");
+    if (importButton && !importButton.dataset.bound) {
+        importButton.dataset.bound = "true";
+        importButton.addEventListener("click", importProfilesFromFile);
     }
 }
 
@@ -1675,12 +1746,8 @@ async function loadCatalogProducts() {
 async function initCatalogTools() {
     const form = document.getElementById('adminSkuUpsertForm');
     const manualForm = document.getElementById('adminManualProductForm');
-    const bulkForm = document.getElementById('adminBulkCatalogImportForm');
+    const bulkImportForm = document.getElementById('adminBulkImportForm');
     const exportForm = document.getElementById('catalogExportForm');
-    const bulkImportFile = document.getElementById('bulkImportFile');
-    const bulkImportSite = document.getElementById('bulkImportSite');
-    const bulkImportSkuList = document.getElementById('bulkImportSkuList');
-    const bulkImportMessage = document.getElementById('bulkImportMessage');
     const exportResults = document.getElementById('catalogExportResults');
     const message = document.getElementById('adminSkuMessage');
     const syncButton = document.getElementById('syncTargetPricingButton');
@@ -1740,76 +1807,6 @@ async function initCatalogTools() {
             }
         });
     }
-    if (bulkForm && superAdmin) {
-        bulkForm.addEventListener('submit', async (event) => {
-            event.preventDefault();
-            if (bulkImportMessage) bulkImportMessage.textContent = 'Importing SKUs...';
-            try {
-                let products = [];
-                const file = bulkImportFile?.files?.[0];
-                if (file) {
-                    const raw = await file.text();
-                    const parsed = JSON.parse(raw);
-                    if (Array.isArray(parsed)) products = parsed;
-                    else if (Array.isArray(parsed?.products)) products = parsed.products;
-                    if (parsed?.site && bulkImportSite && !bulkImportSite.value) bulkImportSite.value = String(parsed.site || '').toLowerCase();
-                }
-                const skuList = bulkImportSkuList?.value || '';
-                const data = await authJSON(API + '/admin/catalog-products/import-list', {
-                    method: 'POST',
-                    body: JSON.stringify({
-                        site: bulkImportSite?.value || 'target',
-                        products,
-                        sku_list: skuList
-                    })
-                });
-                if (bulkImportMessage) bulkImportMessage.textContent = data.message || 'Import complete.';
-                if (bulkImportSkuList) bulkImportSkuList.value = '';
-                if (bulkImportFile) bulkImportFile.value = '';
-                await loadCatalogProducts();
-            } catch (err) {
-                if (bulkImportMessage) bulkImportMessage.textContent = err.message;
-            }
-        });
-    }
-    if (exportForm) {
-        exportForm.addEventListener('submit', async (event) => {
-            event.preventDefault();
-            if (exportResults) exportResults.innerHTML = '<div class="subtle-text">Building export batches...</div>';
-            try {
-                const qs = new URLSearchParams({
-                    site: document.getElementById('catalogExportSite')?.value || 'target',
-                    selected_only: document.getElementById('catalogExportSelectedOnly')?.value || '0',
-                    batch_size: '20'
-                });
-                const data = await authJSON(API + '/admin/catalog-products/export-batches?' + qs.toString());
-                const batches = Array.isArray(data.batches) ? data.batches : [];
-                if (!batches.length) {
-                    if (exportResults) exportResults.innerHTML = '<div class="subtle-text">No products found for export.</div>';
-                    return;
-                }
-                if (exportResults) exportResults.innerHTML = batches.map((batch) => `
-                    <div class="banner banner-soft">
-                      <div class="panel-header"><div><strong>Batch ${batch.batch_number}</strong><div class="subtle-text">${batch.count} products</div></div><div class="panel-actions"><button class="btn" type="button" data-copy-export-batch="${batch.batch_number}">Copy</button></div></div>
-                      <textarea class="input" rows="10" readonly data-export-batch-text="${batch.batch_number}"></textarea>
-                    </div>
-                `).join('');
-                batches.forEach((batch) => {
-                    const textArea = exportResults.querySelector(`[data-export-batch-text="${batch.batch_number}"]`);
-                    if (textArea) textArea.value = batch.text || '';
-                });
-                exportResults.querySelectorAll('[data-copy-export-batch]').forEach((button) => {
-                    button.addEventListener('click', async () => {
-                        const textArea = exportResults.querySelector(`[data-export-batch-text="${button.dataset.copyExportBatch}"]`);
-                        const text = textArea?.value || '';
-                        try { await navigator.clipboard.writeText(text); button.textContent = 'Copied'; setTimeout(() => { button.textContent = 'Copy'; }, 1200); } catch {}
-                    });
-                });
-            } catch (err) {
-                if (exportResults) exportResults.innerHTML = `<div class="subtle-text">${escapeHTML(err.message)}</div>`;
-            }
-        });
-    }
     if (syncButton && superAdmin) {
         syncButton.addEventListener('click', async () => {
             message.textContent = 'Syncing target pricing...';
@@ -1819,6 +1816,79 @@ async function initCatalogTools() {
                 await loadCatalogProducts();
             } catch (err) {
                 message.textContent = err.message;
+            }
+        });
+    }
+    if (bulkImportForm && superAdmin) {
+        bulkImportForm.addEventListener('submit', async (event) => {
+            event.preventDefault();
+            message.textContent = 'Importing SKUs...';
+            try {
+                const file = document.getElementById('bulkImportFile')?.files?.[0] || null;
+                const rawJson = file ? await readTextFile(file) : '';
+                const rawList = document.getElementById('bulkImportSkuList')?.value || '';
+                const data = await authJSON(API + '/admin/catalog-products/bulk-import', {
+                    method: 'POST',
+                    body: JSON.stringify({
+                        site: document.getElementById('bulkImportSite').value,
+                        raw_json: rawJson,
+                        raw_list: rawList,
+                        update_existing: document.getElementById('bulkImportUpdateExisting').checked,
+                        attempt_lookup: document.getElementById('bulkImportAttemptLookup').checked
+                    })
+                });
+                message.textContent = data.message || `Imported ${data.summary?.created || 0} new products.`;
+                bulkImportForm.reset();
+                await loadCatalogProducts();
+            } catch (err) {
+                message.textContent = err.message;
+            }
+        });
+    }
+    if (exportForm) {
+        exportForm.addEventListener('submit', async (event) => {
+            event.preventDefault();
+            if (exportResults) exportResults.innerHTML = '<div class="subtle-text">Building export batches...</div>';
+            try {
+                const qs = new URLSearchParams({
+                    site: document.getElementById('catalogExportSite').value,
+                    batch_size: '20'
+                });
+                if (document.getElementById('catalogExportSelectedOnly').checked) qs.set('selected_only', '1');
+                const data = await authJSON(API + '/admin/catalog-products/export?' + qs.toString());
+                const batches = Array.isArray(data.batches) ? data.batches : [];
+                if (!exportResults) return;
+                if (!batches.length) {
+                    exportResults.innerHTML = '<div class="subtle-text">No products matched this export.</div>';
+                    return;
+                }
+                exportResults.innerHTML = batches.map((batch) => `
+                    <div class="panel panel--tight">
+                      <div class="toolbar-row toolbar-row--spread">
+                        <strong>Batch ${batch.index}</strong>
+                        <button class="btn btn-sm" type="button" data-copy-export-batch="${batch.index}">Copy</button>
+                      </div>
+                      <div class="subtle-text">${batch.count} items</div>
+                      <textarea class="input" rows="10" readonly data-export-batch-text="${batch.index}">${escapeHTML(batch.text)}</textarea>
+                    </div>
+                `).join('');
+                exportResults.querySelectorAll('[data-copy-export-batch]').forEach((button) => {
+                    button.addEventListener('click', async () => {
+                        const batchIndex = button.dataset.copyExportBatch;
+                        const textArea = exportResults.querySelector(`[data-export-batch-text="${batchIndex}"]`);
+                        if (!textArea) return;
+                        try {
+                            await navigator.clipboard.writeText(textArea.value);
+                            message.textContent = `Copied export batch ${batchIndex}.`;
+                        } catch {
+                            textArea.select();
+                            document.execCommand('copy');
+                            message.textContent = `Copied export batch ${batchIndex}.`;
+                        }
+                    });
+                });
+            } catch (err) {
+                if (exportResults) exportResults.innerHTML = `<div class="subtle-text">${escapeHTML(err.message)}</div>`;
             }
         });
     }
@@ -1920,36 +1990,65 @@ function purchaseCustomCredits() {
     startCreditPurchase(input ? input.value : 0);
 }
 
+function setInputValue(id, value) {
+    const el = document.getElementById(id);
+    if (el) el.value = value || '';
+}
+
+function collectMonitorWebhookMap(prefix = '') {
+    return {
+        pokemon: document.getElementById(prefix + 'MonitorPokemonWebhook')?.value || '',
+        onepiece: document.getElementById(prefix + 'MonitorOnePieceWebhook')?.value || '',
+        magic: document.getElementById(prefix + 'MonitorMagicWebhook')?.value || '',
+        lowkey: document.getElementById(prefix + 'MonitorLowkeyWebhook')?.value || '',
+        sports: document.getElementById(prefix + 'MonitorSportsWebhook')?.value || ''
+    };
+}
+
+function fillMonitorWebhookMap(map = {}, prefix = '') {
+    setInputValue(prefix + 'MonitorPokemonWebhook', map.pokemon || '');
+    setInputValue(prefix + 'MonitorOnePieceWebhook', map.onepiece || '');
+    setInputValue(prefix + 'MonitorMagicWebhook', map.magic || '');
+    setInputValue(prefix + 'MonitorLowkeyWebhook', map.lowkey || '');
+    setInputValue(prefix + 'MonitorSportsWebhook', map.sports || '');
+}
+
 async function loadWebhookSettings() {
     const urlInput = document.getElementById('websiteWebhookUrl');
+    const monitorUrlInput = document.getElementById('monitorWebhookUrl');
     const discordInput = document.getElementById('discordRelayWebhookUrl');
     const adminDiscordInput = document.getElementById('adminDiscordRelayWebhookUrl');
     const adminBrandInput = document.getElementById('adminBrandLabel');
     const message = document.getElementById('webhookSettingsMessage');
     const createButton = document.getElementById('createWebhookButton');
+    const createMonitorButton = document.getElementById('createMonitorWebhookButton');
     const superAdminField = document.getElementById('superAdminDiscordField');
+    const superAdminMonitorFields = document.getElementById('superAdminMonitorDiscordFields');
 
     if (!urlInput) return;
 
     try {
         const data = await authJSON(API + '/admin/webhooks/settings');
         urlInput.value = data.inbound_webhook_url || '';
+        if (monitorUrlInput) monitorUrlInput.value = data.monitor_webhook_url || '';
         if (discordInput) discordInput.value = data.discord_webhook_url || '';
         if (adminDiscordInput) adminDiscordInput.value = data.admin_discord_webhook_url || '';
         if (adminBrandInput) adminBrandInput.value = data.admin_brand_label || '';
+        fillMonitorWebhookMap(data.monitor_discord_webhooks || {}, '');
+        fillMonitorWebhookMap(data.admin_monitor_discord_webhooks || {}, 'admin');
 
-        if (createButton) {
-            createButton.style.display = data.can_create_inbound ? '' : 'none';
-        }
-        if (superAdminField) {
-            superAdminField.style.display = data.is_super_admin ? '' : 'none';
-        }
+        if (createButton) createButton.style.display = data.can_create_inbound ? '' : 'none';
+        if (createMonitorButton) createMonitorButton.style.display = data.can_create_inbound ? '' : 'none';
+        if (superAdminField) superAdminField.style.display = data.is_super_admin ? '' : 'none';
+        if (superAdminMonitorFields) superAdminMonitorFields.style.display = data.is_super_admin ? '' : 'none';
 
         if (message) {
             message.textContent = data.inbound_webhook_url
                 ? 'Webhook settings loaded.'
                 : 'No shared website webhook created yet.';
         }
+
+        await loadWebhookEvents();
     } catch (err) {
         if (message) message.textContent = err.message;
     }
@@ -1968,6 +2067,19 @@ async function createWebsiteWebhook() {
     }
 }
 
+async function createMonitorWebhook() {
+    const urlInput = document.getElementById('monitorWebhookUrl');
+    const message = document.getElementById('webhookSettingsMessage');
+    try {
+        if (message) message.textContent = 'Creating monitor webhook...';
+        const data = await authJSON(API + '/admin/webhooks/monitor/create', { method: 'POST' });
+        if (urlInput) urlInput.value = data.monitor_webhook_url || '';
+        if (message) message.textContent = 'Monitor webhook created. Use this URL for in-stock monitor pings.';
+    } catch (err) {
+        if (message) message.textContent = err.message;
+    }
+}
+
 async function saveWebhookSettings() {
     const discordInput = document.getElementById('discordRelayWebhookUrl');
     const adminDiscordInput = document.getElementById('adminDiscordRelayWebhookUrl');
@@ -1980,13 +2092,37 @@ async function saveWebhookSettings() {
             body: JSON.stringify({
                 discord_webhook_url: discordInput ? discordInput.value : '',
                 admin_discord_webhook_url: adminDiscordInput ? adminDiscordInput.value : '',
-                admin_brand_label: adminBrandInput ? adminBrandInput.value : ''
+                admin_brand_label: adminBrandInput ? adminBrandInput.value : '',
+                monitor_discord_webhooks: collectMonitorWebhookMap(''),
+                admin_monitor_discord_webhooks: collectMonitorWebhookMap('admin')
             })
         });
 
         if (message) message.textContent = 'Webhook settings saved.';
     } catch (err) {
         if (message) message.textContent = err.message;
+    }
+}
+
+async function loadWebhookEvents() {
+    const body = document.getElementById('webhookEventsTableBody');
+    if (!body) return;
+    try {
+        const data = await authJSON(API + '/admin/webhooks/events');
+        const rows = Array.isArray(data.events) ? data.events : [];
+        body.innerHTML = rows.length ? rows.map((event) => `
+          <tr>
+            <td>${escapeHtml(formatDateTime(event.created_at || ''))}</td>
+            <td>${escapeHtml(event.webhook_type || '')}</td>
+            <td>${escapeHtml(event.status || '')}</td>
+            <td>${escapeHtml(event.site || '')}</td>
+            <td>${escapeHtml(event.product_type || '')}</td>
+            <td>${escapeHtml(event.product_name || '')}</td>
+            <td>${escapeHtml(event.sku || '')}</td>
+            <td>${escapeHtml(event.error_message || '')}</td>
+          </tr>`).join('') : '<tr><td colspan="8" class="subtle-text">No webhook events yet.</td></tr>';
+    } catch (err) {
+        body.innerHTML = `<tr><td colspan="8" class="subtle-text">${escapeHtml(err.message || 'Could not load events')}</td></tr>`;
     }
 }
 

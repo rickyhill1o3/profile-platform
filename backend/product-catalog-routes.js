@@ -80,41 +80,6 @@ function normalizeCreditCost(value) {
     return Math.round(parsed);
 }
 
-function normalizeImportedPrice(value) {
-    if (value === "" || value === null || value === undefined) return null;
-    const parsed = Number(value);
-    if (!Number.isFinite(parsed) || parsed < 0) return null;
-    if (parsed >= 900) return null;
-    return Number(parsed.toFixed(2));
-}
-
-function normalizeDelimitedSkuList(value) {
-    return String(value || '')
-        .split(/\r?\n|,/)
-        .map((row) => String(row || '').trim())
-        .filter(Boolean);
-}
-
-function formatExportPrice(value) {
-    if (value === null || value === undefined || value === '') return '';
-    const parsed = Number(value);
-    if (!Number.isFinite(parsed)) return '';
-    return parsed.toFixed(2);
-}
-
-function chunkArray(items, size) {
-    const out = [];
-    for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
-    return out;
-}
-
-function buildCatalogExportLine(row) {
-    const sku = String(row.sku || '').trim();
-    const productName = String(row.product_name || row.sku || '').replace(/\r?\n|;/g, ' ').trim();
-    const price = formatExportPrice(row.default_max_price);
-    return `${sku};${productName};${price}`;
-}
-
 function sanitizeLike(value) {
     return String(value || "").replace(/[%_]/g, "").trim();
 }
@@ -126,6 +91,136 @@ function normalizeTitle(value) {
         .replace(/(pack|bundle|edition|the|with|for|and|card|cards|set)/g, " ")
         .replace(/\s+/g, " ")
         .trim();
+}
+
+
+function parseBulkCatalogImport(payload = {}) {
+    const site = normalizeSite(payload.site);
+    const items = [];
+
+    const appendNormalized = (skuValue, row = {}) => {
+        const sku = String(skuValue || '').trim();
+        if (!sku || sku.toUpperCase() === 'MEGA_PLACEHOLDER') return;
+        const rawPrice = row.default_max_price ?? row.userSetMaxPrice ?? row.price ?? row.max_price ?? null;
+        let defaultMaxPrice = null;
+        try {
+            defaultMaxPrice = normalizeMaxPrice(rawPrice);
+        } catch (_) {
+            defaultMaxPrice = null;
+        }
+        if (defaultMaxPrice !== null && defaultMaxPrice >= 900) defaultMaxPrice = null;
+        items.push({
+            site,
+            sku,
+            product_name: String(row.product_name || row.productName || row.name || '').trim(),
+            default_max_price: defaultMaxPrice,
+            metadata: {
+                import_source: payload.import_source || payload.importSource || 'bulk_import',
+                original_user_set_max_price: rawPrice
+            }
+        });
+    };
+
+    const explicitProducts = Array.isArray(payload.products) ? payload.products : [];
+    explicitProducts.forEach((row) => appendNormalized(row?.sku, row || {}));
+
+    const rawJson = String(payload.raw_json || payload.rawJson || '').trim();
+    if (rawJson) {
+        let parsed;
+        try {
+            parsed = JSON.parse(rawJson);
+        } catch (_) {
+            throw new Error('Invalid JSON file or payload.');
+        }
+        if (Array.isArray(parsed)) {
+            parsed.forEach((row) => appendNormalized(row?.sku, row || {}));
+        } else if (Array.isArray(parsed?.products)) {
+            parsed.products.forEach((row) => appendNormalized(row?.sku, row || {}));
+        }
+    }
+
+    const rawList = String(payload.raw_list || payload.rawList || '').trim();
+    if (rawList) {
+        rawList.split(/\r?\n/).forEach((line) => {
+            const clean = String(line || '').trim();
+            if (!clean) return;
+            const parts = clean.split(/[;,|\t]/).map((part) => String(part || '').trim());
+            appendNormalized(parts[0], {
+                product_name: parts[1] || '',
+                default_max_price: parts[2] || null
+            });
+        });
+    }
+
+    const deduped = [];
+    const seen = new Set();
+    for (const item of items) {
+        const key = `${item.site}::${String(item.sku).toLowerCase()}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        deduped.push(item);
+    }
+    return deduped;
+}
+
+async function upsertCatalogProductSeed(supabase, row, options = {}) {
+    const site = normalizeSite(row.site);
+    const sku = String(row.sku || '').trim();
+    if (!sku) throw new Error('SKU is required.');
+    const catalog = await getActiveCatalog(supabase, site);
+    if (!catalog?.id) throw new Error(`No active ${site} catalog found.`);
+
+    const updateExisting = !!options.updateExisting;
+    const existing = await firstRowOrNull(supabase, site, sku);
+    if (existing?.id && !updateExisting) {
+        return { product: existing, action: 'duplicate_existing' };
+    }
+
+    const payload = {
+        catalog_id: catalog.id,
+        site,
+        sku,
+        product_name: String(row.product_name || '').trim() || existing?.product_name || `${site.toUpperCase()} ${sku}`,
+        brand: existing?.brand || (site === 'pokemon' ? 'Pokémon Center' : site.charAt(0).toUpperCase() + site.slice(1)),
+        image_url: existing?.image_url || '',
+        product_url: existing?.product_url || '',
+        default_max_price: row.default_max_price ?? existing?.default_max_price ?? null,
+        credit_cost: normalizeCreditCost(row.credit_cost ?? existing?.credit_cost ?? 0),
+        release_mode_default: normalizeRunMode(row.release_mode_default || existing?.release_mode_default || 'current'),
+        is_enabled: existing?.is_enabled !== false,
+        metadata: Object.assign({}, existing?.metadata || {}, row.metadata || {}, {
+            imported_at: new Date().toISOString()
+        })
+    };
+
+    if (existing?.id) {
+        const { data, error } = await supabase
+            .from('catalog_products')
+            .update(payload)
+            .eq('id', existing.id)
+            .select('*')
+            .single();
+        if (error) throw new Error(error.message);
+        return { product: data, action: 'updated_existing' };
+    }
+
+    const { data, error } = await supabase
+        .from('catalog_products')
+        .insert(payload)
+        .select('*')
+        .single();
+    if (error) throw new Error(error.message);
+    return { product: data, action: 'created' };
+}
+
+function formatCatalogExportLine(row = {}) {
+    return [row.sku || '', row.product_name || '', row.default_max_price ?? ''].join(';');
+}
+
+function chunkRows(rows = [], size = 20) {
+    const chunks = [];
+    for (let i = 0; i < rows.length; i += size) chunks.push(rows.slice(i, i + size));
+    return chunks;
 }
 
 function titleSimilarity(a, b) {
@@ -880,165 +975,92 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
         }
     });
 
-    app.post('/admin/catalog-products/import-list', auth, admin, async (req, res) => {
+
+
+    app.post('/admin/catalog-products/bulk-import', auth, admin, async (req, res) => {
         if (!requireSuperAdmin(req, res)) return;
         try {
             const site = normalizeSite(req.body.site);
-            const catalog = await getActiveCatalog(supabase, site);
-            if (!catalog?.id) return res.status(400).json({ error: `No active ${site} catalog found.` });
+            const items = parseBulkCatalogImport(req.body || {});
+            if (!items.length) return res.status(400).json({ error: 'No valid SKUs found to import.' });
 
-            const sourceProducts = Array.isArray(req.body.products) ? req.body.products : [];
-            const sourceSkus = sourceProducts.length
-                ? sourceProducts.map((row) => ({
-                    sku: String(row?.sku || '').trim(),
-                    product_name: String(row?.product_name || row?.name || '').trim(),
-                    default_max_price: normalizeImportedPrice(row?.price ?? row?.userSetMaxPrice ?? row?.default_max_price)
-                }))
-                : normalizeDelimitedSkuList(req.body.sku_list).map((sku) => ({ sku, product_name: '', default_max_price: null }));
-
-            const deduped = [];
-            const seen = new Set();
-            for (const row of sourceSkus) {
-                const sku = String(row.sku || '').trim();
-                if (!sku || sku === 'MEGA_PLACEHOLDER') continue;
-                const key = `${site}::${sku.toLowerCase()}`;
-                if (seen.has(key)) continue;
-                seen.add(key);
-                deduped.push({ ...row, sku });
-            }
-
-            if (!deduped.length) return res.status(400).json({ error: 'No valid SKUs were provided.' });
-
-            const created = [];
-            const updated = [];
-            const duplicates = [];
-            const errors = [];
-            const doLookup = deduped.length <= 5;
-
-            for (const item of deduped) {
+            const updateExisting = !!req.body.update_existing;
+            const attemptLookup = !!req.body.attempt_lookup;
+            const results = [];
+            for (const item of items) {
                 try {
-                    const existing = await firstRowOrNull(supabase, site, item.sku);
-                    if (existing?.id) {
-                        const nextName = item.product_name || existing.product_name || item.sku;
-                        const nextPrice = item.default_max_price ?? existing.default_max_price ?? null;
-                        const patch = {};
-                        if (nextName !== existing.product_name) patch.product_name = nextName;
-                        if (nextPrice !== existing.default_max_price) patch.default_max_price = nextPrice;
-                        if (Object.keys(patch).length) {
-                            const { data, error } = await supabase
-                                .from('catalog_products')
-                                .update(patch)
-                                .eq('id', existing.id)
-                                .select('*')
-                                .single();
-                            if (error) throw new Error(error.message);
-                            updated.push(data);
-                        } else {
-                            duplicates.push(existing);
-                        }
-                        continue;
+                    if (attemptLookup) {
+                        const product = await upsertCatalogProductByLookup(supabase, site, item.sku);
+                        results.push({ sku: item.sku, action: 'lookup_upserted', product_id: product.id, product_name: product.product_name || item.sku });
+                    } else {
+                        const result = await upsertCatalogProductSeed(supabase, item, { updateExisting });
+                        results.push({ sku: item.sku, action: result.action, product_id: result.product?.id || null, product_name: result.product?.product_name || item.sku });
                     }
-
-                    let lookup = null;
-                    if (doLookup) {
-                        try { lookup = await bestEffortLookupBySku(site, item.sku); } catch {}
-                    }
-
-                    const payload = {
-                        catalog_id: catalog.id,
-                        site,
-                        sku: item.sku,
-                        product_name: item.product_name || lookup?.product_name || item.sku,
-                        brand: lookup?.brand || (site === 'pokemon' ? 'Pokémon Center' : site.charAt(0).toUpperCase() + site.slice(1)),
-                        image_url: lookup?.image_url || '',
-                        product_url: lookup?.product_url || '',
-                        default_max_price: item.default_max_price ?? lookup?.default_max_price ?? null,
-                        credit_cost: 0,
-                        release_mode_default: 'current',
-                        is_enabled: true,
-                        metadata: Object.assign({}, lookup?.metadata || {}, { imported_via: sourceProducts.length ? 'bulk_json' : 'bulk_text' })
-                    };
-
-                    const { data, error } = await supabase.from('catalog_products').insert(payload).select('*').single();
-                    if (error) throw new Error(error.message);
-                    created.push(data);
                 } catch (err) {
-                    errors.push({ sku: item.sku, error: err.message });
+                    results.push({ sku: item.sku, action: 'error', error: err.message });
                 }
             }
 
-            res.json({
-                success: true,
-                site,
-                requested: deduped.length,
-                created_count: created.length,
-                updated_count: updated.length,
-                duplicate_count: duplicates.length,
-                error_count: errors.length,
-                created,
-                updated,
-                duplicates: duplicates.map((row) => ({ id: row.id, sku: row.sku, product_name: row.product_name })),
-                errors,
-                message: `Processed ${deduped.length} SKUs. Created ${created.length}, updated ${updated.length}, skipped ${duplicates.length}.`
-            });
+            const summary = {
+                received: items.length,
+                created: results.filter((row) => row.action === 'created').length,
+                updated_existing: results.filter((row) => row.action === 'updated_existing' || row.action === 'lookup_upserted').length,
+                duplicate_existing: results.filter((row) => row.action === 'duplicate_existing').length,
+                errors: results.filter((row) => row.action === 'error').length
+            };
+            res.json({ success: true, summary, results, message: `Imported ${summary.created + summary.updated_existing} products. Skipped ${summary.duplicate_existing} duplicates.` });
         } catch (err) {
             res.status(500).json({ error: err.message });
         }
     });
 
-    app.get('/admin/catalog-products/export-batches', auth, admin, async (req, res) => {
+    app.get('/admin/catalog-products/export', auth, admin, async (req, res) => {
         try {
-            const currentUser = await getCurrentUser(req);
-            const site = req.query.site ? normalizeSite(req.query.site) : '';
-            const selectedOnly = req.query.selected_only === '1';
+            const site = normalizeSite(req.query.site);
+            const selectedOnly = String(req.query.selected_only || '') === '1';
             const batchSize = Math.max(1, Math.min(100, Number(req.query.batch_size || 20) || 20));
-
             let rows = [];
+
             if (selectedOnly) {
-                const scopedUserIds = await getScopedUserIds(supabase, currentUser);
-                let query = supabase
+                const { data, error } = await supabase
                     .from('user_product_preferences')
-                    .select('selected, catalog_products!inner(id, site, sku, product_name, default_max_price)')
-                    .eq('selected', true);
-                if (site) query = query.eq('catalog_products.site', site);
-                if (scopedUserIds && scopedUserIds.length) query = query.in('user_id', scopedUserIds);
-                const { data, error } = await query;
+                    .select(`catalog_products!inner ( sku, product_name, default_max_price, site )`)
+                    .eq('selected', true)
+                    .eq('catalog_products.site', site);
                 if (error) return res.status(500).json({ error: error.message });
-                const unique = new Map();
-                for (const row of data || []) {
-                    const product = row.catalog_products || {};
-                    const key = `${product.site || ''}::${String(product.sku || '').toLowerCase()}`;
-                    if (!product.sku || unique.has(key)) continue;
-                    unique.set(key, product);
-                }
-                rows = [...unique.values()];
+                const seen = new Set();
+                rows = (data || []).map((row) => row.catalog_products).filter(Boolean).filter((row) => {
+                    const key = `${row.site}::${String(row.sku || '').toLowerCase()}`;
+                    if (seen.has(key)) return false;
+                    seen.add(key);
+                    return true;
+                });
             } else {
-                let query = supabase
+                const { data, error } = await supabase
                     .from('catalog_products')
-                    .select('id, site, sku, product_name, default_max_price')
+                    .select('sku, product_name, default_max_price, site')
+                    .eq('site', site)
                     .eq('is_enabled', true)
-                    .order('product_name', { ascending: true, nullsFirst: false })
-                    .order('sku', { ascending: true });
-                if (site) query = query.eq('site', site);
-                const { data, error } = await query;
+                    .order('created_at', { ascending: false })
+                    .limit(5000);
                 if (error) return res.status(500).json({ error: error.message });
                 rows = data || [];
             }
 
-            rows = rows.filter((row) => row && row.sku).sort((a, b) => String(a.product_name || a.sku).localeCompare(String(b.product_name || b.sku)));
-            const lines = rows.map(buildCatalogExportLine);
-            const batches = chunkArray(lines, batchSize).map((batch, index) => ({
-                batch_number: index + 1,
+            rows = rows
+                .filter((row) => row && row.sku)
+                .sort((a, b) => String(a.sku || '').localeCompare(String(b.sku || '')));
+            const lines = rows.map(formatCatalogExportLine);
+            const batches = chunkRows(lines, batchSize).map((batch, index) => ({
+                index: index + 1,
                 count: batch.length,
-                text: batch.join('\n'),
-                lines: batch
+                text: batch.join('\n')
             }));
-            res.json({ success: true, site: site || null, selected_only: selectedOnly, total_products: rows.length, batch_size: batchSize, batches });
+            res.json({ success: true, count: lines.length, lines, batches });
         } catch (err) {
             res.status(500).json({ error: err.message });
         }
     });
-
 
     app.post('/admin/product-requests/:id/approve', auth, admin, async (req, res) => {
         if (!requireSuperAdmin(req, res)) return;
