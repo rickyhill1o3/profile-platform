@@ -1904,36 +1904,65 @@ function purchaseCustomCredits() {
     startCreditPurchase(input ? input.value : 0);
 }
 
+function setInputValue(id, value) {
+    const el = document.getElementById(id);
+    if (el) el.value = value || '';
+}
+
+function collectMonitorWebhookMap(prefix = '') {
+    return {
+        pokemon: document.getElementById(prefix + 'MonitorPokemonWebhook')?.value || '',
+        onepiece: document.getElementById(prefix + 'MonitorOnePieceWebhook')?.value || '',
+        magic: document.getElementById(prefix + 'MonitorMagicWebhook')?.value || '',
+        lowkey: document.getElementById(prefix + 'MonitorLowkeyWebhook')?.value || '',
+        sports: document.getElementById(prefix + 'MonitorSportsWebhook')?.value || ''
+    };
+}
+
+function fillMonitorWebhookMap(map = {}, prefix = '') {
+    setInputValue(prefix + 'MonitorPokemonWebhook', map.pokemon || '');
+    setInputValue(prefix + 'MonitorOnePieceWebhook', map.onepiece || '');
+    setInputValue(prefix + 'MonitorMagicWebhook', map.magic || '');
+    setInputValue(prefix + 'MonitorLowkeyWebhook', map.lowkey || '');
+    setInputValue(prefix + 'MonitorSportsWebhook', map.sports || '');
+}
+
 async function loadWebhookSettings() {
     const urlInput = document.getElementById('websiteWebhookUrl');
+    const monitorUrlInput = document.getElementById('monitorWebhookUrl');
     const discordInput = document.getElementById('discordRelayWebhookUrl');
     const adminDiscordInput = document.getElementById('adminDiscordRelayWebhookUrl');
     const adminBrandInput = document.getElementById('adminBrandLabel');
     const message = document.getElementById('webhookSettingsMessage');
     const createButton = document.getElementById('createWebhookButton');
+    const createMonitorButton = document.getElementById('createMonitorWebhookButton');
     const superAdminField = document.getElementById('superAdminDiscordField');
+    const superAdminMonitorFields = document.getElementById('superAdminMonitorDiscordFields');
 
     if (!urlInput) return;
 
     try {
         const data = await authJSON(API + '/admin/webhooks/settings');
         urlInput.value = data.inbound_webhook_url || '';
+        if (monitorUrlInput) monitorUrlInput.value = data.monitor_webhook_url || '';
         if (discordInput) discordInput.value = data.discord_webhook_url || '';
         if (adminDiscordInput) adminDiscordInput.value = data.admin_discord_webhook_url || '';
         if (adminBrandInput) adminBrandInput.value = data.admin_brand_label || '';
+        fillMonitorWebhookMap(data.monitor_discord_webhooks || {}, '');
+        fillMonitorWebhookMap(data.admin_monitor_discord_webhooks || {}, 'admin');
 
-        if (createButton) {
-            createButton.style.display = data.can_create_inbound ? '' : 'none';
-        }
-        if (superAdminField) {
-            superAdminField.style.display = data.is_super_admin ? '' : 'none';
-        }
+        if (createButton) createButton.style.display = data.can_create_inbound ? '' : 'none';
+        if (createMonitorButton) createMonitorButton.style.display = data.can_create_inbound ? '' : 'none';
+        if (superAdminField) superAdminField.style.display = data.is_super_admin ? '' : 'none';
+        if (superAdminMonitorFields) superAdminMonitorFields.style.display = data.is_super_admin ? '' : 'none';
 
         if (message) {
             message.textContent = data.inbound_webhook_url
                 ? 'Webhook settings loaded.'
                 : 'No shared website webhook created yet.';
         }
+
+        await loadWebhookEvents();
     } catch (err) {
         if (message) message.textContent = err.message;
     }
@@ -1952,6 +1981,19 @@ async function createWebsiteWebhook() {
     }
 }
 
+async function createMonitorWebhook() {
+    const urlInput = document.getElementById('monitorWebhookUrl');
+    const message = document.getElementById('webhookSettingsMessage');
+    try {
+        if (message) message.textContent = 'Creating monitor webhook...';
+        const data = await authJSON(API + '/admin/webhooks/monitor/create', { method: 'POST' });
+        if (urlInput) urlInput.value = data.monitor_webhook_url || '';
+        if (message) message.textContent = 'Monitor webhook created. Use this URL for in-stock monitor pings.';
+    } catch (err) {
+        if (message) message.textContent = err.message;
+    }
+}
+
 async function saveWebhookSettings() {
     const discordInput = document.getElementById('discordRelayWebhookUrl');
     const adminDiscordInput = document.getElementById('adminDiscordRelayWebhookUrl');
@@ -1964,13 +2006,37 @@ async function saveWebhookSettings() {
             body: JSON.stringify({
                 discord_webhook_url: discordInput ? discordInput.value : '',
                 admin_discord_webhook_url: adminDiscordInput ? adminDiscordInput.value : '',
-                admin_brand_label: adminBrandInput ? adminBrandInput.value : ''
+                admin_brand_label: adminBrandInput ? adminBrandInput.value : '',
+                monitor_discord_webhooks: collectMonitorWebhookMap(''),
+                admin_monitor_discord_webhooks: collectMonitorWebhookMap('admin')
             })
         });
 
         if (message) message.textContent = 'Webhook settings saved.';
     } catch (err) {
         if (message) message.textContent = err.message;
+    }
+}
+
+async function loadWebhookEvents() {
+    const body = document.getElementById('webhookEventsTableBody');
+    if (!body) return;
+    try {
+        const data = await authJSON(API + '/admin/webhooks/events');
+        const rows = Array.isArray(data.events) ? data.events : [];
+        body.innerHTML = rows.length ? rows.map((event) => `
+          <tr>
+            <td>${escapeHtml(formatDateTime(event.created_at || ''))}</td>
+            <td>${escapeHtml(event.webhook_type || '')}</td>
+            <td>${escapeHtml(event.status || '')}</td>
+            <td>${escapeHtml(event.site || '')}</td>
+            <td>${escapeHtml(event.product_type || '')}</td>
+            <td>${escapeHtml(event.product_name || '')}</td>
+            <td>${escapeHtml(event.sku || '')}</td>
+            <td>${escapeHtml(event.error_message || '')}</td>
+          </tr>`).join('') : '<tr><td colspan="8" class="subtle-text">No webhook events yet.</td></tr>';
+    } catch (err) {
+        body.innerHTML = `<tr><td colspan="8" class="subtle-text">${escapeHtml(err.message || 'Could not load events')}</td></tr>`;
     }
 }
 
