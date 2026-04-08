@@ -572,8 +572,19 @@ function normalizeFieldLabel(value = "") {
         .trim();
 }
 
-function cleanFieldValue(value = "") {
+function decodeHtmlEntities(value = "") {
     return String(value || "")
+        .replace(/&#39;/g, "'")
+        .replace(/&#34;/g, '"')
+        .replace(/&quot;/g, '"')
+        .replace(/&apos;/g, "'")
+        .replace(/&amp;/g, '&')
+        .replace(/&lt;/g, '<')
+        .replace(/&gt;/g, '>');
+}
+
+function cleanFieldValue(value = "") {
+    return decodeHtmlEntities(String(value || ""))
         .replace(/<[^>]+>/g, " ")
         .replace(/\s+/g, " ")
         .trim();
@@ -903,24 +914,93 @@ async function setMonitorWebhookSettings(value) {
 function normalizeProductType(value = '') {
     const raw = String(value || '').trim().toLowerCase();
     if (!raw) return 'other';
-    if (raw.includes('pokemon')) return 'pokemon';
+    if (raw.includes('pokemon') || raw.includes('pokémon')) return 'pokemon';
     if (raw.includes('one piece') || raw.includes('onepiece')) return 'onepiece';
-    if (raw.includes('magic')) return 'magic';
-    if (raw.includes('sports')) return 'sports';
-    if (raw.includes('low key') || raw.includes('other')) return 'other';
+    if (raw.includes('magic') || raw.includes('mtg')) return 'magic';
+    if (raw.includes('sports card') || raw.includes('sportscard') || raw.includes('sports')) return 'sports';
+    if (raw.includes('lowkey') || raw.includes('low key') || raw.includes('flip') || raw.includes('other')) return 'other';
     if (raw.includes('all')) return 'all';
     return raw.replace(/[^a-z0-9]+/g, '');
+}
+
+function inferProductTypeFromTitle(title = '') {
+    const raw = String(title || '').toLowerCase();
+    if (!raw) return 'other';
+    if (raw.includes('pokemon') || raw.includes('pokémon')) return 'pokemon';
+    if (raw.includes('one piece')) return 'onepiece';
+    if (raw.includes('magic') || raw.includes('commander') || raw.includes('planeswalker')) return 'magic';
+    if (raw.includes('panini') || raw.includes('topps') || raw.includes('prizm') || raw.includes('sports card') || raw.includes('mlb') || raw.includes('nfl') || raw.includes('nba') || raw.includes('nhl')) return 'sports';
+    return 'other';
 }
 
 function inferProductTypeFromPayload(payload = {}, normalized = {}) {
     const direct = normalizeProductType(payload.product_type || payload.category || payload.group || normalized.product_type || '');
     if (direct && direct !== 'other') return direct;
-    const title = String(normalized.product_name || payload.product_name || '').toLowerCase();
-    if (title.includes('pokemon')) return 'pokemon';
-    if (title.includes('one piece')) return 'onepiece';
-    if (title.includes('magic')) return 'magic';
-    if (title.includes('sports')) return 'sports';
-    return 'other';
+    return inferProductTypeFromTitle(normalized.product_name || payload.product_name || '');
+}
+
+function splitPipeList(value = '') {
+    const text = cleanFieldValue(value);
+    if (!text) return [];
+    return text.split(/\s*\|\s*/).map((part) => cleanFieldValue(part)).filter(Boolean);
+}
+
+function extractUrls(value = '') {
+    const matches = String(value || '').match(/https?:\/\/[^\s|]+/g);
+    return Array.isArray(matches) ? matches.map((item) => cleanFieldValue(item)) : [];
+}
+
+function buildTargetUrlFromSku(sku = '') {
+    const cleanSku = String(sku || '').trim();
+    return cleanSku ? `https://www.target.com/p/-/A-${cleanSku}` : '';
+}
+
+function buildWalmartUrlFromSku(sku = '') {
+    const cleanSku = String(sku || '').trim();
+    return cleanSku ? `https://www.walmart.com/ip/${cleanSku}` : '';
+}
+
+function buildSiteUrlFromSku(site = '', sku = '') {
+    const normalizedSite = String(site || '').toLowerCase();
+    if (normalizedSite.includes('target')) return buildTargetUrlFromSku(sku);
+    if (normalizedSite.includes('walmart')) return buildWalmartUrlFromSku(sku);
+    return '';
+}
+
+function expandMonitorPayloadItems(payload = {}) {
+    const { embed, fields } = buildFieldMapFromEmbeds(payload);
+    const normalized = normalizeIncomingOrderPayload(payload);
+    const titleParts = splitPipeList(fields['title sku'] || fields['title'] || fields['product name'] || normalized.product_name || payload.product_name || '');
+    const skuParts = splitPipeList(fields['instock skus'] || fields['sku'] || normalized.sku || payload.sku || payload.product_sku || '');
+    const priceParts = splitPipeList(fields['price'] || payload.price || normalized.price || '');
+    const urlParts = extractUrls(fields['product'] || payload.product_url || payload.url || normalized.product_url || '');
+    const imageParts = extractUrls(fields['image'] || payload.image_url || normalized.image_url || embed.thumbnail?.url || embed.image?.url || '');
+    const count = Math.max(titleParts.length, skuParts.length, priceParts.length, urlParts.length, 1);
+    const site = normalized.site || payload.site || inferSiteFromPayload(payload, embed, fields) || '';
+    const items = [];
+    for (let i = 0; i < count; i += 1) {
+        const sku = skuParts[i] || (count === 1 ? (skuParts[0] || normalized.sku || payload.sku || payload.product_sku || '') : '');
+        const title = titleParts[i] || (count === 1 ? (titleParts[0] || normalized.product_name || payload.product_name || '') : '');
+        const productUrl = urlParts[i] || (count === 1 ? (urlParts[0] || normalized.product_url || payload.product_url || payload.url || '') : '') || buildSiteUrlFromSku(site, sku);
+        const imageUrl = imageParts[i] || (count === 1 ? (imageParts[0] || normalized.image_url || payload.image_url || '') : '');
+        const rawPrice = priceParts[i] || (count === 1 ? (priceParts[0] || payload.price || normalized.price || '') : '');
+        const priceMatch = String(rawPrice || '').replace(/[^0-9.]/g, '');
+        const price = priceMatch ? Number(priceMatch) : null;
+        const productName = title || normalized.product_name || payload.product_name || sku || 'Unknown item';
+        items.push({
+            source: normalized.source || payload.source || '',
+            site,
+            sku,
+            product_name: productName,
+            product_url: productUrl,
+            image_url: imageUrl,
+            price,
+            stock_count: payload.stock_count ?? payload.instock_count ?? null,
+            product_type: inferProductTypeFromTitle(productName),
+            raw_payload: payload
+        });
+    }
+    return items.filter((item) => item.sku || item.product_name || item.product_url);
 }
 
 async function getActiveMonitorWebhook(req = null) {
@@ -980,50 +1060,53 @@ async function sendCheckoutDiscordWebhookFallback(payload = {}, errorMessage = '
 async function sendMonitorDiscordNotifications(payload = {}) {
     const settings = await getMonitorWebhookSettings();
     const routes = settings?.routes || {};
-    const normalized = normalizeIncomingOrderPayload(payload);
-    const productType = inferProductTypeFromPayload(payload, normalized);
-    const candidates = [];
-    for (const scope of ['super_admin', 'admin']) {
-        const bucket = routes?.[scope] || {};
-        for (const key of [productType, 'all']) {
-            const webhookUrl = String(bucket?.[key] || '').trim();
-            if (webhookUrl) candidates.push({ scope, key, webhookUrl });
+    const items = expandMonitorPayloadItems(payload);
+    const deliveries = [];
+    for (const item of items) {
+        const productType = normalizeProductType(item.product_type || inferProductTypeFromPayload(item, item));
+        const candidates = [];
+        for (const scope of ['super_admin', 'admin']) {
+            const bucket = routes?.[scope] || {};
+            for (const key of [productType, 'all']) {
+                const webhookUrl = String(bucket?.[key] || '').trim();
+                if (webhookUrl) candidates.push({ scope, key, webhookUrl, item });
+            }
+        }
+        const seen = new Set();
+        const unique = candidates.filter((c) => {
+            const dedupeKey = `${c.webhookUrl}:${c.item.sku || c.item.product_name}`;
+            if (seen.has(dedupeKey)) return false;
+            seen.add(dedupeKey);
+            return true;
+        });
+        const embed = {
+            title: `In Stock • ${item.product_name || 'Unknown item'}`,
+            fields: [
+                { name: 'Type', value: productType, inline: true },
+                { name: 'Site', value: String(item.site || '-'), inline: true },
+                { name: 'Price', value: item.price != null ? `$${Number(item.price).toFixed(2)}` : '-', inline: true },
+                { name: 'Stock', value: item.stock_count != null ? String(item.stock_count) : '-', inline: true },
+                { name: 'SKU', value: String(item.sku || '-'), inline: true }
+            ],
+            timestamp: new Date().toISOString()
+        };
+        if (item.product_url) embed.fields.push({ name: 'Link', value: String(item.product_url), inline: false });
+        if (item.image_url) embed.thumbnail = { url: String(item.image_url) };
+        for (const dest of unique) {
+            const body = JSON.stringify({ username: 'The Shore Shack Monitor', embeds: [embed] });
+            try {
+                const result = await enqueueDiscordWebhookJob(dest.webhookUrl, async () => {
+                    const response = await globalThis.fetch(dest.webhookUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body });
+                    if (!response.ok) throw new Error(`Discord webhook failed (${response.status})`);
+                    return { success: true };
+                });
+                deliveries.push({ scope: dest.scope, key: dest.key, webhookUrl: dest.webhookUrl, sku: item.sku || '', product_name: item.product_name || '', product_type: productType, ...result });
+            } catch (err) {
+                deliveries.push({ scope: dest.scope, key: dest.key, webhookUrl: dest.webhookUrl, sku: item.sku || '', product_name: item.product_name || '', product_type: productType, error: err.message || String(err) });
+            }
         }
     }
-    const seen = new Set();
-    const unique = candidates.filter((c) => {
-        if (seen.has(c.webhookUrl)) return false;
-        seen.add(c.webhookUrl);
-        return true;
-    });
-    const embed = {
-        title: `In Stock • ${(normalized.product_name || payload.product_name || 'Unknown item')}`,
-        fields: [
-            { name: 'Type', value: productType, inline: true },
-            { name: 'Site', value: String(normalized.site || payload.site || '-'), inline: true },
-            { name: 'Price', value: payload.price ? `$${Number(payload.price).toFixed(2)}` : '-', inline: true },
-            { name: 'Stock', value: payload.stock_count != null ? String(payload.stock_count) : '-', inline: true },
-            { name: 'SKU', value: String(normalized.sku || payload.sku || '-'), inline: true }
-        ],
-        timestamp: new Date().toISOString()
-    };
-    if (normalized.product_url || payload.product_url) embed.fields.push({ name: 'Link', value: String(normalized.product_url || payload.product_url), inline: false });
-    if (normalized.image_url || payload.image_url) embed.thumbnail = { url: String(normalized.image_url || payload.image_url) };
-    const results = [];
-    for (const dest of unique) {
-        const body = JSON.stringify({ username: 'The Shore Shack Monitor', embeds: [embed] });
-        try {
-            const result = await enqueueDiscordWebhookJob(dest.webhookUrl, async () => {
-                const response = await globalThis.fetch(dest.webhookUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body });
-                if (!response.ok) throw new Error(`Discord webhook failed (${response.status})`);
-                return { success: true };
-            });
-            results.push({ ...dest, ...result });
-        } catch (err) {
-            results.push({ ...dest, error: err.message || String(err) });
-        }
-    }
-    return { product_type: productType, deliveries: results };
+    return { items, deliveries };
 }
 
 function normalizeDiscordHandle(value = '') {
@@ -1897,24 +1980,25 @@ app.post('/admin/webhooks/settings', auth, admin, async (req, res) => {
 app.post(["/webhooks/monitor", "/webhooks/monitor/:token"], async (req, res) => {
     const payload = req.body || {};
     const normalized = normalizeIncomingOrderPayload(payload);
-    const productType = inferProductTypeFromPayload(payload, normalized);
+    const items = expandMonitorPayloadItems(payload);
+    const primary = items[0] || {};
     const eventLog = await appendWebhookEvent('monitor', {
-        source: normalized.source || payload.source || '',
-        site: normalized.site || payload.site || '',
-        product_type: productType,
-        sku: normalized.sku || payload.sku || payload.product_sku || '',
-        product_name: normalized.product_name || payload.product_name || '',
+        source: normalized.source || payload.source || primary.source || '',
+        site: normalized.site || payload.site || primary.site || '',
+        product_type: primary.product_type || inferProductTypeFromPayload(payload, normalized),
+        sku: primary.sku || normalized.sku || payload.sku || payload.product_sku || '',
+        product_name: primary.product_name || normalized.product_name || payload.product_name || '',
         payload
     });
     try {
-        console.log('Monitor webhook hit', { path: req.originalUrl, productType, sku: normalized.sku || payload.sku || null });
+        console.log('Monitor webhook hit', { path: req.originalUrl, items: items.length, primaryType: primary.product_type || null, sku: primary.sku || normalized.sku || payload.sku || null });
         const allowed = await validateMonitorWebhookToken(req);
         if (!allowed) {
             await updateWebhookEvent('monitor', eventLog.id, { status: 'failed', error_message: 'Invalid monitor webhook url', processed_at: new Date().toISOString() });
             return res.status(401).json({ error: 'Invalid monitor webhook url' });
         }
         const relay = await sendMonitorDiscordNotifications(payload);
-        await updateWebhookEvent('monitor', eventLog.id, { status: 'processed', processed_at: new Date().toISOString() });
+        await updateWebhookEvent('monitor', eventLog.id, { status: 'processed', product_type: primary.product_type || inferProductTypeFromPayload(payload, normalized), sku: primary.sku || '', product_name: primary.product_name || '', processed_at: new Date().toISOString() });
         return res.json({ success: true, relay });
     } catch (err) {
         console.error('Monitor webhook error:', err);
