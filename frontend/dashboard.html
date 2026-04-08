@@ -50,32 +50,6 @@
               <button class="btn btn-primary" onclick="location='profile.html'">Create / Edit Profiles</button>
             </div>
           </section>
-
-          <section class="panel banner banner-soft">
-            <strong>Import Refract / Prism Profiles</strong>
-            <p class="subtle-text">Upload an exported JSON file from Refract or Prism and import those profiles directly into your dashboard so profile names can be used for checkout logging, inventory matching, and accounting.</p>
-            <div class="panel-actions" style="flex-wrap:wrap; align-items:end; gap:12px;">
-              <div>
-                <label class="subtle-text" for="profileImportType">Import as</label>
-                <select class="input" id="profileImportType">
-                  <option value="walmart">Walmart</option>
-                  <option value="target">Target</option>
-                  <option value="amazon">Amazon</option>
-                  <option value="general">General</option>
-                </select>
-              </div>
-              <div style="min-width:280px; flex:1;">
-                <label class="subtle-text" for="profileImportFile">JSON export file</label>
-                <input class="input" id="profileImportFile" type="file" accept="application/json,.json" />
-              </div>
-              <label class="checkbox-inline" style="margin-bottom:8px;">
-                <input id="profileImportOverwrite" type="checkbox" />
-                <span>Overwrite matching profiles</span>
-              </label>
-              <button class="btn btn-primary" type="button" id="profileImportButton">Import Profiles</button>
-            </div>
-            <div id="profileImportMessage" class="subtle-text" style="margin-top:10px;"></div>
-          </section>
           <section class="panel" id="dashboard">
             <div class="panel-header">
               <div>
