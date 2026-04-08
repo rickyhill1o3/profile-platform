@@ -4,13 +4,10 @@ const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const { v4: uuidv4 } = require("uuid");
 const crypto = require("crypto");
-const fs = require("fs");
-const path = require("path");
 const nodemailer = require("nodemailer");
 const bodyParser = require("body-parser");
 const Stripe = require("stripe");
 const registerProductCatalogRoutes = require("./product-catalog-routes");
-const registerShopRoutes = require("./shop-routes");
 
 const supabase = require("./database");
 const { encrypt, decrypt } = require("./encryption");
@@ -23,119 +20,13 @@ app.use((req, res, next) => {
     if (req.originalUrl.startsWith("/webhooks/stripe")) {
         return next();
     }
-    express.json({ limit: "5mb" })(req, res, next);
+    express.json()(req, res, next);
 });
 
 const phoneRegex = /^[0-9]{10}$/;
 const SUPER_ADMIN_EMAIL = "theshoreshacktcg@gmail.com";
-const MONITOR_PRODUCT_TYPES = ['pokemon', 'onepiece', 'magic', 'lowkey', 'sports'];
-const WEBHOOK_EVENT_LOG_LIMIT = 500;
 
-
-let shopRoutes = null;
-
-// =========================
-// SUPABASE DISCOUNTS SYSTEM (FINAL CLEAN)
-// =========================
-
-async function getDiscount(code) {
-    const { data } = await supabase
-        .from("discounts")
-        .select("*")
-        .eq("code", code.toUpperCase())
-        .single();
-
-    return data;
-}
-
-// CREATE (ADMIN)
-app.post("/api/discounts", auth, admin, async (req, res) => {
-    const d = req.body;
-
-    const { error } = await supabase.from("discounts").insert([{
-        code: d.code.toUpperCase(),
-        type: d.type,
-        value: Number(d.value || 0),
-        usage_limit: Number(d.usage_limit || 0),
-        one_time_per_user: !!d.one_time_per_user,
-        expires_at: d.expires_at || null,
-        min_cart_value: Number(d.min_cart_value || 0),
-        active: true,
-        usage_count: 0,
-        used_by: []
-    }]);
-
-    if (error) return res.json({ error: error.message });
-
-    res.json({ success: true });
-});
-
-// GET ALL (ADMIN)
-app.get("/api/discounts", auth, admin, async (req, res) => {
-    const { data } = await supabase.from("discounts").select("*");
-    res.json(data);
-});
-
-// DELETE
-app.delete("/api/discounts/:code", auth, admin, async (req, res) => {
-    await supabase
-        .from("discounts")
-        .delete()
-        .eq("code", req.params.code.toUpperCase());
-
-    res.json({ success: true });
-});
-
-// APPLY (PUBLIC)
-app.post("/api/discounts/apply", async (req, res) => {
-    const { code, cartTotal, email, shippingTotal = 0 } = req.body;
-
-    const d = await getDiscount(code);
-
-    if (!d || !d.active) return res.json({ error: "Invalid code" });
-
-    const normalizedEmail = String(email || "").trim().toLowerCase();
-    const usedBy = Array.isArray(d.used_by) ? d.used_by.map((value) => String(value || "").trim().toLowerCase()) : [];
-
-    if (d.one_time_per_user && normalizedEmail && usedBy.includes(normalizedEmail)) {
-        return res.json({ error: "Already used" });
-    }
-
-    if (d.expires_at && new Date() > new Date(d.expires_at))
-        return res.json({ error: "Expired code" });
-
-    if (d.usage_limit && d.usage_count >= d.usage_limit)
-        return res.json({ error: "Usage limit reached" });
-
-    if (Number(cartTotal || 0) < Number(d.min_cart_value || 0))
-        return res.json({ error: "Minimum not met" });
-
-    let discountAmount = 0;
-    let shippingDiscount = 0;
-
-    if (d.type === "percent") {
-        discountAmount = Number(cartTotal || 0) * (Number(d.value || 0) / 100);
-    }
-
-    if (d.type === "fixed") {
-        discountAmount = Number(d.value || 0);
-    }
-
-    if (d.type === "free_shipping") {
-        shippingDiscount = Number(shippingTotal || 0);
-    }
-
-    return res.json({
-        success: true,
-        code: d.code,
-        discountType: d.type,
-        discountAmount,
-        shippingDiscount,
-        totalDiscount: discountAmount + shippingDiscount
-    });
-});
 /* ================= AUTH HELPERS ================= */
-
 
 async function auth(req, res, next) {
     const header = req.headers.authorization;
@@ -323,47 +214,6 @@ function findDuplicateInSameGroup(
     return null;
 }
 
-function normalizeImportedProfilePayload(raw = {}, forcedAccountType = "walmart") {
-    const shipping = raw.shipping || {};
-    const billing = raw.billing || {};
-    const payment = raw.payment || {};
-    const accountType = String(raw.account_type || forcedAccountType || "walmart").trim().toLowerCase();
-    const sameAsShipping = billing.sameAsShipping !== false;
-
-    return {
-        profile_name: String(raw.name || raw.profile_name || raw.email || "Imported Profile").trim(),
-        account_type: accountType,
-        first_name: String(shipping.firstName || shipping.first_name || "").trim(),
-        last_name: String(shipping.lastName || shipping.last_name || "").trim(),
-        email: String(raw.email || shipping.email || raw.profile_email || "").trim(),
-        phone: String(shipping.phone || "").replace(/\D/g, ""),
-        address1: String(shipping.address1 || "").trim(),
-        address2: String(shipping.address2 || "").trim(),
-        city: String(shipping.city || "").trim(),
-        state: String(shipping.province || shipping.state || "").trim(),
-        zip: String(shipping.postalCode || shipping.zip || "").trim(),
-        country: String(shipping.country || "United States").trim(),
-        billing_first_name: sameAsShipping ? "" : String(billing.firstName || "").trim(),
-        billing_last_name: sameAsShipping ? "" : String(billing.lastName || "").trim(),
-        billing_address1: sameAsShipping ? "" : String(billing.address1 || "").trim(),
-        billing_address2: sameAsShipping ? "" : String(billing.address2 || "").trim(),
-        billing_city: sameAsShipping ? "" : String(billing.city || "").trim(),
-        billing_state: sameAsShipping ? "" : String(billing.province || billing.state || "").trim(),
-        billing_zip: sameAsShipping ? "" : String(billing.postalCode || billing.zip || "").trim(),
-        billing_country: sameAsShipping ? "" : String(billing.country || "").trim(),
-        billing_phone: sameAsShipping ? "" : String(billing.phone || "").replace(/\D/g, ""),
-        card_name: String(payment.name || "").trim(),
-        card: String(payment.num || payment.card || "").replace(/\s+/g, ""),
-        exp_month: String(payment.month || "").trim(),
-        exp_year: String(payment.year || "").trim(),
-        cvv: String(payment.cvv || "").trim(),
-        refract_profile_id: String(raw.id || "").trim(),
-        refract_created_at: raw.createdAt || null,
-        refract_updated_at: raw.updatedAt || null,
-        refract_one_time_use: !!raw.oneTimeUse
-    };
-}
-
 async function upsertProfileRelations(profileId, payload) {
     const encryptedCard = encrypt(payload.card || "");
     const encryptedCVV = encrypt(payload.cvv || "");
@@ -382,20 +232,9 @@ async function upsertProfileRelations(profileId, payload) {
         email: payload.email,
         phone: payload.phone,
         address1: payload.address1,
-        address2: payload.address2 || "",
         city: payload.city,
         state: payload.state,
-        zip: payload.zip,
-        country: payload.country || "United States",
-        billing_first_name: payload.billing_first_name || "",
-        billing_last_name: payload.billing_last_name || "",
-        billing_address1: payload.billing_address1 || "",
-        billing_address2: payload.billing_address2 || "",
-        billing_city: payload.billing_city || "",
-        billing_state: payload.billing_state || "",
-        billing_zip: payload.billing_zip || "",
-        billing_country: payload.billing_country || "",
-        billing_phone: payload.billing_phone || ""
+        zip: payload.zip
     };
 
     if (existingAddress?.id) {
@@ -428,7 +267,6 @@ async function upsertProfileRelations(profileId, payload) {
         card_encrypted: encryptedCard,
         cvv_encrypted: encryptedCVV,
         card_last4: cardLast4,
-        card_name: payload.card_name || "",
         exp_month: payload.exp_month,
         exp_year: payload.exp_year
     };
@@ -517,7 +355,7 @@ async function sendEmail({ to, subject, text, html }) {
 }
 
 function buildAppUrl(pathname) {
-    const base = (process.env.APP_BASE_URL || "https://theshoreshacktcg.com").replace(/\/$/, "");
+    const base = (process.env.APP_BASE_URL || "").replace(/\/$/, "");
     if (!base) return pathname;
     return base + pathname;
 }
@@ -1009,150 +847,183 @@ async function setUserSettings(userId, value) {
     return await setAppSetting(getUserSettingsKey(userId), value || {});
 }
 
-function normalizeMonitorProductType(value = '') {
+
+const WEBHOOK_LOG_LIMIT = 500;
+const CHECKOUT_WEBHOOK_SETTINGS_KEY = 'webhook_settings';
+const MONITOR_WEBHOOK_SETTINGS_KEY = 'monitor_webhook_settings';
+const CHECKOUT_EVENT_LOG_KEY = 'webhook_event_log';
+const MONITOR_EVENT_LOG_KEY = 'monitor_webhook_event_log';
+
+async function getWebhookEventLog(kind = 'checkout') {
+    const key = kind === 'monitor' ? MONITOR_EVENT_LOG_KEY : CHECKOUT_EVENT_LOG_KEY;
+    const data = await getAppSetting(key, []);
+    return Array.isArray(data) ? data : [];
+}
+
+async function appendWebhookEvent(kind = 'checkout', entry = {}) {
+    const key = kind === 'monitor' ? MONITOR_EVENT_LOG_KEY : CHECKOUT_EVENT_LOG_KEY;
+    const existing = await getWebhookEventLog(kind);
+    const item = {
+        id: crypto.randomUUID(),
+        webhook_type: kind,
+        created_at: new Date().toISOString(),
+        status: 'received',
+        source: '',
+        site: '',
+        product_type: '',
+        sku: '',
+        product_name: '',
+        error_message: '',
+        payload: {},
+        ...entry
+    };
+    const next = [item, ...existing].slice(0, WEBHOOK_LOG_LIMIT);
+    await setAppSetting(key, next);
+    return item;
+}
+
+async function updateWebhookEvent(kind = 'checkout', id, patch = {}) {
+    if (!id) return null;
+    const key = kind === 'monitor' ? MONITOR_EVENT_LOG_KEY : CHECKOUT_EVENT_LOG_KEY;
+    const existing = await getWebhookEventLog(kind);
+    const next = existing.map((row) => row?.id === id ? { ...row, ...patch } : row);
+    await setAppSetting(key, next);
+    return next.find((row) => row?.id === id) || null;
+}
+
+async function getMonitorWebhookSettings() {
+    const data = await getAppSetting(MONITOR_WEBHOOK_SETTINGS_KEY, {});
+    return data && typeof data === 'object' ? data : {};
+}
+
+async function setMonitorWebhookSettings(value) {
+    return await setAppSetting(MONITOR_WEBHOOK_SETTINGS_KEY, value || {});
+}
+
+function normalizeProductType(value = '') {
     const raw = String(value || '').trim().toLowerCase();
-    if (!raw) return 'lowkey';
-    if (raw.includes('pokemon') || raw === 'poke' || raw === 'pkmn') return 'pokemon';
-    if (raw.includes('one piece') || raw === 'onepiece' || raw === 'op') return 'onepiece';
-    if (raw.includes('magic') || raw === 'mtg') return 'magic';
-    if (raw.includes('sport')) return 'sports';
-    if (raw.includes('low key') || raw.includes('other') || raw.includes('flip')) return 'lowkey';
-    return MONITOR_PRODUCT_TYPES.includes(raw) ? raw : 'lowkey';
+    if (!raw) return 'other';
+    if (raw.includes('pokemon')) return 'pokemon';
+    if (raw.includes('one piece') || raw.includes('onepiece')) return 'onepiece';
+    if (raw.includes('magic')) return 'magic';
+    if (raw.includes('sports')) return 'sports';
+    if (raw.includes('low key') || raw.includes('other')) return 'other';
+    if (raw.includes('all')) return 'all';
+    return raw.replace(/[^a-z0-9]+/g, '');
 }
 
-function inferMonitorProductType(payload = {}) {
-    const direct = normalizeMonitorProductType(payload.product_type || payload.category || payload.group || payload.channel || '');
-    if (direct && direct !== 'lowkey') return direct;
-    const haystack = [payload.product_name, payload.title, payload.site, payload.description, payload.category]
-        .filter(Boolean)
-        .join(' ')
-        .toLowerCase();
-    if (haystack.includes('pokemon')) return 'pokemon';
-    if (haystack.includes('one piece')) return 'onepiece';
-    if (haystack.includes('magic') || haystack.includes('mtg')) return 'magic';
-    if (haystack.includes('sport')) return 'sports';
-    return 'lowkey';
+function inferProductTypeFromPayload(payload = {}, normalized = {}) {
+    const direct = normalizeProductType(payload.product_type || payload.category || payload.group || normalized.product_type || '');
+    if (direct && direct !== 'other') return direct;
+    const title = String(normalized.product_name || payload.product_name || '').toLowerCase();
+    if (title.includes('pokemon')) return 'pokemon';
+    if (title.includes('one piece')) return 'onepiece';
+    if (title.includes('magic')) return 'magic';
+    if (title.includes('sports')) return 'sports';
+    return 'other';
 }
 
-async function getMonitorWebhookConfig() {
-    return await getAppSetting('monitor_webhook', {});
+async function getActiveMonitorWebhook(req = null) {
+    const settings = await getMonitorWebhookSettings();
+    const token = String(settings?.token || '').trim();
+    const base = req ? getApiBaseUrl(req) : String(process.env.PUBLIC_API_BASE_URL || process.env.API_BASE_URL || '').trim().replace(/\/$/, '');
+    return token ? { token, url: `${base}/webhooks/monitor/${token}` } : null;
 }
 
 async function createMonitorWebhook(req, createdBy = null) {
+    const settings = await getMonitorWebhookSettings();
     const token = crypto.randomBytes(18).toString('hex');
-    const data = { token, is_active: true, created_by: createdBy, created_at: new Date().toISOString() };
-    await setAppSetting('monitor_webhook', data);
-    return { ...data, url: `${getApiBaseUrl(req)}/webhooks/monitor/${token}` };
+    const next = { ...(settings || {}), token, created_by: createdBy || null, updated_at: new Date().toISOString() };
+    await setMonitorWebhookSettings(next);
+    return { token, url: `${getApiBaseUrl(req)}/webhooks/monitor/${token}` };
 }
 
 async function validateMonitorWebhookToken(req) {
-    const active = await getMonitorWebhookConfig();
+    const active = await getActiveMonitorWebhook(req);
     if (!active?.token) return true;
     const token = String(req.params.token || req.query.token || '').trim();
     return token && token === active.token;
 }
 
-async function appendWebhookEvent(entry) {
-    const current = await getAppSetting('webhook_event_log', []);
-    const logs = Array.isArray(current) ? current : [];
-    const item = { id: uuidv4(), created_at: new Date().toISOString(), status: 'received', ...entry };
-    logs.unshift(item);
-    await setAppSetting('webhook_event_log', logs.slice(0, WEBHOOK_EVENT_LOG_LIMIT));
-    return item;
-}
-
-async function updateWebhookEvent(eventId, patch = {}) {
-    const current = await getAppSetting('webhook_event_log', []);
-    const logs = Array.isArray(current) ? current : [];
-    const next = logs.map((item) => item.id === eventId ? { ...item, ...patch } : item);
-    await setAppSetting('webhook_event_log', next.slice(0, WEBHOOK_EVENT_LOG_LIMIT));
-    return next.find((item) => item.id === eventId) || null;
-}
-
-function pickMonitorWebhookMap(settings = {}) {
-    const map = {};
-    const source = settings?.monitor_webhooks || {};
-    for (const key of MONITOR_PRODUCT_TYPES) {
-        map[key] = String(source?.[key] || '').trim();
-    }
-    return map;
-}
-
-async function sendMonitorDiscordToTarget({ webhookUrl, payload, productType }) {
-    const trimmedWebhookUrl = String(webhookUrl || '').trim();
-    if (!trimmedWebhookUrl) return { skipped: 'discord_webhook_not_configured' };
-
-    const productName = String(payload.product_name || payload.title || 'In stock item').trim();
-    const site = String(payload.site || '').trim();
-    const price = Number(payload.price);
-    const stockCount = payload.stock_count ?? payload.quantity_available ?? payload.stock ?? null;
-    const productUrl = String(payload.product_url || payload.url || '').trim();
-    const imageUrl = String(payload.image_url || payload.image || '').trim();
-
+async function sendCheckoutDiscordWebhookFallback(payload = {}, errorMessage = '') {
+    const normalized = normalizeIncomingOrderPayload(payload);
+    const globalSettings = await getAppSetting(CHECKOUT_WEBHOOK_SETTINGS_KEY, {});
+    const webhookUrl = String(globalSettings?.discord_webhook_url || '').trim();
+    if (!webhookUrl) return { skipped: 'discord_webhook_not_configured' };
+    const title = (String(normalized.source || '').toLowerCase().includes('stellar') || String(normalized.source || '').toLowerCase().includes('refract'))
+        ? 'TEST CHECKOUT WEBHOOK'
+        : 'UNMATCHED CHECKOUT WEBHOOK';
     const embed = {
-        title: `In Stock • ${productName}`,
-        url: productUrl || undefined,
-        description: productUrl ? `[Open listing](${productUrl})` : '',
+        title,
+        description: normalized.product_name || payload.product_name || 'Checkout received',
         fields: [
-            { name: 'Type', value: productType, inline: true },
-            { name: 'Site', value: site || '-', inline: true },
-            { name: 'Price', value: Number.isFinite(price) ? `$${price.toFixed(2)}` : '-', inline: true },
-            { name: 'Stock', value: stockCount != null ? String(stockCount) : '-', inline: true }
+            { name: 'Site', value: String(normalized.site || payload.site || '-'), inline: true },
+            { name: 'Source', value: String(normalized.source || payload.source || '-'), inline: true },
+            { name: 'Profile', value: String(normalized.profile_name || payload.profile_name || '-'), inline: true },
+            { name: 'Email', value: String(normalized.account_email || normalized.user_email || payload.email || '-'), inline: true },
+            { name: 'SKU', value: String(normalized.sku || payload.sku || payload.product_sku || '-'), inline: true },
+            { name: 'Error', value: String(errorMessage || 'User not matched'), inline: false }
         ],
-        timestamp: new Date().toISOString()
+        timestamp: new Date().toISOString(),
+        footer: { text: 'Webhook received but user was not matched' }
     };
-    if (imageUrl) embed.thumbnail = { url: imageUrl };
-
-    const body = JSON.stringify({
-        username: 'The Shore Shack Monitor',
-        embeds: [embed]
-    });
-
-    return enqueueDiscordWebhookJob(trimmedWebhookUrl, async () => {
-        const response = await globalThis.fetch(trimmedWebhookUrl, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body
-        });
+    if (normalized.product_url) embed.fields.push({ name: 'Product Link', value: normalized.product_url, inline: false });
+    if (normalized.image_url) embed.thumbnail = { url: normalized.image_url };
+    const body = JSON.stringify({ username: 'The Shore Shack', embeds: [embed] });
+    return enqueueDiscordWebhookJob(webhookUrl, async () => {
+        const response = await globalThis.fetch(webhookUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body });
         if (!response.ok) throw new Error(`Discord webhook failed (${response.status})`);
         return { success: true };
     });
 }
 
-async function relayMonitorPing(payload = {}) {
-    const productType = inferMonitorProductType(payload);
-    const globalSettings = await getAppSetting('webhook_settings', {});
-    const globalMap = pickMonitorWebhookMap(globalSettings);
-    const targets = [];
-    if (globalMap[productType]) targets.push({ scope: 'super_admin', webhookUrl: globalMap[productType], productType });
-
-    const { data: adminUsers, error } = await supabase.from('users').select('id, role').in('role', ['admin', 'super_admin']);
-    if (error) throw new Error(error.message);
-    for (const user of adminUsers || []) {
-        const settings = await getAdminWebhookSettings(user.id);
-        const map = pickMonitorWebhookMap(settings);
-        if (map[productType]) {
-            targets.push({ scope: user.role === 'super_admin' ? 'super_admin_user' : 'admin', admin_user_id: user.id, webhookUrl: map[productType], productType });
+async function sendMonitorDiscordNotifications(payload = {}) {
+    const settings = await getMonitorWebhookSettings();
+    const routes = settings?.routes || {};
+    const normalized = normalizeIncomingOrderPayload(payload);
+    const productType = inferProductTypeFromPayload(payload, normalized);
+    const candidates = [];
+    for (const scope of ['super_admin', 'admin']) {
+        const bucket = routes?.[scope] || {};
+        for (const key of [productType, 'all']) {
+            const webhookUrl = String(bucket?.[key] || '').trim();
+            if (webhookUrl) candidates.push({ scope, key, webhookUrl });
         }
     }
-
-    const deduped = [];
     const seen = new Set();
-    for (const target of targets) {
-        const key = `${target.webhookUrl}|${target.productType}`;
-        if (target.webhookUrl && !seen.has(key)) { seen.add(key); deduped.push(target); }
-    }
-
+    const unique = candidates.filter((c) => {
+        if (seen.has(c.webhookUrl)) return false;
+        seen.add(c.webhookUrl);
+        return true;
+    });
+    const embed = {
+        title: `In Stock • ${(normalized.product_name || payload.product_name || 'Unknown item')}`,
+        fields: [
+            { name: 'Type', value: productType, inline: true },
+            { name: 'Site', value: String(normalized.site || payload.site || '-'), inline: true },
+            { name: 'Price', value: payload.price ? `$${Number(payload.price).toFixed(2)}` : '-', inline: true },
+            { name: 'Stock', value: payload.stock_count != null ? String(payload.stock_count) : '-', inline: true },
+            { name: 'SKU', value: String(normalized.sku || payload.sku || '-'), inline: true }
+        ],
+        timestamp: new Date().toISOString()
+    };
+    if (normalized.product_url || payload.product_url) embed.fields.push({ name: 'Link', value: String(normalized.product_url || payload.product_url), inline: false });
+    if (normalized.image_url || payload.image_url) embed.thumbnail = { url: String(normalized.image_url || payload.image_url) };
     const results = [];
-    for (const target of deduped) {
+    for (const dest of unique) {
+        const body = JSON.stringify({ username: 'The Shore Shack Monitor', embeds: [embed] });
         try {
-            results.push({ ...target, ...(await sendMonitorDiscordToTarget({ webhookUrl: target.webhookUrl, payload, productType })) });
+            const result = await enqueueDiscordWebhookJob(dest.webhookUrl, async () => {
+                const response = await globalThis.fetch(dest.webhookUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body });
+                if (!response.ok) throw new Error(`Discord webhook failed (${response.status})`);
+                return { success: true };
+            });
+            results.push({ ...dest, ...result });
         } catch (err) {
-            results.push({ ...target, error: err.message || String(err) });
+            results.push({ ...dest, error: err.message || String(err) });
         }
     }
-
-    return { product_type: productType, relays: results };
+    return { product_type: productType, deliveries: results };
 }
 
 function normalizeDiscordHandle(value = '') {
@@ -1428,43 +1299,29 @@ async function sendCheckoutDiscordNotifications(order, user) {
 async function recordSuccessfulCheckout(payload) {
     const normalized = normalizeIncomingOrderPayload(payload);
     const externalOrderId = normalized.external_order_id;
+    if (!externalOrderId) throw new Error("external_order_id could not be determined");
 
-    if (!externalOrderId) {
-        throw new Error("external_order_id could not be determined");
-    }
-
-    // Prevent duplicates
-    const { data: existing } = await maybeSingle("orders", (qb) =>
+    const { data: existing, error: existingError } = await maybeSingle("orders", (qb) =>
         qb.select("*").eq("external_order_id", externalOrderId).maybeSingle()
     );
+    if (existingError) throw new Error(existingError.message);
+    if (existing?.id) return { order: existing, duplicate: true };
 
-    if (existing?.id) {
-        return { order: existing, duplicate: true };
-    }
-
-    // Find user
     const user = await findUserForWebhook({ ...payload, ...normalized });
-    if (!user?.id) {
-        throw new Error("Could not match webhook payload to a user");
-    }
+    if (!user?.id) throw new Error("Could not match webhook payload to a user");
 
-    // Ensure credit balance
     await ensureUserCreditBalance(user.id);
-
-    // Calculate credits
     const resolvedCost = await resolveOrderCreditCost({ ...payload, ...normalized });
     const creditsToCharge = asWholeCredits(resolvedCost.credits, 0);
-
     const currentBalance = await getUserCreditBalance(user.id);
     const insufficientCredits = creditsToCharge > currentBalance;
 
-    // Create order
     const order = await createOrderRecord({
         ...payload,
         ...normalized,
         user_id: user.id,
         external_order_id: externalOrderId,
-        status: insufficientCredits ? "insufficient_credits" : "success",
+        status: insufficientCredits ? 'insufficient_credits' : 'success',
         credits_charged: creditsToCharge,
         metadata: {
             ...(payload.metadata || {}),
@@ -1476,23 +1333,42 @@ async function recordSuccessfulCheckout(payload) {
     });
 
     let balanceAfter = currentBalance;
-
-    // Charge credits
-    if (creditsToCharge > 0 && !insufficientCredits) {
+    if (creditsToCharge > 0) {
         balanceAfter = await adjustUserCredits({
             userId: user.id,
             delta: -creditsToCharge,
-            reason: "successful_checkout",
-            note: `Credits charged for checkout ${externalOrderId}`,
+            reason: insufficientCredits ? "successful_checkout_negative_balance" : "successful_checkout",
+            note: insufficientCredits
+                ? `Credits charged into negative balance for checkout ${externalOrderId}`
+                : `Credits charged for successful checkout ${externalOrderId}`,
+            metadata: {
+                source: normalized.source || payload.source || "bot_webhook",
+                site: normalized.site || payload.site || "",
+                sku: normalized.sku || payload.sku || payload.product_sku || "",
+                countdown_id: normalized.countdown_id || payload.countdown_id || null,
+                charged_while_negative: insufficientCredits
+            },
             orderId: order.id
         });
+    }
+
+    let discordRelay = [{ skipped: "not_attempted" }];
+    try {
+        discordRelay = await sendCheckoutDiscordNotifications(order, user);
+    } catch (discordErr) {
+        console.error("Discord relay failed:", discordErr);
+        discordRelay = [{ error: discordErr.message || String(discordErr) }];
     }
 
     return {
         order,
         duplicate: false,
         credits_charged: creditsToCharge,
-        balance_after: balanceAfter
+        requested_credits: creditsToCharge,
+        balance_after: balanceAfter,
+        user_id: user.id,
+        insufficient_credits: insufficientCredits,
+        discord_relay: discordRelay
     };
 }
 
@@ -1501,6 +1377,7 @@ app.post("/webhooks/stripe", bodyParser.raw({ type: "application/json" }), async
         console.error("Stripe webhook hit but Stripe is not configured");
         return res.status(400).json({ error: "Stripe is not configured" });
     }
+
     try {
         console.log("Stripe webhook hit");
 
@@ -1530,29 +1407,6 @@ app.post("/webhooks/stripe", bodyParser.raw({ type: "application/json" }), async
                 customer_email: session.customer_email || session.customer_details?.email || null,
                 metadata: session.metadata || {}
             });
-
-            if (String(session.metadata?.checkout_type || "") === "storefront_purchase") {
-                if (shopRoutes?.recordStorefrontSaleFromStripeSession) {
-                    const saleResult = await shopRoutes.recordStorefrontSaleFromStripeSession(session);
-                    console.log("Storefront Stripe sale processed:", saleResult);
-                }
-
-                if (session.metadata?.discount_code) {
-                    const d = await getDiscount(session.metadata.discount_code);
-
-                    if (d) {
-                        await supabase
-                            .from("discounts")
-                            .update({
-                                usage_count: d.usage_count + 1,
-                                used_by: [...(d.used_by || []), session.customer_details?.email || ""]
-                            })
-                            .eq("code", session.metadata.discount_code);
-                    }
-                }
-
-                return res.json({ received: true, storefront: true });
-            }
 
             const user = await findUserForWebhook(session);
             if (!user?.id) {
@@ -1677,14 +1531,12 @@ async function validateInboundWebhookToken(req) {
 app.post(["/webhooks/orders", "/webhooks/orders/:token"], async (req, res) => {
     const payload = req.body || {};
     const normalized = normalizeIncomingOrderPayload(payload);
-    const eventLog = await appendWebhookEvent({
-        webhook_type: 'checkout',
-        source: normalized.source || '',
-        site: normalized.site || '',
-        product_type: inferMonitorProductType(payload),
-        sku: normalized.sku || '',
-        product_name: normalized.product_name || '',
-        external_order_id: normalized.external_order_id || '',
+    const eventLog = await appendWebhookEvent('checkout', {
+        source: normalized.source || payload.source || '',
+        site: normalized.site || payload.site || '',
+        product_type: inferProductTypeFromPayload(payload, normalized),
+        sku: normalized.sku || payload.sku || payload.product_sku || '',
+        product_name: normalized.product_name || payload.product_name || '',
         payload
     });
     try {
@@ -1704,47 +1556,46 @@ app.post(["/webhooks/orders", "/webhooks/orders/:token"], async (req, res) => {
                 provided: req.params.token ? String(req.params.token).slice(0, 8) : null,
                 expected: active?.token ? String(active.token).slice(0, 8) : null
             });
-            await updateWebhookEvent(eventLog.id, { status: 'failed', error_message: 'Invalid webhook url' });
+            await updateWebhookEvent('checkout', eventLog.id, { status: 'failed', error_message: 'Invalid webhook url', processed_at: new Date().toISOString() });
             return res.status(401).json({ error: "Invalid webhook url" });
         }
 
         console.log("Inbound webhook accepted");
 
-        const result = await recordSuccessfulCheckout(payload);
-        await updateWebhookEvent(eventLog.id, { status: 'processed', processed_at: new Date().toISOString(), matched_user_id: result?.order?.user_id || null });
-        console.log("Inbound webhook processed successfully");
-        res.json({ success: true, event_id: eventLog.id, ...result });
+        try {
+            const result = await recordSuccessfulCheckout(payload);
+            await updateWebhookEvent('checkout', eventLog.id, {
+                status: result?.duplicate ? 'duplicate' : 'processed',
+                matched_user_id: result?.user_id || null,
+                external_order_id: result?.order?.external_order_id || normalized.external_order_id || null,
+                processed_at: new Date().toISOString()
+            });
+            console.log("Inbound webhook processed successfully");
+            return res.json({ success: true, ...result });
+        } catch (err) {
+            console.error("Inbound webhook processing error:", err);
+            let relay = null;
+            try {
+                relay = await sendCheckoutDiscordWebhookFallback(payload, err.message || 'User not matched');
+            } catch (relayErr) {
+                console.error('Fallback checkout relay failed:', relayErr);
+            }
+            await updateWebhookEvent('checkout', eventLog.id, {
+                status: 'unmatched_user',
+                error_message: err.message || 'Could not match webhook payload to a user',
+                processed_at: new Date().toISOString()
+            });
+            return res.json({
+                success: false,
+                received: true,
+                forwarded_to_discord: !!relay,
+                error: err.message
+            });
+        }
     } catch (err) {
         console.error("Inbound webhook error:", err);
-        await updateWebhookEvent(eventLog.id, { status: 'failed', error_message: err.message || String(err) });
+        await updateWebhookEvent('checkout', eventLog.id, { status: 'failed', error_message: err.message || String(err), processed_at: new Date().toISOString() });
         res.status(400).json({ error: err.message });
-    }
-});
-
-app.post(["/webhooks/monitor", "/webhooks/monitor/:token"], async (req, res) => {
-    const payload = req.body || {};
-    const productType = inferMonitorProductType(payload);
-    const eventLog = await appendWebhookEvent({
-        webhook_type: 'monitor',
-        source: String(payload.source || '').trim(),
-        site: String(payload.site || '').trim(),
-        product_type: productType,
-        sku: String(payload.sku || '').trim(),
-        product_name: String(payload.product_name || payload.title || '').trim(),
-        payload
-    });
-    try {
-        const allowed = await validateMonitorWebhookToken(req);
-        if (!allowed) {
-            await updateWebhookEvent(eventLog.id, { status: 'failed', error_message: 'Invalid monitor webhook url' });
-            return res.status(401).json({ error: 'Invalid monitor webhook url' });
-        }
-        const relay = await relayMonitorPing(payload);
-        await updateWebhookEvent(eventLog.id, { status: 'processed', processed_at: new Date().toISOString(), relay_result: relay });
-        return res.json({ success: true, event_id: eventLog.id, ...relay });
-    } catch (err) {
-        await updateWebhookEvent(eventLog.id, { status: 'failed', error_message: err.message || String(err) });
-        return res.status(400).json({ error: err.message });
     }
 });
 
@@ -1938,22 +1789,23 @@ app.post("/admin/orders/:id/refund-credits", auth, admin, async (req, res) => {
 });
 
 
+
 app.get('/admin/webhooks/settings', auth, admin, async (req, res) => {
     try {
         const currentUser = await getCurrentUser(req);
         const active = await getActiveInboundWebhook();
-        const monitorWebhook = await getMonitorWebhookConfig();
-        const globalSettings = await getAppSetting('webhook_settings', {});
+        const activeMonitor = await getActiveMonitorWebhook(req);
+        const globalSettings = await getAppSetting(CHECKOUT_WEBHOOK_SETTINGS_KEY, {});
         const adminSettings = await getAdminWebhookSettings(currentUser.id);
+        const monitorSettings = await getMonitorWebhookSettings();
 
         res.json({
             inbound_webhook_url: active?.token ? `${getApiBaseUrl(req)}/webhooks/orders/${active.token}` : '',
-            monitor_webhook_url: monitorWebhook?.token ? `${getApiBaseUrl(req)}/webhooks/monitor/${monitorWebhook.token}` : '',
+            monitor_webhook_url: activeMonitor?.url || '',
             discord_webhook_url: String(globalSettings?.discord_webhook_url || ''),
             admin_discord_webhook_url: String(adminSettings?.discord_webhook_url || ''),
             admin_brand_label: String(adminSettings?.brand_label || ''),
-            monitor_discord_webhooks: pickMonitorWebhookMap(globalSettings),
-            admin_monitor_discord_webhooks: pickMonitorWebhookMap(adminSettings),
+            monitor_routes: monitorSettings?.routes || { super_admin: {}, admin: {} },
             can_create_inbound: currentUser.role === 'super_admin',
             is_super_admin: currentUser.role === 'super_admin'
         });
@@ -1964,17 +1816,9 @@ app.get('/admin/webhooks/settings', auth, admin, async (req, res) => {
 
 app.get('/admin/webhooks/events', auth, admin, async (req, res) => {
     try {
-        const currentUser = await getCurrentUser(req);
-        let logs = await getAppSetting('webhook_event_log', []);
-        logs = Array.isArray(logs) ? logs : [];
-        const type = String(req.query?.type || '').trim();
-        if (type) logs = logs.filter((item) => item.webhook_type === type);
-        const status = String(req.query?.status || '').trim();
-        if (status) logs = logs.filter((item) => item.status === status);
-        const productType = String(req.query?.product_type || '').trim();
-        if (productType) logs = logs.filter((item) => item.product_type === productType);
-        if (currentUser.role !== 'super_admin') logs = logs.slice(0, 200);
-        res.json({ events: logs });
+        const kind = String(req.query?.kind || 'checkout').toLowerCase() === 'monitor' ? 'monitor' : 'checkout';
+        const items = await getWebhookEventLog(kind);
+        res.json({ items });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
@@ -2000,7 +1844,6 @@ app.post('/admin/webhooks/monitor/create', auth, admin, async (req, res) => {
         if (currentUser.role !== 'super_admin') {
             return res.status(403).json({ error: 'Only super admin can create the shared monitor webhook.' });
         }
-
         const webhook = await createMonitorWebhook(req, currentUser.id);
         res.json({ success: true, monitor_webhook_url: webhook.url });
     } catch (err) {
@@ -2011,37 +1854,72 @@ app.post('/admin/webhooks/monitor/create', auth, admin, async (req, res) => {
 app.post('/admin/webhooks/settings', auth, admin, async (req, res) => {
     try {
         const currentUser = await getCurrentUser(req);
-
         const adminDiscordWebhookUrl = String(req.body?.admin_discord_webhook_url || '').trim();
         const adminBrandLabel = String(req.body?.admin_brand_label || '').trim();
-        const adminMonitorMap = {};
-        for (const key of MONITOR_PRODUCT_TYPES) adminMonitorMap[key] = String(req.body?.admin_monitor_discord_webhooks?.[key] || '').trim();
 
         await setAdminWebhookSettings(currentUser.id, {
             discord_webhook_url: adminDiscordWebhookUrl,
-            brand_label: adminBrandLabel,
-            monitor_webhooks: adminMonitorMap
+            brand_label: adminBrandLabel
         });
 
-        const response = {
+        const currentMonitorSettings = await getMonitorWebhookSettings();
+        const currentRoutes = currentMonitorSettings?.routes || { super_admin: {}, admin: {} };
+        const incomingRoutes = req.body?.monitor_routes || {};
+        const normalizeRouteBucket = (bucket) => ({
+            pokemon: String(bucket?.pokemon || '').trim(),
+            onepiece: String(bucket?.onepiece || '').trim(),
+            magic: String(bucket?.magic || '').trim(),
+            sports: String(bucket?.sports || '').trim(),
+            other: String(bucket?.other || '').trim(),
+            all: String(bucket?.all || '').trim()
+        });
+        const mergedRoutes = { ...currentRoutes, admin: normalizeRouteBucket(incomingRoutes.admin || currentRoutes.admin || {}) };
+        let discordWebhookUrl = '';
+        if (currentUser.role === 'super_admin') {
+            discordWebhookUrl = String(req.body?.discord_webhook_url || '').trim();
+            await setAppSetting(CHECKOUT_WEBHOOK_SETTINGS_KEY, { discord_webhook_url: discordWebhookUrl });
+            mergedRoutes.super_admin = normalizeRouteBucket(incomingRoutes.super_admin || currentRoutes.super_admin || {});
+        }
+        await setMonitorWebhookSettings({ ...(currentMonitorSettings || {}), routes: mergedRoutes, updated_at: new Date().toISOString() });
+
+        res.json({
             success: true,
+            discord_webhook_url: discordWebhookUrl,
             admin_discord_webhook_url: adminDiscordWebhookUrl,
             admin_brand_label: adminBrandLabel,
-            admin_monitor_discord_webhooks: adminMonitorMap
-        };
-
-        if (currentUser.role === 'super_admin') {
-            const discordWebhookUrl = String(req.body?.discord_webhook_url || '').trim();
-            const globalMonitorMap = {};
-            for (const key of MONITOR_PRODUCT_TYPES) globalMonitorMap[key] = String(req.body?.monitor_discord_webhooks?.[key] || '').trim();
-            await setAppSetting('webhook_settings', { discord_webhook_url: discordWebhookUrl, monitor_webhooks: globalMonitorMap });
-            response.discord_webhook_url = discordWebhookUrl;
-            response.monitor_discord_webhooks = globalMonitorMap;
-        }
-
-        res.json(response);
+            monitor_routes: mergedRoutes
+        });
     } catch (err) {
         res.status(500).json({ error: err.message });
+    }
+});
+
+app.post(["/webhooks/monitor", "/webhooks/monitor/:token"], async (req, res) => {
+    const payload = req.body || {};
+    const normalized = normalizeIncomingOrderPayload(payload);
+    const productType = inferProductTypeFromPayload(payload, normalized);
+    const eventLog = await appendWebhookEvent('monitor', {
+        source: normalized.source || payload.source || '',
+        site: normalized.site || payload.site || '',
+        product_type: productType,
+        sku: normalized.sku || payload.sku || payload.product_sku || '',
+        product_name: normalized.product_name || payload.product_name || '',
+        payload
+    });
+    try {
+        console.log('Monitor webhook hit', { path: req.originalUrl, productType, sku: normalized.sku || payload.sku || null });
+        const allowed = await validateMonitorWebhookToken(req);
+        if (!allowed) {
+            await updateWebhookEvent('monitor', eventLog.id, { status: 'failed', error_message: 'Invalid monitor webhook url', processed_at: new Date().toISOString() });
+            return res.status(401).json({ error: 'Invalid monitor webhook url' });
+        }
+        const relay = await sendMonitorDiscordNotifications(payload);
+        await updateWebhookEvent('monitor', eventLog.id, { status: 'processed', processed_at: new Date().toISOString() });
+        return res.json({ success: true, relay });
+    } catch (err) {
+        console.error('Monitor webhook error:', err);
+        await updateWebhookEvent('monitor', eventLog.id, { status: 'failed', error_message: err.message || String(err), processed_at: new Date().toISOString() });
+        res.status(400).json({ error: err.message });
     }
 });
 
@@ -2395,116 +2273,6 @@ app.post("/profiles", auth, async (req, res) => {
         res.json({ success: true });
     } catch (err) {
         res.status(500).json({ error: err.message || "Profile creation failed" });
-    }
-});
-
-app.post("/profiles/import", auth, async (req, res) => {
-    try {
-        await ensureUserNotRevoked(req.user_id);
-
-        const rows = Array.isArray(req.body?.profiles) ? req.body.profiles : (Array.isArray(req.body) ? req.body : []);
-        const accountType = String(req.body?.account_type || "walmart").trim().toLowerCase();
-        const overwriteExisting = !!req.body?.overwrite_existing;
-
-        if (!rows.length) {
-            return res.status(400).json({ error: "No profiles were provided for import" });
-        }
-
-        const results = { imported: 0, skipped: 0, errors: [] };
-
-        for (let index = 0; index < rows.length; index += 1) {
-            const source = rows[index] || {};
-            const data = normalizeImportedProfilePayload(source, accountType);
-
-            if (!data.profile_name) {
-                results.skipped += 1;
-                results.errors.push({ index, profile: source?.name || source?.email || `Row ${index + 1}`, error: "Missing profile name" });
-                continue;
-            }
-
-            if (!phoneRegex.test(data.phone || "")) {
-                results.skipped += 1;
-                results.errors.push({ index, profile: data.profile_name, error: "Phone must be 10 digits" });
-                continue;
-            }
-
-            if (!data.card || !data.exp_month || !data.exp_year || !data.cvv) {
-                results.skipped += 1;
-                results.errors.push({ index, profile: data.profile_name, error: "Card details are incomplete" });
-                continue;
-            }
-
-            const existingProfiles = await getUserProfilesWithRelations(req.user_id);
-            const duplicateError = findDuplicateInSameGroup(
-                existingProfiles,
-                null,
-                data.account_type,
-                data.profile_name,
-                data.email,
-                data.phone,
-                (data.card || "").slice(-4)
-            );
-
-            if (duplicateError && !overwriteExisting) {
-                results.skipped += 1;
-                results.errors.push({ index, profile: data.profile_name, error: duplicateError });
-                continue;
-            }
-
-            if (duplicateError && overwriteExisting) {
-                const existingMatch = existingProfiles.find((profile) => {
-                    if (profile.account_type !== data.account_type) return false;
-                    if (profile.profile_name && profile.profile_name === data.profile_name) return true;
-                    if (profile.addresses?.[0]?.email && profile.addresses[0].email === data.email) return true;
-                    return false;
-                });
-
-                if (existingMatch?.id) {
-                    const { error: profileUpdateError } = await supabase
-                        .from("profiles")
-                        .update({
-                            profile_name: data.profile_name,
-                            account_type: data.account_type,
-                            updated_at: new Date().toISOString()
-                        })
-                        .eq("id", existingMatch.id)
-                        .eq("user_id", req.user_id);
-
-                    if (profileUpdateError) {
-                        results.skipped += 1;
-                        results.errors.push({ index, profile: data.profile_name, error: profileUpdateError.message });
-                        continue;
-                    }
-
-                    await upsertProfileRelations(existingMatch.id, data);
-                    results.imported += 1;
-                    continue;
-                }
-            }
-
-            const { data: createdProfile, error: profileError } = await supabase
-                .from("profiles")
-                .insert({
-                    user_id: req.user_id,
-                    profile_name: data.profile_name,
-                    account_type: data.account_type
-                })
-                .select()
-                .single();
-
-            if (profileError || !createdProfile) {
-                results.skipped += 1;
-                results.errors.push({ index, profile: data.profile_name, error: profileError?.message || "Profile creation failed" });
-                continue;
-            }
-
-            await upsertProfileRelations(createdProfile.id, data);
-            results.imported += 1;
-        }
-
-        res.json({ success: true, ...results, total: rows.length });
-    } catch (err) {
-        res.status(500).json({ error: err.message || "Profile import failed" });
     }
 });
 
@@ -3519,87 +3287,6 @@ registerProductCatalogRoutes({
     admin,
     getCurrentUser,
     ensureUserNotRevoked
-});
-
-function validateDiscountCode({ code, cartTotal = 0, shippingTotal = 0, email = "" }) {
-    const normalizedCode = String(code || "").trim().toUpperCase();
-    if (!normalizedCode) {
-        return { ok: false, error: "Discount code is required" };
-    }
-
-    return getDiscount(normalizedCode)
-        .then((discount) => {
-            if (!discount || !discount.active) {
-                return { ok: false, error: "Invalid code" };
-            }
-
-            const now = Date.now();
-            if (
-                discount.expires_at &&
-                Number.isFinite(new Date(discount.expires_at).getTime()) &&
-                new Date(discount.expires_at).getTime() < now
-            ) {
-                return { ok: false, error: "Expired code" };
-            }
-
-            if (Number(discount.usage_limit || 0) > 0 && Number(discount.usage_count || 0) >= Number(discount.usage_limit || 0)) {
-                return { ok: false, error: "Usage limit reached" };
-            }
-
-            const normalizedEmail = String(email || "").trim().toLowerCase();
-            const usedBy = Array.isArray(discount.used_by) ? discount.used_by : [];
-
-            if (discount.one_time_per_user && normalizedEmail && usedBy.includes(normalizedEmail)) {
-                return { ok: false, error: "This code has already been used by this email" };
-            }
-
-            const subtotal = Number(cartTotal || 0);
-            if (subtotal < Number(discount.min_cart_value || 0)) {
-                return {
-                    ok: false,
-                    error: `Minimum cart value is $${Number(discount.min_cart_value || 0).toFixed(2)}`
-                };
-            }
-
-            let discountAmount = 0;
-            let shippingDiscount = 0;
-
-            if (discount.type === "percent") {
-                discountAmount = subtotal * (Number(discount.value || 0) / 100);
-            } else if (discount.type === "fixed") {
-                discountAmount = Number(discount.value || 0);
-            } else if (discount.type === "free_shipping") {
-                shippingDiscount = Math.max(0, Number(shippingTotal || 0));
-            }
-
-            discountAmount = Math.min(subtotal, Number(discountAmount.toFixed(2)));
-            shippingDiscount = Math.min(Number(shippingTotal || 0), Number(shippingDiscount.toFixed(2)));
-
-            return {
-                ok: true,
-                discount,
-                code: discount.code,
-                discountAmount,
-                shippingDiscount,
-                totalDiscount: Number((discountAmount + shippingDiscount).toFixed(2))
-            };
-        })
-        .catch((err) => {
-            return { ok: false, error: err.message || "Could not validate code" };
-        });
-}
-
-shopRoutes = registerShopRoutes({
-    app,
-    supabase,
-    stripe,
-    auth,
-    admin,
-    getCurrentUser,
-    buildAppUrl,
-    sendEmail,
-    SUPER_ADMIN_EMAIL,
-    validateDiscountCode
 });
 
 const PORT = process.env.PORT || 3000;

@@ -18,7 +18,6 @@
       </div>
       <div class="topbar-actions">
         <button class="btn" onclick="openUserDashboard()">User Dashboard</button>
-        <a class="btn" href="admin-store.html">Storefront Admin</a>
         <button class="btn btn-primary" onclick="submitInviteCreation()">Quick Create Invite</button>
         <button class="btn btn-danger" onclick="logout()">Logout</button>
       </div>
@@ -178,37 +177,6 @@
                     Catalog Product</button><button class="btn" type="button" id="syncTargetPricingButton">Sync Target
                     Prices From Amazon</button></div>
               </form>
-              <div class="banner banner-soft"><strong>Bulk SKU import + export</strong>
-                <p class="subtle-text">Import a large JSON SKU file once, or paste a short list of 1-5 SKUs later. The website skips duplicate site+SKU entries automatically and can export batches of 20 in <code>sku;productname;price</code> format.</p>
-              </div>
-              <form id="adminBulkImportForm" class="form-grid">
-                <div class="field"><label for="bulkImportSite">Site</label><select class="input" id="bulkImportSite">
-                    <option value="target">Target</option>
-                    <option value="amazon">Amazon</option>
-                    <option value="walmart">Walmart</option>
-                    <option value="supreme">Supreme</option>
-                    <option value="pokemon">Pokémon Center</option>
-                    <option value="general">General</option>
-                  </select></div>
-                <div class="field"><label for="bulkImportFile">Upload JSON file</label><input class="input" id="bulkImportFile" type="file" accept=".json,text/json" /></div>
-                <div class="field field--full"><label for="bulkImportSkuList">Or paste SKUs / lines</label><textarea class="input" id="bulkImportSkuList" rows="6" placeholder="95040142&#10;95082118&#10;95082135 or sku;productname;price"></textarea></div>
-                <div class="field"><label class="checkbox-inline"><input type="checkbox" id="bulkImportUpdateExisting" /><span>Update existing matching SKUs</span></label></div>
-                <div class="field"><label class="checkbox-inline"><input type="checkbox" id="bulkImportAttemptLookup" /><span>Try live lookup for small lists</span></label></div>
-                <div class="field field--full panel-actions"><button class="btn btn-primary" type="submit">Import SKUs</button></div>
-              </form>
-              <form id="catalogExportForm" class="form-grid">
-                <div class="field"><label for="catalogExportSite">Export Site</label><select class="input" id="catalogExportSite">
-                    <option value="target">Target</option>
-                    <option value="amazon">Amazon</option>
-                    <option value="walmart">Walmart</option>
-                    <option value="supreme">Supreme</option>
-                    <option value="pokemon">Pokémon Center</option>
-                    <option value="general">General</option>
-                  </select></div>
-                <div class="field"><label class="checkbox-inline"><input type="checkbox" id="catalogExportSelectedOnly" /><span>Export only user-selected products</span></label></div>
-                <div class="field field--full panel-actions"><button class="btn" type="submit">Build Export Batches</button></div>
-              </form>
-              <div id="catalogExportResults" class="stack-list"></div>
               <div class="banner banner-soft"><strong>Manual product add</strong>
                 <p class="subtle-text">Create products manually when a scrape fails, or create a blank placeholder card
                   for future drops.</p>
@@ -600,17 +568,6 @@
                 onclick="createWebsiteWebhook()">Create / Refresh Shared Website Webhook</button>
             </div>
 
-            <div class="field field--full">
-              <label for="monitorWebhookUrl">Shared Monitor Webhook URL</label>
-              <input class="input" id="monitorWebhookUrl" readonly placeholder="Click Create Monitor Webhook" />
-              <div class="subtle-text">Send in-stock monitor pings here. The site will relay them to Discord channels by product type.</div>
-            </div>
-
-            <div class="field field--full panel-actions">
-              <button class="btn btn-primary" type="button" id="createMonitorWebhookButton"
-                onclick="createMonitorWebhook()">Create / Refresh Shared Monitor Webhook</button>
-            </div>
-
             <div class="field field--full" id="superAdminDiscordField">
               <label for="discordRelayWebhookUrl">Super Admin Discord Webhook</label>
               <input class="input" id="discordRelayWebhookUrl" placeholder="https://discord.com/api/webhooks/..." />
@@ -631,45 +588,69 @@
                 YOUR LABEL</div>
             </div>
 
-            <div class="field field--full" id="superAdminMonitorDiscordFields">
-              <label>Super Admin Monitor Discord Webhooks</label>
-              <div class="form-grid">
-                <div class="field"><label for="monitorPokemonWebhook">Pokemon</label><input class="input" id="monitorPokemonWebhook" placeholder="https://discord.com/api/webhooks/..." /></div>
-                <div class="field"><label for="monitorOnePieceWebhook">One Piece</label><input class="input" id="monitorOnePieceWebhook" placeholder="https://discord.com/api/webhooks/..." /></div>
-                <div class="field"><label for="monitorMagicWebhook">Magic</label><input class="input" id="monitorMagicWebhook" placeholder="https://discord.com/api/webhooks/..." /></div>
-                <div class="field"><label for="monitorLowkeyWebhook">Low Key Flips (Other)</label><input class="input" id="monitorLowkeyWebhook" placeholder="https://discord.com/api/webhooks/..." /></div>
-                <div class="field"><label for="monitorSportsWebhook">Sports Cards</label><input class="input" id="monitorSportsWebhook" placeholder="https://discord.com/api/webhooks/..." /></div>
-              </div>
-            </div>
-
             <div class="field field--full">
-              <label>Your Admin Monitor Discord Webhooks</label>
-              <div class="form-grid">
-                <div class="field"><label for="adminMonitorPokemonWebhook">Pokemon</label><input class="input" id="adminMonitorPokemonWebhook" placeholder="https://discord.com/api/webhooks/..." /></div>
-                <div class="field"><label for="adminMonitorOnePieceWebhook">One Piece</label><input class="input" id="adminMonitorOnePieceWebhook" placeholder="https://discord.com/api/webhooks/..." /></div>
-                <div class="field"><label for="adminMonitorMagicWebhook">Magic</label><input class="input" id="adminMonitorMagicWebhook" placeholder="https://discord.com/api/webhooks/..." /></div>
-                <div class="field"><label for="adminMonitorLowkeyWebhook">Low Key Flips (Other)</label><input class="input" id="adminMonitorLowkeyWebhook" placeholder="https://discord.com/api/webhooks/..." /></div>
-                <div class="field"><label for="adminMonitorSportsWebhook">Sports Cards</label><input class="input" id="adminMonitorSportsWebhook" placeholder="https://discord.com/api/webhooks/..." /></div>
-              </div>
+              <label for="monitorWebhookUrl">Shared Monitor Webhook URL</label>
+              <input class="input" id="monitorWebhookUrl" readonly placeholder="Click Create Monitor Webhook" />
+              <div class="subtle-text">Use this for in-stock monitor pings.</div>
             </div>
 
             <div class="field field--full panel-actions">
-              <button class="btn btn-primary" type="button" onclick="saveWebhookSettings()">Save Webhook
-                Settings</button>
-              <button class="btn" type="button" onclick="loadWebhookEvents()">Refresh Webhook Logs</button>
+              <button class="btn btn-secondary" type="button" id="createMonitorWebhookButton" onclick="createMonitorWebhook()">Create / Refresh Shared Monitor Webhook</button>
+            </div>
+
+            <div class="field field--half" id="superAdminMonitorFieldPokemon">
+              <label for="superAdminMonitorPokemon">Super Admin Monitor - Pokemon</label>
+              <input class="input" id="superAdminMonitorPokemon" placeholder="https://discord.com/api/webhooks/..." />
+            </div>
+            <div class="field field--half" id="superAdminMonitorFieldOnepiece">
+              <label for="superAdminMonitorOnepiece">Super Admin Monitor - One Piece</label>
+              <input class="input" id="superAdminMonitorOnepiece" placeholder="https://discord.com/api/webhooks/..." />
+            </div>
+            <div class="field field--half" id="superAdminMonitorFieldMagic">
+              <label for="superAdminMonitorMagic">Super Admin Monitor - Magic</label>
+              <input class="input" id="superAdminMonitorMagic" placeholder="https://discord.com/api/webhooks/..." />
+            </div>
+            <div class="field field--half" id="superAdminMonitorFieldSports">
+              <label for="superAdminMonitorSports">Super Admin Monitor - Sports Cards</label>
+              <input class="input" id="superAdminMonitorSports" placeholder="https://discord.com/api/webhooks/..." />
+            </div>
+            <div class="field field--half" id="superAdminMonitorFieldOther">
+              <label for="superAdminMonitorOther">Super Admin Monitor - Low Key Flips (Other)</label>
+              <input class="input" id="superAdminMonitorOther" placeholder="https://discord.com/api/webhooks/..." />
+            </div>
+
+            <div class="field field--half">
+              <label for="adminMonitorPokemon">Your Admin Monitor - Pokemon</label>
+              <input class="input" id="adminMonitorPokemon" placeholder="https://discord.com/api/webhooks/..." />
+            </div>
+            <div class="field field--half">
+              <label for="adminMonitorOnepiece">Your Admin Monitor - One Piece</label>
+              <input class="input" id="adminMonitorOnepiece" placeholder="https://discord.com/api/webhooks/..." />
+            </div>
+            <div class="field field--half">
+              <label for="adminMonitorMagic">Your Admin Monitor - Magic</label>
+              <input class="input" id="adminMonitorMagic" placeholder="https://discord.com/api/webhooks/..." />
+            </div>
+            <div class="field field--half">
+              <label for="adminMonitorSports">Your Admin Monitor - Sports Cards</label>
+              <input class="input" id="adminMonitorSports" placeholder="https://discord.com/api/webhooks/..." />
+            </div>
+            <div class="field field--half">
+              <label for="adminMonitorOther">Your Admin Monitor - Low Key Flips (Other)</label>
+              <input class="input" id="adminMonitorOther" placeholder="https://discord.com/api/webhooks/..." />
+            </div>
+
+            <div class="field field--full panel-actions">
+              <button class="btn btn-primary" type="button" onclick="saveWebhookSettings()">Save Webhook Settings</button>
+              <button class="btn btn-secondary" type="button" onclick="refreshWebhookLogs()">Refresh Webhook Logs</button>
             </div>
           </div>
 
           <div id="webhookSettingsMessage" class="subtle-text"></div>
-
-          <div class="panel card" style="margin-top:16px;">
-            <div class="panel-header"><div><h3>Webhook Event Log</h3><p class="subtle-text">View received checkout and monitor webhooks to catch anything you missed.</p></div></div>
-            <div class="table-wrap table-wrap--admin-scroll">
-              <table class="admin-table">
-                <thead><tr><th>Time</th><th>Type</th><th>Status</th><th>Site</th><th>Product Type</th><th>Product</th><th>SKU</th><th>Error</th></tr></thead>
-                <tbody id="webhookEventsTableBody"></tbody>
-              </table>
-            </div>
+          <div class="panel" style="margin-top:16px;">
+            <h3>Webhook Event Log</h3>
+            <div class="subtle-text">View received checkout and monitor webhooks to catch anything you missed.</div>
+            <div id="webhookLogWrap" style="overflow:auto; margin-top:12px;"></div>
           </div>
         </section>
 
