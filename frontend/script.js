@@ -8,6 +8,12 @@ let usersPage = 1;
 const PAGE_SIZE = 10;
 
 
+let profileImportBound = false;
+let allDashboardProfiles = [];
+let profileGroupFilters = { general: '', walmart: '', target: '', amazon: '' };
+let selectedProfileIds = new Set();
+
+
 const PUBLIC_PATHS = new Set(["/", "/index.html", "/guide", "/guide.html", "/login", "/login.html", "/signup", "/signup.html", "/forgot-password", "/forgot-password.html", "/reset-password", "/reset-password.html"]);
 
 function currentPathname() {
@@ -22,15 +28,6 @@ function requireAuthForPrivatePages() {
         return false;
     }
     return true;
-}
-
-function escapeHtml(value) {
-    return String(value || "")
-        .replace(/&/g, "&amp;")
-        .replace(/</g, "&lt;")
-        .replace(/>/g, "&gt;")
-        .replace(/"/g, "&quot;")
-        .replace(/'/g, "&#39;");
 }
 
 function escapeHTML(value) {
@@ -124,6 +121,11 @@ function canManageCatalog() {
     return isSuperAdmin();
 }
 
+function syncSuperAdminStorefrontLink() {
+    const link = document.getElementById("storefrontAdminLink");
+    if (link) link.style.display = isSuperAdmin() ? "inline-flex" : "none";
+}
+
 function logout() {
     localStorage.clear();
     location = "login.html";
@@ -131,6 +133,10 @@ function logout() {
 
 function openAdminPanel() {
     location = "admin.html";
+}
+
+function openStoreAdmin() {
+    location = "admin-store.html";
 }
 
 function openUserDashboard() {
@@ -270,6 +276,7 @@ async function loadProfiles() {
 
     let user = currentUser();
     const adminButton = document.getElementById("adminPanelButton");
+    const storeAdminButton = document.getElementById("storeAdminButton");
 
     try {
         const refreshedUser = await refreshCurrentUserFromServer();
@@ -278,6 +285,9 @@ async function loadProfiles() {
 
     if (adminButton) {
         adminButton.style.display = isAdminRole(user?.role) ? "inline-flex" : "none";
+    }
+    if (storeAdminButton) {
+        storeAdminButton.style.display = user?.role === 'super_admin' ? 'inline-flex' : 'none';
     }
 
     try {
@@ -292,13 +302,8 @@ async function loadProfiles() {
             return;
         }
 
-        const groups = {
-            general: [],
-            walmart: [],
-            target: [],
-            amazon: []
-        };
-
+        allDashboardProfiles = profiles;
+        const groups = { general: [], walmart: [], target: [], amazon: [] };
         profiles.forEach((p) => {
             if (groups[p.account_type]) groups[p.account_type].push(p);
         });
@@ -328,9 +333,18 @@ async function loadProfiles() {
         };
 
         let html = "";
-
         Object.keys(groups).forEach((groupKey) => {
-            const items = groups[groupKey];
+            const rawItems = groups[groupKey];
+            const filterValue = String(profileGroupFilters[groupKey] || '').trim().toLowerCase();
+            const items = filterValue
+                ? rawItems.filter((p) => {
+                    const address = p.addresses?.[0] || {};
+                    const payment = p.payments?.[0] || {};
+                    const haystack = [p.profile_name, address.email, address.phone, address.city, address.state, payment.card_last4].join(' ').toLowerCase();
+                    return haystack.includes(filterValue);
+                })
+                : rawItems;
+            const selectedCount = rawItems.filter((p) => selectedProfileIds.has(String(p.id))).length;
 
             html += `
                 <section class="profile-group-section">
@@ -339,15 +353,20 @@ async function loadProfiles() {
                             <h3 class="profile-group-title">${labels[groupKey]}</h3>
                             <div class="profile-group-subtitle">${descriptions[groupKey]}</div>
                         </div>
-                        <span class="badge">${items.length} saved</span>
+                        <span class="badge">${rawItems.length} saved</span>
+                    </div>
+                    <div class="toolbar-row" style="margin:12px 0; align-items:center;">
+                        <input class="input" type="search" placeholder="Search ${labels[groupKey].toLowerCase()}" value="${escapeHTML(profileGroupFilters[groupKey] || '')}" data-profile-search="${groupKey}" />
+                        <button class="btn" type="button" data-profile-select-visible="${groupKey}">Select Visible</button>
+                        <button class="btn btn-danger" type="button" data-profile-delete-group="${groupKey}" ${selectedCount ? '' : 'disabled'}>Delete Selected (${selectedCount})</button>
                     </div>
             `;
 
             if (!items.length) {
                 html += `
                     <div class="empty-card">
-                        <h4>No profiles yet</h4>
-                        <p>Create your first ${groupKey} profile.</p>
+                        <h4>${rawItems.length ? 'No matching profiles' : 'No profiles yet'}</h4>
+                        <p>${rawItems.length ? 'Try a different search.' : 'Create your first ' + groupKey + ' profile.'}</p>
                         <div class="panel-actions">
                             <button class="btn btn-primary" onclick="createProfile()">Create Profile</button>
                         </div>
@@ -355,27 +374,29 @@ async function loadProfiles() {
                 `;
             } else {
                 html += `<div class="profile-card-grid">`;
-
                 items.forEach((p) => {
                     const address = p.addresses?.[0] || {};
                     const payment = p.payments?.[0] || {};
                     const state = address.state || "";
                     const city = address.city || "";
                     const maskedCard = maskCard(payment.card_number, payment.card_last4);
-
+                    const checked = selectedProfileIds.has(String(p.id)) ? 'checked' : '';
                     html += `
                         <article class="profile-card-modern">
                             <div class="profile-card-top">
-                                <div>
-                                    <h4>${p.profile_name}</h4>
-                                    <div class="subtle-text">${city}${city && state ? ", " : ""}${state || "No location set"}</div>
-                                </div>
+                                <label class="checkbox-inline"><input type="checkbox" data-profile-select="${p.id}" ${checked} /><span>Select</span></label>
                                 <span class="badge">${p.account_type}</span>
                             </div>
+                            <div class="profile-card-top">
+                                <div>
+                                    <h4>${escapeHTML(p.profile_name)}</h4>
+                                    <div class="subtle-text">${escapeHTML(city)}${city && state ? ", " : ""}${escapeHTML(state || "No location set")}</div>
+                                </div>
+                            </div>
                             <div class="profile-detail-list">
-                                <div><span>Email</span><strong>${address.email || "-"}</strong></div>
-                                <div><span>Phone</span><strong>${address.phone || "-"}</strong></div>
-                                <div><span>Card</span><strong>${maskedCard}</strong></div>
+                                <div><span>Email</span><strong>${escapeHTML(address.email || "-")}</strong></div>
+                                <div><span>Phone</span><strong>${escapeHTML(address.phone || "-")}</strong></div>
+                                <div><span>Card</span><strong>${escapeHTML(maskedCard)}</strong></div>
                             </div>
                             <div class="panel-actions">
                                 <button class="btn" onclick="edit('${p.id}')">Edit</button>
@@ -384,17 +405,106 @@ async function loadProfiles() {
                         </article>
                     `;
                 });
-
                 html += `</div>`;
             }
-
             html += `</section>`;
         });
 
         dashboardEl.innerHTML = html;
+        bindProfileDashboardControls();
+        bindProfileImportControls();
     } catch {
         dashboardEl.innerHTML = `<p>Could not connect to the server.</p>`;
     }
+}
+
+
+function bindProfileDashboardControls() {
+    document.querySelectorAll('[data-profile-search]').forEach((input) => {
+        input.addEventListener('input', () => {
+            profileGroupFilters[input.dataset.profileSearch] = input.value || '';
+            loadProfiles();
+        });
+    });
+    document.querySelectorAll('[data-profile-select]').forEach((checkbox) => {
+        checkbox.addEventListener('change', () => {
+            const id = String(checkbox.dataset.profileSelect || '');
+            if (checkbox.checked) selectedProfileIds.add(id); else selectedProfileIds.delete(id);
+            loadProfiles();
+        });
+    });
+    document.querySelectorAll('[data-profile-select-visible]').forEach((button) => {
+        button.addEventListener('click', () => {
+            const group = button.dataset.profileSelectVisible;
+            const filterValue = String(profileGroupFilters[group] || '').trim().toLowerCase();
+            allDashboardProfiles.filter((p) => p.account_type === group).forEach((p) => {
+                const address = p.addresses?.[0] || {};
+                const payment = p.payments?.[0] || {};
+                const haystack = [p.profile_name, address.email, address.phone, address.city, address.state, payment.card_last4].join(' ').toLowerCase();
+                if (!filterValue || haystack.includes(filterValue)) selectedProfileIds.add(String(p.id));
+            });
+            loadProfiles();
+        });
+    });
+    document.querySelectorAll('[data-profile-delete-group]').forEach((button) => {
+        button.addEventListener('click', async () => {
+            const group = button.dataset.profileDeleteGroup;
+            const ids = allDashboardProfiles.filter((p) => p.account_type === group && selectedProfileIds.has(String(p.id))).map((p) => String(p.id));
+            if (!ids.length) return;
+            if (!confirm(`Delete ${ids.length} selected ${group} profile(s)?`)) return;
+            const res = await fetch(API + '/profiles/bulk', {
+                method: 'DELETE',
+                headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token() },
+                body: JSON.stringify({ ids })
+            });
+            const data = await res.json();
+            if (data.error) {
+                alert(data.error);
+                return;
+            }
+            ids.forEach((id) => selectedProfileIds.delete(String(id)));
+            await loadProfiles();
+        });
+    });
+}
+
+function bindProfileImportControls() {
+    if (profileImportBound) return;
+    const button = document.getElementById('profileImportButton');
+    const fileInput = document.getElementById('profileImportFile');
+    const typeSelect = document.getElementById('profileImportType');
+    const message = document.getElementById('profileImportMessage');
+    if (!button || !fileInput || !typeSelect || !message) return;
+    profileImportBound = true;
+    button.addEventListener('click', async () => {
+        message.textContent = '';
+        const file = fileInput.files?.[0];
+        if (!file) {
+            message.textContent = 'Choose a JSON export first.';
+            return;
+        }
+        button.disabled = true;
+        try {
+            const text = await file.text();
+            const parsed = JSON.parse(text);
+            const profiles = Array.isArray(parsed) ? parsed : (Array.isArray(parsed?.profiles) ? parsed.profiles : []);
+            if (!profiles.length) throw new Error('No profiles found in that file.');
+            const res = await fetch(API + '/profiles/import', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token() },
+                body: JSON.stringify({ account_type: typeSelect.value, profiles })
+            });
+            const data = await res.json();
+            if (data.error) throw new Error(data.error);
+            message.textContent = `Imported ${data.imported_count || 0}, skipped ${data.skipped_count || 0}, errors ${data.error_count || 0}.`;
+            fileInput.value = '';
+            await loadProfiles();
+        } catch (error) {
+            message.textContent = error.message || 'Could not import profiles.';
+        } finally {
+            button.disabled = false;
+        }
+    });
 }
 
 function createProfile() {
@@ -1854,43 +1964,34 @@ function purchaseCustomCredits() {
 
 async function loadWebhookSettings() {
     const urlInput = document.getElementById('websiteWebhookUrl');
-    const monitorUrlInput = document.getElementById('monitorWebhookUrl');
     const discordInput = document.getElementById('discordRelayWebhookUrl');
     const adminDiscordInput = document.getElementById('adminDiscordRelayWebhookUrl');
     const adminBrandInput = document.getElementById('adminBrandLabel');
     const message = document.getElementById('webhookSettingsMessage');
     const createButton = document.getElementById('createWebhookButton');
-    const createMonitorButton = document.getElementById('createMonitorWebhookButton');
     const superAdminField = document.getElementById('superAdminDiscordField');
+
     if (!urlInput) return;
+
     try {
         const data = await authJSON(API + '/admin/webhooks/settings');
         urlInput.value = data.inbound_webhook_url || '';
-        if (monitorUrlInput) monitorUrlInput.value = data.monitor_webhook_url || '';
         if (discordInput) discordInput.value = data.discord_webhook_url || '';
         if (adminDiscordInput) adminDiscordInput.value = data.admin_discord_webhook_url || '';
         if (adminBrandInput) adminBrandInput.value = data.admin_brand_label || '';
-        const routes = data.monitor_routes || {};
-        const setVal = (id, val) => { const el = document.getElementById(id); if (el) el.value = val || ''; };
-        setVal('superAdminMonitorPokemon', routes.super_admin?.pokemon);
-        setVal('superAdminMonitorOnepiece', routes.super_admin?.onepiece);
-        setVal('superAdminMonitorMagic', routes.super_admin?.magic);
-        setVal('superAdminMonitorSports', routes.super_admin?.sports);
-        setVal('superAdminMonitorOther', routes.super_admin?.other);
-        setVal('adminMonitorPokemon', routes.admin?.pokemon);
-        setVal('adminMonitorOnepiece', routes.admin?.onepiece);
-        setVal('adminMonitorMagic', routes.admin?.magic);
-        setVal('adminMonitorSports', routes.admin?.sports);
-        setVal('adminMonitorOther', routes.admin?.other);
-        if (createButton) createButton.style.display = data.can_create_inbound ? '' : 'none';
-        if (createMonitorButton) createMonitorButton.style.display = data.can_create_inbound ? '' : 'none';
-        if (superAdminField) superAdminField.style.display = data.is_super_admin ? '' : 'none';
-        ['Pokemon','Onepiece','Magic','Sports','Other'].forEach((suffix)=>{
-          const ids=['superAdminMonitorField'+suffix];
-          ids.forEach((id)=>{ const el=document.getElementById(id); if (el) el.style.display = data.is_super_admin ? '' : 'none'; });
-        });
-        if (message) message.textContent = data.inbound_webhook_url ? 'Webhook settings loaded.' : 'No shared website webhook created yet.';
-        await refreshWebhookLogs();
+
+        if (createButton) {
+            createButton.style.display = data.can_create_inbound ? '' : 'none';
+        }
+        if (superAdminField) {
+            superAdminField.style.display = data.is_super_admin ? '' : 'none';
+        }
+
+        if (message) {
+            message.textContent = data.inbound_webhook_url
+                ? 'Webhook settings loaded.'
+                : 'No shared website webhook created yet.';
+        }
     } catch (err) {
         if (message) message.textContent = err.message;
     }
@@ -1909,72 +2010,25 @@ async function createWebsiteWebhook() {
     }
 }
 
-async function createMonitorWebhook() {
-    const urlInput = document.getElementById('monitorWebhookUrl');
-    const message = document.getElementById('webhookSettingsMessage');
-    try {
-        if (message) message.textContent = 'Creating monitor webhook...';
-        const data = await authJSON(API + '/admin/webhooks/monitor/create', { method: 'POST' });
-        if (urlInput) urlInput.value = data.monitor_webhook_url || '';
-        if (message) message.textContent = 'Monitor webhook created. Paste this URL into your monitor bot.';
-    } catch (err) {
-        if (message) message.textContent = err.message;
-    }
-}
-
 async function saveWebhookSettings() {
     const discordInput = document.getElementById('discordRelayWebhookUrl');
     const adminDiscordInput = document.getElementById('adminDiscordRelayWebhookUrl');
     const adminBrandInput = document.getElementById('adminBrandLabel');
     const message = document.getElementById('webhookSettingsMessage');
-    const val = (id) => document.getElementById(id)?.value || '';
+
     try {
         await authJSON(API + '/admin/webhooks/settings', {
             method: 'POST',
             body: JSON.stringify({
                 discord_webhook_url: discordInput ? discordInput.value : '',
                 admin_discord_webhook_url: adminDiscordInput ? adminDiscordInput.value : '',
-                admin_brand_label: adminBrandInput ? adminBrandInput.value : '',
-                monitor_routes: {
-                    super_admin: {
-                        pokemon: val('superAdminMonitorPokemon'),
-                        onepiece: val('superAdminMonitorOnepiece'),
-                        magic: val('superAdminMonitorMagic'),
-                        sports: val('superAdminMonitorSports'),
-                        other: val('superAdminMonitorOther')
-                    },
-                    admin: {
-                        pokemon: val('adminMonitorPokemon'),
-                        onepiece: val('adminMonitorOnepiece'),
-                        magic: val('adminMonitorMagic'),
-                        sports: val('adminMonitorSports'),
-                        other: val('adminMonitorOther')
-                    }
-                }
+                admin_brand_label: adminBrandInput ? adminBrandInput.value : ''
             })
         });
+
         if (message) message.textContent = 'Webhook settings saved.';
     } catch (err) {
         if (message) message.textContent = err.message;
-    }
-}
-
-async function refreshWebhookLogs() {
-    const wrap = document.getElementById('webhookLogWrap');
-    if (!wrap) return;
-    try {
-        const [checkout, monitor] = await Promise.all([
-            authJSON(API + '/admin/webhooks/events?kind=checkout'),
-            authJSON(API + '/admin/webhooks/events?kind=monitor')
-        ]);
-        const items = [...(checkout.items || []), ...(monitor.items || [])].sort((a,b)=> new Date(b.created_at)-new Date(a.created_at));
-        wrap.innerHTML = `
-          <table class="table">
-            <thead><tr><th>Time</th><th>Type</th><th>Status</th><th>Site</th><th>Product Type</th><th>Product</th><th>SKU</th><th>Error</th></tr></thead>
-            <tbody>${items.map((row)=>`<tr><td>${escapeHtml(formatDateTime(row.created_at))}</td><td>${escapeHtml(row.webhook_type || '')}</td><td>${escapeHtml(row.status || '')}</td><td>${escapeHtml(row.site || '')}</td><td>${escapeHtml(row.product_type || '')}</td><td>${escapeHtml(row.product_name || '')}</td><td>${escapeHtml(row.sku || '')}</td><td>${escapeHtml(row.error_message || '')}</td></tr>`).join('')}</tbody>
-          </table>`;
-    } catch (err) {
-        wrap.innerHTML = `<div class="subtle-text">${escapeHtml(err.message)}</div>`;
     }
 }
 
@@ -2199,6 +2253,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     try {
         if (token()) { await refreshCurrentUserFromServer(); }
     } catch (_) { }
+    try { syncSuperAdminStorefrontLink(); } catch (_) { }
     try { await loadPublicCountdowns(); } catch (_) { }
 
     if (document.getElementById("dashboard")) {

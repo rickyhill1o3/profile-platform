@@ -2,7 +2,7 @@
 (function () {
   const panes = Array.from(document.querySelectorAll('[data-store-pane]'));
   const navButtons = Array.from(document.querySelectorAll('[data-store-nav]'));
-  const state = { products: [], orders: [], receipts: [], overrides: [], shippingTiers: [], discounts: [], accounting: null, editingProductId: '' };
+  const state = { products: [], orders: [], receipts: [], overrides: [], discounts: [], accounting: null, editingProductId: '' };
   function $(id) { return document.getElementById(id); }
   function setPane(name) { panes.forEach((pane) => pane.classList.toggle('is-active', pane.dataset.storePane === name)); navButtons.forEach((button) => button.classList.toggle('is-active', button.dataset.storeNav === name)); }
   function escape(value) { return typeof escapeHTML === 'function' ? escapeHTML(value) : String(value || ''); }
@@ -12,7 +12,7 @@
   function requireAdminAccess() {
     if (typeof requireAuthForPrivatePages === 'function' && !requireAuthForPrivatePages()) return false;
     const user = typeof currentUser === 'function' ? currentUser() : null;
-    if (!user || !(user.role === 'admin' || user.role === 'super_admin')) { window.location.replace('login.html'); return false; }
+    if (!user || user.role !== 'super_admin') { window.location.replace('dashboard.html'); return false; }
     return true;
   }
   function buildMergeOptions(currentId) {
@@ -110,77 +110,18 @@
   function renderOrders() {
     const body = $('storeOrdersBody'); if (!body) return;
     body.innerHTML = state.orders.length ? state.orders.map((order) => {
-      const sessionId = escape(order.session_id || order.order_id || '');
       const itemSummary = (order.items || []).map((item) => `${escape(item.title || 'Item')} × ${escape(item.quantity || 0)}`).join('<br>');
-      const shippingName = order.customer_name || order.shipping_name || '';
-      const carrierValue = String(order.tracking_carrier || '').toLowerCase();
-      return `<tr>
-        <td>${escape(dateTime(order.sold_at || order.placed_at))}</td>
-        <td><strong>${escape(order.order_id || order.session_id || 'Order')}</strong></td>
-        <td><div>${escape(order.customer_email || '—')}</div><div class="subtle-text">${escape(shippingName)}</div></td>
-        <td>${itemSummary || '—'}</td>
-        <td>${money(order.total)}</td>
-        <td><span class="badge">${escape(order.status || 'paid')}</span></td>
-        <td><div>${escape(order.tracking_number || '—')}</div><div class="subtle-text">${escape(order.tracking_carrier || '')}</div></td>
-        <td>
-          <div style="display:grid;gap:8px;min-width:230px;">
-            <select class="input input--sm" data-order-tracking-carrier="${sessionId}">
-              <option value="" ${carrierValue ? '' : 'selected'}>Select carrier</option>
-              <option value="USPS" ${carrierValue === 'usps' ? 'selected' : ''}>USPS</option>
-              <option value="UPS" ${carrierValue === 'ups' ? 'selected' : ''}>UPS</option>
-              <option value="FedEx" ${carrierValue === 'fedex' ? 'selected' : ''}>FedEx</option>
-            </select>
-            <input class="input input--sm" placeholder="Tracking number" data-order-tracking-number="${sessionId}" value="${escape(order.tracking_number || '')}" />
-            <input class="input input--sm" placeholder="Tracking URL (optional)" data-order-tracking-url="${sessionId}" value="${escape(order.tracking_url || '')}" />
-            <div style="display:grid;gap:8px;grid-template-columns:1fr;">
-              <button class="btn btn-primary" type="button" data-save-order-tracking="${sessionId}">Save Tracking + Email</button>
-              <button class="btn" type="button" data-resend-order-receipt="${sessionId}">Send Receipt Again</button>
-              <button class="btn btn-danger" type="button" data-cancel-order="${sessionId}">Cancel + Refund</button>
-            </div>
-          </div>
-        </td>
-      </tr>`;
+      return `<tr><td>${escape(dateTime(order.placed_at))}</td><td><strong>${escape(order.order_number || order.session_id || 'Order')}</strong></td><td><div>${escape(order.customer_email || '—')}</div><div class="subtle-text">${escape(order.shipping_name || '')}</div></td><td>${itemSummary || '—'}</td><td>${money(order.total)}</td><td><span class="badge">${escape(order.status || 'paid')}</span></td><td><div>${escape(order.tracking_number || '—')}</div><div class="subtle-text">${escape(order.tracking_carrier || '')}</div></td><td><div class="form-grid storefront-order-inline-form"><div class="field"><input class="input input--sm" placeholder="Carrier" data-order-tracking-carrier="${escape(order.session_id)}" value="${escape(order.tracking_carrier || '')}" /></div><div class="field"><input class="input input--sm" placeholder="Tracking number" data-order-tracking-number="${escape(order.session_id)}" value="${escape(order.tracking_number || '')}" /></div><div class="field"><input class="input input--sm" placeholder="Tracking URL (optional)" data-order-tracking-url="${escape(order.session_id)}" value="${escape(order.tracking_url || '')}" /></div><div class="field"><button class="btn btn-primary" type="button" data-save-order-tracking="${escape(order.session_id)}">Save Tracking + Email</button></div></div></td></tr>`;
     }).join('') : '<tr><td colspan="8">No active orders found.</td></tr>';
-
     body.querySelectorAll('[data-save-order-tracking]').forEach((button) => button.addEventListener('click', async () => {
       const sessionId = button.dataset.saveOrderTracking;
       const carrier = body.querySelector(`[data-order-tracking-carrier="${CSS.escape(sessionId)}"]`)?.value || '';
       const number = body.querySelector(`[data-order-tracking-number="${CSS.escape(sessionId)}"]`)?.value || '';
       const url = body.querySelector(`[data-order-tracking-url="${CSS.escape(sessionId)}"]`)?.value || '';
-      if (!carrier) return showMessage('storeOrdersMessage', 'Please select a carrier.', true);
       if (!number) return showMessage('storeOrdersMessage', 'Tracking number is required.', true);
       button.disabled = true; showMessage('storeOrdersMessage', 'Saving tracking and sending email...');
-      try {
-        await authJSON(API + '/admin/store/orders/' + encodeURIComponent(sessionId) + '/tracking', { method: 'POST', body: JSON.stringify({ tracking_carrier: carrier, tracking_number: number, tracking_url: url, status: 'shipped' }) });
-        showMessage('storeOrdersMessage', 'Tracking saved and customer email sent.');
-        await loadOrders();
-      } catch (error) {
-        showMessage('storeOrdersMessage', error.message || 'Could not save tracking.', true);
-      } finally { button.disabled = false; }
-    }));
-
-    body.querySelectorAll('[data-resend-order-receipt]').forEach((button) => button.addEventListener('click', async () => {
-      const sessionId = button.dataset.resendOrderReceipt;
-      button.disabled = true; showMessage('storeOrdersMessage', 'Sending receipt email...');
-      try {
-        await authJSON(API + '/admin/store/orders/' + encodeURIComponent(sessionId) + '/resend-receipt', { method: 'POST' });
-        showMessage('storeOrdersMessage', 'Receipt email sent to the customer.');
-      } catch (error) {
-        showMessage('storeOrdersMessage', error.message || 'Could not resend receipt.', true);
-      } finally { button.disabled = false; }
-    }));
-
-    body.querySelectorAll('[data-cancel-order]').forEach((button) => button.addEventListener('click', async () => {
-      const sessionId = button.dataset.cancelOrder;
-      if (!window.confirm('Cancel this order, refund the payment, and restore inventory?')) return;
-      button.disabled = true; showMessage('storeOrdersMessage', 'Refunding order and restoring inventory...');
-      try {
-        await authJSON(API + '/admin/store/orders/' + encodeURIComponent(sessionId) + '/cancel-refund', { method: 'POST' });
-        showMessage('storeOrdersMessage', 'Order cancelled, refunded, and customer emailed.');
-        await refreshAll();
-      } catch (error) {
-        showMessage('storeOrdersMessage', error.message || 'Could not cancel and refund order.', true);
-      } finally { button.disabled = false; }
+      try { await authJSON(API + '/admin/store/orders/' + encodeURIComponent(sessionId) + '/tracking', { method: 'POST', body: JSON.stringify({ tracking_carrier: carrier, tracking_number: number, tracking_url: url }) }); showMessage('storeOrdersMessage', 'Tracking saved and customer email sent.'); await loadOrders(); }
+      catch (error) { showMessage('storeOrdersMessage', error.message || 'Could not save tracking.', true); } finally { button.disabled = false; }
     }));
   }
   function renderDiscounts() {
@@ -203,43 +144,13 @@
       catch (error) { showMessage('discountMessage', error.message || 'Could not delete discount.', true); } finally { button.disabled = false; }
     }));
   }
-  function renderShippingSettings() {
-    const body = $('shippingSettingsBody');
-    if (!body) return;
-    const defaults = [
-      { tier_name: '1-2 items', min_qty: 1, max_qty: 2, amount: 8.95 },
-      { tier_name: '3-4 items', min_qty: 3, max_qty: 4, amount: 12.95 },
-      { tier_name: '5-10 items', min_qty: 5, max_qty: 10, amount: 19.95 },
-      { tier_name: '11+ items', min_qty: 11, max_qty: '', amount: 29.95 }
-    ];
-    const rows = (state.shippingTiers && state.shippingTiers.length ? state.shippingTiers : defaults);
-    body.innerHTML = rows.map((row, index) => `
-      <tr>
-        <td><input class="input input--sm" data-shipping-tier-name="${index}" value="${escape(row.tier_name || '')}" /></td>
-        <td><input class="input input--sm" type="number" min="1" step="1" data-shipping-tier-min="${index}" value="${escape(row.min_qty || '')}" /></td>
-        <td><input class="input input--sm" type="number" min="1" step="1" data-shipping-tier-max="${index}" value="${escape(row.max_qty ?? '')}" placeholder="No max" /></td>
-        <td><input class="input input--sm" type="number" min="0" step="0.01" data-shipping-tier-amount="${index}" value="${escape((row.amount ?? row.amount_cents / 100 ?? 0).toString())}" /></td>
-      </tr>
-    `).join('');
-  }
-  function readShippingTierForm() {
-    const names = Array.from(document.querySelectorAll('[data-shipping-tier-name]'));
-    return names.map((input, index) => ({
-      tier_name: input.value,
-      min_qty: Number(document.querySelector(`[data-shipping-tier-min="${index}"]`)?.value || 0),
-      max_qty: document.querySelector(`[data-shipping-tier-max="${index}"]`)?.value === '' ? null : Number(document.querySelector(`[data-shipping-tier-max="${index}"]`)?.value || 0),
-      amount: Number(document.querySelector(`[data-shipping-tier-amount="${index}"]`)?.value || 0),
-      is_active: true
-    }));
-  }
-  async function loadShippingSettings() { const data = await authJSON(API + '/admin/store/shipping-settings'); state.shippingTiers = Array.isArray(data.tiers) ? data.tiers : []; renderShippingSettings(); }
   async function loadProducts() { const data = await authJSON(API + '/admin/store/products'); state.products = Array.isArray(data.products) ? data.products : []; renderProducts(); renderTopStats(); }
   async function loadReceipts() { const data = await authJSON(API + '/admin/store/receipts'); state.receipts = Array.isArray(data.receipts) ? data.receipts : []; renderReceipts(); renderTopStats(); }
   async function loadOverrides() { const data = await authJSON(API + '/admin/store/pricing'); state.overrides = Array.isArray(data.overrides) ? data.overrides : []; renderOverrides(); }
   async function loadOrders() { const data = await authJSON(API + '/admin/store/orders'); state.orders = Array.isArray(data.orders) ? data.orders : []; renderOrders(); }
   async function loadAccounting() { const data = await authJSON(API + '/admin/store/accounting/summary'); state.accounting = data || {}; $('accountingExportLink').href = API + '/admin/store/accounting/export.csv'; renderAccounting(); renderTopStats(); }
-  async function loadDiscounts() { const data = await authJSON(API + '/api/discounts'); state.discounts = Array.isArray(data) ? data : (Array.isArray(data.discounts) ? data.discounts : []); renderDiscounts(); }
-  async function refreshAll() { await Promise.all([loadProducts(), loadReceipts(), loadOverrides(), loadShippingSettings(), loadOrders(), loadAccounting(), loadDiscounts()]); }
+  async function loadDiscounts() { const data = await authJSON(API + '/api/discounts'); state.discounts = Array.isArray(data.discounts) ? data.discounts : []; renderDiscounts(); }
+  async function refreshAll() { await Promise.all([loadProducts(), loadReceipts(), loadOverrides(), loadOrders(), loadAccounting(), loadDiscounts()]); }
   function bindPaneNav() { navButtons.forEach((button) => button.addEventListener('click', () => setPane(button.dataset.storeNav))); }
   async function lookupProductDetails() {
     const site = $('storeManualSite')?.value || ''; const sku = $('storeManualSku')?.value || ''; if (!site || !sku) return;
@@ -277,26 +188,6 @@
       event.preventDefault(); showMessage('pricingOverrideMessage', 'Saving price override...');
       try { await authJSON(API + '/admin/store/pricing', { method: 'POST', body: JSON.stringify({ site: $('pricingSite').value, sku: $('pricingSku').value, sale_price: $('pricingSalePrice').value, notes: $('pricingNotes').value }) }); showMessage('pricingOverrideMessage', 'Price override saved.'); $('pricingOverrideForm').reset(); await refreshAll(); }
       catch (error) { showMessage('pricingOverrideMessage', error.message || 'Could not save pricing override.', true); }
-    });
-    $('shippingSettingsReset')?.addEventListener('click', () => {
-      state.shippingTiers = [
-        { tier_name: '1-2 items', min_qty: 1, max_qty: 2, amount: 8.95 },
-        { tier_name: '3-4 items', min_qty: 3, max_qty: 4, amount: 12.95 },
-        { tier_name: '5-10 items', min_qty: 5, max_qty: 10, amount: 19.95 },
-        { tier_name: '11+ items', min_qty: 11, max_qty: '', amount: 29.95 }
-      ];
-      renderShippingSettings();
-      showMessage('shippingSettingsMessage', 'Default shipping tiers restored in the form. Save to apply them.');
-    });
-    $('shippingSettingsSave')?.addEventListener('click', async () => {
-      showMessage('shippingSettingsMessage', 'Saving shipping settings...');
-      try {
-        await authJSON(API + '/admin/store/shipping-settings', { method: 'POST', body: JSON.stringify({ tiers: readShippingTierForm() }) });
-        showMessage('shippingSettingsMessage', 'Shipping settings saved. Cart and checkout will now use the same tiers.');
-        await loadShippingSettings();
-      } catch (error) {
-        showMessage('shippingSettingsMessage', error.message || 'Could not save shipping settings.', true);
-      }
     });
   }
   function bindDiscountForm() {
