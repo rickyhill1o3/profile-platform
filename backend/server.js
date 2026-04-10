@@ -1104,6 +1104,123 @@ async function createInboundWebhook(req, createdBy = null) {
     return { ...data, url: `${getApiBaseUrl(req)}/webhooks/orders/${token}` };
 }
 
+async function getMonitorWebhookToken() {
+    const settings = await getAppSetting('monitor_webhook_settings', {});
+    return String(settings?.token || '').trim();
+}
+
+async function createMonitorWebhook(req, createdBy = null) {
+    const token = crypto.randomBytes(18).toString('hex');
+    const current = await getAppSetting('monitor_webhook_settings', {});
+    await setAppSetting('monitor_webhook_settings', {
+        ...current,
+        token,
+        created_by: createdBy || null,
+        updated_at: new Date().toISOString()
+    });
+    return { token, url: `${getApiBaseUrl(req)}/webhooks/monitor/${token}` };
+}
+
+function normalizeMonitorType(value = '') {
+    const t = String(value || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '');
+    if (['pokemon','pokmon'].includes(t)) return 'pokemon';
+    if (['onepiece'].includes(t)) return 'onepiece';
+    if (['sport','sports','sportscards','sportscard'].includes(t)) return 'sports';
+    if (['othertcg','mtg','magic','lorcana','yugioh','yugio','digimon','dragonball','unionarena','weiss'].includes(t)) return 'othertcg';
+    if (['lowkey','other','lowkeyflips','flips'].includes(t)) return 'lowkey';
+    return '';
+}
+
+function classifyMonitorType({ title = '', productType = '', url = '' }) {
+    const explicit = normalizeMonitorType(productType);
+    if (explicit) return explicit;
+    const hay = `${title} ${url}`.toLowerCase();
+    if (/pokemon|pok[eé]mon/.test(hay)) return 'pokemon';
+    if (/one\s*piece/.test(hay)) return 'onepiece';
+    if (/magic|mtg|lorcana|yu-?gi-?oh|yugioh|digimon|dragon ball|union arena|weiss/.test(hay)) return 'othertcg';
+    if (/topps|panini|upper deck|sports card|baseball card|basketball card|football card|soccer card|hockey card/.test(hay)) return 'sports';
+    return 'lowkey';
+}
+
+function extractMonitorItems(payload = {}) {
+    const items = [];
+    const arr = Array.isArray(payload.items) ? payload.items : [];
+    for (const row of arr) {
+        items.push({
+            sku: String(row.sku || row.SKU || '').trim(),
+            title: String(row.title || row.name || row.product_name || '').trim(),
+            price: row.price ?? row.Price ?? null,
+            url: String(row.url || row.product_url || row.link || '').trim(),
+            image: String(row.image || row.image_url || row.thumbnail || '').trim(),
+            site: String(row.site || payload.site || payload.source || '').trim().toLowerCase(),
+            stock: row.stock ?? row.stock_count ?? row.quantity ?? null,
+            productType: String(row.product_type || payload.product_type || '').trim()
+        });
+    }
+    const skuList = String(payload.instock_skus || payload.skus || '').split(/[|,\n]/).map(s=>s.trim()).filter(Boolean);
+    const titleText = String(payload.title || payload.product_name || payload['Title/SKU'] || '').trim();
+    const site = String(payload.site || payload.source || '').trim().toLowerCase();
+    const price = payload.price ?? payload.Price ?? null;
+    const url = String(payload.product_url || payload.url || payload.link || '').trim();
+    const image = String(payload.image_url || payload.image || '').trim();
+    const explicitType = String(payload.product_type || payload.category || '').trim();
+    if (skuList.length) {
+        for (const sku of skuList) {
+            items.push({ sku, title: titleText, price, url, image, site, stock: payload.stock_count ?? null, productType: explicitType });
+        }
+    }
+    if (!items.length) {
+        items.push({
+            sku: String(payload.sku || payload.SKU || '').trim(),
+            title: titleText,
+            price,
+            url,
+            image,
+            site,
+            stock: payload.stock_count ?? null,
+            productType: explicitType
+        });
+    }
+    return items.filter(x => x.sku || x.title || x.url);
+}
+
+function buildProductUrl(site, sku, fallbackUrl='') {
+    if (fallbackUrl) return fallbackUrl;
+    const s = String(site||'').toLowerCase();
+    const clean = String(sku||'').trim();
+    if (!clean) return '';
+    if (s.includes('target')) return `https://www.target.com/p/-/A-${clean}`;
+    if (s.includes('walmart')) return `https://www.walmart.com/ip/${clean}`;
+    return '';
+}
+
+async function sendMonitorDiscordWebhook(webhookUrl, item) {
+    const finalUrl = buildProductUrl(item.site, item.sku, item.url);
+    const body = JSON.stringify({
+        username: 'In Stock Monitor',
+        embeds: [{
+            title: 'Monitor Notification',
+            description: item.title || item.sku || 'In stock item',
+            url: finalUrl || undefined,
+            fields: [
+                { name: 'Site', value: String(item.site || '-'), inline: true },
+                { name: 'Category', value: String(item.category || 'lowkey'), inline: true },
+                { name: 'SKU', value: String(item.sku || '-'), inline: true },
+                { name: 'Price', value: item.price != null ? `$${item.price}` : '-', inline: true },
+                { name: 'Stock', value: item.stock != null ? String(item.stock) : '-', inline: true },
+                { name: 'Product Link', value: finalUrl || '-', inline: false }
+            ],
+            thumbnail: item.image ? { url: item.image } : undefined,
+            timestamp: new Date().toISOString()
+        }]
+    });
+    return enqueueDiscordWebhookJob(webhookUrl, async () => {
+        const response = await globalThis.fetch(webhookUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body });
+        if (!response.ok) throw new Error(`Discord webhook failed (${response.status})`);
+        return { success: true };
+    });
+}
+
 function maskEmail(email = '') {
     const value = String(email || '').trim().toLowerCase();
     const parts = value.split('@');
@@ -1520,6 +1637,35 @@ async function validateInboundWebhookToken(req) {
     return token && token === active.token;
 }
 
+app.post(["/webhooks/monitor", "/webhooks/monitor/:token"], async (req, res) => {
+    try {
+        const token = String(req.params.token || req.query.token || '').trim();
+        const expected = await getMonitorWebhookToken();
+        if (expected && token !== expected) return res.status(401).json({ error: 'Invalid monitor webhook url' });
+        const payload = req.body || {};
+        const items = extractMonitorItems(payload).map((item) => ({
+            ...item,
+            category: classifyMonitorType({ title: item.title, productType: item.productType, url: item.url })
+        }));
+        const globalSettings = await getAppSetting('webhook_settings', {});
+        const groups = globalSettings?.monitor_groups || {};
+        const results = [];
+        for (const item of items) {
+            const url = String(groups[item.category] || '').trim();
+            if (!url) {
+                results.push({ sku: item.sku, skipped: 'monitor_webhook_not_configured', category: item.category });
+                continue;
+            }
+            await sendMonitorDiscordWebhook(url, item);
+            results.push({ sku: item.sku, category: item.category, success: true });
+        }
+        res.json({ success: true, item_count: items.length, results });
+    } catch (err) {
+        console.error('Monitor webhook error:', err);
+        res.status(400).json({ error: err.message });
+    }
+});
+
 app.post(["/webhooks/orders", "/webhooks/orders/:token"], async (req, res) => {
     try {
         console.log("Inbound webhook hit", {
@@ -1747,13 +1893,16 @@ app.get('/admin/webhooks/settings', auth, admin, async (req, res) => {
         const currentUser = await getCurrentUser(req);
         const active = await getActiveInboundWebhook();
         const globalSettings = await getAppSetting('webhook_settings', {});
+        const monitorSettings = await getAppSetting('monitor_webhook_settings', {});
         const adminSettings = await getAdminWebhookSettings(currentUser.id);
 
         res.json({
             inbound_webhook_url: active?.token ? `${getApiBaseUrl(req)}/webhooks/orders/${active.token}` : '',
+            monitor_webhook_url: monitorSettings?.token ? `${getApiBaseUrl(req)}/webhooks/monitor/${monitorSettings.token}` : '',
             discord_webhook_url: String(globalSettings?.discord_webhook_url || ''),
             admin_discord_webhook_url: String(adminSettings?.discord_webhook_url || ''),
             admin_brand_label: String(adminSettings?.brand_label || ''),
+            monitor_groups: globalSettings?.monitor_groups || {},
             can_create_inbound: currentUser.role === 'super_admin',
             is_super_admin: currentUser.role === 'super_admin'
         });
@@ -1796,8 +1945,10 @@ app.post('/admin/webhooks/settings', auth, admin, async (req, res) => {
 
         if (currentUser.role === 'super_admin') {
             const discordWebhookUrl = String(req.body?.discord_webhook_url || '').trim();
-            await setAppSetting('webhook_settings', { discord_webhook_url: discordWebhookUrl });
+            const currentGlobal = await getAppSetting('webhook_settings', {});
+            await setAppSetting('webhook_settings', { ...currentGlobal, discord_webhook_url: discordWebhookUrl, monitor_groups: req.body?.monitor_groups || currentGlobal.monitor_groups || {} });
             response.discord_webhook_url = discordWebhookUrl;
+            response.monitor_groups = req.body?.monitor_groups || {};
         }
 
         res.json(response);
@@ -1806,11 +1957,12 @@ app.post('/admin/webhooks/settings', auth, admin, async (req, res) => {
     }
 });
 
-app.post('/admin/webhooks/settings', auth, admin, async (req, res) => {
+app.post('/admin/webhooks/monitor/create', auth, admin, async (req, res) => {
     try {
-        const discordWebhookUrl = String(req.body?.discord_webhook_url || '').trim();
-        await setAppSetting('webhook_settings', { discord_webhook_url: discordWebhookUrl });
-        res.json({ success: true, discord_webhook_url: discordWebhookUrl });
+        const currentUser = await getCurrentUser(req);
+        if (currentUser.role !== 'super_admin') return res.status(403).json({ error: 'Only super admin can create the shared monitor webhook.' });
+        const webhook = await createMonitorWebhook(req, currentUser.id);
+        res.json({ success: true, monitor_webhook_url: webhook.url });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }

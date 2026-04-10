@@ -589,6 +589,28 @@
                 YOUR LABEL</div>
             </div>
 
+            <div class="field field--full">
+              <label for="monitorWebhookUrl">Shared Monitor Webhook URL</label>
+              <input class="input" id="monitorWebhookUrl" readonly placeholder="Click Create Monitor Webhook" />
+              <div class="subtle-text">Use this URL for in-stock monitor pings.</div>
+            </div>
+
+            <div class="field field--full panel-actions">
+              <button class="btn btn-primary" type="button" id="createMonitorWebhookButton"
+                onclick="createMonitorWebhook()">Create / Refresh Shared Monitor Webhook</button>
+            </div>
+
+            <div class="field field--full" id="superAdminMonitorGroups">
+              <label>Super Admin Monitor Routing By Product Group</label>
+              <div class="form-grid">
+                <div class="field"><label for="monitorPokemon">Pokemon</label><input class="input" id="monitorPokemon" placeholder="https://discord.com/api/webhooks/..." /></div>
+                <div class="field"><label for="monitorOnePiece">One Piece</label><input class="input" id="monitorOnePiece" placeholder="https://discord.com/api/webhooks/..." /></div>
+                <div class="field"><label for="monitorSports">Sports Cards</label><input class="input" id="monitorSports" placeholder="https://discord.com/api/webhooks/..." /></div>
+                <div class="field"><label for="monitorOtherTcg">Other TCG</label><input class="input" id="monitorOtherTcg" placeholder="https://discord.com/api/webhooks/..." /></div>
+                <div class="field"><label for="monitorLowkey">Low Key Flips</label><input class="input" id="monitorLowkey" placeholder="https://discord.com/api/webhooks/..." /></div>
+              </div>
+            </div>
+
             <div class="field field--full panel-actions">
               <button class="btn btn-primary" type="button" onclick="saveWebhookSettings()">Save Webhook
                 Settings</button>

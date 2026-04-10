@@ -1964,28 +1964,43 @@ function purchaseCustomCredits() {
 
 async function loadWebhookSettings() {
     const urlInput = document.getElementById('websiteWebhookUrl');
+    const monitorUrlInput = document.getElementById('monitorWebhookUrl');
     const discordInput = document.getElementById('discordRelayWebhookUrl');
     const adminDiscordInput = document.getElementById('adminDiscordRelayWebhookUrl');
     const adminBrandInput = document.getElementById('adminBrandLabel');
     const message = document.getElementById('webhookSettingsMessage');
     const createButton = document.getElementById('createWebhookButton');
+    const createMonitorButton = document.getElementById('createMonitorWebhookButton');
     const superAdminField = document.getElementById('superAdminDiscordField');
+    const superAdminMonitorGroups = document.getElementById('superAdminMonitorGroups');
+
+    const monitorInputs = {
+        pokemon: document.getElementById('monitorPokemon'),
+        onepiece: document.getElementById('monitorOnePiece'),
+        sports: document.getElementById('monitorSports'),
+        othertcg: document.getElementById('monitorOtherTcg'),
+        lowkey: document.getElementById('monitorLowkey')
+    };
 
     if (!urlInput) return;
 
     try {
         const data = await authJSON(API + '/admin/webhooks/settings');
         urlInput.value = data.inbound_webhook_url || '';
+        if (monitorUrlInput) monitorUrlInput.value = data.monitor_webhook_url || '';
         if (discordInput) discordInput.value = data.discord_webhook_url || '';
         if (adminDiscordInput) adminDiscordInput.value = data.admin_discord_webhook_url || '';
         if (adminBrandInput) adminBrandInput.value = data.admin_brand_label || '';
 
-        if (createButton) {
-            createButton.style.display = data.can_create_inbound ? '' : 'none';
-        }
-        if (superAdminField) {
-            superAdminField.style.display = data.is_super_admin ? '' : 'none';
-        }
+        const monitorSettings = data.monitor_groups || {};
+        Object.entries(monitorInputs).forEach(([key, input]) => {
+            if (input) input.value = monitorSettings[key] || '';
+        });
+
+        if (createButton) createButton.style.display = data.can_create_inbound ? '' : 'none';
+        if (createMonitorButton) createMonitorButton.style.display = data.can_create_inbound ? '' : 'none';
+        if (superAdminField) superAdminField.style.display = data.is_super_admin ? '' : 'none';
+        if (superAdminMonitorGroups) superAdminMonitorGroups.style.display = data.is_super_admin ? '' : 'none';
 
         if (message) {
             message.textContent = data.inbound_webhook_url
@@ -2010,6 +2025,19 @@ async function createWebsiteWebhook() {
     }
 }
 
+async function createMonitorWebhook() {
+    const urlInput = document.getElementById('monitorWebhookUrl');
+    const message = document.getElementById('webhookSettingsMessage');
+    try {
+        if (message) message.textContent = 'Creating monitor webhook...';
+        const data = await authJSON(API + '/admin/webhooks/monitor/create', { method: 'POST' });
+        if (urlInput) urlInput.value = data.monitor_webhook_url || '';
+        if (message) message.textContent = 'Monitor webhook created. Paste this URL into your monitor bot.';
+    } catch (err) {
+        if (message) message.textContent = err.message;
+    }
+}
+
 async function saveWebhookSettings() {
     const discordInput = document.getElementById('discordRelayWebhookUrl');
     const adminDiscordInput = document.getElementById('adminDiscordRelayWebhookUrl');
@@ -2022,7 +2050,14 @@ async function saveWebhookSettings() {
             body: JSON.stringify({
                 discord_webhook_url: discordInput ? discordInput.value : '',
                 admin_discord_webhook_url: adminDiscordInput ? adminDiscordInput.value : '',
-                admin_brand_label: adminBrandInput ? adminBrandInput.value : ''
+                admin_brand_label: adminBrandInput ? adminBrandInput.value : '',
+                monitor_groups: {
+                    pokemon: document.getElementById('monitorPokemon')?.value || '',
+                    onepiece: document.getElementById('monitorOnePiece')?.value || '',
+                    sports: document.getElementById('monitorSports')?.value || '',
+                    othertcg: document.getElementById('monitorOtherTcg')?.value || '',
+                    lowkey: document.getElementById('monitorLowkey')?.value || ''
+                }
             })
         });
 
