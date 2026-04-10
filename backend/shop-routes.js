@@ -1771,7 +1771,7 @@ app.post('/public/store/checkout-session', async (req, res) => {
 
     let validatedDiscount = null;
     if (discountCode && typeof validateDiscountCode === 'function') {
-      validatedDiscount = validateDiscountCode({
+      validatedDiscount = await validateDiscountCode({
         code: discountCode,
         cartTotal: subtotalDollars,
         shippingTotal: centsToDollars(shipping.amount_cents),

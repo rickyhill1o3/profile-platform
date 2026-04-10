@@ -55,6 +55,7 @@ app.post("/api/discounts", auth, admin, async (req, res) => {
         type: d.type,
         value: Number(d.value || 0),
         usage_limit: Number(d.usage_limit || 0),
+        one_time_per_user: !!d.one_time_per_user,
         expires_at: d.expires_at || null,
         min_cart_value: Number(d.min_cart_value || 0),
         active: true,
@@ -84,6 +85,60 @@ app.delete("/api/discounts/:code", auth, admin, async (req, res) => {
 });
 
 // APPLY (PUBLIC)
+async function validateDiscountCode({ code, cartTotal = 0, shippingTotal = 0, email = "" }) {
+    const normalizedCode = String(code || "").trim().toUpperCase();
+    if (!normalizedCode) {
+        return { ok: false, error: "Discount code is required" };
+    }
+
+    const d = await getDiscount(normalizedCode);
+
+    if (!d || !d.active) {
+        return { ok: false, error: "Invalid code" };
+    }
+
+    if (d.expires_at && new Date() > new Date(d.expires_at)) {
+        return { ok: false, error: "Expired code" };
+    }
+
+    if (d.usage_limit && d.usage_count >= d.usage_limit) {
+        return { ok: false, error: "Usage limit reached" };
+    }
+
+    const usedBy = Array.isArray(d.used_by) ? d.used_by : [];
+    const normalizedEmail = String(email || "").trim().toLowerCase();
+    if (d.one_time_per_user && normalizedEmail && usedBy.includes(normalizedEmail)) {
+        return { ok: false, error: "Already used" };
+    }
+
+    if (Number(cartTotal || 0) < Number(d.min_cart_value || 0)) {
+        return { ok: false, error: "Minimum not met" };
+    }
+
+    let discountAmount = 0;
+    let shippingDiscount = 0;
+
+    if (d.type === "percent") {
+        discountAmount = Number(cartTotal || 0) * (Number(d.value || 0) / 100);
+    } else if (d.type === "fixed") {
+        discountAmount = Number(d.value || 0);
+    } else if (d.type === "free_shipping") {
+        shippingDiscount = Number(shippingTotal || 0);
+    }
+
+    discountAmount = Math.max(0, Number(discountAmount.toFixed(2)));
+    shippingDiscount = Math.max(0, Number(shippingDiscount.toFixed(2)));
+
+    return {
+        ok: true,
+        code: d.code,
+        discount: d,
+        discountAmount,
+        shippingDiscount,
+        totalDiscount: Number((discountAmount + shippingDiscount).toFixed(2))
+    };
+}
+
 app.post("/api/discounts/apply", async (req, res) => {
     const { code, cartTotal, email, shippingTotal = 0 } = req.body;
 
@@ -97,7 +152,7 @@ app.post("/api/discounts/apply", async (req, res) => {
     if (d.usage_limit && d.usage_count >= d.usage_limit)
         return res.json({ error: "Usage limit reached" });
 
-    if (d.used_by.includes(email))
+    if (d.one_time_per_user && Array.isArray(d.used_by) && d.used_by.includes(email))
         return res.json({ error: "Already used" });
 
     if (cartTotal < d.min_cart_value)
