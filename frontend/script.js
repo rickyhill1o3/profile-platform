@@ -1983,7 +1983,19 @@ async function loadWebhookLogs() {
             container.innerHTML = '<div class="subtle-text">No webhook events yet.</div>';
             return;
         }
-        const rows = items.map((item) => `
+        const rows = items.map((item) => {
+            const parsed = Array.isArray(item.parsed_items) ? item.parsed_items : [];
+            const targets = Array.isArray(item.discord_targets) ? item.discord_targets : [];
+            const details = parsed.length
+              ? `<details><summary>Parsed items (${parsed.length})</summary><pre style="white-space:pre-wrap;max-width:480px;">${escapeHtml(JSON.stringify(parsed, null, 2))}</pre></details>`
+              : '';
+            const targetDetails = targets.length
+              ? `<details><summary>Discord targets (${targets.length})</summary><pre style="white-space:pre-wrap;max-width:420px;">${escapeHtml(JSON.stringify(targets, null, 2))}</pre></details>`
+              : '';
+            const payloadDetails = item.payload
+              ? `<details><summary>Raw payload</summary><pre style="white-space:pre-wrap;max-width:520px;">${escapeHtml(JSON.stringify(item.payload, null, 2))}</pre></details>`
+              : '';
+            return `
             <tr>
               <td>${escapeHtml(new Date(item.created_at).toLocaleString())}</td>
               <td>${escapeHtml(item.type || '-')}</td>
@@ -1992,13 +2004,13 @@ async function loadWebhookLogs() {
               <td>${escapeHtml(item.product_type || '-')}</td>
               <td style="max-width:280px;word-break:break-word;">${escapeHtml(item.product || '-')}</td>
               <td>${escapeHtml(item.sku || '-')}</td>
-              <td style="max-width:260px;word-break:break-word;">${escapeHtml(item.error || '')}</td>
-            </tr>
-        `).join('');
+              <td style="max-width:360px;word-break:break-word;">${escapeHtml(item.error || '')}${details}${targetDetails}${payloadDetails}</td>
+            </tr>`;
+        }).join('');
         container.innerHTML = `
             <div style="overflow:auto;">
               <table class="admin-table">
-                <thead><tr><th>Time</th><th>Type</th><th>Status</th><th>Site</th><th>Product Type</th><th>Product</th><th>SKU</th><th>Error</th></tr></thead>
+                <thead><tr><th>Time</th><th>Type</th><th>Status</th><th>Site</th><th>Product Type</th><th>Product</th><th>SKU</th><th>Error / Debug</th></tr></thead>
                 <tbody>${rows}</tbody>
               </table>
             </div>`;
