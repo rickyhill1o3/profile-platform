@@ -1962,6 +1962,51 @@ function purchaseCustomCredits() {
     startCreditPurchase(input ? input.value : 0);
 }
 
+
+function escapeHtml(value = '') {
+    return String(value)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
+async function loadWebhookLogs() {
+    const container = document.getElementById('webhookLogs');
+    if (!container) return;
+    try {
+        container.textContent = 'Loading webhook logs...';
+        const data = await authJSON(API + '/admin/webhooks/logs');
+        const items = Array.isArray(data.items) ? data.items : [];
+        if (!items.length) {
+            container.innerHTML = '<div class="subtle-text">No webhook events yet.</div>';
+            return;
+        }
+        const rows = items.map((item) => `
+            <tr>
+              <td>${escapeHtml(new Date(item.created_at).toLocaleString())}</td>
+              <td>${escapeHtml(item.type || '-')}</td>
+              <td>${escapeHtml(item.status || '-')}</td>
+              <td>${escapeHtml(item.site || '-')}</td>
+              <td>${escapeHtml(item.product_type || '-')}</td>
+              <td style="max-width:280px;word-break:break-word;">${escapeHtml(item.product || '-')}</td>
+              <td>${escapeHtml(item.sku || '-')}</td>
+              <td style="max-width:260px;word-break:break-word;">${escapeHtml(item.error || '')}</td>
+            </tr>
+        `).join('');
+        container.innerHTML = `
+            <div style="overflow:auto;">
+              <table class="admin-table">
+                <thead><tr><th>Time</th><th>Type</th><th>Status</th><th>Site</th><th>Product Type</th><th>Product</th><th>SKU</th><th>Error</th></tr></thead>
+                <tbody>${rows}</tbody>
+              </table>
+            </div>`;
+    } catch (err) {
+        container.textContent = err.message || 'Failed to load webhook logs.';
+    }
+}
+
 async function loadWebhookSettings() {
     const urlInput = document.getElementById('websiteWebhookUrl');
     const monitorUrlInput = document.getElementById('monitorWebhookUrl');
@@ -2007,6 +2052,7 @@ async function loadWebhookSettings() {
                 ? 'Webhook settings loaded.'
                 : 'No shared website webhook created yet.';
         }
+        await loadWebhookLogs();
     } catch (err) {
         if (message) message.textContent = err.message;
     }

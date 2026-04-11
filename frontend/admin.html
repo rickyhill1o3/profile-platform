@@ -618,6 +618,15 @@
           </div>
 
           <div id="webhookSettingsMessage" class="subtle-text"></div>
+
+          <div class="field field--full panel-actions" style="margin-top:12px;">
+            <button class="btn" type="button" onclick="loadWebhookLogs()">Refresh Webhook Logs</button>
+          </div>
+
+          <section class="admin-pane-card" style="margin-top:16px;">
+            <div class="panel-header"><div><h3>Webhook Event Log</h3><p class="subtle-text">View received checkout and monitor webhooks to catch anything you missed.</p></div></div>
+            <div id="webhookLogs" class="subtle-text">Loading webhook logs...</div>
+          </section>
         </section>
 
       </div>
