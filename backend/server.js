@@ -1400,9 +1400,34 @@ function buildProductUrl(site, sku, fallbackUrl='') {
     return '';
 }
 
-async function sendMonitorDiscordWebhook(webhookUrl, item) {
+function normalizeMonitorGroupConfig(raw) {
+    if (typeof raw === 'string') {
+        return { webhook_url: String(raw || '').trim(), ping_mode: 'none', role_mention: '' };
+    }
+    const value = raw && typeof raw === 'object' ? raw : {};
+    const pingMode = ['none', 'everyone', 'role'].includes(String(value.ping_mode || '').trim().toLowerCase())
+        ? String(value.ping_mode || '').trim().toLowerCase()
+        : 'none';
+    return {
+        webhook_url: String(value.webhook_url || value.url || '').trim(),
+        ping_mode: pingMode,
+        role_mention: String(value.role_mention || '').trim()
+    };
+}
+
+function getMonitorMentionText(routeConfig) {
+    const config = normalizeMonitorGroupConfig(routeConfig);
+    if (config.ping_mode === 'everyone') return '@everyone';
+    if (config.ping_mode === 'role' && config.role_mention) return config.role_mention;
+    return '';
+}
+
+async function sendMonitorDiscordWebhook(routeConfigOrUrl, item) {
+    const routeConfig = normalizeMonitorGroupConfig(routeConfigOrUrl);
+    const webhookUrl = routeConfig.webhook_url || (typeof routeConfigOrUrl === 'string' ? String(routeConfigOrUrl).trim() : '');
     const finalUrl = buildProductUrl(item.site, item.sku, item.url);
     const cleanPrice = cleanMonitorPriceValue(item.price);
+    const mentionText = getMonitorMentionText(routeConfig);
     const fields = [
         { name: 'Site', value: String(item.site || '-'), inline: true },
         { name: 'Category', value: String(item.category || 'lowkey'), inline: true },
@@ -1417,6 +1442,8 @@ async function sendMonitorDiscordWebhook(webhookUrl, item) {
     }
     const body = JSON.stringify({
         username: 'In Stock Monitor',
+        content: mentionText || undefined,
+        allowed_mentions: { parse: ['everyone', 'roles'] },
         embeds: [{
             title: item.title || item.sku || 'In stock item',
             description: 'Item restocked',
@@ -1429,7 +1456,7 @@ async function sendMonitorDiscordWebhook(webhookUrl, item) {
     return enqueueDiscordWebhookJob(webhookUrl, async () => {
         for (let attempt = 1; attempt <= 5; attempt++) {
             const response = await globalThis.fetch(webhookUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body });
-            if (response.ok) return { success: true, attempt };
+            if (response.ok) return { success: true, attempt, ping_mode: routeConfig.ping_mode || 'none', role_mention: routeConfig.role_mention || '' };
             const text = await response.text().catch(() => '');
             if (response.status === 429) {
                 let retryMs = 5000;
@@ -1910,15 +1937,16 @@ app.post(["/webhooks/monitor", "/webhooks/monitor/:token"], async (req, res) => 
         const usedTargets = [];
 
         for (const item of items) {
-            const url = String(groups[item.category] || '').trim();
+            const routeConfig = normalizeMonitorGroupConfig(groups[item.category]);
+            const url = String(routeConfig.webhook_url || '').trim();
             if (!url) {
                 results.push({ sku: item.sku, skipped: 'monitor_webhook_not_configured', category: item.category });
                 continue;
             }
-            usedTargets.push({ category: item.category, webhook_url: url.slice(0, 80) });
+            usedTargets.push({ category: item.category, webhook_url: url.slice(0, 80), ping_mode: routeConfig.ping_mode || 'none', role_mention: routeConfig.role_mention || '' });
             try {
-                const sendResult = await sendMonitorDiscordWebhook(url, item);
-                results.push({ sku: item.sku, category: item.category, success: true, attempt: sendResult?.attempt || 1 });
+                const sendResult = await sendMonitorDiscordWebhook(routeConfig, item);
+                results.push({ sku: item.sku, category: item.category, success: true, attempt: sendResult?.attempt || 1, ping_mode: sendResult?.ping_mode || 'none', role_mention: sendResult?.role_mention || '' });
             } catch (sendErr) {
                 results.push({ sku: item.sku, category: item.category, success: false, error: sendErr.message });
             }

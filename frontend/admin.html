@@ -603,12 +603,27 @@
             <div class="field field--full" id="superAdminMonitorGroups">
               <label>Super Admin Monitor Routing By Product Group</label>
               <div class="form-grid">
-                <div class="field"><label for="monitorPokemon">Pokemon</label><input class="input" id="monitorPokemon" placeholder="https://discord.com/api/webhooks/..." /></div>
-                <div class="field"><label for="monitorOnePiece">One Piece</label><input class="input" id="monitorOnePiece" placeholder="https://discord.com/api/webhooks/..." /></div>
-                <div class="field"><label for="monitorSports">Sports Cards</label><input class="input" id="monitorSports" placeholder="https://discord.com/api/webhooks/..." /></div>
-                <div class="field"><label for="monitorOtherTcg">Other TCG</label><input class="input" id="monitorOtherTcg" placeholder="https://discord.com/api/webhooks/..." /></div>
-                <div class="field"><label for="monitorLowkey">Low Key Flips</label><input class="input" id="monitorLowkey" placeholder="https://discord.com/api/webhooks/..." /></div>
+                <div class="field field--full"><label for="monitorPokemon">Pokemon Webhook URL</label><input class="input" id="monitorPokemon" placeholder="https://discord.com/api/webhooks/..." /></div>
+                <div class="field"><label for="monitorPokemonPingMode">Pokemon Ping Mode</label><select class="input" id="monitorPokemonPingMode"><option value="none">None</option><option value="everyone">@everyone</option><option value="role">Role</option></select></div>
+                <div class="field"><label for="monitorPokemonRole">Pokemon Role Mention</label><input class="input" id="monitorPokemonRole" placeholder="<@&ROLE_ID>" /></div>
+
+                <div class="field field--full"><label for="monitorOnePiece">One Piece Webhook URL</label><input class="input" id="monitorOnePiece" placeholder="https://discord.com/api/webhooks/..." /></div>
+                <div class="field"><label for="monitorOnePiecePingMode">One Piece Ping Mode</label><select class="input" id="monitorOnePiecePingMode"><option value="none">None</option><option value="everyone">@everyone</option><option value="role">Role</option></select></div>
+                <div class="field"><label for="monitorOnePieceRole">One Piece Role Mention</label><input class="input" id="monitorOnePieceRole" placeholder="<@&ROLE_ID>" /></div>
+
+                <div class="field field--full"><label for="monitorSports">Sports Cards Webhook URL</label><input class="input" id="monitorSports" placeholder="https://discord.com/api/webhooks/..." /></div>
+                <div class="field"><label for="monitorSportsPingMode">Sports Cards Ping Mode</label><select class="input" id="monitorSportsPingMode"><option value="none">None</option><option value="everyone">@everyone</option><option value="role">Role</option></select></div>
+                <div class="field"><label for="monitorSportsRole">Sports Cards Role Mention</label><input class="input" id="monitorSportsRole" placeholder="<@&ROLE_ID>" /></div>
+
+                <div class="field field--full"><label for="monitorOtherTcg">Other TCG Webhook URL</label><input class="input" id="monitorOtherTcg" placeholder="https://discord.com/api/webhooks/..." /></div>
+                <div class="field"><label for="monitorOtherTcgPingMode">Other TCG Ping Mode</label><select class="input" id="monitorOtherTcgPingMode"><option value="none">None</option><option value="everyone">@everyone</option><option value="role">Role</option></select></div>
+                <div class="field"><label for="monitorOtherTcgRole">Other TCG Role Mention</label><input class="input" id="monitorOtherTcgRole" placeholder="<@&ROLE_ID>" /></div>
+
+                <div class="field field--full"><label for="monitorLowkey">Low Key Flips Webhook URL</label><input class="input" id="monitorLowkey" placeholder="https://discord.com/api/webhooks/..." /></div>
+                <div class="field"><label for="monitorLowkeyPingMode">Low Key Flips Ping Mode</label><select class="input" id="monitorLowkeyPingMode"><option value="none">None</option><option value="everyone">@everyone</option><option value="role">Role</option></select></div>
+                <div class="field"><label for="monitorLowkeyRole">Low Key Flips Role Mention</label><input class="input" id="monitorLowkeyRole" placeholder="<@&ROLE_ID>" /></div>
               </div>
+              <div class="subtle-text">Use Role mode with a Discord role mention like &lt;@&amp;123456789012345678&gt;.</div>
             </div>
 
             <div class="field field--full panel-actions">

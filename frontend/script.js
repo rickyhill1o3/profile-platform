@@ -2032,11 +2032,31 @@ async function loadWebhookSettings() {
     const superAdminMonitorGroups = document.getElementById('superAdminMonitorGroups');
 
     const monitorInputs = {
-        pokemon: document.getElementById('monitorPokemon'),
-        onepiece: document.getElementById('monitorOnePiece'),
-        sports: document.getElementById('monitorSports'),
-        othertcg: document.getElementById('monitorOtherTcg'),
-        lowkey: document.getElementById('monitorLowkey')
+        pokemon: {
+            webhook_url: document.getElementById('monitorPokemon'),
+            ping_mode: document.getElementById('monitorPokemonPingMode'),
+            role_mention: document.getElementById('monitorPokemonRole')
+        },
+        onepiece: {
+            webhook_url: document.getElementById('monitorOnePiece'),
+            ping_mode: document.getElementById('monitorOnePiecePingMode'),
+            role_mention: document.getElementById('monitorOnePieceRole')
+        },
+        sports: {
+            webhook_url: document.getElementById('monitorSports'),
+            ping_mode: document.getElementById('monitorSportsPingMode'),
+            role_mention: document.getElementById('monitorSportsRole')
+        },
+        othertcg: {
+            webhook_url: document.getElementById('monitorOtherTcg'),
+            ping_mode: document.getElementById('monitorOtherTcgPingMode'),
+            role_mention: document.getElementById('monitorOtherTcgRole')
+        },
+        lowkey: {
+            webhook_url: document.getElementById('monitorLowkey'),
+            ping_mode: document.getElementById('monitorLowkeyPingMode'),
+            role_mention: document.getElementById('monitorLowkeyRole')
+        }
     };
 
     if (!urlInput) return;
@@ -2050,8 +2070,12 @@ async function loadWebhookSettings() {
         if (adminBrandInput) adminBrandInput.value = data.admin_brand_label || '';
 
         const monitorSettings = data.monitor_groups || {};
-        Object.entries(monitorInputs).forEach(([key, input]) => {
-            if (input) input.value = monitorSettings[key] || '';
+        Object.entries(monitorInputs).forEach(([key, inputs]) => {
+            const raw = monitorSettings[key] || '';
+            const cfg = typeof raw === 'string' ? { webhook_url: raw, ping_mode: 'none', role_mention: '' } : (raw || {});
+            if (inputs.webhook_url) inputs.webhook_url.value = cfg.webhook_url || '';
+            if (inputs.ping_mode) inputs.ping_mode.value = cfg.ping_mode || 'none';
+            if (inputs.role_mention) inputs.role_mention.value = cfg.role_mention || '';
         });
 
         if (createButton) createButton.style.display = data.can_create_inbound ? '' : 'none';
@@ -2110,11 +2134,31 @@ async function saveWebhookSettings() {
                 admin_discord_webhook_url: adminDiscordInput ? adminDiscordInput.value : '',
                 admin_brand_label: adminBrandInput ? adminBrandInput.value : '',
                 monitor_groups: {
-                    pokemon: document.getElementById('monitorPokemon')?.value || '',
-                    onepiece: document.getElementById('monitorOnePiece')?.value || '',
-                    sports: document.getElementById('monitorSports')?.value || '',
-                    othertcg: document.getElementById('monitorOtherTcg')?.value || '',
-                    lowkey: document.getElementById('monitorLowkey')?.value || ''
+                    pokemon: {
+                        webhook_url: document.getElementById('monitorPokemon')?.value || '',
+                        ping_mode: document.getElementById('monitorPokemonPingMode')?.value || 'none',
+                        role_mention: document.getElementById('monitorPokemonRole')?.value || ''
+                    },
+                    onepiece: {
+                        webhook_url: document.getElementById('monitorOnePiece')?.value || '',
+                        ping_mode: document.getElementById('monitorOnePiecePingMode')?.value || 'none',
+                        role_mention: document.getElementById('monitorOnePieceRole')?.value || ''
+                    },
+                    sports: {
+                        webhook_url: document.getElementById('monitorSports')?.value || '',
+                        ping_mode: document.getElementById('monitorSportsPingMode')?.value || 'none',
+                        role_mention: document.getElementById('monitorSportsRole')?.value || ''
+                    },
+                    othertcg: {
+                        webhook_url: document.getElementById('monitorOtherTcg')?.value || '',
+                        ping_mode: document.getElementById('monitorOtherTcgPingMode')?.value || 'none',
+                        role_mention: document.getElementById('monitorOtherTcgRole')?.value || ''
+                    },
+                    lowkey: {
+                        webhook_url: document.getElementById('monitorLowkey')?.value || '',
+                        ping_mode: document.getElementById('monitorLowkeyPingMode')?.value || 'none',
+                        role_mention: document.getElementById('monitorLowkeyRole')?.value || ''
+                    }
                 }
             })
         });
