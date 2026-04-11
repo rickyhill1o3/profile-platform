@@ -9,6 +9,7 @@ const path = require("path");
 const nodemailer = require("nodemailer");
 const bodyParser = require("body-parser");
 const Stripe = require("stripe");
+const cheerio = require("cheerio");
 const registerProductCatalogRoutes = require("./product-catalog-routes");
 const registerShopRoutes = require("./shop-routes");
 
@@ -1225,13 +1226,103 @@ function extractEmbedFields(payload = {}) {
     return { embed, fields: map };
 }
 
+function splitMonitorPipeValues(value = '') {
+    return String(value || '')
+        .split(/\s*\|\s*/)
+        .map((v) => String(v || '').trim())
+        .filter(Boolean);
+}
+
+function cleanMonitorPriceValue(value) {
+    if (value == null) return '';
+    const raw = String(value).trim();
+    if (!raw) return '';
+    const money = raw.match(/\$?\d+(?:\.\d{1,2})?/);
+    if (!money) return raw.replace(/^\$+/, '');
+    return money[0].replace(/^\$+/, '');
+}
+
+function normalizeMonitorSite(value = '') {
+    const raw = String(value || '').trim().toLowerCase();
+    if (raw.startsWith('target')) return 'target';
+    if (raw.startsWith('walmart')) return 'walmart';
+    return raw;
+}
+
+async function fetchTargetItemDetailsBySku(sku) {
+    const clean = String(sku || '').trim();
+    if (!clean) return null;
+    const url = `https://www.target.com/p/-/A-${encodeURIComponent(clean)}`;
+    const response = await globalThis.fetch(url, {
+        headers: {
+            'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
+            'accept-language': 'en-US,en;q=0.9'
+        }
+    });
+    if (!response.ok) return null;
+    const html = await response.text();
+    if (!html || html.length < 1000) return null;
+    const $ = cheerio.load(html);
+    const title = $('meta[property="og:title"]').attr('content') || $('title').text().trim() || '';
+    const image = $('meta[property="og:image"]').attr('content') || $('img[src*="target.scene7"]').first().attr('src') || '';
+    const priceText = $('meta[property="product:price:amount"]').attr('content') || $('[data-test="product-price"]').first().text().trim() || $('[data-test="current-price"]').first().text().trim() || '';
+    const price = cleanMonitorPriceValue(priceText || '');
+    let cartLimit = null;
+    const limitPatterns = [
+        /maxOrderQuantity"?\s*[:=]\s*(\d{1,3})/i,
+        /order[_ ]?limit"?\s*[:=]\s*(\d{1,3})/i,
+        /max[_ ]?quantity"?\s*[:=]\s*(\d{1,3})/i,
+        /limit\s+(?:of\s+)?(\d{1,3})\s+(?:per|qty|quantity)/i
+    ];
+    for (const pattern of limitPatterns) {
+        const m = html.match(pattern);
+        if (m) {
+            cartLimit = Number(m[1]);
+            break;
+        }
+    }
+    return {
+        title: String(title || '').replace(/\s*:[^:]*Target\s*$/i, '').trim(),
+        image: String(image || '').trim(),
+        price,
+        url,
+        cartLimit
+    };
+}
+
+async function enrichMonitorItems(items = []) {
+    const enriched = [];
+    for (const item of items) {
+        const next = { ...item };
+        const site = String(next.site || '').toLowerCase();
+        const needsLookup = site.includes('target') && (!!next.sku) && (!next.image || !next.url || !next.title || !cleanMonitorPriceValue(next.price));
+        if (needsLookup) {
+            try {
+                const details = await fetchTargetItemDetailsBySku(next.sku);
+                if (details) {
+                    next.title = next.title || details.title || next.title;
+                    next.image = next.image || details.image || next.image;
+                    next.url = next.url || details.url || next.url;
+                    next.price = cleanMonitorPriceValue(next.price) || details.price || next.price;
+                    next.cartLimit = next.cartLimit || details.cartLimit || null;
+                }
+            } catch (err) {
+                console.error('Target monitor enrichment failed:', err.message || err);
+            }
+        }
+        next.price = cleanMonitorPriceValue(next.price);
+        enriched.push(next);
+    }
+    return enriched;
+}
+
 function extractMonitorItems(payload = {}) {
     const items = [];
     const { embed, fields } = extractEmbedFields(payload);
     const baseSite = String(payload.site || payload.source || fields['site'] || '').trim().toLowerCase();
     const explicitType = String(payload.product_type || payload.category || fields['category'] || '').trim();
     const baseImage = String(payload.image_url || payload.image || embed.thumbnail?.url || embed.image?.url || '').trim();
-    const baseUrl = String(payload.product_url || payload.url || payload.link || fields['product link'] || '').trim();
+    const baseUrl = String(payload.product_url || payload.url || payload.link || fields['product link'] || fields['product'] || embed.url || '').trim();
     const basePrice = payload.price ?? payload.Price ?? fields['price'] ?? null;
 
     const arr = Array.isArray(payload.items) ? payload.items : [];
@@ -1244,47 +1335,58 @@ function extractMonitorItems(payload = {}) {
             image: String(row.image || row.image_url || row.thumbnail || '').trim(),
             site: String(row.site || baseSite).trim().toLowerCase(),
             stock: row.stock ?? row.stock_count ?? row.quantity ?? null,
+            cartLimit: row.cart_limit ?? row.max_order_quantity ?? row.cart_limit_qty ?? null,
             productType: String(row.product_type || explicitType || '').trim()
         });
     }
 
     const skuFromField = String(fields['instock skus'] || fields['instock sku'] || payload.instock_skus || payload.skus || '').trim();
-    const skuList = skuFromField.split(/[|,\n]/).map((v) => v.trim()).filter(Boolean);
-
-    const titleSkuField = String(fields['title/sku'] || fields['title sku'] || '').trim();
-    const titleParts = titleSkuField.split(/\s*\/\s*sku\s*[:\-]?\s*/i);
-    const titleText = String(payload.title || payload.product_name || titleParts[0] || '').trim();
-    const possibleSku = String(payload.sku || payload.SKU || (titleParts[1] || '')).trim();
+    const skuList = splitMonitorPipeValues(skuFromField);
+    const titleSkuField = String(fields['title/sku'] || fields['title sku'] || payload.title || payload.product_name || '').trim();
+    const titleList = splitMonitorPipeValues(titleSkuField);
+    const priceList = splitMonitorPipeValues(basePrice || '');
 
     if (skuList.length) {
-        for (const sku of skuList) {
+        for (let i = 0; i < skuList.length; i += 1) {
+            const sku = skuList[i];
             items.push({
                 sku,
-                title: titleText,
-                price: basePrice,
+                title: titleList[i] || titleList[0] || '',
+                price: priceList[i] || priceList[0] || '',
                 url: baseUrl,
                 image: baseImage,
                 site: baseSite,
                 stock: payload.stock_count ?? fields['stock'] ?? null,
+                cartLimit: payload.cart_limit ?? fields['cart limit'] ?? null,
                 productType: explicitType
             });
         }
     }
 
     if (!items.length) {
+        const possibleSku = String(payload.sku || payload.SKU || '').trim();
         items.push({
             sku: possibleSku,
-            title: titleText,
-            price: basePrice,
+            title: titleList[0] || '',
+            price: priceList[0] || cleanMonitorPriceValue(basePrice || ''),
             url: baseUrl,
             image: baseImage,
             site: baseSite,
             stock: payload.stock_count ?? fields['stock'] ?? null,
+            cartLimit: payload.cart_limit ?? fields['cart limit'] ?? null,
             productType: explicitType
         });
     }
 
-    return items.filter((x) => x.sku || x.title || x.url);
+    const deduped = [];
+    const seen = new Set();
+    for (const item of items.filter((x) => x.sku || x.title || x.url)) {
+        const key = `${String(item.sku || '').trim()}::${String(item.title || '').trim()}::${String(item.url || '').trim()}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        deduped.push(item);
+    }
+    return deduped;
 }
 
 function buildProductUrl(site, sku, fallbackUrl='') {
@@ -1300,20 +1402,26 @@ function buildProductUrl(site, sku, fallbackUrl='') {
 
 async function sendMonitorDiscordWebhook(webhookUrl, item) {
     const finalUrl = buildProductUrl(item.site, item.sku, item.url);
+    const cleanPrice = cleanMonitorPriceValue(item.price);
+    const fields = [
+        { name: 'Site', value: String(item.site || '-'), inline: true },
+        { name: 'Category', value: String(item.category || 'lowkey'), inline: true },
+        { name: 'SKU', value: String(item.sku || '-'), inline: true },
+        { name: 'Price', value: cleanPrice ? `$${cleanPrice}` : '-', inline: true }
+    ];
+    if (item.cartLimit != null && String(item.cartLimit).trim() !== '') {
+        fields.push({ name: 'Cart Limit', value: String(item.cartLimit), inline: true });
+    }
+    if (finalUrl) {
+        fields.push({ name: 'Product Link', value: finalUrl, inline: false });
+    }
     const body = JSON.stringify({
         username: 'In Stock Monitor',
         embeds: [{
             title: item.title || item.sku || 'In stock item',
             description: 'Item restocked',
             url: finalUrl || undefined,
-            fields: [
-                { name: 'Site', value: String(item.site || '-'), inline: true },
-                { name: 'Category', value: String(item.category || 'lowkey'), inline: true },
-                { name: 'SKU', value: String(item.sku || '-'), inline: true },
-                { name: 'Price', value: item.price != null ? `$${item.price}` : '-', inline: true },
-                { name: 'Stock', value: item.stock != null ? String(item.stock) : '-', inline: true },
-                { name: 'Product Link', value: finalUrl || '-', inline: false }
-            ],
+            fields,
             thumbnail: item.image ? { url: item.image } : undefined,
             timestamp: new Date().toISOString()
         }]
@@ -1764,11 +1872,13 @@ app.post(["/webhooks/monitor", "/webhooks/monitor/:token"], async (req, res) => 
         if (expected && token !== expected) return res.status(401).json({ error: 'Invalid monitor webhook url' });
 
         const payload = req.body || {};
-        const items = extractMonitorItems(payload).map((item) => ({
+        const rawItems = extractMonitorItems(payload).map((item) => ({
             ...item,
             category: classifyMonitorType({ title: item.title, productType: item.productType, url: item.url }),
             url: buildProductUrl(item.site, item.sku, item.url)
         }));
+
+        const items = await enrichMonitorItems(rawItems);
 
         const first = items[0] || {};
         const site = String(first.site || payload.site || payload.source || '').trim().toLowerCase();
@@ -1787,6 +1897,7 @@ app.post(["/webhooks/monitor", "/webhooks/monitor/:token"], async (req, res) => 
                 site: item.site || '',
                 price: item.price ?? null,
                 stock: item.stock ?? null,
+                cartLimit: item.cartLimit ?? null,
                 url: item.url || '',
                 image: item.image || '',
                 category: item.category || ''
@@ -1830,6 +1941,7 @@ app.post(["/webhooks/monitor", "/webhooks/monitor/:token"], async (req, res) => 
                 site: item.site || '',
                 price: item.price ?? null,
                 stock: item.stock ?? null,
+                cartLimit: item.cartLimit ?? null,
                 url: item.url || '',
                 image: item.image || '',
                 category: item.category || ''
