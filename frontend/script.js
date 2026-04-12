@@ -1801,6 +1801,9 @@ async function initCatalogTools() {
     const filterButton = document.getElementById('catalogFilterButton');
     const controls = document.getElementById('superAdminCatalogControls');
     const notice = document.getElementById('superAdminCatalogNotice');
+    const bulkImportForm = document.getElementById('catalogBulkImportForm');
+    const exportForm = document.getElementById('catalogExportForm');
+    const exportResults = document.getElementById('catalogExportResults');
     const superAdmin = canManageCatalog();
     if (controls) controls.style.display = superAdmin ? 'block' : 'none';
     if (notice) notice.style.display = superAdmin ? 'none' : 'block';
@@ -1852,6 +1855,61 @@ async function initCatalogTools() {
             }
         });
     }
+
+    if (bulkImportForm && superAdmin) {
+        bulkImportForm.addEventListener('submit', async (event) => {
+            event.preventDefault();
+            message.textContent = 'Importing product list...';
+            try {
+                const file = document.getElementById('catalogBulkImportFile').files[0];
+                if (!file) throw new Error('Choose a JSON file to import.');
+                const text = await file.text();
+                const parsed = JSON.parse(text);
+                const products = Array.isArray(parsed) ? parsed : (Array.isArray(parsed.products) ? parsed.products : []);
+                if (!products.length) throw new Error('No products were found in the imported file.');
+                const data = await authJSON(API + '/admin/catalog-products/import-list', {
+                    method: 'POST',
+                    body: JSON.stringify({
+                        site: document.getElementById('catalogBulkImportSite').value,
+                        products
+                    })
+                });
+                message.textContent = data.message || `Imported ${data.imported || 0} products.`;
+                bulkImportForm.reset();
+                await loadCatalogProducts();
+            } catch (err) {
+                message.textContent = err.message;
+            }
+        });
+    }
+    if (exportForm) {
+        exportForm.addEventListener('submit', async (event) => {
+            event.preventDefault();
+            if (exportResults) exportResults.innerHTML = '<div class="subtle-text">Building export batches...</div>';
+            try {
+                const site = document.getElementById('catalogExportSite').value;
+                const batchSize = document.getElementById('catalogExportBatchSize').value || '29';
+                const qs = new URLSearchParams({ site, batchSize });
+                const data = await authJSON(API + '/admin/catalog-products/export-lines?' + qs.toString());
+                const batches = Array.isArray(data.batches) ? data.batches : [];
+                if (!batches.length) {
+                    if (exportResults) exportResults.innerHTML = '<div class="subtle-text">No products found to export.</div>';
+                    return;
+                }
+                if (exportResults) {
+                    exportResults.innerHTML = batches.map((batch) => `
+                        <section class="panel panel--inner">
+                          <div class="panel-header"><div><h3>${escapeHTML(site.toUpperCase())} Batch ${batch.index}</h3><p class="subtle-text">${batch.count} products</p></div></div>
+                          <textarea class="input" rows="${Math.min(14, Math.max(6, batch.count + 1))}" readonly>${escapeHTML(batch.text)}</textarea>
+                        </section>
+                    `).join('');
+                }
+            } catch (err) {
+                if (exportResults) exportResults.innerHTML = `<div class="subtle-text">${escapeHTML(err.message)}</div>`;
+            }
+        });
+    }
+
     if (syncButton && superAdmin) {
         syncButton.addEventListener('click', async () => {
             message.textContent = 'Syncing target pricing...';

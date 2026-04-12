@@ -212,6 +212,30 @@
                 <div class="field field--full panel-actions"><button class="btn btn-primary" type="submit">Save Manual
                     Product</button></div>
               </form>
+
+              <div class="banner banner-soft"><strong>Bulk import lists</strong>
+                <p class="subtle-text">Import Amazon or Target JSON exports into the live catalog. Target items will try to pull live retail price before saving.</p>
+              </div>
+              <form id="catalogBulkImportForm" class="form-grid">
+                <div class="field"><label for="catalogBulkImportSite">Import Site</label><select class="input" id="catalogBulkImportSite">
+                    <option value="amazon">Amazon</option>
+                    <option value="target">Target</option>
+                  </select></div>
+                <div class="field"><label for="catalogBulkImportFile">JSON File</label><input class="input" id="catalogBulkImportFile" type="file" accept="application/json,.json" /></div>
+                <div class="field field--full panel-actions"><button class="btn btn-primary" type="submit">Import Product List</button></div>
+              </form>
+              <div class="banner banner-soft"><strong>Export for Stellar</strong>
+                <p class="subtle-text">Export Amazon or Target products in batches of 29 using <code>sku;title;price</code>.</p>
+              </div>
+              <form id="catalogExportForm" class="form-grid">
+                <div class="field"><label for="catalogExportSite">Export Site</label><select class="input" id="catalogExportSite">
+                    <option value="amazon">Amazon</option>
+                    <option value="target">Target</option>
+                  </select></div>
+                <div class="field"><label for="catalogExportBatchSize">Batch Size</label><input class="input" id="catalogExportBatchSize" type="number" min="1" max="200" step="1" value="29" /></div>
+                <div class="field field--full panel-actions"><button class="btn" type="submit">Build Export Batches</button></div>
+              </form>
+              <div id="catalogExportResults" class="stack-list"></div>
             </div>
             <div id="superAdminCatalogNotice" class="banner banner-soft" style="display:none;">You can review the
               catalog and requests, but only the super admin can change live catalog entries.</div>
