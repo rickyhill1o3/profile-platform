@@ -32,6 +32,29 @@ function buildBoxLunchUrl({ title = "", image = "", url = "" }) {
 }
 
 
+
+function slugifyProductTitle(title = "") {
+  return String(title)
+    .trim()
+    .toLowerCase()
+    .replace(/&/g, "and")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+function buildHotTopicUrl({ title = "", image = "", url = "" }) {
+  if (url) return url;
+  const productId = extractBoxLunchProductIdFromImage(image);
+  if (productId && title) {
+    const slug = slugifyProductTitle(title);
+    return `https://www.hottopic.com/product/${slug}/${productId}.html`;
+  }
+  if (title) {
+    return `https://www.hottopic.com/search?q=${encodeURIComponent(title)}`;
+  }
+  return "";
+}
+
 const express = require("express");
 const cors = require("cors");
 const bcrypt = require("bcryptjs");
@@ -1501,6 +1524,9 @@ function buildProductUrl(site, sku, fallbackUrl='', title = '', image = '') {
     const clean = String(sku||'').trim();
     if (s.includes('boxlunch')) {
         return buildBoxLunchUrl({ title, image, url: fallbackUrl });
+    }
+    if (s.includes('hottopic') || s.includes('hot topic')) {
+        return buildHotTopicUrl({ title, image, url: fallbackUrl });
     }
     if (!clean) return '';
     if (s.includes('target')) return `https://www.target.com/p/-/A-${clean}`;
