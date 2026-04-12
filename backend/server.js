@@ -1697,12 +1697,15 @@ async function sendMonitorDiscordWebhook(routeConfigOrUrl, item) {
     }
     const atcLinks = Array.isArray(item.atcLinks) ? item.atcLinks.filter((row) => row && row.url) : [];
     if (atcLinks.length) {
-        const atcValue = atcLinks.slice(0, 6).map((row) => {
+        const formattedAtcLinks = atcLinks.slice(0, 6).map((row) => {
             const qtyMatch = String(row.label || '').match(/(\d+)x/i);
             const label = qtyMatch ? `ATC ${qtyMatch[1]}x` : String(row.label || 'ATC').replace(/^ATC Link\s*/i, 'ATC ');
             return `[${label}](${row.url})`;
-        }).join(' • ');
-        fields.push({ name: 'ATC', value: atcValue, inline: false });
+        });
+        for (let i = 0; i < formattedAtcLinks.length; i += 2) {
+            const chunk = formattedAtcLinks.slice(i, i + 2).join(' • ');
+            fields.push({ name: i === 0 ? 'ATC Links' : 'ATC More', value: chunk, inline: false });
+        }
     }
     const body = JSON.stringify({
         username: 'In Stock Monitor',
