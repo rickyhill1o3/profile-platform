@@ -732,9 +732,19 @@ function normalizeFieldLabel(value = "") {
 
 function cleanFieldValue(value = "") {
     return String(value || "")
+        .replace(/\|\|/g, " ")
+        .replace(/\*\*/g, " ")
+        .replace(/__+/g, " ")
+        .replace(/~~/g, " ")
         .replace(/<[^>]+>/g, " ")
+        .replace(/\[(.*?)\]\((.*?)\)/g, "$1")
         .replace(/\s+/g, " ")
         .trim();
+}
+
+function extractMarkdownLink(value = "") {
+    const match = String(value || '').match(/\[([^\]]+)\]\(([^)]+)\)/);
+    return match ? { text: cleanFieldValue(match[1] || ''), url: String(match[2] || '').trim() } : null;
 }
 
 function extractEmail(value = "") {
@@ -812,23 +822,20 @@ function normalizeIncomingOrderPayload(payload = {}) {
     const { embed, fields } = buildFieldMapFromEmbeds(payload);
     const source = inferSourceFromPayload(payload, embed, fields);
     const site = inferSiteFromPayload(payload, embed, fields);
-    const productName = cleanFieldValue(
-        payload.product_name ||
-        payload.product?.name ||
-        fields['product'] ||
-        fields['product name'] ||
-        embed.description || ''
-    );
-    const orderNumber = cleanFieldValue(payload.order_number || fields['order id'] || fields['order number'] || '');
+    const productFieldRaw = payload.product_name || payload.product?.name || fields['product'] || fields['product name'] || embed.description || '';
+    const productLink = extractMarkdownLink(payload.product_url || payload.url || fields['product'] || fields['share link'] || fields['input'] || '');
+    const orderLink = extractMarkdownLink(fields['order id'] || fields['order number'] || payload.order_number || '');
+    const productName = cleanFieldValue(productLink?.text || productFieldRaw || '');
+    const orderNumber = cleanFieldValue(orderLink?.text || payload.order_number || fields['order id'] || fields['order number'] || '').replace(/^#/, '');
     const accountEmail = extractEmail(payload.user_email || payload.email || fields['account'] || fields['email'] || '');
     const profileName = cleanFieldValue(payload.profile_name || fields['profile'] || '');
-    const sku = cleanFieldValue(payload.sku || payload.product_sku || fields['sku'] || '');
+    const sku = cleanFieldValue(payload.sku || payload.product_sku || fields['sku'] || '') || cleanFieldValue(productLink?.url || '').match(/(?:A-|ip\/seort\/|ip\/)(\d{6,})/)?.[1] || '';
     const quantityRaw = payload.quantity ?? fields['quantity'];
     const quantity = Number.isFinite(Number(quantityRaw)) ? Math.max(1, Math.round(Number(quantityRaw))) : 1;
     const priceRaw = payload.price ?? fields['price'] ?? fields['product price'];
     const priceMatch = String(priceRaw || '').replace(/[^0-9.]/g, '');
     const price = priceMatch ? Number(priceMatch) : null;
-    const productUrl = cleanFieldValue(payload.product_url || payload.url || fields['input'] || fields['share link'] || '');
+    const productUrl = String(productLink?.url || payload.product_url || payload.url || fields['input'] || fields['share link'] || '').trim();
     const imageUrl = payload.image_url || payload.product?.image_url || embed.thumbnail?.url || embed.image?.url || '';
     const timestamp = cleanFieldValue(payload.timestamp || embed.timestamp || embed.footer?.text || '');
     const mode = cleanFieldValue(payload.mode || fields['mode'] || '');
@@ -891,12 +898,13 @@ async function findUserForWebhook(payload) {
         }
     }
 
-    // 2. ACCOUNT EMAIL SECOND
+    // 2. ACCOUNT / PROFILE EMAIL SECOND
     if (normalized.account_email) {
+        const normalizedEmail = String(normalized.account_email).trim().toLowerCase();
         const { data: accounts, error: accountError } = await supabase
             .from('accounts')
             .select('profile_id, login_email, created_at')
-            .ilike('login_email', String(normalized.account_email).trim())
+            .ilike('login_email', normalizedEmail)
             .order('created_at', { ascending: false });
 
         if (accountError) throw new Error(accountError.message);
@@ -918,6 +926,17 @@ async function findUserForWebhook(payload) {
                     if (user) return user;
                 }
             }
+        }
+
+        const { data: profileEmailMatches, error: profileEmailError } = await supabase
+            .from('profiles')
+            .select('user_id, created_at')
+            .ilike('email', normalizedEmail)
+            .order('created_at', { ascending: false });
+        if (profileEmailError && !String(profileEmailError.message || '').includes('column')) throw new Error(profileEmailError.message);
+        if (profileEmailMatches?.length && profileEmailMatches[0]?.user_id) {
+            const user = await getUserById(profileEmailMatches[0].user_id);
+            if (user) return user;
         }
     }
 
@@ -995,6 +1014,21 @@ async function setAdminWebhookSettings(userId, value) {
     return await setAppSetting(getAdminWebhookSettingKey(userId), value || {});
 }
 
+
+async function getAllAdminMonitorGroupConfigs() {
+    const { data: admins, error } = await supabase
+        .from('users')
+        .select('id, role, email')
+        .in('role', ['admin', 'super_admin']);
+    if (error) throw new Error(error.message);
+    const rows = [];
+    for (const adminUser of admins || []) {
+        const settings = await getAdminWebhookSettings(adminUser.id).catch(() => ({}));
+        const monitorGroups = settings?.monitor_groups || {};
+        rows.push({ user_id: adminUser.id, role: adminUser.role, email: adminUser.email, monitor_groups: monitorGroups });
+    }
+    return rows;
+}
 async function getUserSettings(userId) {
     if (!userId) return {};
     return await getAppSetting(getUserSettingsKey(userId), {});
@@ -2001,23 +2035,36 @@ app.post(["/webhooks/monitor", "/webhooks/monitor/:token"], async (req, res) => 
         })).id;
 
         const globalSettings = await getAppSetting('webhook_settings', {});
-        const groups = globalSettings?.monitor_groups || {};
+        const globalGroups = globalSettings?.monitor_groups || {};
+        const adminMonitorConfigs = await getAllAdminMonitorGroupConfigs();
         const results = [];
         const usedTargets = [];
 
         for (const item of items) {
-            const routeConfig = normalizeMonitorGroupConfig(groups[item.category]);
-            const url = String(routeConfig.webhook_url || '').trim();
-            if (!url) {
+            const targets = [];
+            const superRoute = normalizeMonitorGroupConfig(globalGroups[item.category]);
+            if (String(superRoute.webhook_url || '').trim()) {
+                targets.push({ scope: 'super_admin', user_id: null, route: superRoute });
+            }
+            for (const adminConfig of adminMonitorConfigs) {
+                const route = normalizeMonitorGroupConfig(adminConfig.monitor_groups?.[item.category]);
+                if (String(route.webhook_url || '').trim()) {
+                    targets.push({ scope: adminConfig.role === 'super_admin' ? 'super_admin_user' : 'admin', user_id: adminConfig.user_id, route });
+                }
+            }
+            if (!targets.length) {
                 results.push({ sku: item.sku, skipped: 'monitor_webhook_not_configured', category: item.category });
                 continue;
             }
-            usedTargets.push({ category: item.category, webhook_url: url.slice(0, 80), ping_mode: routeConfig.ping_mode || 'none', role_mention: routeConfig.role_mention || '' });
-            try {
-                const sendResult = await sendMonitorDiscordWebhook(routeConfig, item);
-                results.push({ sku: item.sku, category: item.category, success: true, attempt: sendResult?.attempt || 1, ping_mode: sendResult?.ping_mode || 'none', role_mention: sendResult?.role_mention || '' });
-            } catch (sendErr) {
-                results.push({ sku: item.sku, category: item.category, success: false, error: sendErr.message });
+            for (const target of targets) {
+                const url = String(target.route.webhook_url || '').trim();
+                usedTargets.push({ category: item.category, scope: target.scope, user_id: target.user_id, webhook_url: url.slice(0, 80), ping_mode: target.route.ping_mode || 'none', role_mention: target.route.role_mention || '' });
+                try {
+                    const sendResult = await sendMonitorDiscordWebhook(target.route, item);
+                    results.push({ sku: item.sku, category: item.category, scope: target.scope, user_id: target.user_id, success: true, attempt: sendResult?.attempt || 1, ping_mode: sendResult?.ping_mode || 'none', role_mention: sendResult?.role_mention || '' });
+                } catch (sendErr) {
+                    results.push({ sku: item.sku, category: item.category, scope: target.scope, user_id: target.user_id, success: false, error: sendErr.message });
+                }
             }
         }
 
@@ -2312,6 +2359,8 @@ app.get('/admin/webhooks/settings', auth, admin, async (req, res) => {
             admin_discord_webhook_url: String(adminSettings?.discord_webhook_url || ''),
             admin_brand_label: String(adminSettings?.brand_label || ''),
             monitor_groups: globalSettings?.monitor_groups || {},
+            admin_monitor_groups: adminSettings?.monitor_groups || {},
+            monitor_dedupe_window_seconds: Number(globalSettings?.monitor_dedupe_window_seconds || 45),
             can_create_inbound: currentUser.role === 'super_admin',
             is_super_admin: currentUser.role === 'super_admin'
         });
@@ -2323,6 +2372,8 @@ app.get('/admin/webhooks/settings', auth, admin, async (req, res) => {
 
 app.get('/admin/webhooks/logs', auth, admin, async (req, res) => {
     try {
+        const currentUser = await getCurrentUser(req);
+        if (currentUser.role !== 'super_admin') return res.status(403).json({ error: 'Only super admin can view webhook logs.' });
         const rows = await getWebhookLogEntries(200);
         res.json({ items: rows });
     } catch (err) {
@@ -2353,7 +2404,8 @@ app.post('/admin/webhooks/settings', auth, admin, async (req, res) => {
 
         await setAdminWebhookSettings(currentUser.id, {
             discord_webhook_url: adminDiscordWebhookUrl,
-            brand_label: adminBrandLabel
+            brand_label: adminBrandLabel,
+            monitor_groups: req.body?.admin_monitor_groups || {}
         });
 
         const response = {

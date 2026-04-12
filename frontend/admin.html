@@ -110,6 +110,7 @@
             </div>
             <div class="panel-actions" id="invitePagination" style="display:none"></div>
           </section>
+          </div>
         </section>
 
         <section class="admin-pane" data-admin-pane="countdowns">
@@ -275,6 +276,7 @@
               </table>
             </div>
           </section>
+          </div>
         </section>
 
         <section class="admin-pane" data-admin-pane="exports">
@@ -306,6 +308,7 @@
                 JSON</button><button class="btn btn-primary" onclick="exportAccountsTxt()">Export Account
                 Logins</button><button class="btn btn-primary" onclick="exportGmailImapTxt()">Export Gmail / 2FA</button></div>
           </section>
+          </div>
         </section>
 
         <section class="admin-pane" data-admin-pane="selections">
@@ -365,6 +368,7 @@
               </div>
             </div>
           </section>
+          </div>
         </section>
 
 
@@ -490,6 +494,7 @@
               </table>
             </div>
           </section>
+          </div>
         </section>
 
         <section class="admin-pane" data-admin-pane="users">
@@ -535,6 +540,7 @@
             </div>
             <div class="panel-actions" id="usersPagination" style="display:none"></div>
           </section>
+          </div>
         </section>
 
         <section class="admin-pane" data-admin-pane="webhooks">
@@ -626,6 +632,32 @@
               <div class="subtle-text">Use Role mode with a Discord role mention like &lt;@&amp;123456789012345678&gt;.</div>
             </div>
 
+            <div class="field field--full" id="adminMonitorGroupsSection">
+              <label>Your Admin Monitor Routing By Product Group</label>
+              <div class="form-grid">
+                <div class="field field--full"><label for="adminMonitorPokemon">Pokemon Webhook URL</label><input class="input" id="adminMonitorPokemon" placeholder="https://discord.com/api/webhooks/..." /></div>
+                <div class="field"><label for="adminMonitorPokemonPingMode">Pokemon Ping Mode</label><select class="input" id="adminMonitorPokemonPingMode"><option value="none">None</option><option value="everyone">@everyone</option><option value="role">Role</option></select></div>
+                <div class="field"><label for="adminMonitorPokemonRole">Pokemon Role Mention</label><input class="input" id="adminMonitorPokemonRole" placeholder="<@&ROLE_ID>" /></div>
+
+                <div class="field field--full"><label for="adminMonitorOnePiece">One Piece Webhook URL</label><input class="input" id="adminMonitorOnePiece" placeholder="https://discord.com/api/webhooks/..." /></div>
+                <div class="field"><label for="adminMonitorOnePiecePingMode">One Piece Ping Mode</label><select class="input" id="adminMonitorOnePiecePingMode"><option value="none">None</option><option value="everyone">@everyone</option><option value="role">Role</option></select></div>
+                <div class="field"><label for="adminMonitorOnePieceRole">One Piece Role Mention</label><input class="input" id="adminMonitorOnePieceRole" placeholder="<@&ROLE_ID>" /></div>
+
+                <div class="field field--full"><label for="adminMonitorSports">Sports Cards Webhook URL</label><input class="input" id="adminMonitorSports" placeholder="https://discord.com/api/webhooks/..." /></div>
+                <div class="field"><label for="adminMonitorSportsPingMode">Sports Cards Ping Mode</label><select class="input" id="adminMonitorSportsPingMode"><option value="none">None</option><option value="everyone">@everyone</option><option value="role">Role</option></select></div>
+                <div class="field"><label for="adminMonitorSportsRole">Sports Cards Role Mention</label><input class="input" id="adminMonitorSportsRole" placeholder="<@&ROLE_ID>" /></div>
+
+                <div class="field field--full"><label for="adminMonitorOtherTcg">Other TCG Webhook URL</label><input class="input" id="adminMonitorOtherTcg" placeholder="https://discord.com/api/webhooks/..." /></div>
+                <div class="field"><label for="adminMonitorOtherTcgPingMode">Other TCG Ping Mode</label><select class="input" id="adminMonitorOtherTcgPingMode"><option value="none">None</option><option value="everyone">@everyone</option><option value="role">Role</option></select></div>
+                <div class="field"><label for="adminMonitorOtherTcgRole">Other TCG Role Mention</label><input class="input" id="adminMonitorOtherTcgRole" placeholder="<@&ROLE_ID>" /></div>
+
+                <div class="field field--full"><label for="adminMonitorLowkey">Low Key Flips Webhook URL</label><input class="input" id="adminMonitorLowkey" placeholder="https://discord.com/api/webhooks/..." /></div>
+                <div class="field"><label for="adminMonitorLowkeyPingMode">Low Key Flips Ping Mode</label><select class="input" id="adminMonitorLowkeyPingMode"><option value="none">None</option><option value="everyone">@everyone</option><option value="role">Role</option></select></div>
+                <div class="field"><label for="adminMonitorLowkeyRole">Low Key Flips Role Mention</label><input class="input" id="adminMonitorLowkeyRole" placeholder="<@&ROLE_ID>" /></div>
+              </div>
+              <div class="subtle-text">These are your own monitor outputs. Super admin can still manage the shared global routing above.</div>
+            </div>
+
             <div class="field field--full panel-actions">
               <button class="btn btn-primary" type="button" onclick="saveWebhookSettings()">Save Webhook
                 Settings</button>
@@ -634,6 +666,7 @@
 
           <div id="webhookSettingsMessage" class="subtle-text"></div>
 
+          <div id="webhookLogsSection">
           <div class="field field--full panel-actions" style="margin-top:12px;">
             <button class="btn" type="button" onclick="loadWebhookLogs()">Refresh Webhook Logs</button>
           </div>
@@ -642,6 +675,7 @@
             <div class="panel-header"><div><h3>Webhook Event Log</h3><p class="subtle-text">View received checkout and monitor webhooks to catch anything you missed.</p></div></div>
             <div id="webhookLogs" class="subtle-text">Loading webhook logs...</div>
           </section>
+          </div>
         </section>
 
       </div>

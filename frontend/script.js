@@ -2059,6 +2059,34 @@ async function loadWebhookSettings() {
         }
     };
 
+
+    const adminMonitorInputs = {
+        pokemon: {
+            webhook_url: document.getElementById('adminMonitorPokemon'),
+            ping_mode: document.getElementById('adminMonitorPokemonPingMode'),
+            role_mention: document.getElementById('adminMonitorPokemonRole')
+        },
+        onepiece: {
+            webhook_url: document.getElementById('adminMonitorOnePiece'),
+            ping_mode: document.getElementById('adminMonitorOnePiecePingMode'),
+            role_mention: document.getElementById('adminMonitorOnePieceRole')
+        },
+        sports: {
+            webhook_url: document.getElementById('adminMonitorSports'),
+            ping_mode: document.getElementById('adminMonitorSportsPingMode'),
+            role_mention: document.getElementById('adminMonitorSportsRole')
+        },
+        othertcg: {
+            webhook_url: document.getElementById('adminMonitorOtherTcg'),
+            ping_mode: document.getElementById('adminMonitorOtherTcgPingMode'),
+            role_mention: document.getElementById('adminMonitorOtherTcgRole')
+        },
+        lowkey: {
+            webhook_url: document.getElementById('adminMonitorLowkey'),
+            ping_mode: document.getElementById('adminMonitorLowkeyPingMode'),
+            role_mention: document.getElementById('adminMonitorLowkeyRole')
+        }
+    };
     if (!urlInput) return;
 
     try {
@@ -2079,18 +2107,30 @@ async function loadWebhookSettings() {
             if (inputs.ping_mode) inputs.ping_mode.value = cfg.ping_mode || 'none';
             if (inputs.role_mention) inputs.role_mention.value = cfg.role_mention || '';
         });
+        const adminMonitorSettings = data.admin_monitor_groups || {};
+        Object.entries(adminMonitorInputs).forEach(([key, inputs]) => {
+            const raw = adminMonitorSettings[key] || '';
+            const cfg = typeof raw === 'string' ? { webhook_url: raw, ping_mode: 'none', role_mention: '' } : (raw || {});
+            if (inputs.webhook_url) inputs.webhook_url.value = cfg.webhook_url || '';
+            if (inputs.ping_mode) inputs.ping_mode.value = cfg.ping_mode || 'none';
+            if (inputs.role_mention) inputs.role_mention.value = cfg.role_mention || '';
+        });
 
         if (createButton) createButton.style.display = data.can_create_inbound ? '' : 'none';
         if (createMonitorButton) createMonitorButton.style.display = data.can_create_inbound ? '' : 'none';
         if (superAdminField) superAdminField.style.display = data.is_super_admin ? '' : 'none';
         if (superAdminMonitorGroups) superAdminMonitorGroups.style.display = data.is_super_admin ? '' : 'none';
+        const webhookLogsSection = document.getElementById('webhookLogsSection');
+        if (webhookLogsSection) webhookLogsSection.style.display = data.is_super_admin ? '' : 'none';
 
         if (message) {
             message.textContent = data.inbound_webhook_url
                 ? 'Webhook settings loaded.'
                 : 'No shared website webhook created yet.';
         }
-        await loadWebhookLogs();
+        if (data.is_super_admin) {
+            await loadWebhookLogs();
+        }
     } catch (err) {
         if (message) message.textContent = err.message;
     }
@@ -2161,6 +2201,33 @@ async function saveWebhookSettings() {
                         webhook_url: document.getElementById('monitorLowkey')?.value || '',
                         ping_mode: document.getElementById('monitorLowkeyPingMode')?.value || 'none',
                         role_mention: document.getElementById('monitorLowkeyRole')?.value || ''
+                    }
+                },
+                admin_monitor_groups: {
+                    pokemon: {
+                        webhook_url: document.getElementById('adminMonitorPokemon')?.value || '',
+                        ping_mode: document.getElementById('adminMonitorPokemonPingMode')?.value || 'none',
+                        role_mention: document.getElementById('adminMonitorPokemonRole')?.value || ''
+                    },
+                    onepiece: {
+                        webhook_url: document.getElementById('adminMonitorOnePiece')?.value || '',
+                        ping_mode: document.getElementById('adminMonitorOnePiecePingMode')?.value || 'none',
+                        role_mention: document.getElementById('adminMonitorOnePieceRole')?.value || ''
+                    },
+                    sports: {
+                        webhook_url: document.getElementById('adminMonitorSports')?.value || '',
+                        ping_mode: document.getElementById('adminMonitorSportsPingMode')?.value || 'none',
+                        role_mention: document.getElementById('adminMonitorSportsRole')?.value || ''
+                    },
+                    othertcg: {
+                        webhook_url: document.getElementById('adminMonitorOtherTcg')?.value || '',
+                        ping_mode: document.getElementById('adminMonitorOtherTcgPingMode')?.value || 'none',
+                        role_mention: document.getElementById('adminMonitorOtherTcgRole')?.value || ''
+                    },
+                    lowkey: {
+                        webhook_url: document.getElementById('adminMonitorLowkey')?.value || '',
+                        ping_mode: document.getElementById('adminMonitorLowkeyPingMode')?.value || 'none',
+                        role_mention: document.getElementById('adminMonitorLowkeyRole')?.value || ''
                     }
                 }
             })
