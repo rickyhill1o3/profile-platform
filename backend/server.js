@@ -1387,7 +1387,56 @@ function normalizeMonitorSite(value = '') {
     const raw = String(value || '').trim().toLowerCase();
     if (raw.startsWith('target')) return 'target';
     if (raw.startsWith('walmart')) return 'walmart';
+    if (raw.startsWith('amazon')) return 'amazon';
+    if (raw.startsWith('hot topic') || raw.startsWith('hottopic')) return 'hottopic';
+    if (raw.startsWith('box lunch') || raw.startsWith('boxlunch')) return 'boxlunch';
     return raw;
+}
+
+
+function extractAmazonAsin(value = '') {
+    const raw = String(value || '').trim();
+    if (!raw) return '';
+    const direct = raw.match(/(B0[A-Z0-9]{8})/i);
+    if (direct) return String(direct[1] || '').toUpperCase();
+    const fromDp = raw.match(/\/dp\/([A-Z0-9]{10})/i);
+    if (fromDp) return String(fromDp[1] || '').toUpperCase();
+    return '';
+}
+
+function siteAliasesForCatalog(site = '') {
+    const normalized = normalizeMonitorSite(site);
+    if (normalized === 'amazon') return ['amazon', 'amazonv3'];
+    if (normalized === 'target') return ['target', 'targetgo'];
+    if (normalized === 'walmart') return ['walmart'];
+    return [normalized].filter(Boolean);
+}
+
+async function fetchCatalogProductDetailsForMonitor(item = {}) {
+    try {
+        const aliases = siteAliasesForCatalog(item.site);
+        const sku = String(item.sku || '').trim();
+        if (!aliases.length || !sku) return null;
+        const { data, error } = await supabase
+            .from('catalog_products')
+            .select('site, sku, product_name, image_url, product_url, default_max_price')
+            .in('site', aliases)
+            .eq('sku', sku)
+            .limit(1)
+            .maybeSingle();
+        if (error) return null;
+        if (!data) return null;
+        return {
+            title: String(data.product_name || '').trim(),
+            image: String(data.image_url || '').trim(),
+            url: String(data.product_url || '').trim(),
+            price: data.default_max_price == null ? '' : String(Number(data.default_max_price).toFixed(2)),
+            site: String(data.site || '').trim().toLowerCase(),
+            category: classifyMonitorType({ title: String(data.product_name || ''), productType: '', url: String(data.product_url || '') })
+        };
+    } catch {
+        return null;
+    }
 }
 
 async function fetchTargetItemDetailsBySku(sku) {
@@ -1435,6 +1484,42 @@ async function enrichMonitorItems(items = []) {
     const enriched = [];
     for (const item of items) {
         const next = { ...item };
+        next.site = normalizeMonitorSite(next.site);
+
+        if (next.site === 'amazon') {
+            const asin = extractAmazonAsin(next.sku || next.url || next.title);
+            if (asin) {
+                next.sku = asin;
+                next.url = next.url || `https://www.amazon.com/dp/${asin}`;
+            }
+            const catalog = await fetchCatalogProductDetailsForMonitor(next);
+            if (catalog) {
+                next.title = catalog.title || next.title;
+                next.image = catalog.image || next.image;
+                next.url = next.url || catalog.url || next.url;
+                next.price = cleanMonitorPriceValue(next.price) || cleanMonitorPriceValue(catalog.price) || next.price;
+                next.category = catalog.category || next.category;
+            }
+            next.price = cleanMonitorPriceValue(next.price);
+            if (!next.category || next.category === 'lowkey') {
+                next.category = classifyMonitorType({ title: next.title, productType: next.productType, url: next.url });
+            }
+            enriched.push(next);
+            continue;
+        }
+
+        const needsCatalog = !!next.sku && (!next.image || !next.url || !next.title || !cleanMonitorPriceValue(next.price));
+        if (needsCatalog) {
+            const catalog = await fetchCatalogProductDetailsForMonitor(next);
+            if (catalog) {
+                next.title = next.title || catalog.title || next.title;
+                next.image = next.image || catalog.image || next.image;
+                next.url = next.url || catalog.url || next.url;
+                next.price = cleanMonitorPriceValue(next.price) || cleanMonitorPriceValue(catalog.price) || next.price;
+                next.category = next.category || catalog.category || next.category;
+            }
+        }
+
         const site = String(next.site || '').toLowerCase();
         const needsLookup = site.includes('target') && (!!next.sku) && (!next.image || !next.url || !next.title || !cleanMonitorPriceValue(next.price));
         if (needsLookup) {
@@ -1452,6 +1537,9 @@ async function enrichMonitorItems(items = []) {
             }
         }
         next.price = cleanMonitorPriceValue(next.price);
+        if (!next.category || next.category === 'lowkey') {
+            next.category = classifyMonitorType({ title: next.title, productType: next.productType, url: next.url });
+        }
         enriched.push(next);
     }
     return enriched;
@@ -1460,7 +1548,7 @@ async function enrichMonitorItems(items = []) {
 function extractMonitorItems(payload = {}) {
     const items = [];
     const { embed, fields, fieldList } = extractEmbedFields(payload);
-    const baseSite = String(payload.site || payload.source || fields['site'] || '').trim().toLowerCase();
+    const baseSite = normalizeMonitorSite(String(payload.site || payload.source || fields['site'] || '').trim().toLowerCase());
     const explicitType = String(payload.product_type || payload.category || fields['category'] || '').trim();
     const baseImage = String(payload.image_url || payload.image || embed.thumbnail?.url || embed.image?.url || '').trim();
     const productFieldValue = String(fields['product'] || '').trim();
@@ -1469,7 +1557,7 @@ function extractMonitorItems(payload = {}) {
     const baseUrl = looksLikeUrl(rawBaseUrl) ? String(rawBaseUrl).trim() : '';
     const basePrice = payload.price ?? payload.Price ?? fields['price'] ?? null;
     const skuFieldRaw = String(fields['sku'] || payload.sku || payload.SKU || '').trim();
-    const fallbackSku = skuFieldRaw || ((baseSite.includes('amazon') && productFieldValue) ? productFieldValue : '');
+    const fallbackSku = extractAmazonAsin(skuFieldRaw || ((baseSite.includes('amazon') && productFieldValue) ? productFieldValue : '')) || skuFieldRaw || ((baseSite.includes('amazon') && productFieldValue) ? productFieldValue : '');
     const amazonAtcLinks = fieldList
         .filter((field) => field.key.startsWith('atc link'))
         .map((field) => ({
@@ -1503,8 +1591,9 @@ function extractMonitorItems(payload = {}) {
     if (skuList.length) {
         for (let i = 0; i < skuList.length; i += 1) {
             const sku = skuList[i];
+            const resolvedSku = extractAmazonAsin(sku) || sku;
             items.push({
-                sku,
+                sku: resolvedSku,
                 title: titleList[i] || titleList[0] || '',
                 price: priceList[i] || priceList[0] || '',
                 url: baseUrl,
@@ -1607,8 +1696,13 @@ async function sendMonitorDiscordWebhook(routeConfigOrUrl, item) {
         fields.push({ name: 'Product Link', value: finalUrl, inline: false });
     }
     const atcLinks = Array.isArray(item.atcLinks) ? item.atcLinks.filter((row) => row && row.url) : [];
-    for (const row of atcLinks.slice(0, 6)) {
-        fields.push({ name: row.label || 'ATC Link', value: row.url, inline: false });
+    if (atcLinks.length) {
+        const atcValue = atcLinks.slice(0, 6).map((row) => {
+            const qtyMatch = String(row.label || '').match(/(\d+)x/i);
+            const label = qtyMatch ? `ATC ${qtyMatch[1]}x` : String(row.label || 'ATC').replace(/^ATC Link\s*/i, 'ATC ');
+            return `[${label}](${row.url})`;
+        }).join(' • ');
+        fields.push({ name: 'ATC', value: atcValue, inline: false });
     }
     const body = JSON.stringify({
         username: 'In Stock Monitor',
