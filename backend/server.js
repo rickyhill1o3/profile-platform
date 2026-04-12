@@ -1348,11 +1348,23 @@ function extractEmbedFields(payload = {}) {
     const embed = Array.isArray(payload.embeds) ? (payload.embeds[0] || {}) : {};
     const fields = Array.isArray(embed.fields) ? embed.fields : [];
     const map = {};
+    const list = [];
     for (const field of fields) {
         const key = String(field?.name || '').trim().toLowerCase();
-        if (key) map[key] = String(field?.value || '').trim();
+        const value = String(field?.value || '').trim();
+        if (key) map[key] = value;
+        list.push({ key, value, raw: field });
     }
-    return { embed, fields: map };
+    return { embed, fields: map, fieldList: list };
+}
+
+function extractMarkdownLink(value = '') {
+    const match = String(value || '').match(/\[([^\]]+)\]\(([^)]+)\)/);
+    return match ? { text: String(match[1] || '').trim(), url: String(match[2] || '').trim() } : null;
+}
+
+function looksLikeUrl(value = '') {
+    return /^https?:\/\//i.test(String(value || '').trim());
 }
 
 function splitMonitorPipeValues(value = '') {
@@ -1447,12 +1459,24 @@ async function enrichMonitorItems(items = []) {
 
 function extractMonitorItems(payload = {}) {
     const items = [];
-    const { embed, fields } = extractEmbedFields(payload);
+    const { embed, fields, fieldList } = extractEmbedFields(payload);
     const baseSite = String(payload.site || payload.source || fields['site'] || '').trim().toLowerCase();
     const explicitType = String(payload.product_type || payload.category || fields['category'] || '').trim();
     const baseImage = String(payload.image_url || payload.image || embed.thumbnail?.url || embed.image?.url || '').trim();
-    const baseUrl = String(payload.product_url || payload.url || payload.link || fields['product link'] || fields['product'] || embed.url || '').trim();
+    const productFieldValue = String(fields['product'] || '').trim();
+    const productFieldLink = extractMarkdownLink(productFieldValue);
+    const rawBaseUrl = payload.product_url || payload.url || payload.link || fields['product link'] || productFieldLink?.url || embed.url || '';
+    const baseUrl = looksLikeUrl(rawBaseUrl) ? String(rawBaseUrl).trim() : '';
     const basePrice = payload.price ?? payload.Price ?? fields['price'] ?? null;
+    const skuFieldRaw = String(fields['sku'] || payload.sku || payload.SKU || '').trim();
+    const fallbackSku = skuFieldRaw || ((baseSite.includes('amazon') && productFieldValue) ? productFieldValue : '');
+    const amazonAtcLinks = fieldList
+        .filter((field) => field.key.startsWith('atc link'))
+        .map((field) => ({
+            label: String(field.raw?.name || field.key || '').trim(),
+            url: extractMarkdownLink(field.value)?.url || ''
+        }))
+        .filter((row) => row.url);
 
     const arr = Array.isArray(payload.items) ? payload.items : [];
     for (const row of arr) {
@@ -1465,7 +1489,8 @@ function extractMonitorItems(payload = {}) {
             site: String(row.site || baseSite).trim().toLowerCase(),
             stock: row.stock ?? row.stock_count ?? row.quantity ?? null,
             cartLimit: row.cart_limit ?? row.max_order_quantity ?? row.cart_limit_qty ?? null,
-            productType: String(row.product_type || explicitType || '').trim()
+            productType: String(row.product_type || explicitType || '').trim(),
+            atcLinks: Array.isArray(row.atcLinks) ? row.atcLinks : amazonAtcLinks
         });
     }
 
@@ -1487,7 +1512,8 @@ function extractMonitorItems(payload = {}) {
                 site: baseSite,
                 stock: payload.stock_count ?? fields['stock'] ?? null,
                 cartLimit: payload.cart_limit ?? fields['cart limit'] ?? null,
-                productType: explicitType
+                productType: explicitType,
+                atcLinks: amazonAtcLinks
             });
         }
     }
@@ -1495,15 +1521,16 @@ function extractMonitorItems(payload = {}) {
     if (!items.length) {
         const possibleSku = String(payload.sku || payload.SKU || '').trim();
         items.push({
-            sku: possibleSku,
-            title: titleList[0] || '',
+            sku: possibleSku || fallbackSku,
+            title: titleList[0] || (productFieldLink?.text || (!looksLikeUrl(productFieldValue) ? productFieldValue : '')) || '',
             price: priceList[0] || cleanMonitorPriceValue(basePrice || ''),
             url: baseUrl,
             image: baseImage,
             site: baseSite,
             stock: payload.stock_count ?? fields['stock'] ?? null,
             cartLimit: payload.cart_limit ?? fields['cart limit'] ?? null,
-            productType: explicitType
+            productType: explicitType,
+            atcLinks: amazonAtcLinks
         });
     }
 
@@ -1527,6 +1554,10 @@ function buildProductUrl(site, sku, fallbackUrl='', title = '', image = '') {
     }
     if (s.includes('hottopic') || s.includes('hot topic')) {
         return buildHotTopicUrl({ title, image, url: fallbackUrl });
+    }
+    if (s.includes('amazon')) {
+        if (clean) return `https://www.amazon.com/dp/${clean}`;
+        return '';
     }
     if (!clean) return '';
     if (s.includes('target')) return `https://www.target.com/p/-/A-${clean}`;
@@ -1574,6 +1605,10 @@ async function sendMonitorDiscordWebhook(routeConfigOrUrl, item) {
     }
     if (finalUrl) {
         fields.push({ name: 'Product Link', value: finalUrl, inline: false });
+    }
+    const atcLinks = Array.isArray(item.atcLinks) ? item.atcLinks.filter((row) => row && row.url) : [];
+    for (const row of atcLinks.slice(0, 6)) {
+        fields.push({ name: row.label || 'ATC Link', value: row.url, inline: false });
     }
     const body = JSON.stringify({
         username: 'In Stock Monitor',
