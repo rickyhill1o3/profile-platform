@@ -1495,10 +1495,13 @@ function extractMonitorItems(payload = {}) {
     return deduped;
 }
 
-function buildProductUrl(site, sku, fallbackUrl='') {
+function buildProductUrl(site, sku, fallbackUrl='', title = '', image = '') {
     if (fallbackUrl) return fallbackUrl;
     const s = String(site||'').toLowerCase();
     const clean = String(sku||'').trim();
+    if (s.includes('boxlunch')) {
+        return buildBoxLunchUrl({ title, image, url: fallbackUrl });
+    }
     if (!clean) return '';
     if (s.includes('target')) return `https://www.target.com/p/-/A-${clean}`;
     if (s.includes('walmart')) return `https://www.walmart.com/ip/${clean}`;
@@ -1531,7 +1534,7 @@ function getMonitorMentionText(routeConfig) {
 async function sendMonitorDiscordWebhook(routeConfigOrUrl, item) {
     const routeConfig = normalizeMonitorGroupConfig(routeConfigOrUrl);
     const webhookUrl = routeConfig.webhook_url || (typeof routeConfigOrUrl === 'string' ? String(routeConfigOrUrl).trim() : '');
-    const finalUrl = buildProductUrl(item.site, item.sku, item.url);
+    const finalUrl = buildProductUrl(item.site, item.sku, item.url, item.title, item.image);
     const cleanPrice = cleanMonitorPriceValue(item.price);
     const mentionText = getMonitorMentionText(routeConfig);
     const fields = [
@@ -2008,7 +2011,7 @@ app.post(["/webhooks/monitor", "/webhooks/monitor/:token"], async (req, res) => 
         const rawItems = extractMonitorItems(payload).map((item) => ({
             ...item,
             category: classifyMonitorType({ title: item.title, productType: item.productType, url: item.url }),
-            url: buildProductUrl(item.site, item.sku, item.url)
+            url: buildProductUrl(item.site, item.sku, item.url, item.title, item.image)
         }));
 
         const items = await enrichMonitorItems(rawItems);
