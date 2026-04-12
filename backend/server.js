@@ -1146,7 +1146,8 @@ async function appendWebhookLogEntry(entry = {}) {
         error: String(entry.error || '').trim(),
         payload: entry.payload || null,
         parsed_items: Array.isArray(entry.parsed_items) ? entry.parsed_items : [],
-        discord_targets: Array.isArray(entry.discord_targets) ? entry.discord_targets : []
+        discord_targets: Array.isArray(entry.discord_targets) ? entry.discord_targets : [],
+        fingerprint: String(entry.fingerprint || '').trim()
     };
     rows.unshift(row);
     await setAppSetting('webhook_event_log', rows.slice(0, 500));
@@ -1162,6 +1163,43 @@ async function updateWebhookLogEntry(id, patch = {}) {
     rows[idx] = { ...rows[idx], ...patch };
     await setAppSetting('webhook_event_log', rows.slice(0, 500));
     return rows[idx];
+}
+
+
+async function getMonitorDedupeWindowSeconds() {
+    const currentGlobal = await getAppSetting('webhook_settings', {});
+    const raw = Number(currentGlobal?.monitor_dedupe_window_seconds);
+    if (Number.isFinite(raw) && raw >= 0) return Math.min(600, Math.round(raw));
+    return 45;
+}
+
+function buildMonitorDedupeFingerprint(site = '', items = []) {
+    const normalizedItems = (Array.isArray(items) ? items : []).map((item) => ({
+        sku: String(item?.sku || '').trim(),
+        title: String(item?.title || '').trim().toLowerCase(),
+        price: String(item?.price ?? '').trim().toLowerCase(),
+        url: String(item?.url || '').trim().toLowerCase(),
+        category: String(item?.category || '').trim().toLowerCase()
+    })).sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+    const payload = {
+        type: 'monitor',
+        site: String(site || '').trim().toLowerCase(),
+        items: normalizedItems
+    };
+    return crypto.createHash('sha256').update(JSON.stringify(payload)).digest('hex');
+}
+
+async function findRecentDuplicateMonitorLog(fingerprint, windowSeconds) {
+    if (!fingerprint || !windowSeconds) return null;
+    const current = await getAppSetting('webhook_event_log', []);
+    const rows = Array.isArray(current) ? current : [];
+    const cutoff = Date.now() - (Number(windowSeconds) * 1000);
+    return rows.find((row) => (
+        String(row.type || '') === 'monitor' &&
+        String(row.fingerprint || '') === String(fingerprint) &&
+        String(row.status || '') !== 'duplicate_skipped' &&
+        new Date(row.created_at || 0).getTime() >= cutoff
+    )) || null;
 }
 
 async function sendUnmatchedCheckoutDiscordNotification(payload = {}, errorMessage = '') {
@@ -1909,6 +1947,36 @@ app.post(["/webhooks/monitor", "/webhooks/monitor/:token"], async (req, res) => 
 
         const first = items[0] || {};
         const site = String(first.site || payload.site || payload.source || '').trim().toLowerCase();
+        const dedupeWindowSeconds = await getMonitorDedupeWindowSeconds();
+        const fingerprint = buildMonitorDedupeFingerprint(site, items);
+        const duplicate = await findRecentDuplicateMonitorLog(fingerprint, dedupeWindowSeconds);
+
+        if (duplicate) {
+            logId = (await appendWebhookLogEntry({
+                type: 'monitor',
+                status: 'duplicate_skipped',
+                site,
+                product_type: String(first.category || ''),
+                product: String(first.title || first.url || ''),
+                sku: String(first.sku || ''),
+                error: `Skipped duplicate monitor webhook within ${dedupeWindowSeconds} seconds`,
+                payload,
+                fingerprint,
+                parsed_items: items.map((item) => ({
+                    title: item.title || '',
+                    sku: item.sku || '',
+                    site: item.site || '',
+                    price: item.price ?? null,
+                    stock: item.stock ?? null,
+                    cartLimit: item.cartLimit ?? null,
+                    url: item.url || '',
+                    image: item.image || '',
+                    category: item.category || ''
+                })),
+                discord_targets: duplicate.discord_targets || []
+            })).id;
+            return res.json({ success: true, skipped: true, reason: 'duplicate_within_window', dedupe_window_seconds: dedupeWindowSeconds });
+        }
 
         logId = (await appendWebhookLogEntry({
             type: 'monitor',
@@ -1918,6 +1986,7 @@ app.post(["/webhooks/monitor", "/webhooks/monitor/:token"], async (req, res) => 
             product: String(first.title || first.url || ''),
             sku: String(first.sku || ''),
             payload,
+            fingerprint,
             parsed_items: items.map((item) => ({
                 title: item.title || '',
                 sku: item.sku || '',
@@ -1974,7 +2043,8 @@ app.post(["/webhooks/monitor", "/webhooks/monitor/:token"], async (req, res) => 
                 image: item.image || '',
                 category: item.category || ''
             })),
-            discord_targets: usedTargets
+            discord_targets: usedTargets,
+            fingerprint
         });
 
         res.json({ success: true, item_count: items.length, results });
@@ -2295,9 +2365,16 @@ app.post('/admin/webhooks/settings', auth, admin, async (req, res) => {
         if (currentUser.role === 'super_admin') {
             const discordWebhookUrl = String(req.body?.discord_webhook_url || '').trim();
             const currentGlobal = await getAppSetting('webhook_settings', {});
-            await setAppSetting('webhook_settings', { ...currentGlobal, discord_webhook_url: discordWebhookUrl, monitor_groups: req.body?.monitor_groups || currentGlobal.monitor_groups || {} });
+            const monitorDedupeWindowSeconds = Math.max(0, Math.min(600, Number(req.body?.monitor_dedupe_window_seconds ?? currentGlobal.monitor_dedupe_window_seconds ?? 45) || 45));
+            await setAppSetting('webhook_settings', {
+                ...currentGlobal,
+                discord_webhook_url: discordWebhookUrl,
+                monitor_groups: req.body?.monitor_groups || currentGlobal.monitor_groups || {},
+                monitor_dedupe_window_seconds: monitorDedupeWindowSeconds
+            });
             response.discord_webhook_url = discordWebhookUrl;
             response.monitor_groups = req.body?.monitor_groups || {};
+            response.monitor_dedupe_window_seconds = monitorDedupeWindowSeconds;
         }
 
         res.json(response);

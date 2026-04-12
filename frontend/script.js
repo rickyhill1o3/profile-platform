@@ -2068,6 +2068,8 @@ async function loadWebhookSettings() {
         if (discordInput) discordInput.value = data.discord_webhook_url || '';
         if (adminDiscordInput) adminDiscordInput.value = data.admin_discord_webhook_url || '';
         if (adminBrandInput) adminBrandInput.value = data.admin_brand_label || '';
+        const monitorDedupeInput = document.getElementById('monitorDedupeWindowSeconds');
+        if (monitorDedupeInput) monitorDedupeInput.value = Number(data.monitor_dedupe_window_seconds || 45);
 
         const monitorSettings = data.monitor_groups || {};
         Object.entries(monitorInputs).forEach(([key, inputs]) => {
@@ -2133,6 +2135,7 @@ async function saveWebhookSettings() {
                 discord_webhook_url: discordInput ? discordInput.value : '',
                 admin_discord_webhook_url: adminDiscordInput ? adminDiscordInput.value : '',
                 admin_brand_label: adminBrandInput ? adminBrandInput.value : '',
+                monitor_dedupe_window_seconds: Number(document.getElementById('monitorDedupeWindowSeconds')?.value || 45),
                 monitor_groups: {
                     pokemon: {
                         webhook_url: document.getElementById('monitorPokemon')?.value || '',
