@@ -1461,14 +1461,40 @@ function extractMonitorItems(payload = {}) {
     return deduped;
 }
 
-function buildProductUrl(site, sku, fallbackUrl='') {
+function slugifyBoxLunchTitle(title = '') {
+    return String(title || '')
+        .trim()
+        .toLowerCase()
+        .replace(/&/g, ' and ')
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '');
+}
+
+function extractBoxLunchProductIdFromImage(imageUrl = '') {
+    const match = String(imageUrl || '').match(/\/(\d{6,})_hi/i);
+    return match ? match[1] : '';
+}
+
+function buildBoxLunchUrl({ title = '', image = '', sku = '', fallbackUrl = '' } = {}) {
+    if (fallbackUrl) return fallbackUrl;
+    const productId = String(sku || '').trim() || extractBoxLunchProductIdFromImage(image);
+    if (productId && title) {
+        return `https://www.boxlunch.com/product/${slugifyBoxLunchTitle(title)}/${productId}.html`;
+    }
+    if (title) {
+        return `https://www.boxlunch.com/search?q=${encodeURIComponent(title)}`;
+    }
+    return '';
+}
+
+function buildProductUrl(site, sku, fallbackUrl='', title='', image='') {
     if (fallbackUrl) return fallbackUrl;
     const s = String(site||'').toLowerCase();
     const clean = String(sku||'').trim();
-    if (!clean) return '';
-    if (s.includes('target')) return `https://www.target.com/p/-/A-${clean}`;
-    if (s.includes('walmart')) return `https://www.walmart.com/ip/${clean}`;
-    if (s.includes('sams')) return `https://www.samsclub.com/s/${encodeURIComponent(clean)}`;
+    if (s.includes('target')) return clean ? `https://www.target.com/p/-/A-${clean}` : '';
+    if (s.includes('walmart')) return clean ? `https://www.walmart.com/ip/${clean}` : '';
+    if (s.includes('sams')) return clean ? `https://www.samsclub.com/s/${encodeURIComponent(clean)}` : '';
+    if (s.includes('boxlunch')) return buildBoxLunchUrl({ title, image, sku: clean, fallbackUrl });
     return '';
 }
 
@@ -1497,7 +1523,7 @@ function getMonitorMentionText(routeConfig) {
 async function sendMonitorDiscordWebhook(routeConfigOrUrl, item) {
     const routeConfig = normalizeMonitorGroupConfig(routeConfigOrUrl);
     const webhookUrl = routeConfig.webhook_url || (typeof routeConfigOrUrl === 'string' ? String(routeConfigOrUrl).trim() : '');
-    const finalUrl = buildProductUrl(item.site, item.sku, item.url);
+    const finalUrl = buildProductUrl(item.site, item.sku, item.url, item.title, item.image);
     const cleanPrice = cleanMonitorPriceValue(item.price);
     const mentionText = getMonitorMentionText(routeConfig);
     const fields = [
@@ -1974,7 +2000,7 @@ app.post(["/webhooks/monitor", "/webhooks/monitor/:token"], async (req, res) => 
         const rawItems = extractMonitorItems(payload).map((item) => ({
             ...item,
             category: classifyMonitorType({ title: item.title, productType: item.productType, url: item.url }),
-            url: buildProductUrl(item.site, item.sku, item.url)
+            url: buildProductUrl(item.site, item.sku, item.url, item.title, item.image)
         }));
 
         const items = await enrichMonitorItems(rawItems);
