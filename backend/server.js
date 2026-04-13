@@ -1683,11 +1683,12 @@ async function sendMonitorDiscordWebhook(routeConfigOrUrl, item) {
     const finalUrl = buildProductUrl(item.site, item.sku, item.url, item.title, item.image);
     const cleanPrice = cleanMonitorPriceValue(item.price);
     const mentionText = getMonitorMentionText(routeConfig);
+    const displayPrice = cleanPrice && cleanPrice.toUpperCase() !== 'N/A' ? `$${cleanPrice}` : '-';
     const fields = [
         { name: 'Site', value: String(item.site || '-'), inline: true },
         { name: 'Category', value: String(item.category || 'lowkey'), inline: true },
         { name: 'SKU', value: String(item.sku || '-'), inline: true },
-        { name: 'Price', value: cleanPrice ? `$${cleanPrice}` : '-', inline: true }
+        { name: 'Price', value: displayPrice, inline: true }
     ];
     if (item.cartLimit != null && String(item.cartLimit).trim() !== '') {
         fields.push({ name: 'Cart Limit', value: String(item.cartLimit), inline: true });
@@ -1697,14 +1698,19 @@ async function sendMonitorDiscordWebhook(routeConfigOrUrl, item) {
     }
     const atcLinks = Array.isArray(item.atcLinks) ? item.atcLinks.filter((row) => row && row.url) : [];
     if (atcLinks.length) {
-        const formattedAtcLinks = atcLinks.slice(0, 6).map((row) => {
-            const qtyMatch = String(row.label || '').match(/(\d+)x/i);
-            const label = qtyMatch ? `ATC ${qtyMatch[1]}x` : String(row.label || 'ATC').replace(/^ATC Link\s*/i, 'ATC ');
-            return `[${label}](${row.url})`;
-        });
-        for (let i = 0; i < formattedAtcLinks.length; i += 2) {
-            const chunk = formattedAtcLinks.slice(i, i + 2).join(' • ');
-            fields.push({ name: i === 0 ? 'ATC Links' : 'ATC More', value: chunk, inline: false });
+        const allowedQty = new Set(['1', '3', '5']);
+        const formattedAtcLinks = atcLinks
+            .map((row) => {
+                const qtyMatch = String(row.label || '').match(/(\d+)x/i);
+                const qty = qtyMatch ? String(qtyMatch[1]) : '';
+                if (qty && !allowedQty.has(qty)) return null;
+                const label = qty ? `ATC ${qty}x` : String(row.label || 'ATC').replace(/^ATC Link\s*/i, 'ATC ');
+                return `[${label}](${row.url})`;
+            })
+            .filter(Boolean)
+            .slice(0, 3);
+        if (formattedAtcLinks.length) {
+            fields.push({ name: 'ATC Links', value: formattedAtcLinks.join(' • '), inline: false });
         }
     }
     const body = JSON.stringify({
