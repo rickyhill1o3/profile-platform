@@ -126,7 +126,7 @@ async function tryLookupUrls(urls) {
     try {
       const html = await fetchHtml(url);
       if (html && html.length > 1000) return { url, html };
-    } catch {}
+    } catch { }
   }
   return null;
 }
@@ -866,11 +866,64 @@ async function maybeAutoListStorefrontFromOrder({ supabase, payload, normalized,
   return { listed: true, product: updatedProduct, receipt, pricing, site_lookup: siteProduct };
 }
 
-function shippingTierForQuantity(quantity) {
-  if (quantity <= 2) return { label: '1-2 items', amount_cents: 895 };
-  if (quantity <= 4) return { label: '3-4 items', amount_cents: 1295 };
-  if (quantity <= 10) return { label: '5-10 items', amount_cents: 1995 };
-  return { label: '11+ items', amount_cents: 2995 };
+const DEFAULT_SHIPPING_TIERS = [
+  { tier_name: '1-2 items', min_qty: 1, max_qty: 2, amount_cents: 895, is_active: true },
+  { tier_name: '3-4 items', min_qty: 3, max_qty: 4, amount_cents: 1295, is_active: true },
+  { tier_name: '5-10 items', min_qty: 5, max_qty: 10, amount_cents: 1995, is_active: true },
+  { tier_name: '11+ items', min_qty: 11, max_qty: null, amount_cents: 2995, is_active: true }
+];
+
+function normalizeShippingTiers(raw) {
+  const source = Array.isArray(raw) && raw.length ? raw : DEFAULT_SHIPPING_TIERS;
+  const tiers = source
+    .map((row, index) => ({
+      tier_name: normalizeText(row.tier_name || row.label || `Tier ${index + 1}`),
+      min_qty: Math.max(1, Number(row.min_qty || 1) || 1),
+      max_qty: row.max_qty === null || row.max_qty === '' || row.max_qty === undefined ? null : Math.max(1, Number(row.max_qty || 1) || 1),
+      amount_cents: Math.max(0, Math.round(Number(row.amount_cents != null ? row.amount_cents : dollarsToCents(row.amount || row.price || 0)) || 0)),
+      is_active: row.is_active !== false
+    }))
+    .filter((row) => row.is_active)
+    .sort((a, b) => a.min_qty - b.min_qty);
+  return tiers.length ? tiers : DEFAULT_SHIPPING_TIERS;
+}
+
+async function getStoreShippingTiers(supabase) {
+  const { data, error } = await supabase
+    .from('app_settings')
+    .select('value_json')
+    .eq('key', 'storefront_shipping_tiers')
+    .maybeSingle();
+  if (error && !String(error.message || '').toLowerCase().includes('does not exist')) {
+    throw new Error(error.message);
+  }
+  return normalizeShippingTiers(data?.value_json);
+}
+
+async function saveStoreShippingTiers(supabase, tiers) {
+  const normalized = normalizeShippingTiers(tiers);
+  const { error } = await supabase
+    .from('app_settings')
+    .upsert({
+      key: 'storefront_shipping_tiers',
+      value_json: normalized,
+      updated_at: new Date().toISOString()
+    }, { onConflict: 'key' });
+  if (error) throw new Error(error.message);
+  return normalized;
+}
+
+async function shippingTierForQuantity(supabase, quantity) {
+  const qty = Math.max(0, Number(quantity || 0));
+  const tiers = await getStoreShippingTiers(supabase);
+  if (!qty) return { label: 'No items', amount_cents: 0, min_qty: 0, max_qty: 0 };
+  const match = tiers.find((row) => qty >= row.min_qty && (row.max_qty == null || qty <= row.max_qty)) || tiers[tiers.length - 1];
+  return {
+    label: match.tier_name,
+    amount_cents: Number(match.amount_cents || 0),
+    min_qty: match.min_qty,
+    max_qty: match.max_qty
+  };
 }
 
 async function allocateCostFIFO({ supabase, storefrontProductId, quantity }) {
@@ -912,7 +965,171 @@ async function allocateCostFIFO({ supabase, storefrontProductId, quantity }) {
   return { allocatedCostCents, allocations };
 }
 
-async function recordStorefrontSaleFromStripeSession({ supabase, session }) {
+async function sendStorefrontOrderConfirmation({ supabase, sendEmail, sales, notificationEmail = "" }) {
+  if (!Array.isArray(sales) || !sales.length || typeof sendEmail !== 'function') {
+    return { skipped: 'missing_sales_or_email' };
+  }
+
+  const productIds = [...new Set(sales.map((sale) => sale.storefront_product_id).filter(Boolean))];
+  const { data: productRows, error: productError } = await supabase
+    .from('storefront_products')
+    .select('id, title, image_url, primary_sku, primary_site')
+    .in('id', productIds);
+  if (productError) throw new Error(productError.message);
+  const productsById = new Map((productRows || []).map((row) => [String(row.id), row]));
+
+  const firstSale = sales[0] || {};
+  const customerEmail = String(firstSale.customer_email || '').trim();
+  const metadata = firstSale.metadata || {};
+  const shippingAddress = metadata.shipping_address || {};
+  const shippingName = metadata.shipping_name || metadata.customer_name || '';
+  const orderNumber = String(firstSale.stripe_session_id || firstSale.id || '').trim();
+
+  const items = sales.map((sale) => {
+    const product = productsById.get(String(sale.storefront_product_id)) || {};
+    return {
+      title: product.title || 'Storefront product',
+      image_url: product.image_url || '',
+      sku: product.primary_sku || '',
+      site: product.primary_site || '',
+      quantity: Number(sale.quantity || 0),
+      unit_price: centsToDollars(sale.sale_unit_price_cents),
+      subtotal: centsToDollars(sale.sale_subtotal_cents),
+      shipping: centsToDollars(sale.shipping_cents),
+      tax: centsToDollars(sale.tax_cents),
+      total: centsToDollars(sale.total_cents)
+    };
+  });
+
+  const subtotal = items.reduce((sum, item) => sum + Number(item.subtotal || 0), 0);
+  const shippingTotal = items.reduce((sum, item) => sum + Number(item.shipping || 0), 0);
+  const taxTotal = items.reduce((sum, item) => sum + Number(item.tax || 0), 0);
+  const grandTotal = items.reduce((sum, item) => sum + Number(item.total || 0), 0);
+
+  const addressLines = [
+    shippingName,
+    shippingAddress.line1,
+    shippingAddress.line2,
+    [shippingAddress.city, shippingAddress.state, shippingAddress.postal_code].filter(Boolean).join(', '),
+    shippingAddress.country
+  ].filter(Boolean);
+
+  const customerHtml = `
+    <div style="font-family:Arial,sans-serif;line-height:1.5;color:#111">
+      <h2>Thanks for your order from The Shore Shack TCG</h2>
+      <p>We received your order and will get it packed soon.</p>
+      <p><strong>Order #:</strong> ${orderNumber}</p>
+      <table style="width:100%;border-collapse:collapse;margin-top:16px">
+        <thead>
+          <tr>
+            <th style="text-align:left;padding:8px;border-bottom:1px solid #ddd">Item</th>
+            <th style="text-align:left;padding:8px;border-bottom:1px solid #ddd">Qty</th>
+            <th style="text-align:left;padding:8px;border-bottom:1px solid #ddd">Price</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${items.map((item) => `
+            <tr>
+              <td style="padding:8px;border-bottom:1px solid #eee;vertical-align:top">
+                <div style="display:flex;gap:12px;align-items:flex-start">
+                  ${item.image_url ? `<img src="${item.image_url}" alt="" style="width:56px;height:56px;object-fit:contain;border:1px solid #ddd;border-radius:6px" />` : ''}
+                  <div>
+                    <div style="font-weight:600">${item.title}</div>
+                    <div style="color:#666;font-size:12px">${item.site ? item.site.toUpperCase() + ' ' : ''}${item.sku ? 'SKU ' + item.sku : ''}</div>
+                  </div>
+                </div>
+              </td>
+              <td style="padding:8px;border-bottom:1px solid #eee">${item.quantity}</td>
+              <td style="padding:8px;border-bottom:1px solid #eee">$${item.total.toFixed(2)}</td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
+      <div style="margin-top:16px">
+        <div><strong>Subtotal:</strong> $${subtotal.toFixed(2)}</div>
+        <div><strong>Shipping:</strong> $${shippingTotal.toFixed(2)}</div>
+        <div><strong>Tax:</strong> $${taxTotal.toFixed(2)}</div>
+        <div style="font-size:18px;margin-top:8px"><strong>Total:</strong> $${grandTotal.toFixed(2)}</div>
+      </div>
+      ${addressLines.length ? `<div style="margin-top:16px"><strong>Shipping to:</strong><br />${addressLines.join('<br />')}</div>` : ''}
+    </div>
+  `;
+
+  const customerText = [
+    'Thanks for your order from The Shore Shack TCG',
+    `Order #: ${orderNumber}`,
+    '',
+    ...items.map((item) => `${item.title} x${item.quantity} - $${item.total.toFixed(2)}`),
+    '',
+    `Subtotal: $${subtotal.toFixed(2)}`,
+    `Shipping: $${shippingTotal.toFixed(2)}`,
+    `Tax: $${taxTotal.toFixed(2)}`,
+    `Total: $${grandTotal.toFixed(2)}`,
+    '',
+    addressLines.length ? `Ship to:\n${addressLines.join('\n')}` : ''
+  ].filter(Boolean).join('\n');
+
+  let customerResult = null;
+  if (customerEmail) {
+    customerResult = await sendEmail({
+      to: customerEmail,
+      subject: `Your Shore Shack order receipt - ${orderNumber}`,
+      html: customerHtml,
+      text: customerText
+    });
+  }
+
+  let adminResult = null;
+  const adminEmail = String(notificationEmail || process.env.STORE_ORDER_NOTIFICATION_EMAIL || 'theshoreshacktcg@gmail.com').trim();
+  if (adminEmail) {
+    const adminHtml = `
+      <div style="font-family:Arial,sans-serif;line-height:1.5;color:#111">
+        <h2>New storefront order received</h2>
+        <p><strong>Order #:</strong> ${orderNumber}</p>
+        <p><strong>Customer:</strong> ${shippingName || '-'}<br /><strong>Email:</strong> ${customerEmail || '-'}</p>
+        ${addressLines.length ? `<p><strong>Ship to:</strong><br />${addressLines.join('<br />')}</p>` : ''}
+        ${customerHtml}
+      </div>
+    `;
+    const adminText = [
+      'New storefront order received',
+      `Order #: ${orderNumber}`,
+      `Customer: ${shippingName || '-'}`,
+      `Email: ${customerEmail || '-'}`,
+      '',
+      ...items.map((item) => `${item.title} x${item.quantity} - $${item.total.toFixed(2)}`),
+      '',
+      `Subtotal: $${subtotal.toFixed(2)}`,
+      `Shipping: $${shippingTotal.toFixed(2)}`,
+      `Tax: $${taxTotal.toFixed(2)}`,
+      `Total: $${grandTotal.toFixed(2)}`,
+      '',
+      addressLines.length ? `Ship to:\n${addressLines.join('\n')}` : ''
+    ].filter(Boolean).join('\n');
+
+    try {
+      adminResult = await sendEmail({
+        to: adminEmail,
+        subject: `New Shore Shack order - ${orderNumber}`,
+        html: adminHtml,
+        text: adminText
+      });
+    } catch (err) {
+      console.error('Admin storefront order email failed:', err);
+      adminResult = { error: err.message || String(err) };
+    }
+  }
+
+  return {
+    sent: true,
+    customer_email: customerEmail || null,
+    admin_email: adminEmail || null,
+    customer_result: customerResult,
+    admin_result: adminResult
+  };
+}
+
+async function recordStorefrontSaleFromStripeSession({ supabase, sendEmail, session, notificationEmail = '' }) {
   const metadata = session?.metadata || {};
   if (String(metadata.checkout_type || '') !== 'storefront_purchase') {
     return { skipped: 'not_storefront_checkout' };
@@ -934,20 +1151,20 @@ async function recordStorefrontSaleFromStripeSession({ supabase, session }) {
 
   const parsedCart = String(metadata.cart_items || '').trim()
     ? String(metadata.cart_items).split(',').map((entry) => {
-        const [productId, qty] = String(entry || '').split(':');
-        return {
-          storefront_product_id: String(productId || '').trim(),
-          quantity: Math.max(1, Number(qty || 1) || 1)
-        };
-      }).filter((entry) => entry.storefront_product_id)
+      const [productId, qty] = String(entry || '').split(':');
+      return {
+        storefront_product_id: String(productId || '').trim(),
+        quantity: Math.max(1, Number(qty || 1) || 1)
+      };
+    }).filter((entry) => entry.storefront_product_id)
     : [];
 
   const saleItems = parsedCart.length
     ? parsedCart
     : [{
-        storefront_product_id: String(metadata.storefront_product_id || '').trim(),
-        quantity: Math.max(1, Number(metadata.quantity || 1) || 1)
-      }].filter((entry) => entry.storefront_product_id);
+      storefront_product_id: String(metadata.storefront_product_id || '').trim(),
+      quantity: Math.max(1, Number(metadata.quantity || 1) || 1)
+    }].filter((entry) => entry.storefront_product_id);
 
   if (!saleItems.length) {
     return { skipped: 'missing_product_or_session' };
@@ -1037,7 +1254,7 @@ async function recordStorefrontSaleFromStripeSession({ supabase, session }) {
   }
 
   await Promise.all(saleItems.map((entry) => recalculateProductInventory(supabase, entry.storefront_product_id)));
-  const emailResult = await sendStorefrontOrderConfirmation({ sales: insertedSales });
+  const emailResult = await sendStorefrontOrderConfirmation({ supabase, sendEmail, sales: insertedSales, notificationEmail: process.env.STORE_ORDER_NOTIFICATION_EMAIL || SUPER_ADMIN_EMAIL });
   return { recorded: true, sales: insertedSales, email: emailResult };
 }
 
@@ -1138,6 +1355,34 @@ function registerShopRoutes({
           purchase_total_price: centsToDollars(row.purchase_total_price_cents)
         }))
       });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+
+  app.get('/public/store/shipping-settings', async (req, res) => {
+    try {
+      const tiers = await getStoreShippingTiers(supabase);
+      res.json({ tiers: tiers.map((row) => ({ ...row, amount: centsToDollars(row.amount_cents) })) });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.get('/admin/store/shipping-settings', auth, admin, async (req, res) => {
+    try {
+      const tiers = await getStoreShippingTiers(supabase);
+      res.json({ tiers: tiers.map((row) => ({ ...row, amount: centsToDollars(row.amount_cents) })) });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post('/admin/store/shipping-settings', auth, admin, async (req, res) => {
+    try {
+      const tiers = await saveStoreShippingTiers(supabase, req.body?.tiers || []);
+      res.json({ success: true, tiers: tiers.map((row) => ({ ...row, amount: centsToDollars(row.amount_cents) })) });
     } catch (err) {
       res.status(500).json({ error: err.message });
     }
@@ -1697,157 +1942,156 @@ function registerShopRoutes({
   });
 
 
-app.post('/public/store/checkout-session', async (req, res) => {
-  try {
-    if (!stripe) return res.status(400).json({ error: 'Stripe is not configured yet' });
+  app.post('/public/store/checkout-session', async (req, res) => {
+    try {
+      if (!stripe) return res.status(400).json({ error: 'Stripe is not configured yet' });
 
-    const requestedItems = Array.isArray(req.body?.items) && req.body.items.length
-      ? req.body.items
-      : [{
+      const requestedItems = Array.isArray(req.body?.items) && req.body.items.length
+        ? req.body.items
+        : [{
           product_id: req.body?.product_id || req.body?.storefront_product_id || req.body?.inventory_id,
           quantity: req.body?.quantity || 1
         }];
 
-    const normalizedItems = requestedItems
-      .map((entry) => ({
-        product_id: String(entry?.product_id || '').trim(),
-        quantity: Math.max(1, Number(entry?.quantity || 1) || 1)
-      }))
-      .filter((entry) => entry.product_id);
+      const normalizedItems = requestedItems
+        .map((entry) => ({
+          product_id: String(entry?.product_id || '').trim(),
+          quantity: Math.max(1, Number(entry?.quantity || 1) || 1)
+        }))
+        .filter((entry) => entry.product_id);
 
-    if (!normalizedItems.length) {
-      return res.status(400).json({ error: 'At least one product is required for checkout' });
-    }
-
-    const grouped = new Map();
-    for (const entry of normalizedItems) {
-      const current = grouped.get(entry.product_id) || 0;
-      grouped.set(entry.product_id, current + entry.quantity);
-    }
-    const compactItems = Array.from(grouped.entries()).map(([product_id, quantity]) => ({ product_id, quantity }));
-    const productIds = compactItems.map((entry) => entry.product_id);
-
-    const { data: items, error } = await supabase
-      .from('storefront_products')
-      .select('*')
-      .in('id', productIds)
-      .eq('status', 'active');
-    if (error) return res.status(500).json({ error: error.message });
-    const productsById = new Map((items || []).map((item) => [String(item.id), item]));
-    if (productsById.size !== compactItems.length) {
-      return res.status(404).json({ error: 'One or more products could not be found' });
-    }
-
-    const lineItems = [];
-    let totalQuantity = 0;
-    let subtotalDollars = 0;
-    for (const entry of compactItems) {
-      const item = productsById.get(entry.product_id);
-      if (entry.quantity > Number(item.stock_on_hand || 0)) {
-        return res.status(400).json({ error: `Not enough inventory available for ${item.title}` });
+      if (!normalizedItems.length) {
+        return res.status(400).json({ error: 'At least one product is required for checkout' });
       }
-      if (!Number.isFinite(Number(item.sale_price_cents)) || Number(item.sale_price_cents) <= 0) {
-        return res.status(400).json({ error: `${item.title} does not have a valid sale price yet` });
+
+      const grouped = new Map();
+      for (const entry of normalizedItems) {
+        const current = grouped.get(entry.product_id) || 0;
+        grouped.set(entry.product_id, current + entry.quantity);
       }
-      totalQuantity += entry.quantity;
-      subtotalDollars += centsToDollars(Number(item.sale_price_cents) * entry.quantity);
-      lineItems.push({
-        quantity: entry.quantity,
-        price_data: {
-          currency: process.env.STRIPE_CURRENCY || 'usd',
-          unit_amount: Number(item.sale_price_cents),
-          product_data: {
-            name: item.title,
-            description: item.description || `${item.primary_site} SKU ${item.primary_sku}`,
-            images: item.image_url ? [item.image_url] : []
+      const compactItems = Array.from(grouped.entries()).map(([product_id, quantity]) => ({ product_id, quantity }));
+      const productIds = compactItems.map((entry) => entry.product_id);
+
+      const { data: items, error } = await supabase
+        .from('storefront_products')
+        .select('*')
+        .in('id', productIds)
+        .eq('status', 'active');
+      if (error) return res.status(500).json({ error: error.message });
+      const productsById = new Map((items || []).map((item) => [String(item.id), item]));
+      if (productsById.size !== compactItems.length) {
+        return res.status(404).json({ error: 'One or more products could not be found' });
+      }
+
+      const lineItems = [];
+      let totalQuantity = 0;
+      let subtotalDollars = 0;
+      for (const entry of compactItems) {
+        const item = productsById.get(entry.product_id);
+        if (entry.quantity > Number(item.stock_on_hand || 0)) {
+          return res.status(400).json({ error: `Not enough inventory available for ${item.title}` });
+        }
+        if (!Number.isFinite(Number(item.sale_price_cents)) || Number(item.sale_price_cents) <= 0) {
+          return res.status(400).json({ error: `${item.title} does not have a valid sale price yet` });
+        }
+        totalQuantity += entry.quantity;
+        subtotalDollars += centsToDollars(Number(item.sale_price_cents) * entry.quantity);
+        lineItems.push({
+          quantity: entry.quantity,
+          price_data: {
+            currency: process.env.STRIPE_CURRENCY || 'usd',
+            unit_amount: Number(item.sale_price_cents),
+            product_data: {
+              name: item.title,
+              description: item.description || `${item.primary_site} SKU ${item.primary_sku}`,
+              images: item.image_url ? [item.image_url] : []
+            }
           }
-        }
-      });
-    }
-
-    const shipping = shippingTierForQuantity(totalQuantity);
-    const discountCode = String(req.body?.discount_code || '').trim().toUpperCase();
-    const customerEmail = String(req.body?.customer_email || '').trim().toLowerCase();
-
-    let validatedDiscount = null;
-    if (discountCode && typeof validateDiscountCode === 'function') {
-      validatedDiscount = await validateDiscountCode({
-        code: discountCode,
-        cartTotal: subtotalDollars,
-        shippingTotal: centsToDollars(shipping.amount_cents),
-        email: customerEmail
-      });
-      if (!validatedDiscount.ok) {
-        return res.status(400).json({ error: validatedDiscount.error });
+        });
       }
-    }
 
-    if (!(validatedDiscount?.discount?.type === 'free_shipping')) {
-      lineItems.push({
-        quantity: 1,
-        price_data: {
+      const shipping = await shippingTierForQuantity(supabase, totalQuantity);
+      const discountCode = String(req.body?.discount_code || '').trim().toUpperCase();
+      const customerEmail = String(req.body?.customer_email || '').trim().toLowerCase();
+
+      let validatedDiscount = null;
+      if (discountCode && typeof validateDiscountCode === 'function') {
+        validatedDiscount = await validateDiscountCode({
+          code: discountCode,
+          cartTotal: subtotalDollars,
+          shippingTotal: centsToDollars(shipping.amount_cents),
+          email: customerEmail
+        });
+        if (!validatedDiscount.ok) {
+          return res.status(400).json({ error: validatedDiscount.error });
+        }
+      }
+
+      if (!(validatedDiscount?.discount?.type === 'free_shipping')) {
+        lineItems.push({
+          quantity: 1,
+          price_data: {
+            currency: process.env.STRIPE_CURRENCY || 'usd',
+            unit_amount: shipping.amount_cents,
+            product_data: { name: `Shipping (${shipping.label})` }
+          }
+        });
+      }
+
+      let discounts = undefined;
+      if (validatedDiscount?.discount?.type === 'percent') {
+        const coupon = await stripe.coupons.create({
+          duration: 'once',
+          percent_off: Number(validatedDiscount.discount.value),
+          name: `${validatedDiscount.code} ${validatedDiscount.discount.value}% off`
+        });
+        discounts = [{ coupon: coupon.id }];
+      } else if (validatedDiscount?.discount?.type === 'fixed') {
+        const coupon = await stripe.coupons.create({
+          duration: 'once',
+          amount_off: dollarsToCents(validatedDiscount.discount.value),
           currency: process.env.STRIPE_CURRENCY || 'usd',
-          unit_amount: shipping.amount_cents,
-          product_data: { name: `Shipping (${shipping.label})` }
+          name: `${validatedDiscount.code} $${Number(validatedDiscount.discount.value).toFixed(2)} off`
+        });
+        discounts = [{ coupon: coupon.id }];
+      }
+
+      const successUrl = buildAppUrl('/shop.html?checkout=success');
+      const cancelUrl = buildAppUrl('/shop.html?checkout=cancel');
+      const compactMetadata = compactItems.map((entry) => `${entry.product_id}:${entry.quantity}`).join(',');
+      const firstItem = productsById.get(compactItems[0].product_id);
+
+      const session = await stripe.checkout.sessions.create({
+        mode: 'payment',
+        success_url: successUrl,
+        cancel_url: cancelUrl,
+        customer_creation: 'always',
+        customer_email: customerEmail || undefined,
+        billing_address_collection: 'required',
+        shipping_address_collection: { allowed_countries: ['US'] },
+        phone_number_collection: { enabled: true },
+        automatic_tax: { enabled: true },
+        line_items: lineItems,
+        discounts,
+        metadata: {
+          checkout_type: 'storefront_purchase',
+          storefront_product_id: String(firstItem.id),
+          site: String(firstItem.primary_site || ''),
+          sku: String(firstItem.primary_sku || ''),
+          quantity: String(compactItems[0].quantity),
+          cart_items: compactMetadata,
+          discount_code: validatedDiscount?.code || '',
+          customer_email: customerEmail || ''
         }
       });
+
+      res.json({ url: session.url, id: session.id });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
     }
+  });
 
-    let discounts = undefined;
-    if (validatedDiscount?.discount?.type === 'percent') {
-      const coupon = await stripe.coupons.create({
-        duration: 'once',
-        percent_off: Number(validatedDiscount.discount.value),
-        name: `${validatedDiscount.code} ${validatedDiscount.discount.value}% off`
-      });
-      discounts = [{ coupon: coupon.id }];
-    } else if (validatedDiscount?.discount?.type === 'fixed') {
-      const coupon = await stripe.coupons.create({
-        duration: 'once',
-        amount_off: dollarsToCents(validatedDiscount.discount.value),
-        currency: process.env.STRIPE_CURRENCY || 'usd',
-        name: `${validatedDiscount.code} $${Number(validatedDiscount.discount.value).toFixed(2)} off`
-      });
-      discounts = [{ coupon: coupon.id }];
-    }
-
-    const successUrl = buildAppUrl('/shop.html?checkout=success');
-    const cancelUrl = buildAppUrl('/shop.html?checkout=cancel');
-    const compactMetadata = compactItems.map((entry) => `${entry.product_id}:${entry.quantity}`).join(',');
-    const firstItem = productsById.get(compactItems[0].product_id);
-
-    const session = await stripe.checkout.sessions.create({
-      mode: 'payment',
-      success_url: successUrl,
-      cancel_url: cancelUrl,
-      customer_creation: 'always',
-      customer_email: customerEmail || undefined,
-      billing_address_collection: 'required',
-      shipping_address_collection: { allowed_countries: ['US'] },
-      phone_number_collection: { enabled: true },
-      automatic_tax: { enabled: true },
-      line_items: lineItems,
-      discounts,
-      metadata: {
-        checkout_type: 'storefront_purchase',
-        storefront_product_id: String(firstItem.id),
-        site: String(firstItem.primary_site || ''),
-        sku: String(firstItem.primary_sku || ''),
-        quantity: String(compactItems[0].quantity),
-        cart_items: compactMetadata,
-        discount_code: validatedDiscount?.code || '',
-        customer_email: customerEmail || ''
-      }
-    });
-
-    res.json({ url: session.url, id: session.id });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-return {
-
+  return {
     maybeCacheWebhookProductFromOrder: async ({ payload, normalized, user }) =>
       maybeCacheWebhookProductFromOrder({
         supabase,
@@ -1865,7 +2109,7 @@ return {
         superAdminEmail: SUPER_ADMIN_EMAIL
       }),
     recordStorefrontSaleFromStripeSession: async (session) =>
-      recordStorefrontSaleFromStripeSession({ supabase, session })
+      recordStorefrontSaleFromStripeSession({ supabase, sendEmail, session, notificationEmail: process.env.STORE_ORDER_NOTIFICATION_EMAIL || SUPER_ADMIN_EMAIL })
   };
 }
 
