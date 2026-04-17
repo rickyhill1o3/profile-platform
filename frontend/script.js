@@ -2090,6 +2090,7 @@ async function loadWebhookSettings() {
     const createMonitorButton = document.getElementById('createMonitorWebhookButton');
     const superAdminField = document.getElementById('superAdminDiscordField');
     const superAdminMonitorGroups = document.getElementById('superAdminMonitorGroups');
+    const adminMonitorGroupsSection = document.getElementById('adminMonitorGroupsSection');
 
     const monitorInputs = {
         pokemon: {
@@ -2182,6 +2183,7 @@ async function loadWebhookSettings() {
         if (createMonitorButton) createMonitorButton.style.display = data.can_create_inbound ? '' : 'none';
         if (superAdminField) superAdminField.style.display = data.is_super_admin ? '' : 'none';
         if (superAdminMonitorGroups) superAdminMonitorGroups.style.display = data.is_super_admin ? '' : 'none';
+        if (adminMonitorGroupsSection) adminMonitorGroupsSection.style.display = data.is_super_admin ? 'none' : '';
         const webhookLogsSection = document.getElementById('webhookLogsSection');
         if (webhookLogsSection) webhookLogsSection.style.display = data.is_super_admin ? '' : 'none';
 

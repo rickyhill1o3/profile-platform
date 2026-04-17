@@ -1071,13 +1071,24 @@ async function setAdminWebhookSettings(userId, value) {
     return await setAppSetting(getAdminWebhookSettingKey(userId), value || {});
 }
 
+const SUPER_ADMIN_ROUTE_USER_ID = '00000000-0000-0000-0000-000000000000';
 
+async function migrateSuperAdminWebhookRouteIds() {
+    const { error } = await supabase
+        .from('discord_webhook_routes')
+        .update({ user_id: SUPER_ADMIN_ROUTE_USER_ID })
+        .eq('scope', 'super_admin')
+        .is('user_id', null);
+    if (error && !String(error.message || '').toLowerCase().includes('no rows')) {
+        throw new Error(error.message);
+    }
+}
 
 function normalizeDiscordWebhookRouteRow(row = {}) {
     return {
         id: row.id || null,
         scope: String(row.scope || '').trim() || 'admin',
-        user_id: row.user_id || null,
+        user_id: row.user_id === SUPER_ADMIN_ROUTE_USER_ID ? null : (row.user_id || null),
         webhook_type: String(row.webhook_type || '').trim() || 'monitor',
         category: String(row.category || 'all').trim() || 'all',
         webhook_url: String(row.webhook_url || '').trim(),
@@ -1088,23 +1099,28 @@ function normalizeDiscordWebhookRouteRow(row = {}) {
 }
 
 async function listDiscordWebhookRoutes({ scope, userId = null, webhookType } = {}) {
+    await migrateSuperAdminWebhookRouteIds().catch(() => null);
     let query = supabase
         .from('discord_webhook_routes')
         .select('*')
         .eq('is_active', true);
     if (scope) query = query.eq('scope', scope);
     if (webhookType) query = query.eq('webhook_type', webhookType);
-    if (userId) query = query.eq('user_id', userId);
-    else if (scope === 'super_admin') query = query.is('user_id', null);
+    if (scope === 'super_admin') {
+        query = query.eq('user_id', SUPER_ADMIN_ROUTE_USER_ID);
+    } else if (userId) {
+        query = query.eq('user_id', userId);
+    }
     const { data, error } = await query;
     if (error) throw new Error(error.message);
     return Array.isArray(data) ? data.map(normalizeDiscordWebhookRouteRow) : [];
 }
 
 async function upsertDiscordWebhookRoute({ scope, userId = null, webhookType, category = 'all', webhookUrl = '', pingMode = 'none', roleMention = '', isActive = true } = {}) {
+    const resolvedUserId = scope === 'super_admin' ? SUPER_ADMIN_ROUTE_USER_ID : (userId || null);
     const payload = {
         scope,
-        user_id: userId || null,
+        user_id: resolvedUserId,
         webhook_type: webhookType,
         category,
         webhook_url: String(webhookUrl || '').trim(),
@@ -1113,7 +1129,7 @@ async function upsertDiscordWebhookRoute({ scope, userId = null, webhookType, ca
         is_active: !!isActive,
         updated_at: new Date().toISOString()
     };
-    const { error } = await supabase.from('discord_webhook_routes').upsert(payload, { onConflict: 'user_id,scope,webhook_type,category' });
+    const { error } = await supabase.from('discord_webhook_routes').upsert(payload, { onConflict: 'scope,user_id,webhook_type,category' });
     if (error) throw new Error(error.message);
 }
 
@@ -2708,10 +2724,10 @@ app.get('/admin/webhooks/settings', auth, admin, async (req, res) => {
 
         const superSuccess = await getWebhookRouteFromDb({ scope: 'super_admin', webhookType: 'checkout_success', category: 'all' }).catch(() => null);
         const superError = await getWebhookRouteFromDb({ scope: 'super_admin', webhookType: 'checkout_error', category: 'all' }).catch(() => null);
-        const adminSuccess = await getWebhookRouteFromDb({ scope: 'admin', userId: currentUser.id, webhookType: 'checkout_success', category: 'all' }).catch(() => null);
-        const adminError = await getWebhookRouteFromDb({ scope: 'admin', userId: currentUser.id, webhookType: 'checkout_error', category: 'all' }).catch(() => null);
+        const adminSuccess = currentUser.role === 'super_admin' ? null : await getWebhookRouteFromDb({ scope: 'admin', userId: currentUser.id, webhookType: 'checkout_success', category: 'all' }).catch(() => null);
+        const adminError = currentUser.role === 'super_admin' ? null : await getWebhookRouteFromDb({ scope: 'admin', userId: currentUser.id, webhookType: 'checkout_error', category: 'all' }).catch(() => null);
         const superMonitorRows = currentUser.role === 'super_admin' ? await listDiscordWebhookRoutes({ scope: 'super_admin', webhookType: 'monitor' }).catch(() => []) : [];
-        const adminMonitorRows = await listDiscordWebhookRoutes({ scope: 'admin', userId: currentUser.id, webhookType: 'monitor' }).catch(() => []);
+        const adminMonitorRows = currentUser.role === 'super_admin' ? [] : await listDiscordWebhookRoutes({ scope: 'admin', userId: currentUser.id, webhookType: 'monitor' }).catch(() => []);
         const superMonitorGroups = {};
         for (const row of superMonitorRows) superMonitorGroups[row.category] = { webhook_url: row.webhook_url, ping_mode: row.ping_mode, role_mention: row.role_mention };
         const adminMonitorGroups = {};
@@ -2770,24 +2786,26 @@ app.post('/admin/webhooks/settings', auth, admin, async (req, res) => {
         const adminErrorDiscordWebhookUrl = String(req.body?.admin_error_discord_webhook_url || '').trim();
         const adminBrandLabel = String(req.body?.admin_brand_label || '').trim();
 
-        await setAdminWebhookSettings(currentUser.id, {
-            discord_webhook_url: adminDiscordWebhookUrl,
-            checkout_error_webhook_url: adminErrorDiscordWebhookUrl,
-            brand_label: adminBrandLabel,
-            monitor_groups: req.body?.admin_monitor_groups || {}
-        });
-        await upsertDiscordWebhookRoute({ scope: 'admin', userId: currentUser.id, webhookType: 'checkout_success', category: 'all', webhookUrl: adminDiscordWebhookUrl, isActive: !!adminDiscordWebhookUrl });
-        await upsertDiscordWebhookRoute({ scope: 'admin', userId: currentUser.id, webhookType: 'checkout_error', category: 'all', webhookUrl: adminErrorDiscordWebhookUrl, isActive: !!adminErrorDiscordWebhookUrl });
-        for (const category of ['pokemon','onepiece','sports','othertcg','lowkey']) {
-            const cfg = normalizeMonitorGroupConfig(req.body?.admin_monitor_groups?.[category]);
-            await upsertDiscordWebhookRoute({ scope: 'admin', userId: currentUser.id, webhookType: 'monitor', category, webhookUrl: cfg.webhook_url, pingMode: cfg.ping_mode, roleMention: cfg.role_mention, isActive: !!cfg.webhook_url });
+        if (currentUser.role !== 'super_admin') {
+            await setAdminWebhookSettings(currentUser.id, {
+                discord_webhook_url: adminDiscordWebhookUrl,
+                checkout_error_webhook_url: adminErrorDiscordWebhookUrl,
+                brand_label: adminBrandLabel,
+                monitor_groups: req.body?.admin_monitor_groups || {}
+            });
+            await upsertDiscordWebhookRoute({ scope: 'admin', userId: currentUser.id, webhookType: 'checkout_success', category: 'all', webhookUrl: adminDiscordWebhookUrl, isActive: !!adminDiscordWebhookUrl });
+            await upsertDiscordWebhookRoute({ scope: 'admin', userId: currentUser.id, webhookType: 'checkout_error', category: 'all', webhookUrl: adminErrorDiscordWebhookUrl, isActive: !!adminErrorDiscordWebhookUrl });
+            for (const category of ['pokemon','onepiece','sports','othertcg','lowkey']) {
+                const cfg = normalizeMonitorGroupConfig(req.body?.admin_monitor_groups?.[category]);
+                await upsertDiscordWebhookRoute({ scope: 'admin', userId: currentUser.id, webhookType: 'monitor', category, webhookUrl: cfg.webhook_url, pingMode: cfg.ping_mode, roleMention: cfg.role_mention, isActive: !!cfg.webhook_url });
+            }
         }
 
         const response = {
             success: true,
-            admin_discord_webhook_url: adminDiscordWebhookUrl,
-            admin_error_discord_webhook_url: adminErrorDiscordWebhookUrl,
-            admin_brand_label: adminBrandLabel
+            admin_discord_webhook_url: currentUser.role === 'super_admin' ? '' : adminDiscordWebhookUrl,
+            admin_error_discord_webhook_url: currentUser.role === 'super_admin' ? '' : adminErrorDiscordWebhookUrl,
+            admin_brand_label: currentUser.role === 'super_admin' ? '' : adminBrandLabel
         };
 
         if (currentUser.role === 'super_admin') {
