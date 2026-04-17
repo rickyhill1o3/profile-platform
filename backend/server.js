@@ -1072,6 +1072,96 @@ async function setAdminWebhookSettings(userId, value) {
 }
 
 
+
+function normalizeDiscordWebhookRouteRow(row = {}) {
+    return {
+        id: row.id || null,
+        scope: String(row.scope || '').trim() || 'admin',
+        user_id: row.user_id || null,
+        webhook_type: String(row.webhook_type || '').trim() || 'monitor',
+        category: String(row.category || 'all').trim() || 'all',
+        webhook_url: String(row.webhook_url || '').trim(),
+        ping_mode: String(row.ping_mode || 'none').trim() || 'none',
+        role_mention: String(row.role_mention || '').trim(),
+        is_active: row.is_active !== false
+    };
+}
+
+async function listDiscordWebhookRoutes({ scope, userId = null, webhookType } = {}) {
+    let query = supabase
+        .from('discord_webhook_routes')
+        .select('*')
+        .eq('is_active', true);
+    if (scope) query = query.eq('scope', scope);
+    if (webhookType) query = query.eq('webhook_type', webhookType);
+    if (userId) query = query.eq('user_id', userId);
+    else if (scope === 'super_admin') query = query.is('user_id', null);
+    const { data, error } = await query;
+    if (error) throw new Error(error.message);
+    return Array.isArray(data) ? data.map(normalizeDiscordWebhookRouteRow) : [];
+}
+
+async function upsertDiscordWebhookRoute({ scope, userId = null, webhookType, category = 'all', webhookUrl = '', pingMode = 'none', roleMention = '', isActive = true } = {}) {
+    const payload = {
+        scope,
+        user_id: userId || null,
+        webhook_type: webhookType,
+        category,
+        webhook_url: String(webhookUrl || '').trim(),
+        ping_mode: String(pingMode || 'none').trim() || 'none',
+        role_mention: String(roleMention || '').trim(),
+        is_active: !!isActive,
+        updated_at: new Date().toISOString()
+    };
+    const { error } = await supabase.from('discord_webhook_routes').upsert(payload, { onConflict: 'user_id,scope,webhook_type,category' });
+    if (error) throw new Error(error.message);
+}
+
+async function getWebhookRouteFromDb({ scope, userId = null, webhookType, category = 'all' } = {}) {
+    const rows = await listDiscordWebhookRoutes({ scope, userId, webhookType });
+    return rows.find((row) => row.category === category) || null;
+}
+
+async function migrateWebhookSettingsToSupabase({ currentUser, globalSettings = {}, adminSettings = {} } = {}) {
+    if (currentUser?.role === 'super_admin') {
+        const existingSuccess = await getWebhookRouteFromDb({ scope: 'super_admin', webhookType: 'checkout_success', category: 'all' }).catch(() => null);
+        const existingError = await getWebhookRouteFromDb({ scope: 'super_admin', webhookType: 'checkout_error', category: 'all' }).catch(() => null);
+        if (!existingSuccess && String(globalSettings?.discord_webhook_url || '').trim()) {
+            await upsertDiscordWebhookRoute({ scope: 'super_admin', webhookType: 'checkout_success', category: 'all', webhookUrl: globalSettings.discord_webhook_url });
+        }
+        if (!existingError && String(globalSettings?.checkout_error_webhook_url || '').trim()) {
+            await upsertDiscordWebhookRoute({ scope: 'super_admin', webhookType: 'checkout_error', category: 'all', webhookUrl: globalSettings.checkout_error_webhook_url });
+        }
+        const monitorGroups = globalSettings?.monitor_groups || {};
+        for (const category of ['pokemon','onepiece','sports','othertcg','lowkey']) {
+            const cfg = normalizeMonitorGroupConfig(monitorGroups?.[category]);
+            const existing = await getWebhookRouteFromDb({ scope: 'super_admin', webhookType: 'monitor', category }).catch(() => null);
+            if (!existing && String(cfg.webhook_url || '').trim()) {
+                await upsertDiscordWebhookRoute({ scope: 'super_admin', webhookType: 'monitor', category, webhookUrl: cfg.webhook_url, pingMode: cfg.ping_mode, roleMention: cfg.role_mention });
+            }
+        }
+    }
+
+    if (currentUser?.id) {
+        const existingAdminSuccess = await getWebhookRouteFromDb({ scope: 'admin', userId: currentUser.id, webhookType: 'checkout_success', category: 'all' }).catch(() => null);
+        const existingAdminError = await getWebhookRouteFromDb({ scope: 'admin', userId: currentUser.id, webhookType: 'checkout_error', category: 'all' }).catch(() => null);
+        if (!existingAdminSuccess && String(adminSettings?.discord_webhook_url || '').trim()) {
+            await upsertDiscordWebhookRoute({ scope: 'admin', userId: currentUser.id, webhookType: 'checkout_success', category: 'all', webhookUrl: adminSettings.discord_webhook_url });
+        }
+        if (!existingAdminError && String(adminSettings?.checkout_error_webhook_url || '').trim()) {
+            await upsertDiscordWebhookRoute({ scope: 'admin', userId: currentUser.id, webhookType: 'checkout_error', category: 'all', webhookUrl: adminSettings.checkout_error_webhook_url });
+        }
+        const adminGroups = adminSettings?.monitor_groups || {};
+        for (const category of ['pokemon','onepiece','sports','othertcg','lowkey']) {
+            const cfg = normalizeMonitorGroupConfig(adminGroups?.[category]);
+            const existing = await getWebhookRouteFromDb({ scope: 'admin', userId: currentUser.id, webhookType: 'monitor', category }).catch(() => null);
+            if (!existing && String(cfg.webhook_url || '').trim()) {
+                await upsertDiscordWebhookRoute({ scope: 'admin', userId: currentUser.id, webhookType: 'monitor', category, webhookUrl: cfg.webhook_url, pingMode: cfg.ping_mode, roleMention: cfg.role_mention });
+            }
+        }
+    }
+}
+
 async function getAllAdminMonitorGroupConfigs() {
     const { data: admins, error } = await supabase
         .from('users')
@@ -1080,8 +1170,15 @@ async function getAllAdminMonitorGroupConfigs() {
     if (error) throw new Error(error.message);
     const rows = [];
     for (const adminUser of admins || []) {
-        const settings = await getAdminWebhookSettings(adminUser.id).catch(() => ({}));
-        const monitorGroups = settings?.monitor_groups || {};
+        const routeRows = await listDiscordWebhookRoutes({ scope: 'admin', userId: adminUser.id, webhookType: 'monitor' }).catch(() => []);
+        const monitorGroups = {};
+        for (const row of routeRows) {
+            monitorGroups[row.category] = { webhook_url: row.webhook_url, ping_mode: row.ping_mode, role_mention: row.role_mention };
+        }
+        if (!Object.keys(monitorGroups).length) {
+            const settings = await getAdminWebhookSettings(adminUser.id).catch(() => ({}));
+            Object.assign(monitorGroups, settings?.monitor_groups || {});
+        }
         rows.push({ user_id: adminUser.id, role: adminUser.role, email: adminUser.email, monitor_groups: monitorGroups });
     }
     return rows;
@@ -1917,7 +2014,8 @@ async function sendCheckoutDiscordNotifications(order, user) {
     // Route success and failed checkout events to separate webhook URLs
     const checkoutType = classifyCheckoutWebhookType(order);
     const globalSettings = await getAppSetting('webhook_settings', {});
-    const globalWebhookUrl = String((checkoutType === 'error' ? globalSettings?.checkout_error_webhook_url : globalSettings?.discord_webhook_url) || '').trim();
+    const globalRoute = await getWebhookRouteFromDb({ scope: 'super_admin', webhookType: checkoutType === 'error' ? 'checkout_error' : 'checkout_success', category: 'all' }).catch(() => null);
+    const globalWebhookUrl = String((globalRoute?.webhook_url || (checkoutType === 'error' ? globalSettings?.checkout_error_webhook_url : globalSettings?.discord_webhook_url)) || '').trim();
 
     if (globalWebhookUrl) {
         results.push({
@@ -1938,7 +2036,8 @@ async function sendCheckoutDiscordNotifications(order, user) {
     // Also send to owner admin webhook if the user belongs to an admin
     if (user?.owner_admin_id) {
         const adminSettings = await getAdminWebhookSettings(user.owner_admin_id);
-        const adminWebhookUrl = String((checkoutType === 'error' ? adminSettings?.checkout_error_webhook_url : adminSettings?.discord_webhook_url) || '').trim();
+        const adminRoute = await getWebhookRouteFromDb({ scope: 'admin', userId: user.owner_admin_id, webhookType: checkoutType === 'error' ? 'checkout_error' : 'checkout_success', category: 'all' }).catch(() => null);
+        const adminWebhookUrl = String((adminRoute?.webhook_url || (checkoutType === 'error' ? adminSettings?.checkout_error_webhook_url : adminSettings?.discord_webhook_url)) || '').trim();
         const brandLabel = String(adminSettings?.brand_label || '').trim();
 
         if (adminWebhookUrl) {
@@ -2286,7 +2385,10 @@ app.post(["/webhooks/monitor", "/webhooks/monitor/:token"], async (req, res) => 
         })).id;
 
         const globalSettings = await getAppSetting('webhook_settings', {});
-        const globalGroups = globalSettings?.monitor_groups || {};
+        const superRows = await listDiscordWebhookRoutes({ scope: 'super_admin', webhookType: 'monitor' }).catch(() => []);
+        const globalGroups = {};
+        for (const row of superRows) globalGroups[row.category] = { webhook_url: row.webhook_url, ping_mode: row.ping_mode, role_mention: row.role_mention };
+        if (!Object.keys(globalGroups).length) Object.assign(globalGroups, globalSettings?.monitor_groups || {});
         const adminMonitorConfigs = await getAllAdminMonitorGroupConfigs();
         const results = [];
         const usedTargets = [];
@@ -2602,17 +2704,29 @@ app.get('/admin/webhooks/settings', auth, admin, async (req, res) => {
         const globalSettings = await getAppSetting('webhook_settings', {});
         const monitorSettings = await getAppSetting('monitor_webhook_settings', {});
         const adminSettings = await getAdminWebhookSettings(currentUser.id);
+        await migrateWebhookSettingsToSupabase({ currentUser, globalSettings, adminSettings }).catch(() => null);
+
+        const superSuccess = await getWebhookRouteFromDb({ scope: 'super_admin', webhookType: 'checkout_success', category: 'all' }).catch(() => null);
+        const superError = await getWebhookRouteFromDb({ scope: 'super_admin', webhookType: 'checkout_error', category: 'all' }).catch(() => null);
+        const adminSuccess = await getWebhookRouteFromDb({ scope: 'admin', userId: currentUser.id, webhookType: 'checkout_success', category: 'all' }).catch(() => null);
+        const adminError = await getWebhookRouteFromDb({ scope: 'admin', userId: currentUser.id, webhookType: 'checkout_error', category: 'all' }).catch(() => null);
+        const superMonitorRows = currentUser.role === 'super_admin' ? await listDiscordWebhookRoutes({ scope: 'super_admin', webhookType: 'monitor' }).catch(() => []) : [];
+        const adminMonitorRows = await listDiscordWebhookRoutes({ scope: 'admin', userId: currentUser.id, webhookType: 'monitor' }).catch(() => []);
+        const superMonitorGroups = {};
+        for (const row of superMonitorRows) superMonitorGroups[row.category] = { webhook_url: row.webhook_url, ping_mode: row.ping_mode, role_mention: row.role_mention };
+        const adminMonitorGroups = {};
+        for (const row of adminMonitorRows) adminMonitorGroups[row.category] = { webhook_url: row.webhook_url, ping_mode: row.ping_mode, role_mention: row.role_mention };
 
         res.json({
             inbound_webhook_url: active?.token ? `${getApiBaseUrl(req)}/webhooks/orders/${active.token}` : '',
             monitor_webhook_url: monitorSettings?.token ? `${getApiBaseUrl(req)}/webhooks/monitor/${monitorSettings.token}` : '',
-            discord_webhook_url: String(globalSettings?.discord_webhook_url || ''),
-            checkout_error_webhook_url: String(globalSettings?.checkout_error_webhook_url || ''),
-            admin_discord_webhook_url: String(adminSettings?.discord_webhook_url || ''),
-            admin_error_discord_webhook_url: String(adminSettings?.checkout_error_webhook_url || ''),
+            discord_webhook_url: String(superSuccess?.webhook_url || globalSettings?.discord_webhook_url || ''),
+            checkout_error_webhook_url: String(superError?.webhook_url || globalSettings?.checkout_error_webhook_url || ''),
+            admin_discord_webhook_url: String(adminSuccess?.webhook_url || adminSettings?.discord_webhook_url || ''),
+            admin_error_discord_webhook_url: String(adminError?.webhook_url || adminSettings?.checkout_error_webhook_url || ''),
             admin_brand_label: String(adminSettings?.brand_label || ''),
-            monitor_groups: globalSettings?.monitor_groups || {},
-            admin_monitor_groups: adminSettings?.monitor_groups || {},
+            monitor_groups: Object.keys(superMonitorGroups).length ? superMonitorGroups : (globalSettings?.monitor_groups || {}),
+            admin_monitor_groups: Object.keys(adminMonitorGroups).length ? adminMonitorGroups : (adminSettings?.monitor_groups || {}),
             monitor_dedupe_window_seconds: Number(globalSettings?.monitor_dedupe_window_seconds || 45),
             can_create_inbound: currentUser.role === 'super_admin',
             is_super_admin: currentUser.role === 'super_admin'
@@ -2662,6 +2776,12 @@ app.post('/admin/webhooks/settings', auth, admin, async (req, res) => {
             brand_label: adminBrandLabel,
             monitor_groups: req.body?.admin_monitor_groups || {}
         });
+        await upsertDiscordWebhookRoute({ scope: 'admin', userId: currentUser.id, webhookType: 'checkout_success', category: 'all', webhookUrl: adminDiscordWebhookUrl, isActive: !!adminDiscordWebhookUrl });
+        await upsertDiscordWebhookRoute({ scope: 'admin', userId: currentUser.id, webhookType: 'checkout_error', category: 'all', webhookUrl: adminErrorDiscordWebhookUrl, isActive: !!adminErrorDiscordWebhookUrl });
+        for (const category of ['pokemon','onepiece','sports','othertcg','lowkey']) {
+            const cfg = normalizeMonitorGroupConfig(req.body?.admin_monitor_groups?.[category]);
+            await upsertDiscordWebhookRoute({ scope: 'admin', userId: currentUser.id, webhookType: 'monitor', category, webhookUrl: cfg.webhook_url, pingMode: cfg.ping_mode, roleMention: cfg.role_mention, isActive: !!cfg.webhook_url });
+        }
 
         const response = {
             success: true,
@@ -2682,6 +2802,12 @@ app.post('/admin/webhooks/settings', auth, admin, async (req, res) => {
                 monitor_groups: req.body?.monitor_groups || currentGlobal.monitor_groups || {},
                 monitor_dedupe_window_seconds: monitorDedupeWindowSeconds
             });
+            await upsertDiscordWebhookRoute({ scope: 'super_admin', webhookType: 'checkout_success', category: 'all', webhookUrl: discordWebhookUrl, isActive: !!discordWebhookUrl });
+            await upsertDiscordWebhookRoute({ scope: 'super_admin', webhookType: 'checkout_error', category: 'all', webhookUrl: checkoutErrorWebhookUrl, isActive: !!checkoutErrorWebhookUrl });
+            for (const category of ['pokemon','onepiece','sports','othertcg','lowkey']) {
+                const cfg = normalizeMonitorGroupConfig(req.body?.monitor_groups?.[category]);
+                await upsertDiscordWebhookRoute({ scope: 'super_admin', webhookType: 'monitor', category, webhookUrl: cfg.webhook_url, pingMode: cfg.ping_mode, roleMention: cfg.role_mention, isActive: !!cfg.webhook_url });
+            }
             response.discord_webhook_url = discordWebhookUrl;
             response.checkout_error_webhook_url = checkoutErrorWebhookUrl;
             response.monitor_groups = req.body?.monitor_groups || {};
