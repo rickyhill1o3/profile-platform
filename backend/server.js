@@ -1118,19 +1118,60 @@ async function listDiscordWebhookRoutes({ scope, userId = null, webhookType } = 
 
 async function upsertDiscordWebhookRoute({ scope, userId = null, webhookType, category = 'all', webhookUrl = '', pingMode = 'none', roleMention = '', isActive = true } = {}) {
     const resolvedUserId = scope === 'super_admin' ? SUPER_ADMIN_ROUTE_USER_ID : (userId || null);
+    const normalizedWebhookType = String(webhookType || '').trim();
+    const normalizedCategory = normalizedWebhookType.startsWith('checkout_') ? 'all' : (String(category || 'all').trim() || 'all');
     const payload = {
         scope,
         user_id: resolvedUserId,
-        webhook_type: webhookType,
-        category,
+        webhook_type: normalizedWebhookType,
+        category: normalizedCategory,
         webhook_url: String(webhookUrl || '').trim(),
-        ping_mode: String(pingMode || 'none').trim() || 'none',
-        role_mention: String(roleMention || '').trim(),
+        ping_mode: normalizedWebhookType === 'monitor' ? (String(pingMode || 'none').trim() || 'none') : 'none',
+        role_mention: normalizedWebhookType === 'monitor' ? String(roleMention || '').trim() : '',
         is_active: !!isActive,
         updated_at: new Date().toISOString()
     };
-    const { error } = await supabase.from('discord_webhook_routes').upsert(payload, { onConflict: 'scope,user_id,webhook_type,category' });
-    if (error) throw new Error(error.message);
+
+    const matchQuery = supabase
+        .from('discord_webhook_routes')
+        .select('id, category')
+        .eq('scope', scope)
+        .eq('user_id', resolvedUserId)
+        .eq('webhook_type', normalizedWebhookType);
+
+    const { data: existingRows, error: existingError } = normalizedWebhookType.startsWith('checkout_')
+        ? await matchQuery
+        : await matchQuery.eq('category', normalizedCategory);
+
+    if (existingError) throw new Error(existingError.message);
+
+    const rows = Array.isArray(existingRows) ? existingRows : [];
+
+    if (normalizedWebhookType.startsWith('checkout_') && rows.length) {
+        const staleIds = rows.filter((row) => String(row.category || 'all') !== 'all').map((row) => row.id).filter(Boolean);
+        if (staleIds.length) {
+            const { error: deleteStaleError } = await supabase.from('discord_webhook_routes').delete().in('id', staleIds);
+            if (deleteStaleError) throw new Error(deleteStaleError.message);
+        }
+    }
+
+    const validRows = rows.filter((row) => String(row.category || 'all') === normalizedCategory);
+    const primaryRow = validRows[0] || null;
+    const duplicateIds = validRows.slice(1).map((row) => row.id).filter(Boolean);
+
+    if (duplicateIds.length) {
+        const { error: deleteDupError } = await supabase.from('discord_webhook_routes').delete().in('id', duplicateIds);
+        if (deleteDupError) throw new Error(deleteDupError.message);
+    }
+
+    if (primaryRow?.id) {
+        const { error: updateError } = await supabase.from('discord_webhook_routes').update(payload).eq('id', primaryRow.id);
+        if (updateError) throw new Error(updateError.message);
+        return;
+    }
+
+    const { error: insertError } = await supabase.from('discord_webhook_routes').insert({ ...payload, created_at: new Date().toISOString() });
+    if (insertError) throw new Error(insertError.message);
 }
 
 async function getWebhookRouteFromDb({ scope, userId = null, webhookType, category = 'all' } = {}) {
