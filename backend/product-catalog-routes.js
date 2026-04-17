@@ -431,6 +431,69 @@ async function syncTargetPricingFromAmazon(supabase) {
 }
 
 
+
+function parseImportedCatalogList(input) {
+    if (Array.isArray(input)) return input;
+    if (input && Array.isArray(input.products)) return input.products;
+    return [];
+}
+
+function isPlaceholderPrice(value) {
+    const n = Number(value);
+    return Number.isFinite(n) && n >= 999;
+}
+
+function chunkLines(lines, size = 29) {
+    const rows = Array.isArray(lines) ? lines : [];
+    const out = [];
+    for (let i = 0; i < rows.length; i += size) out.push(rows.slice(i, i + size));
+    return out;
+}
+
+function escapeExportField(value) {
+    return String(value ?? '').replace(/\r?\n|;/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+async function importCatalogList(supabase, site, listInput) {
+    const normalizedSite = normalizeSite(site);
+    const entries = parseImportedCatalogList(listInput);
+    const seen = new Set();
+    const results = [];
+
+    for (const entry of entries) {
+        const sku = String(entry?.sku || '').trim();
+        if (!sku || seen.has(sku.toLowerCase())) continue;
+        seen.add(sku.toLowerCase());
+        const sourcePrice = normalizeMaxPrice(entry?.userSetMaxPrice);
+
+        let product = await upsertCatalogProductByLookup(supabase, normalizedSite, sku);
+
+        if (normalizedSite === 'amazon' && sourcePrice !== null) {
+            const { data, error } = await supabase
+                .from('catalog_products')
+                .update({ default_max_price: sourcePrice })
+                .eq('id', product.id)
+                .select('*')
+                .single();
+            if (!error && data) product = data;
+        }
+
+        if (normalizedSite === 'target' && sourcePrice !== null && !isPlaceholderPrice(sourcePrice) && (product.default_max_price === null || isPlaceholderPrice(product.default_max_price))) {
+            const { data, error } = await supabase
+                .from('catalog_products')
+                .update({ default_max_price: sourcePrice })
+                .eq('id', product.id)
+                .select('*')
+                .single();
+            if (!error && data) product = data;
+        }
+
+        results.push(product);
+    }
+
+    return results;
+}
+
 function requireSuperAdmin(req, res) {
     if (req.role !== 'super_admin') {
         res.status(403).json({ error: 'Super admin only.' });
@@ -890,6 +953,45 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
         const { error } = await supabase.from('product_requests').delete().eq('id', req.params.id);
         if (error) return res.status(500).json({ error: error.message });
         res.json({ success: true, message: 'Request deleted.' });
+    });
+
+
+    app.post('/admin/catalog-products/import-list', auth, admin, async (req, res) => {
+        try {
+            if (!requireSuperAdmin(req, res)) return;
+            const site = normalizeSite(req.body?.site);
+            const items = await importCatalogList(supabase, site, req.body?.products || req.body?.data || []);
+            res.json({ success: true, imported: items.length, items, message: `Imported ${items.length} ${site} products.` });
+        } catch (err) {
+            res.status(400).json({ error: err.message });
+        }
+    });
+
+    app.get('/admin/catalog-products/export-lines', auth, admin, async (req, res) => {
+        try {
+            const site = normalizeSite(req.query.site);
+            const batchSize = Math.max(1, Math.min(200, Number(req.query.batchSize || 29) || 29));
+            const { data, error } = await supabase
+                .from('catalog_products')
+                .select('site, sku, product_name, default_max_price, metadata, is_enabled')
+                .eq('site', site)
+                .eq('is_enabled', true)
+                .order('product_name', { ascending: true });
+            if (error) throw new Error(error.message);
+            const rows = (data || []).filter((row) => !(row.metadata && row.metadata.virtual)).map((row) => {
+                const price = row.default_max_price === null || row.default_max_price === undefined ? '' : Number(row.default_max_price).toFixed(2).replace(/\.00$/, '.00');
+                return `${escapeExportField(row.sku)};${escapeExportField(row.product_name)};${price}`;
+            });
+            res.json({
+                success: true,
+                site,
+                total: rows.length,
+                batchSize,
+                batches: chunkLines(rows, batchSize).map((lines, index) => ({ index: index + 1, text: lines.join('\n'), count: lines.length }))
+            });
+        } catch (err) {
+            res.status(400).json({ error: err.message });
+        }
     });
 
     app.get('/admin/catalog-products', auth, admin, async (req, res) => {

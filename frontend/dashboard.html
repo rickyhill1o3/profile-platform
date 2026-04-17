@@ -17,6 +17,7 @@
       <div class="topbar-actions">
         <a class="btn" href="guide.html">User Guide</a>
         <button class="btn" id="adminPanelButton" style="display:none" onclick="openAdminPanel()">Admin Panel</button>
+        <button class="btn" id="storeAdminButton" style="display:none" onclick="openStoreAdmin()">Storefront Admin</button>
         <a class="btn" href="shop.html">Public Shop</a>
         <button class="btn" onclick="goToChangePassword()">Change Password</button>
         <button class="btn btn-danger" onclick="logout()">Logout</button>
@@ -59,6 +60,21 @@
               <div class="panel-actions">
                 <button class="btn btn-primary" onclick="location='profile.html'">Add Profile</button>
               </div>
+            </div>
+            <div class="banner banner-soft" style="margin-top:16px;">
+              <strong>Import checkout profiles</strong>
+              <p class="subtle-text">Upload a Refract / Prism JSON export to add multiple profiles at once.</p>
+              <div class="toolbar-row">
+                <select id="profileImportType" class="input">
+                  <option value="walmart">Walmart</option>
+                  <option value="target">Target</option>
+                  <option value="amazon">Amazon</option>
+                  <option value="general">General</option>
+                </select>
+                <input id="profileImportFile" class="input" type="file" accept="application/json,.json" />
+                <button class="btn btn-primary" id="profileImportButton" type="button">Import Profiles</button>
+              </div>
+              <div id="profileImportMessage" class="subtle-text"></div>
             </div>
           </section>
         </section>

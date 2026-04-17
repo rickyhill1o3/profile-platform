@@ -1,3 +1,60 @@
+
+// ===== BOXLUNCH URL HELPERS =====
+function slugifyBoxLunchTitle(title = "") {
+  return String(title)
+    .trim()
+    .toLowerCase()
+    .replace(/&/g, "and")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .replace(/-boxlunch-exclusive$/, "---boxlunch-exclusive");
+}
+
+function extractBoxLunchProductIdFromImage(imageUrl = "") {
+  const match = String(imageUrl).match(/\/(\d{6,})_hi\b/i);
+  return match ? match[1] : "";
+}
+
+function buildBoxLunchUrl({ title = "", image = "", url = "" }) {
+  if (url) return url;
+
+  const productId = extractBoxLunchProductIdFromImage(image);
+  if (productId && title) {
+    const slug = slugifyBoxLunchTitle(title);
+    return `https://www.boxlunch.com/product/${slug}/${productId}.html`;
+  }
+
+  if (title) {
+    return `https://www.boxlunch.com/search?q=${encodeURIComponent(title)}`;
+  }
+
+  return "";
+}
+
+
+
+function slugifyProductTitle(title = "") {
+  return String(title)
+    .trim()
+    .toLowerCase()
+    .replace(/&/g, "and")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+function buildHotTopicUrl({ title = "", image = "", url = "" }) {
+  if (url) return url;
+  const productId = extractBoxLunchProductIdFromImage(image);
+  if (productId && title) {
+    const slug = slugifyProductTitle(title);
+    return `https://www.hottopic.com/product/${slug}/${productId}.html`;
+  }
+  if (title) {
+    return `https://www.hottopic.com/search?q=${encodeURIComponent(title)}`;
+  }
+  return "";
+}
+
 const express = require("express");
 const cors = require("cors");
 const bcrypt = require("bcryptjs");
@@ -9,6 +66,7 @@ const path = require("path");
 const nodemailer = require("nodemailer");
 const bodyParser = require("body-parser");
 const Stripe = require("stripe");
+const cheerio = require("cheerio");
 const registerProductCatalogRoutes = require("./product-catalog-routes");
 const registerShopRoutes = require("./shop-routes");
 
@@ -85,14 +143,64 @@ app.delete("/api/discounts/:code", auth, admin, async (req, res) => {
 });
 
 // APPLY (PUBLIC)
+async function validateDiscountCode({ code, cartTotal = 0, shippingTotal = 0, email = "" }) {
+    const normalizedCode = String(code || "").trim().toUpperCase();
+    if (!normalizedCode) {
+        return { ok: false, error: "Discount code is required" };
+    }
+
+    const d = await getDiscount(normalizedCode);
+
+    if (!d || !d.active) {
+        return { ok: false, error: "Invalid code" };
+    }
+
+    if (d.expires_at && new Date() > new Date(d.expires_at)) {
+        return { ok: false, error: "Expired code" };
+    }
+
+    if (d.usage_limit && d.usage_count >= d.usage_limit) {
+        return { ok: false, error: "Usage limit reached" };
+    }
+
+    const usedBy = Array.isArray(d.used_by) ? d.used_by : [];
+    const normalizedEmail = String(email || "").trim().toLowerCase();
+    if (d.one_time_per_user && normalizedEmail && usedBy.includes(normalizedEmail)) {
+        return { ok: false, error: "Already used" };
+    }
+
+    if (Number(cartTotal || 0) < Number(d.min_cart_value || 0)) {
+        return { ok: false, error: "Minimum not met" };
+    }
+
+    let discountAmount = 0;
+    let shippingDiscount = 0;
+
+    if (d.type === "percent") {
+        discountAmount = Number(cartTotal || 0) * (Number(d.value || 0) / 100);
+    } else if (d.type === "fixed") {
+        discountAmount = Number(d.value || 0);
+    } else if (d.type === "free_shipping") {
+        shippingDiscount = Number(shippingTotal || 0);
+    }
+
+    discountAmount = Math.max(0, Number(discountAmount.toFixed(2)));
+    shippingDiscount = Math.max(0, Number(shippingDiscount.toFixed(2)));
+
+    return {
+        ok: true,
+        code: d.code,
+        discount: d,
+        discountAmount,
+        shippingDiscount,
+        totalDiscount: Number((discountAmount + shippingDiscount).toFixed(2))
+    };
+}
+
 app.post("/api/discounts/apply", async (req, res) => {
     const { code, cartTotal, email, shippingTotal = 0 } = req.body;
 
     const d = await getDiscount(code);
-
-    if (d.one_time_per_user && d.used_by.includes(email)) {
-        return res.json({ error: "Already used" });
-    }
 
     if (!d || !d.active) return res.json({ error: "Invalid code" });
 
@@ -101,6 +209,9 @@ app.post("/api/discounts/apply", async (req, res) => {
 
     if (d.usage_limit && d.usage_count >= d.usage_limit)
         return res.json({ error: "Usage limit reached" });
+
+    if (d.one_time_per_user && Array.isArray(d.used_by) && d.used_by.includes(email))
+        return res.json({ error: "Already used" });
 
     if (cartTotal < d.min_cart_value)
         return res.json({ error: "Minimum not met" });
@@ -678,9 +789,19 @@ function normalizeFieldLabel(value = "") {
 
 function cleanFieldValue(value = "") {
     return String(value || "")
+        .replace(/\|\|/g, " ")
+        .replace(/\*\*/g, " ")
+        .replace(/__+/g, " ")
+        .replace(/~~/g, " ")
         .replace(/<[^>]+>/g, " ")
+        .replace(/\[(.*?)\]\((.*?)\)/g, "$1")
         .replace(/\s+/g, " ")
         .trim();
+}
+
+function extractMarkdownLink(value = "") {
+    const match = String(value || '').match(/\[([^\]]+)\]\(([^)]+)\)/);
+    return match ? { text: cleanFieldValue(match[1] || ''), url: String(match[2] || '').trim() } : null;
 }
 
 function extractEmail(value = "") {
@@ -758,23 +879,20 @@ function normalizeIncomingOrderPayload(payload = {}) {
     const { embed, fields } = buildFieldMapFromEmbeds(payload);
     const source = inferSourceFromPayload(payload, embed, fields);
     const site = inferSiteFromPayload(payload, embed, fields);
-    const productName = cleanFieldValue(
-        payload.product_name ||
-        payload.product?.name ||
-        fields['product'] ||
-        fields['product name'] ||
-        embed.description || ''
-    );
-    const orderNumber = cleanFieldValue(payload.order_number || fields['order id'] || fields['order number'] || '');
+    const productFieldRaw = payload.product_name || payload.product?.name || fields['product'] || fields['product name'] || embed.description || '';
+    const productLink = extractMarkdownLink(payload.product_url || payload.url || fields['product'] || fields['share link'] || fields['input'] || '');
+    const orderLink = extractMarkdownLink(fields['order id'] || fields['order number'] || payload.order_number || '');
+    const productName = cleanFieldValue(productLink?.text || productFieldRaw || '');
+    const orderNumber = cleanFieldValue(orderLink?.text || payload.order_number || fields['order id'] || fields['order number'] || '').replace(/^#/, '');
     const accountEmail = extractEmail(payload.user_email || payload.email || fields['account'] || fields['email'] || '');
     const profileName = cleanFieldValue(payload.profile_name || fields['profile'] || '');
-    const sku = cleanFieldValue(payload.sku || payload.product_sku || fields['sku'] || '');
+    const sku = cleanFieldValue(payload.sku || payload.product_sku || fields['sku'] || '') || cleanFieldValue(productLink?.url || '').match(/(?:A-|ip\/seort\/|ip\/)(\d{6,})/)?.[1] || '';
     const quantityRaw = payload.quantity ?? fields['quantity'];
     const quantity = Number.isFinite(Number(quantityRaw)) ? Math.max(1, Math.round(Number(quantityRaw))) : 1;
     const priceRaw = payload.price ?? fields['price'] ?? fields['product price'];
     const priceMatch = String(priceRaw || '').replace(/[^0-9.]/g, '');
     const price = priceMatch ? Number(priceMatch) : null;
-    const productUrl = cleanFieldValue(payload.product_url || payload.url || fields['input'] || fields['share link'] || '');
+    const productUrl = String(productLink?.url || payload.product_url || payload.url || fields['input'] || fields['share link'] || '').trim();
     const imageUrl = payload.image_url || payload.product?.image_url || embed.thumbnail?.url || embed.image?.url || '';
     const timestamp = cleanFieldValue(payload.timestamp || embed.timestamp || embed.footer?.text || '');
     const mode = cleanFieldValue(payload.mode || fields['mode'] || '');
@@ -837,12 +955,13 @@ async function findUserForWebhook(payload) {
         }
     }
 
-    // 2. ACCOUNT EMAIL SECOND
+    // 2. ACCOUNT / PROFILE EMAIL SECOND
     if (normalized.account_email) {
+        const normalizedEmail = String(normalized.account_email).trim().toLowerCase();
         const { data: accounts, error: accountError } = await supabase
             .from('accounts')
             .select('profile_id, login_email, created_at')
-            .ilike('login_email', String(normalized.account_email).trim())
+            .ilike('login_email', normalizedEmail)
             .order('created_at', { ascending: false });
 
         if (accountError) throw new Error(accountError.message);
@@ -864,6 +983,17 @@ async function findUserForWebhook(payload) {
                     if (user) return user;
                 }
             }
+        }
+
+        const { data: profileEmailMatches, error: profileEmailError } = await supabase
+            .from('profiles')
+            .select('user_id, created_at')
+            .ilike('email', normalizedEmail)
+            .order('created_at', { ascending: false });
+        if (profileEmailError && !String(profileEmailError.message || '').includes('column')) throw new Error(profileEmailError.message);
+        if (profileEmailMatches?.length && profileEmailMatches[0]?.user_id) {
+            const user = await getUserById(profileEmailMatches[0].user_id);
+            if (user) return user;
         }
     }
 
@@ -941,6 +1071,21 @@ async function setAdminWebhookSettings(userId, value) {
     return await setAppSetting(getAdminWebhookSettingKey(userId), value || {});
 }
 
+
+async function getAllAdminMonitorGroupConfigs() {
+    const { data: admins, error } = await supabase
+        .from('users')
+        .select('id, role, email')
+        .in('role', ['admin', 'super_admin']);
+    if (error) throw new Error(error.message);
+    const rows = [];
+    for (const adminUser of admins || []) {
+        const settings = await getAdminWebhookSettings(adminUser.id).catch(() => ({}));
+        const monitorGroups = settings?.monitor_groups || {};
+        rows.push({ user_id: adminUser.id, role: adminUser.role, email: adminUser.email, monitor_groups: monitorGroups });
+    }
+    return rows;
+}
 async function getUserSettings(userId) {
     if (!userId) return {};
     return await getAppSetting(getUserSettingsKey(userId), {});
@@ -973,44 +1118,6 @@ function getCheckoutBannerText(mentionText = '', brandLabel = '') {
     return brand
         ? `Thank you ${mention} for checking out with The Shore Shack x ${brand.toUpperCase()}`
         : `Thank you ${mention} for checking out with The Shore Shack`;
-}
-
-function classifyCheckoutRelay(payload = {}, order = {}) {
-    const embed = payload?.embeds?.[0] || payload?.embed || {};
-    const title = String(embed?.title || '').toLowerCase();
-    const desc = String(embed?.description || '').toLowerCase();
-    const status = String(order?.status || '').toLowerCase();
-
-    if (status === 'insufficient_credits') return 'error';
-    if (title.includes('successful checkout') || title.includes('checkout success') || title.includes('order confirmed') || title.includes('successful')) return 'success';
-    if (
-        title.includes('oos') || title.includes('failed') || title.includes('declined') || title.includes('error') ||
-        title.includes('cancel') || desc.includes('out of stock') || desc.includes('went out of stock') ||
-        desc.includes('payment') || desc.includes('declined')
-    ) return 'error';
-    return 'success';
-}
-
-function buildCheckoutErrorDedupKey(payload = {}) {
-    const { embed, fields } = buildFieldMapFromEmbeds(payload);
-    const title = cleanFieldValue(embed?.title || '');
-    const site = inferSiteFromPayload(payload, embed, fields);
-    const sku = cleanFieldValue(fields['sku'] || payload.sku || '');
-    const profile = cleanFieldValue(fields['profile'] || payload.profile_name || '');
-    const orderId = cleanFieldValue(fields['order id'] || fields['order number'] || payload.order_number || '');
-    return [site, title, sku, profile, orderId].join('|').toLowerCase();
-}
-
-const checkoutErrorRecentCache = new Map();
-function shouldSkipRecentCheckoutError(payload = {}, relayType = 'success') {
-    if (relayType !== 'error') return false;
-    const key = buildCheckoutErrorDedupKey(payload);
-    if (!key.replace(/\|/g, '')) return false;
-    const now = Date.now();
-    const last = checkoutErrorRecentCache.get(key);
-    if (last && now - last < 45000) return true;
-    checkoutErrorRecentCache.set(key, now);
-    return false;
 }
 
 const discordWebhookQueues = new Map();
@@ -1089,6 +1196,593 @@ async function createInboundWebhook(req, createdBy = null) {
     return { ...data, url: `${getApiBaseUrl(req)}/webhooks/orders/${token}` };
 }
 
+async function getMonitorWebhookToken() {
+    const settings = await getAppSetting('monitor_webhook_settings', {});
+    return String(settings?.token || '').trim();
+}
+
+async function createMonitorWebhook(req, createdBy = null) {
+    const token = crypto.randomBytes(18).toString('hex');
+    const current = await getAppSetting('monitor_webhook_settings', {});
+    await setAppSetting('monitor_webhook_settings', {
+        ...current,
+        token,
+        created_by: createdBy || null,
+        updated_at: new Date().toISOString()
+    });
+    return { token, url: `${getApiBaseUrl(req)}/webhooks/monitor/${token}` };
+}
+
+
+
+async function getWebhookLogEntries(limit = 200) {
+    const current = await getAppSetting('webhook_event_log', []);
+    const rows = Array.isArray(current) ? current : [];
+    return rows.slice(0, Math.max(1, Number(limit) || 200));
+}
+
+async function appendWebhookLogEntry(entry = {}) {
+    const current = await getAppSetting('webhook_event_log', []);
+    const rows = Array.isArray(current) ? current : [];
+    const id = crypto.randomUUID ? crypto.randomUUID() : crypto.randomBytes(12).toString('hex');
+    const row = {
+        id,
+        created_at: new Date().toISOString(),
+        type: String(entry.type || '').trim() || 'unknown',
+        status: String(entry.status || '').trim() || 'received',
+        site: String(entry.site || '').trim(),
+        product_type: String(entry.product_type || '').trim(),
+        product: String(entry.product || '').trim(),
+        sku: String(entry.sku || '').trim(),
+        error: String(entry.error || '').trim(),
+        payload: entry.payload || null,
+        parsed_items: Array.isArray(entry.parsed_items) ? entry.parsed_items : [],
+        discord_targets: Array.isArray(entry.discord_targets) ? entry.discord_targets : [],
+        fingerprint: String(entry.fingerprint || '').trim()
+    };
+    rows.unshift(row);
+    await setAppSetting('webhook_event_log', rows.slice(0, 500));
+    return row;
+}
+
+async function updateWebhookLogEntry(id, patch = {}) {
+    if (!id) return null;
+    const current = await getAppSetting('webhook_event_log', []);
+    const rows = Array.isArray(current) ? current : [];
+    const idx = rows.findIndex((row) => String(row.id) === String(id));
+    if (idx === -1) return null;
+    rows[idx] = { ...rows[idx], ...patch };
+    await setAppSetting('webhook_event_log', rows.slice(0, 500));
+    return rows[idx];
+}
+
+
+async function getMonitorDedupeWindowSeconds() {
+    const currentGlobal = await getAppSetting('webhook_settings', {});
+    const raw = Number(currentGlobal?.monitor_dedupe_window_seconds);
+    if (Number.isFinite(raw) && raw >= 0) return Math.min(600, Math.round(raw));
+    return 45;
+}
+
+function buildMonitorDedupeFingerprint(site = '', items = []) {
+    const normalizedItems = (Array.isArray(items) ? items : []).map((item) => ({
+        sku: String(item?.sku || '').trim(),
+        title: String(item?.title || '').trim().toLowerCase(),
+        price: String(item?.price ?? '').trim().toLowerCase(),
+        url: String(item?.url || '').trim().toLowerCase(),
+        category: String(item?.category || '').trim().toLowerCase()
+    })).sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+    const payload = {
+        type: 'monitor',
+        site: String(site || '').trim().toLowerCase(),
+        items: normalizedItems
+    };
+    return crypto.createHash('sha256').update(JSON.stringify(payload)).digest('hex');
+}
+
+async function findRecentDuplicateMonitorLog(fingerprint, windowSeconds) {
+    if (!fingerprint || !windowSeconds) return null;
+    const current = await getAppSetting('webhook_event_log', []);
+    const rows = Array.isArray(current) ? current : [];
+    const cutoff = Date.now() - (Number(windowSeconds) * 1000);
+    return rows.find((row) => (
+        String(row.type || '') === 'monitor' &&
+        String(row.fingerprint || '') === String(fingerprint) &&
+        String(row.status || '') !== 'duplicate_skipped' &&
+        new Date(row.created_at || 0).getTime() >= cutoff
+    )) || null;
+}
+
+async function sendUnmatchedCheckoutDiscordNotification(payload = {}, errorMessage = '') {
+    const globalSettings = await getAppSetting('webhook_settings', {});
+    const webhookUrl = String(globalSettings?.discord_webhook_url || '').trim();
+    if (!webhookUrl) return { skipped: 'discord_webhook_not_configured' };
+    const normalized = normalizeIncomingOrderPayload(payload || {});
+    const body = JSON.stringify({
+        username: 'The Shore Shack',
+        embeds: [{
+            title: 'Checkout Webhook Received • Unmatched User',
+            description: normalized.product_name || payload.product_name || 'Checkout webhook received',
+            fields: [
+                { name: 'Site', value: String(normalized.site || payload.site || '-'), inline: true },
+                { name: 'Source', value: String(normalized.source || payload.source || '-'), inline: true },
+                { name: 'Profile / Email', value: String(payload.profile_name || payload.email || payload.customer_email || '-'), inline: true },
+                { name: 'SKU', value: String(normalized.sku || payload.sku || '-'), inline: true },
+                { name: 'Quantity', value: String(normalized.quantity || payload.quantity || 1), inline: true },
+                { name: 'Error', value: errorMessage || 'Could not match webhook payload to a user', inline: false },
+                { name: 'Product Link', value: String(normalized.product_url || payload.product_url || '-'), inline: false }
+            ],
+            thumbnail: normalized.image_url ? { url: normalized.image_url } : undefined,
+            timestamp: new Date().toISOString()
+        }]
+    });
+    return enqueueDiscordWebhookJob(webhookUrl, async () => {
+        const response = await globalThis.fetch(webhookUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body });
+        if (!response.ok) throw new Error(`Discord webhook failed (${response.status})`);
+        return { success: true };
+    });
+}
+
+function decodeHtmlEntities(value = '') {
+    let text = String(value || '');
+    if (!text) return '';
+    const named = {
+        amp: '&',
+        lt: '<',
+        gt: '>',
+        quot: '"',
+        apos: "'",
+        nbsp: ' ',
+        mdash: '—',
+        ndash: '–',
+        rsquo: '’',
+        lsquo: '‘',
+        rdquo: '”',
+        ldquo: '“',
+        hellip: '…',
+        copy: '©',
+        reg: '®',
+        trade: '™',
+        eacute: 'é',
+        Eacute: 'É'
+    };
+    text = text.replace(/&#(\d+);/g, (_, n) => {
+        const code = Number(n);
+        return Number.isFinite(code) ? String.fromCodePoint(code) : _;
+    });
+    text = text.replace(/&#x([0-9a-fA-F]+);/g, (_, h) => {
+        const code = parseInt(h, 16);
+        return Number.isFinite(code) ? String.fromCodePoint(code) : _;
+    });
+    text = text.replace(/&([a-zA-Z]+);/g, (m, name) => Object.prototype.hasOwnProperty.call(named, name) ? named[name] : m);
+    return text;
+}
+
+function normalizeMonitorType(value = '') {
+    const t = String(value || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '');
+    if (['pokemon','pokmon'].includes(t)) return 'pokemon';
+    if (['onepiece'].includes(t)) return 'onepiece';
+    if (['sport','sports','sportscards','sportscard'].includes(t)) return 'sports';
+    if (['othertcg','mtg','magic','lorcana','yugioh','yugio','digimon','dragonball','unionarena','weiss'].includes(t)) return 'othertcg';
+    if (['lowkey','other','lowkeyflips','flips'].includes(t)) return 'lowkey';
+    return '';
+}
+
+function classifyMonitorType({ title = '', productType = '', url = '' }) {
+    const explicit = normalizeMonitorType(productType);
+    if (explicit) return explicit;
+    const hay = decodeHtmlEntities(`${title} ${url}`).toLowerCase();
+    if (/pokemon|pok[eé]mon/.test(hay)) return 'pokemon';
+    if (/one\s*piece/.test(hay)) return 'onepiece';
+    if (/magic|mtg|lorcana|yu-?gi-?oh|yugioh|digimon|dragon ball|union arena|weiss/.test(hay)) return 'othertcg';
+    if (/topps|panini|upper deck|sports card|baseball card|basketball card|football card|soccer card|hockey card/.test(hay)) return 'sports';
+    return 'lowkey';
+}
+
+
+function extractEmbedFields(payload = {}) {
+    const embed = Array.isArray(payload.embeds) ? (payload.embeds[0] || {}) : {};
+    const fields = Array.isArray(embed.fields) ? embed.fields : [];
+    const map = {};
+    const list = [];
+    for (const field of fields) {
+        const key = String(field?.name || '').trim().toLowerCase();
+        const value = decodeHtmlEntities(String(field?.value || '').trim());
+        if (key) map[key] = value;
+        list.push({ key, value, raw: field });
+    }
+    return { embed, fields: map, fieldList: list };
+}
+
+function extractMarkdownLink(value = '') {
+    const match = String(value || '').match(/\[([^\]]+)\]\(([^)]+)\)/);
+    return match ? { text: String(match[1] || '').trim(), url: String(match[2] || '').trim() } : null;
+}
+
+function looksLikeUrl(value = '') {
+    return /^https?:\/\//i.test(String(value || '').trim());
+}
+
+function splitMonitorPipeValues(value = '') {
+    return String(value || '')
+        .split(/\s*\|\s*/)
+        .map((v) => String(v || '').trim())
+        .filter(Boolean);
+}
+
+function cleanMonitorPriceValue(value) {
+    if (value == null) return '';
+    const raw = String(value).trim();
+    if (!raw) return '';
+    const money = raw.match(/\$?\d+(?:\.\d{1,2})?/);
+    if (!money) return raw.replace(/^\$+/, '');
+    return money[0].replace(/^\$+/, '');
+}
+
+function normalizeMonitorSite(value = '') {
+    const raw = String(value || '').trim().toLowerCase();
+    if (raw.startsWith('target')) return 'target';
+    if (raw.startsWith('walmart')) return 'walmart';
+    if (raw.startsWith('amazon')) return 'amazon';
+    if (raw.startsWith('hot topic') || raw.startsWith('hottopic')) return 'hottopic';
+    if (raw.startsWith('box lunch') || raw.startsWith('boxlunch')) return 'boxlunch';
+    return raw;
+}
+
+
+function extractAmazonAsin(value = '') {
+    const raw = String(value || '').trim();
+    if (!raw) return '';
+    const direct = raw.match(/(B0[A-Z0-9]{8})/i);
+    if (direct) return String(direct[1] || '').toUpperCase();
+    const fromDp = raw.match(/\/dp\/([A-Z0-9]{10})/i);
+    if (fromDp) return String(fromDp[1] || '').toUpperCase();
+    return '';
+}
+
+function siteAliasesForCatalog(site = '') {
+    const normalized = normalizeMonitorSite(site);
+    if (normalized === 'amazon') return ['amazon', 'amazonv3'];
+    if (normalized === 'target') return ['target', 'targetgo'];
+    if (normalized === 'walmart') return ['walmart'];
+    return [normalized].filter(Boolean);
+}
+
+async function fetchCatalogProductDetailsForMonitor(item = {}) {
+    try {
+        const aliases = siteAliasesForCatalog(item.site);
+        const sku = String(item.sku || '').trim();
+        if (!aliases.length || !sku) return null;
+        const { data, error } = await supabase
+            .from('catalog_products')
+            .select('site, sku, product_name, image_url, product_url, default_max_price')
+            .in('site', aliases)
+            .eq('sku', sku)
+            .limit(1)
+            .maybeSingle();
+        if (error) return null;
+        if (!data) return null;
+        return {
+            title: String(data.product_name || '').trim(),
+            image: String(data.image_url || '').trim(),
+            url: String(data.product_url || '').trim(),
+            price: data.default_max_price == null ? '' : String(Number(data.default_max_price).toFixed(2)),
+            site: String(data.site || '').trim().toLowerCase(),
+            category: classifyMonitorType({ title: String(data.product_name || ''), productType: '', url: String(data.product_url || '') })
+        };
+    } catch {
+        return null;
+    }
+}
+
+async function fetchTargetItemDetailsBySku(sku) {
+    const clean = String(sku || '').trim();
+    if (!clean) return null;
+    const url = `https://www.target.com/p/-/A-${encodeURIComponent(clean)}`;
+    const response = await globalThis.fetch(url, {
+        headers: {
+            'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
+            'accept-language': 'en-US,en;q=0.9'
+        }
+    });
+    if (!response.ok) return null;
+    const html = await response.text();
+    if (!html || html.length < 1000) return null;
+    const $ = cheerio.load(html);
+    const title = $('meta[property="og:title"]').attr('content') || $('title').text().trim() || '';
+    const image = $('meta[property="og:image"]').attr('content') || $('img[src*="target.scene7"]').first().attr('src') || '';
+    const priceText = $('meta[property="product:price:amount"]').attr('content') || $('[data-test="product-price"]').first().text().trim() || $('[data-test="current-price"]').first().text().trim() || '';
+    const price = cleanMonitorPriceValue(priceText || '');
+    let cartLimit = null;
+    const limitPatterns = [
+        /maxOrderQuantity"?\s*[:=]\s*(\d{1,3})/i,
+        /order[_ ]?limit"?\s*[:=]\s*(\d{1,3})/i,
+        /max[_ ]?quantity"?\s*[:=]\s*(\d{1,3})/i,
+        /limit\s+(?:of\s+)?(\d{1,3})\s+(?:per|qty|quantity)/i
+    ];
+    for (const pattern of limitPatterns) {
+        const m = html.match(pattern);
+        if (m) {
+            cartLimit = Number(m[1]);
+            break;
+        }
+    }
+    return {
+        title: decodeHtmlEntities(String(title || '').replace(/\s*:[^:]*Target\s*$/i, '').trim()),
+        image: String(image || '').trim(),
+        price,
+        url,
+        cartLimit
+    };
+}
+
+async function enrichMonitorItems(items = []) {
+    const enriched = [];
+    for (const item of items) {
+        const next = { ...item };
+        next.site = normalizeMonitorSite(next.site);
+        next.title = decodeHtmlEntities(String(next.title || '').trim());
+
+        if (next.site === 'amazon') {
+            const asin = extractAmazonAsin(next.sku || next.url || next.title);
+            if (asin) {
+                next.sku = asin;
+                next.url = next.url || `https://www.amazon.com/dp/${asin}`;
+            }
+            const catalog = await fetchCatalogProductDetailsForMonitor(next);
+            if (catalog) {
+                next.title = catalog.title || next.title;
+                next.image = catalog.image || next.image;
+                next.url = next.url || catalog.url || next.url;
+                next.price = cleanMonitorPriceValue(next.price) || cleanMonitorPriceValue(catalog.price) || next.price;
+                next.category = catalog.category || next.category;
+            }
+            next.price = cleanMonitorPriceValue(next.price);
+            if (!next.category || next.category === 'lowkey') {
+                next.category = classifyMonitorType({ title: next.title, productType: next.productType, url: next.url });
+            }
+            enriched.push(next);
+            continue;
+        }
+
+        const needsCatalog = !!next.sku && (!next.image || !next.url || !next.title || !cleanMonitorPriceValue(next.price));
+        if (needsCatalog) {
+            const catalog = await fetchCatalogProductDetailsForMonitor(next);
+            if (catalog) {
+                next.title = next.title || catalog.title || next.title;
+                next.image = next.image || catalog.image || next.image;
+                next.url = next.url || catalog.url || next.url;
+                next.price = cleanMonitorPriceValue(next.price) || cleanMonitorPriceValue(catalog.price) || next.price;
+                next.category = next.category || catalog.category || next.category;
+            }
+        }
+
+        const site = String(next.site || '').toLowerCase();
+        const needsLookup = site.includes('target') && (!!next.sku) && (!next.image || !next.url || !next.title || !cleanMonitorPriceValue(next.price));
+        if (needsLookup) {
+            try {
+                const details = await fetchTargetItemDetailsBySku(next.sku);
+                if (details) {
+                    next.title = next.title || details.title || next.title;
+                    next.image = next.image || details.image || next.image;
+                    next.url = next.url || details.url || next.url;
+                    next.price = cleanMonitorPriceValue(next.price) || details.price || next.price;
+                    next.cartLimit = next.cartLimit || details.cartLimit || null;
+                }
+            } catch (err) {
+                console.error('Target monitor enrichment failed:', err.message || err);
+            }
+        }
+        next.price = cleanMonitorPriceValue(next.price);
+        if (!next.category || next.category === 'lowkey') {
+            next.category = classifyMonitorType({ title: next.title, productType: next.productType, url: next.url });
+        }
+        enriched.push(next);
+    }
+    return enriched;
+}
+
+function extractMonitorItems(payload = {}) {
+    const items = [];
+    const { embed, fields, fieldList } = extractEmbedFields(payload);
+    const baseSite = normalizeMonitorSite(String(payload.site || payload.source || fields['site'] || '').trim().toLowerCase());
+    const explicitType = String(payload.product_type || payload.category || fields['category'] || '').trim();
+    const baseImage = String(payload.image_url || payload.image || embed.thumbnail?.url || embed.image?.url || '').trim();
+    const productFieldValue = String(fields['product'] || '').trim();
+    const productFieldLink = extractMarkdownLink(productFieldValue);
+    const rawBaseUrl = payload.product_url || payload.url || payload.link || fields['product link'] || productFieldLink?.url || embed.url || '';
+    const baseUrl = looksLikeUrl(rawBaseUrl) ? String(rawBaseUrl).trim() : '';
+    const basePrice = payload.price ?? payload.Price ?? fields['price'] ?? null;
+    const skuFieldRaw = String(fields['sku'] || payload.sku || payload.SKU || '').trim();
+    const fallbackSku = extractAmazonAsin(skuFieldRaw || ((baseSite.includes('amazon') && productFieldValue) ? productFieldValue : '')) || skuFieldRaw || ((baseSite.includes('amazon') && productFieldValue) ? productFieldValue : '');
+    const amazonAtcLinks = fieldList
+        .filter((field) => field.key.startsWith('atc link'))
+        .map((field) => ({
+            label: String(field.raw?.name || field.key || '').trim(),
+            url: extractMarkdownLink(field.value)?.url || ''
+        }))
+        .filter((row) => row.url);
+
+    const arr = Array.isArray(payload.items) ? payload.items : [];
+    for (const row of arr) {
+        items.push({
+            sku: String(row.sku || row.SKU || '').trim(),
+            title: decodeHtmlEntities(String(row.title || row.name || row.product_name || '').trim()),
+            price: row.price ?? row.Price ?? null,
+            url: String(row.url || row.product_url || row.link || '').trim(),
+            image: String(row.image || row.image_url || row.thumbnail || '').trim(),
+            site: String(row.site || baseSite).trim().toLowerCase(),
+            stock: row.stock ?? row.stock_count ?? row.quantity ?? null,
+            cartLimit: row.cart_limit ?? row.max_order_quantity ?? row.cart_limit_qty ?? null,
+            productType: String(row.product_type || explicitType || '').trim(),
+            atcLinks: Array.isArray(row.atcLinks) ? row.atcLinks : amazonAtcLinks
+        });
+    }
+
+    const skuFromField = String(fields['instock skus'] || fields['instock sku'] || payload.instock_skus || payload.skus || '').trim();
+    const skuList = splitMonitorPipeValues(skuFromField);
+    const titleSkuField = String(fields['title/sku'] || fields['title sku'] || payload.title || payload.product_name || '').trim();
+    const titleList = splitMonitorPipeValues(titleSkuField);
+    const priceList = splitMonitorPipeValues(basePrice || '');
+
+    if (skuList.length) {
+        for (let i = 0; i < skuList.length; i += 1) {
+            const sku = skuList[i];
+            const resolvedSku = extractAmazonAsin(sku) || sku;
+            items.push({
+                sku: resolvedSku,
+                title: decodeHtmlEntities(titleList[i] || titleList[0] || ''),
+                price: priceList[i] || priceList[0] || '',
+                url: baseUrl,
+                image: baseImage,
+                site: baseSite,
+                stock: payload.stock_count ?? fields['stock'] ?? null,
+                cartLimit: payload.cart_limit ?? fields['cart limit'] ?? null,
+                productType: explicitType,
+                atcLinks: amazonAtcLinks
+            });
+        }
+    }
+
+    if (!items.length) {
+        const possibleSku = String(payload.sku || payload.SKU || '').trim();
+        items.push({
+            sku: possibleSku || fallbackSku,
+            title: decodeHtmlEntities(titleList[0] || (productFieldLink?.text || (!looksLikeUrl(productFieldValue) ? productFieldValue : '')) || ''),
+            price: priceList[0] || cleanMonitorPriceValue(basePrice || ''),
+            url: baseUrl,
+            image: baseImage,
+            site: baseSite,
+            stock: payload.stock_count ?? fields['stock'] ?? null,
+            cartLimit: payload.cart_limit ?? fields['cart limit'] ?? null,
+            productType: explicitType,
+            atcLinks: amazonAtcLinks
+        });
+    }
+
+    const deduped = [];
+    const seen = new Set();
+    for (const item of items.filter((x) => x.sku || x.title || x.url)) {
+        const key = `${String(item.sku || '').trim()}::${String(item.title || '').trim()}::${String(item.url || '').trim()}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        deduped.push(item);
+    }
+    return deduped;
+}
+
+function buildProductUrl(site, sku, fallbackUrl='', title = '', image = '') {
+    if (fallbackUrl) return fallbackUrl;
+    const s = String(site||'').toLowerCase();
+    const clean = String(sku||'').trim();
+    if (s.includes('boxlunch')) {
+        return buildBoxLunchUrl({ title, image, url: fallbackUrl });
+    }
+    if (s.includes('hottopic') || s.includes('hot topic')) {
+        return buildHotTopicUrl({ title, image, url: fallbackUrl });
+    }
+    if (s.includes('amazon')) {
+        if (clean) return `https://www.amazon.com/dp/${clean}`;
+        return '';
+    }
+    if (!clean) return '';
+    if (s.includes('target')) return `https://www.target.com/p/-/A-${clean}`;
+    if (s.includes('walmart')) return `https://www.walmart.com/ip/${clean}`;
+    if (s.includes('sams')) return `https://www.samsclub.com/s/${encodeURIComponent(clean)}`;
+    return '';
+}
+
+function normalizeMonitorGroupConfig(raw) {
+    if (typeof raw === 'string') {
+        return { webhook_url: String(raw || '').trim(), ping_mode: 'none', role_mention: '' };
+    }
+    const value = raw && typeof raw === 'object' ? raw : {};
+    const pingMode = ['none', 'everyone', 'role'].includes(String(value.ping_mode || '').trim().toLowerCase())
+        ? String(value.ping_mode || '').trim().toLowerCase()
+        : 'none';
+    return {
+        webhook_url: String(value.webhook_url || value.url || '').trim(),
+        ping_mode: pingMode,
+        role_mention: String(value.role_mention || '').trim()
+    };
+}
+
+function getMonitorMentionText(routeConfig) {
+    const config = normalizeMonitorGroupConfig(routeConfig);
+    if (config.ping_mode === 'everyone') return '@everyone';
+    if (config.ping_mode === 'role' && config.role_mention) return config.role_mention;
+    return '';
+}
+
+async function sendMonitorDiscordWebhook(routeConfigOrUrl, item) {
+    const routeConfig = normalizeMonitorGroupConfig(routeConfigOrUrl);
+    const webhookUrl = routeConfig.webhook_url || (typeof routeConfigOrUrl === 'string' ? String(routeConfigOrUrl).trim() : '');
+    const finalUrl = buildProductUrl(item.site, item.sku, item.url, item.title, item.image);
+    const cleanPrice = cleanMonitorPriceValue(item.price);
+    const mentionText = getMonitorMentionText(routeConfig);
+    const displayPrice = cleanPrice && cleanPrice.toUpperCase() !== 'N/A' ? `$${cleanPrice}` : '-';
+    const fields = [
+        { name: 'Site', value: String(item.site || '-'), inline: true },
+        { name: 'Category', value: String(item.category || 'lowkey'), inline: true },
+        { name: 'SKU', value: String(item.sku || '-'), inline: true },
+        { name: 'Price', value: displayPrice, inline: true }
+    ];
+    if (item.cartLimit != null && String(item.cartLimit).trim() !== '') {
+        fields.push({ name: 'Cart Limit', value: String(item.cartLimit), inline: true });
+    }
+    if (finalUrl) {
+        fields.push({ name: 'Product Link', value: finalUrl, inline: false });
+    }
+    const atcLinks = Array.isArray(item.atcLinks) ? item.atcLinks.filter((row) => row && row.url) : [];
+    if (atcLinks.length) {
+        const allowedQty = new Set(['1', '3', '5']);
+        const formattedAtcLinks = atcLinks
+            .map((row) => {
+                const qtyMatch = String(row.label || '').match(/(\d+)x/i);
+                const qty = qtyMatch ? String(qtyMatch[1]) : '';
+                if (qty && !allowedQty.has(qty)) return null;
+                const label = qty ? `ATC ${qty}x` : String(row.label || 'ATC').replace(/^ATC Link\s*/i, 'ATC ');
+                return `[${label}](${row.url})`;
+            })
+            .filter(Boolean)
+            .slice(0, 3);
+        if (formattedAtcLinks.length) {
+            fields.push({ name: 'ATC Links', value: formattedAtcLinks.join(' • '), inline: false });
+        }
+    }
+    const body = JSON.stringify({
+        username: 'In Stock Monitor',
+        content: mentionText || undefined,
+        allowed_mentions: { parse: ['everyone', 'roles'] },
+        embeds: [{
+            title: decodeHtmlEntities(item.title || item.sku || 'In stock item'),
+            description: 'Item restocked',
+            url: finalUrl || undefined,
+            fields,
+            thumbnail: item.image ? { url: item.image } : undefined,
+            timestamp: new Date().toISOString()
+        }]
+    });
+    return enqueueDiscordWebhookJob(webhookUrl, async () => {
+        for (let attempt = 1; attempt <= 5; attempt++) {
+            const response = await globalThis.fetch(webhookUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body });
+            if (response.ok) return { success: true, attempt, ping_mode: routeConfig.ping_mode || 'none', role_mention: routeConfig.role_mention || '' };
+            const text = await response.text().catch(() => '');
+            if (response.status === 429) {
+                let retryMs = 5000;
+                try {
+                    const parsed = JSON.parse(text || '{}');
+                    if (parsed?.retry_after != null) retryMs = Math.ceil(Number(parsed.retry_after) * 1000);
+                } catch {}
+                await new Promise((resolve) => setTimeout(resolve, retryMs));
+                continue;
+            }
+            throw new Error(`Discord webhook failed (${response.status}): ${text || response.statusText}`);
+        }
+        throw new Error('Discord webhook failed after maximum retry attempts');
+    });
+}
+
 function maskEmail(email = '') {
     const value = String(email || '').trim().toLowerCase();
     const parts = value.split('@');
@@ -1104,8 +1798,7 @@ async function sendDiscordWebhookToTarget({
     userEmail = '',
     discordHandle = '',
     brandLabel = '',
-    username = 'The Shore Shack',
-    relayType = 'success'
+    username = 'The Shore Shack'
 }) {
     const trimmedWebhookUrl = String(webhookUrl || '').trim();
     if (!trimmedWebhookUrl) {
@@ -1116,21 +1809,12 @@ async function sendDiscordWebhookToTarget({
     const normalized = normalizeIncomingOrderPayload(payload);
     const isInsufficient = String(order.status || '') === 'insufficient_credits';
     const mentionText = formatDiscordMention(discordHandle, userEmail);
-    const incomingEmbed = payload?.embeds?.[0] || payload?.embed || {};
-    const relayKind = relayType || classifyCheckoutRelay(payload, order);
-    if (shouldSkipRecentCheckoutError(payload, relayKind)) {
-        return { skipped: 'duplicate_checkout_error_skipped' };
-    }
 
     const embed = {
-        title: relayKind === 'error'
-            ? (cleanFieldValue(incomingEmbed?.title || '') || `Checkout Error • ${order.site || normalized.site || order.source || 'Bot'}`)
-            : (isInsufficient
-                ? `Checkout Logged • Credits Needed`
-                : `Successful Checkout • ${order.site || normalized.site || order.source || 'Bot'}`),
-        description: relayKind === 'error'
-            ? (cleanFieldValue(incomingEmbed?.description || '') || normalized.product_name || order.product_name || 'Checkout error received')
-            : (normalized.product_name || order.product_name || 'Checkout received'),
+        title: isInsufficient
+            ? `Checkout Logged • Credits Needed`
+            : `Successful Checkout • ${order.site || normalized.site || order.source || 'Bot'}`,
+        description: normalized.product_name || order.product_name || 'Checkout received',
         fields: [
             { name: 'Site', value: String(order.site || normalized.site || '-'), inline: true },
             { name: 'Source', value: String(order.source || normalized.source || '-'), inline: true },
@@ -1139,11 +1823,9 @@ async function sendDiscordWebhookToTarget({
             { name: 'Credits', value: String(order.credits_charged || 0), inline: true }
         ],
         footer: {
-            text: relayKind === 'error'
-                ? 'Checkout error relayed by The Shore Shack'
-                : (isInsufficient
-                    ? 'Order saved without charging credits'
-                    : 'Youve Been Served by The Shore Shack')
+            text: isInsufficient
+                ? 'Order saved without charging credits'
+                : 'Youve Been Served by The Shore Shack'
         },
         timestamp: new Date().toISOString()
     };
@@ -1156,15 +1838,6 @@ async function sendDiscordWebhookToTarget({
     }
     if (normalized.product_url) {
         embed.fields.push({ name: 'Product Link', value: normalized.product_url, inline: false });
-    }
-    if (relayKind === 'error') {
-        const { fields } = buildFieldMapFromEmbeds(payload);
-        const profile = cleanFieldValue(fields['profile'] || normalized.profile_name || '');
-        const account = cleanFieldValue(fields['account'] || normalized.account_email || normalized.user_email || '');
-        const orderId = cleanFieldValue(fields['order id'] || fields['order number'] || normalized.order_number || '');
-        if (profile) embed.fields.push({ name: 'Profile', value: profile, inline: true });
-        if (account) embed.fields.push({ name: 'Account', value: account, inline: true });
-        if (orderId) embed.fields.push({ name: 'Order ID', value: orderId, inline: true });
     }
     if (normalized.image_url) {
         embed.thumbnail = { url: normalized.image_url };
@@ -1223,15 +1896,28 @@ async function sendDiscordWebhookToTarget({
     });
 }
 
+function classifyCheckoutWebhookType(order) {
+    const payload = order?.raw_payload || {};
+    const { embed } = extractEmbedFields(payload);
+    const title = decodeHtmlEntities(String(embed?.title || '')).toLowerCase();
+    const description = decodeHtmlEntities(String(embed?.description || '')).toLowerCase();
+    const authorName = decodeHtmlEntities(String(embed?.author?.name || '')).toLowerCase();
+    const hay = `${title} ${description} ${authorName}`;
+    if (/checkout oos|failed|declined|error|canceled|cancelled|payment failed|out of stock/.test(hay)) return 'error';
+    if (/successful checkout|success|confirmed|order confirmed/.test(hay)) return 'success';
+    return String(order?.status || '').includes('insufficient') ? 'error' : 'success';
+}
+
 async function sendCheckoutDiscordNotifications(order, user) {
     const results = [];
     const userEmail = String(user?.email || '');
     const userSettings = user?.id ? await getUserSettings(user.id) : {};
     const discordHandle = normalizeDiscordUserId(userSettings?.discord_user_id || '');
 
-    // Always send to super admin / global webhook
+    // Route success and failed checkout events to separate webhook URLs
+    const checkoutType = classifyCheckoutWebhookType(order);
     const globalSettings = await getAppSetting('webhook_settings', {});
-    const globalWebhookUrl = String(globalSettings?.discord_webhook_url || '').trim();
+    const globalWebhookUrl = String((checkoutType === 'error' ? globalSettings?.checkout_error_webhook_url : globalSettings?.discord_webhook_url) || '').trim();
 
     if (globalWebhookUrl) {
         results.push({
@@ -1252,7 +1938,7 @@ async function sendCheckoutDiscordNotifications(order, user) {
     // Also send to owner admin webhook if the user belongs to an admin
     if (user?.owner_admin_id) {
         const adminSettings = await getAdminWebhookSettings(user.owner_admin_id);
-        const adminWebhookUrl = String(adminSettings?.discord_webhook_url || '').trim();
+        const adminWebhookUrl = String((checkoutType === 'error' ? adminSettings?.checkout_error_webhook_url : adminSettings?.discord_webhook_url) || '').trim();
         const brandLabel = String(adminSettings?.brand_label || '').trim();
 
         if (adminWebhookUrl) {
@@ -1391,7 +2077,6 @@ app.post("/webhooks/stripe", bodyParser.raw({ type: "application/json" }), async
                     const saleResult = await shopRoutes.recordStorefrontSaleFromStripeSession(session);
                     console.log("Storefront Stripe sale processed:", saleResult);
                 }
-
                 if (session.metadata?.discount_code) {
                     const d = await getDiscount(session.metadata.discount_code);
 
@@ -1405,8 +2090,6 @@ app.post("/webhooks/stripe", bodyParser.raw({ type: "application/json" }), async
                             .eq("code", session.metadata.discount_code);
                     }
                 }
-
-                return res.json({ received: true, storefront: true });
             }
 
             const user = await findUserForWebhook(session);
@@ -1529,7 +2212,149 @@ async function validateInboundWebhookToken(req) {
     return token && token === active.token;
 }
 
+
+app.post(["/webhooks/monitor", "/webhooks/monitor/:token"], async (req, res) => {
+    let logId = null;
+    try {
+        console.log('📩 MONITOR WEBHOOK HIT', { path: req.originalUrl, hasToken: !!req.params.token, body: req.body });
+        const token = String(req.params.token || req.query.token || '').trim();
+        const expected = await getMonitorWebhookToken();
+        if (expected && token !== expected) return res.status(401).json({ error: 'Invalid monitor webhook url' });
+
+        const payload = req.body || {};
+        const rawItems = extractMonitorItems(payload).map((item) => ({
+            ...item,
+            category: classifyMonitorType({ title: item.title, productType: item.productType, url: item.url }),
+            url: buildProductUrl(item.site, item.sku, item.url, item.title, item.image)
+        }));
+
+        const items = await enrichMonitorItems(rawItems);
+
+        const first = items[0] || {};
+        const site = String(first.site || payload.site || payload.source || '').trim().toLowerCase();
+        const dedupeWindowSeconds = await getMonitorDedupeWindowSeconds();
+        const fingerprint = buildMonitorDedupeFingerprint(site, items);
+        const duplicate = await findRecentDuplicateMonitorLog(fingerprint, dedupeWindowSeconds);
+
+        if (duplicate) {
+            logId = (await appendWebhookLogEntry({
+                type: 'monitor',
+                status: 'duplicate_skipped',
+                site,
+                product_type: String(first.category || ''),
+                product: String(first.title || first.url || ''),
+                sku: String(first.sku || ''),
+                error: `Skipped duplicate monitor webhook within ${dedupeWindowSeconds} seconds`,
+                payload,
+                fingerprint,
+                parsed_items: items.map((item) => ({
+                    title: item.title || '',
+                    sku: item.sku || '',
+                    site: item.site || '',
+                    price: item.price ?? null,
+                    stock: item.stock ?? null,
+                    cartLimit: item.cartLimit ?? null,
+                    url: item.url || '',
+                    image: item.image || '',
+                    category: item.category || ''
+                })),
+                discord_targets: duplicate.discord_targets || []
+            })).id;
+            return res.json({ success: true, skipped: true, reason: 'duplicate_within_window', dedupe_window_seconds: dedupeWindowSeconds });
+        }
+
+        logId = (await appendWebhookLogEntry({
+            type: 'monitor',
+            status: 'received',
+            site,
+            product_type: String(first.category || ''),
+            product: String(first.title || first.url || ''),
+            sku: String(first.sku || ''),
+            payload,
+            fingerprint,
+            parsed_items: items.map((item) => ({
+                title: item.title || '',
+                sku: item.sku || '',
+                site: item.site || '',
+                price: item.price ?? null,
+                stock: item.stock ?? null,
+                cartLimit: item.cartLimit ?? null,
+                url: item.url || '',
+                image: item.image || '',
+                category: item.category || ''
+            }))
+        })).id;
+
+        const globalSettings = await getAppSetting('webhook_settings', {});
+        const globalGroups = globalSettings?.monitor_groups || {};
+        const adminMonitorConfigs = await getAllAdminMonitorGroupConfigs();
+        const results = [];
+        const usedTargets = [];
+
+        for (const item of items) {
+            const targets = [];
+            const superRoute = normalizeMonitorGroupConfig(globalGroups[item.category]);
+            if (String(superRoute.webhook_url || '').trim()) {
+                targets.push({ scope: 'super_admin', user_id: null, route: superRoute });
+            }
+            for (const adminConfig of adminMonitorConfigs) {
+                const route = normalizeMonitorGroupConfig(adminConfig.monitor_groups?.[item.category]);
+                if (String(route.webhook_url || '').trim()) {
+                    targets.push({ scope: adminConfig.role === 'super_admin' ? 'super_admin_user' : 'admin', user_id: adminConfig.user_id, route });
+                }
+            }
+            if (!targets.length) {
+                results.push({ sku: item.sku, skipped: 'monitor_webhook_not_configured', category: item.category });
+                continue;
+            }
+            for (const target of targets) {
+                const url = String(target.route.webhook_url || '').trim();
+                usedTargets.push({ category: item.category, scope: target.scope, user_id: target.user_id, webhook_url: url.slice(0, 80), ping_mode: target.route.ping_mode || 'none', role_mention: target.route.role_mention || '' });
+                try {
+                    const sendResult = await sendMonitorDiscordWebhook(target.route, item);
+                    results.push({ sku: item.sku, category: item.category, scope: target.scope, user_id: target.user_id, success: true, attempt: sendResult?.attempt || 1, ping_mode: sendResult?.ping_mode || 'none', role_mention: sendResult?.role_mention || '' });
+                } catch (sendErr) {
+                    results.push({ sku: item.sku, category: item.category, scope: target.scope, user_id: target.user_id, success: false, error: sendErr.message });
+                }
+            }
+        }
+
+        const failed = results.filter((r) => !r.success && !r.skipped);
+        const skipped = results.filter((r) => r.skipped);
+
+        await updateWebhookLogEntry(logId, {
+            status: failed.length ? 'failed' : 'processed',
+            product_type: String(first.category || ''),
+            product: String(first.title || first.url || ''),
+            sku: String(first.sku || ''),
+            error: failed.length
+                ? failed.map((x) => `${x.sku || '-'}: ${x.error}`).join(' | ')
+                : (skipped.length ? 'Some items skipped due to missing group webhook url' : ''),
+            parsed_items: items.map((item) => ({
+                title: item.title || '',
+                sku: item.sku || '',
+                site: item.site || '',
+                price: item.price ?? null,
+                stock: item.stock ?? null,
+                cartLimit: item.cartLimit ?? null,
+                url: item.url || '',
+                image: item.image || '',
+                category: item.category || ''
+            })),
+            discord_targets: usedTargets,
+            fingerprint
+        });
+
+        res.json({ success: true, item_count: items.length, results });
+    } catch (err) {
+        console.error('Monitor webhook error:', err);
+        if (logId) await updateWebhookLogEntry(logId, { status: 'failed', error: err.message }).catch(() => null);
+        res.status(400).json({ error: err.message });
+    }
+});
+
 app.post(["/webhooks/orders", "/webhooks/orders/:token"], async (req, res) => {
+    let logId = null;
     try {
         console.log("Inbound webhook hit", {
             path: req.originalUrl,
@@ -1551,13 +2376,32 @@ app.post(["/webhooks/orders", "/webhooks/orders/:token"], async (req, res) => {
         }
 
         console.log("Inbound webhook accepted");
+        const payload = req.body || {};
+        const normalized = normalizeIncomingOrderPayload(payload);
+        logId = (await appendWebhookLogEntry({
+            type: 'checkout',
+            status: 'received',
+            site: String(normalized.site || payload.site || '').trim(),
+            product_type: String(payload.product_type || ''),
+            product: String(normalized.product_name || payload.product_name || ''),
+            sku: String(normalized.sku || payload.sku || ''),
+            payload
+        })).id;
 
-        const result = await recordSuccessfulCheckout(req.body || {});
+        const result = await recordSuccessfulCheckout(payload);
         console.log("Inbound webhook processed successfully");
+        await updateWebhookLogEntry(logId, { status: 'processed', error: '' }).catch(() => null);
         res.json({ success: true, ...result });
     } catch (err) {
         console.error("Inbound webhook error:", err);
-        res.status(400).json({ error: err.message });
+        const payload = req.body || {};
+        try {
+            await sendUnmatchedCheckoutDiscordNotification(payload, err.message || 'Could not match webhook payload to a user');
+        } catch (discordErr) {
+            console.error('Unmatched checkout discord relay failed:', discordErr);
+        }
+        if (logId) await updateWebhookLogEntry(logId, { status: 'unmatched_user', error: err.message || 'Could not match webhook payload to a user' }).catch(() => null);
+        res.status(400).json({ error: err.message, forwarded: true });
     }
 });
 
@@ -1756,18 +2600,35 @@ app.get('/admin/webhooks/settings', auth, admin, async (req, res) => {
         const currentUser = await getCurrentUser(req);
         const active = await getActiveInboundWebhook();
         const globalSettings = await getAppSetting('webhook_settings', {});
+        const monitorSettings = await getAppSetting('monitor_webhook_settings', {});
         const adminSettings = await getAdminWebhookSettings(currentUser.id);
 
         res.json({
             inbound_webhook_url: active?.token ? `${getApiBaseUrl(req)}/webhooks/orders/${active.token}` : '',
+            monitor_webhook_url: monitorSettings?.token ? `${getApiBaseUrl(req)}/webhooks/monitor/${monitorSettings.token}` : '',
             discord_webhook_url: String(globalSettings?.discord_webhook_url || ''),
             checkout_error_webhook_url: String(globalSettings?.checkout_error_webhook_url || ''),
             admin_discord_webhook_url: String(adminSettings?.discord_webhook_url || ''),
             admin_error_discord_webhook_url: String(adminSettings?.checkout_error_webhook_url || ''),
             admin_brand_label: String(adminSettings?.brand_label || ''),
+            monitor_groups: globalSettings?.monitor_groups || {},
+            admin_monitor_groups: adminSettings?.monitor_groups || {},
+            monitor_dedupe_window_seconds: Number(globalSettings?.monitor_dedupe_window_seconds || 45),
             can_create_inbound: currentUser.role === 'super_admin',
             is_super_admin: currentUser.role === 'super_admin'
         });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+
+app.get('/admin/webhooks/logs', auth, admin, async (req, res) => {
+    try {
+        const currentUser = await getCurrentUser(req);
+        if (currentUser.role !== 'super_admin') return res.status(403).json({ error: 'Only super admin can view webhook logs.' });
+        const rows = await getWebhookLogEntries(200);
+        res.json({ items: rows });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
@@ -1798,7 +2659,8 @@ app.post('/admin/webhooks/settings', auth, admin, async (req, res) => {
         await setAdminWebhookSettings(currentUser.id, {
             discord_webhook_url: adminDiscordWebhookUrl,
             checkout_error_webhook_url: adminErrorDiscordWebhookUrl,
-            brand_label: adminBrandLabel
+            brand_label: adminBrandLabel,
+            monitor_groups: req.body?.admin_monitor_groups || {}
         });
 
         const response = {
@@ -1811,12 +2673,19 @@ app.post('/admin/webhooks/settings', auth, admin, async (req, res) => {
         if (currentUser.role === 'super_admin') {
             const discordWebhookUrl = String(req.body?.discord_webhook_url || '').trim();
             const checkoutErrorWebhookUrl = String(req.body?.checkout_error_webhook_url || '').trim();
+            const currentGlobal = await getAppSetting('webhook_settings', {});
+            const monitorDedupeWindowSeconds = Math.max(0, Math.min(600, Number(req.body?.monitor_dedupe_window_seconds ?? currentGlobal.monitor_dedupe_window_seconds ?? 45) || 45));
             await setAppSetting('webhook_settings', {
+                ...currentGlobal,
                 discord_webhook_url: discordWebhookUrl,
-                checkout_error_webhook_url: checkoutErrorWebhookUrl
+                checkout_error_webhook_url: checkoutErrorWebhookUrl,
+                monitor_groups: req.body?.monitor_groups || currentGlobal.monitor_groups || {},
+                monitor_dedupe_window_seconds: monitorDedupeWindowSeconds
             });
             response.discord_webhook_url = discordWebhookUrl;
             response.checkout_error_webhook_url = checkoutErrorWebhookUrl;
+            response.monitor_groups = req.body?.monitor_groups || {};
+            response.monitor_dedupe_window_seconds = monitorDedupeWindowSeconds;
         }
 
         res.json(response);
@@ -1825,6 +2694,16 @@ app.post('/admin/webhooks/settings', auth, admin, async (req, res) => {
     }
 });
 
+app.post('/admin/webhooks/monitor/create', auth, admin, async (req, res) => {
+    try {
+        const currentUser = await getCurrentUser(req);
+        if (currentUser.role !== 'super_admin') return res.status(403).json({ error: 'Only super admin can create the shared monitor webhook.' });
+        const webhook = await createMonitorWebhook(req, currentUser.id);
+        res.json({ success: true, monitor_webhook_url: webhook.url });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
 
 /* ================= AUTH ROUTES ================= */
 
@@ -2092,6 +2971,36 @@ app.post("/change-password", auth, async (req, res) => {
 
 /* ================= USER PROFILES ================= */
 
+
+function normalizeImportedProfilePayload(entry = {}, accountType = "walmart") {
+    const shipping = entry.shipping || {};
+    const billing = entry.billing || {};
+    const payment = entry.payment || {};
+    const digitsOnly = (value) => String(value || "").replace(/\D/g, "");
+    const phone = digitsOnly(shipping.phone || billing.phone || "");
+    return {
+        profile_name: String(entry.name || entry.profile_name || entry.email || "Imported Profile").trim(),
+        account_type: String(accountType || entry.account_type || 'walmart').trim().toLowerCase(),
+        first_name: String(shipping.firstName || shipping.first_name || billing.firstName || "").trim(),
+        last_name: String(shipping.lastName || shipping.last_name || billing.lastName || "").trim(),
+        email: String(entry.email || shipping.email || billing.email || "").trim().toLowerCase(),
+        phone: phone.slice(-10),
+        address1: String(shipping.address1 || shipping.address_1 || billing.address1 || "").trim(),
+        city: String(shipping.city || billing.city || "").trim(),
+        state: String(shipping.province || shipping.state || billing.province || billing.state || "").trim(),
+        zip: String(shipping.postalCode || shipping.zip || billing.postalCode || billing.zip || "").trim(),
+        card: digitsOnly(payment.num || payment.card_number || ""),
+        exp_month: String(payment.month || payment.exp_month || "").padStart(2, '0').slice(-2),
+        exp_year: String(payment.year || payment.exp_year || "").slice(-4),
+        cvv: digitsOnly(payment.cvv || ""),
+        account_login_email: "",
+        account_login_password: "",
+        gmail_app_password: "",
+        amazon_2fa_secret: "",
+        imported_profile_id: String(entry.id || "").trim()
+    };
+}
+
 app.get("/profiles", auth, async (req, res) => {
     try {
         await ensureUserNotRevoked(req.user_id);
@@ -2125,6 +3034,135 @@ app.get("/profiles", auth, async (req, res) => {
         });
 
         res.json(data || []);
+    } catch (err) {
+        const status = err.message === "This account has been revoked" ? 403 : 500;
+        res.status(status).json({ error: err.message });
+    }
+});
+
+app.post("/profiles/import", auth, async (req, res) => {
+    try {
+        await ensureUserNotRevoked(req.user_id);
+        const accountType = String(req.body?.account_type || 'walmart').trim().toLowerCase();
+        const rawProfiles = Array.isArray(req.body?.profiles) ? req.body.profiles : [];
+        if (!rawProfiles.length) {
+            return res.status(400).json({ error: "No profiles were provided" });
+        }
+
+        const existingProfiles = await getUserProfilesWithRelations(req.user_id);
+        const imported = [];
+        const skipped = [];
+        const errors = [];
+        const seen = new Set();
+
+        for (const entry of rawProfiles) {
+            const payload = normalizeImportedProfilePayload(entry, accountType);
+            const dedupeKey = [payload.account_type, payload.profile_name, payload.email, payload.phone, (payload.card || '').slice(-4)].join('|').toLowerCase();
+            if (seen.has(dedupeKey)) {
+                skipped.push({ profile_name: payload.profile_name, reason: 'Duplicate in upload' });
+                continue;
+            }
+            seen.add(dedupeKey);
+
+            if (!payload.profile_name || !payload.email) {
+                skipped.push({ profile_name: payload.profile_name || entry?.name || 'Unknown', reason: 'Missing profile name or email' });
+                continue;
+            }
+
+            if (!phoneRegex.test(payload.phone || "")) {
+                skipped.push({ profile_name: payload.profile_name, reason: 'Phone must be 10 digits' });
+                continue;
+            }
+
+            const duplicateError = findDuplicateInSameGroup(
+                existingProfiles,
+                null,
+                payload.account_type,
+                payload.profile_name,
+                payload.email,
+                payload.phone,
+                (payload.card || '').slice(-4)
+            );
+
+            if (duplicateError) {
+                skipped.push({ profile_name: payload.profile_name, reason: duplicateError });
+                continue;
+            }
+
+            const { data: createdProfile, error: profileError } = await supabase
+                .from("profiles")
+                .insert({
+                    user_id: req.user_id,
+                    profile_name: payload.profile_name,
+                    account_type: payload.account_type
+                })
+                .select()
+                .single();
+
+            if (profileError || !createdProfile) {
+                errors.push({ profile_name: payload.profile_name, reason: profileError?.message || 'Profile creation failed' });
+                continue;
+            }
+
+            try {
+                await upsertProfileRelations(createdProfile.id, payload);
+                imported.push({ id: createdProfile.id, profile_name: payload.profile_name });
+                existingProfiles.push({
+                    id: createdProfile.id,
+                    profile_name: payload.profile_name,
+                    account_type: payload.account_type,
+                    addresses: [{ email: payload.email, phone: payload.phone }],
+                    payments: [{ card_last4: (payload.card || '').slice(-4) }]
+                });
+            } catch (err) {
+                errors.push({ profile_name: payload.profile_name, reason: err.message || 'Could not save profile relations' });
+            }
+        }
+
+        res.json({
+            success: true,
+            imported_count: imported.length,
+            skipped_count: skipped.length,
+            error_count: errors.length,
+            imported,
+            skipped,
+            errors
+        });
+    } catch (err) {
+        const status = err.message === "This account has been revoked" ? 403 : 500;
+        res.status(status).json({ error: err.message || 'Profile import failed' });
+    }
+});
+
+app.delete("/profiles/bulk", auth, async (req, res) => {
+    try {
+        await ensureUserNotRevoked(req.user_id);
+        const ids = Array.isArray(req.body?.ids) ? req.body.ids.map((id) => String(id || '').trim()).filter(Boolean) : [];
+        if (!ids.length) {
+            return res.status(400).json({ error: 'No profile ids were provided' });
+        }
+
+        const { data: ownedProfiles, error: ownedError } = await supabase
+            .from('profiles')
+            .select('id')
+            .eq('user_id', req.user_id)
+            .in('id', ids);
+        if (ownedError) {
+            return res.status(500).json({ error: ownedError.message });
+        }
+        const ownedIds = (ownedProfiles || []).map((row) => row.id);
+        if (!ownedIds.length) {
+            return res.status(404).json({ error: 'No matching profiles found' });
+        }
+
+        await supabase.from('accounts').delete().in('profile_id', ownedIds);
+        await supabase.from('payments').delete().in('profile_id', ownedIds);
+        await supabase.from('addresses').delete().in('profile_id', ownedIds);
+        const { error } = await supabase.from('profiles').delete().eq('user_id', req.user_id).in('id', ownedIds);
+        if (error) {
+            return res.status(500).json({ error: error.message });
+        }
+        res.json({ success: true, deleted_count: ownedIds.length });
     } catch (err) {
         const status = err.message === "This account has been revoked" ? 403 : 500;
         res.status(status).json({ error: err.message });
@@ -3191,74 +4229,6 @@ registerProductCatalogRoutes({
     getCurrentUser,
     ensureUserNotRevoked
 });
-
-function validateDiscountCode({ code, cartTotal = 0, shippingTotal = 0, email = "" }) {
-    const normalizedCode = String(code || "").trim().toUpperCase();
-    if (!normalizedCode) {
-        return { ok: false, error: "Discount code is required" };
-    }
-
-    return getDiscount(normalizedCode)
-        .then((discount) => {
-            if (!discount || !discount.active) {
-                return { ok: false, error: "Invalid code" };
-            }
-
-            const now = Date.now();
-            if (
-                discount.expires_at &&
-                Number.isFinite(new Date(discount.expires_at).getTime()) &&
-                new Date(discount.expires_at).getTime() < now
-            ) {
-                return { ok: false, error: "Expired code" };
-            }
-
-            if (Number(discount.usage_limit || 0) > 0 && Number(discount.usage_count || 0) >= Number(discount.usage_limit || 0)) {
-                return { ok: false, error: "Usage limit reached" };
-            }
-
-            const normalizedEmail = String(email || "").trim().toLowerCase();
-            const usedBy = Array.isArray(discount.used_by) ? discount.used_by : [];
-
-            if (discount.one_time_per_user && normalizedEmail && usedBy.includes(normalizedEmail)) {
-                return { ok: false, error: "This code has already been used by this email" };
-            }
-
-            const subtotal = Number(cartTotal || 0);
-            if (subtotal < Number(discount.min_cart_value || 0)) {
-                return {
-                    ok: false,
-                    error: `Minimum cart value is $${Number(discount.min_cart_value || 0).toFixed(2)}`
-                };
-            }
-
-            let discountAmount = 0;
-            let shippingDiscount = 0;
-
-            if (discount.type === "percent") {
-                discountAmount = subtotal * (Number(discount.value || 0) / 100);
-            } else if (discount.type === "fixed") {
-                discountAmount = Number(discount.value || 0);
-            } else if (discount.type === "free_shipping") {
-                shippingDiscount = Math.max(0, Number(shippingTotal || 0));
-            }
-
-            discountAmount = Math.min(subtotal, Number(discountAmount.toFixed(2)));
-            shippingDiscount = Math.min(Number(shippingTotal || 0), Number(shippingDiscount.toFixed(2)));
-
-            return {
-                ok: true,
-                discount,
-                code: discount.code,
-                discountAmount,
-                shippingDiscount,
-                totalDiscount: Number((discountAmount + shippingDiscount).toFixed(2))
-            };
-        })
-        .catch((err) => {
-            return { ok: false, error: err.message || "Could not validate code" };
-        });
-}
 
 shopRoutes = registerShopRoutes({
     app,

@@ -8,6 +8,12 @@ let usersPage = 1;
 const PAGE_SIZE = 10;
 
 
+let profileImportBound = false;
+let allDashboardProfiles = [];
+let profileGroupFilters = { general: '', walmart: '', target: '', amazon: '' };
+let selectedProfileIds = new Set();
+
+
 const PUBLIC_PATHS = new Set(["/", "/index.html", "/guide", "/guide.html", "/login", "/login.html", "/signup", "/signup.html", "/forgot-password", "/forgot-password.html", "/reset-password", "/reset-password.html"]);
 
 function currentPathname() {
@@ -115,6 +121,11 @@ function canManageCatalog() {
     return isSuperAdmin();
 }
 
+function syncSuperAdminStorefrontLink() {
+    const link = document.getElementById("storefrontAdminLink");
+    if (link) link.style.display = isSuperAdmin() ? "inline-flex" : "none";
+}
+
 function logout() {
     localStorage.clear();
     location = "login.html";
@@ -122,6 +133,10 @@ function logout() {
 
 function openAdminPanel() {
     location = "admin.html";
+}
+
+function openStoreAdmin() {
+    location = "admin-store.html";
 }
 
 function openUserDashboard() {
@@ -261,6 +276,7 @@ async function loadProfiles() {
 
     let user = currentUser();
     const adminButton = document.getElementById("adminPanelButton");
+    const storeAdminButton = document.getElementById("storeAdminButton");
 
     try {
         const refreshedUser = await refreshCurrentUserFromServer();
@@ -269,6 +285,9 @@ async function loadProfiles() {
 
     if (adminButton) {
         adminButton.style.display = isAdminRole(user?.role) ? "inline-flex" : "none";
+    }
+    if (storeAdminButton) {
+        storeAdminButton.style.display = user?.role === 'super_admin' ? 'inline-flex' : 'none';
     }
 
     try {
@@ -283,13 +302,8 @@ async function loadProfiles() {
             return;
         }
 
-        const groups = {
-            general: [],
-            walmart: [],
-            target: [],
-            amazon: []
-        };
-
+        allDashboardProfiles = profiles;
+        const groups = { general: [], walmart: [], target: [], amazon: [] };
         profiles.forEach((p) => {
             if (groups[p.account_type]) groups[p.account_type].push(p);
         });
@@ -319,9 +333,18 @@ async function loadProfiles() {
         };
 
         let html = "";
-
         Object.keys(groups).forEach((groupKey) => {
-            const items = groups[groupKey];
+            const rawItems = groups[groupKey];
+            const filterValue = String(profileGroupFilters[groupKey] || '').trim().toLowerCase();
+            const items = filterValue
+                ? rawItems.filter((p) => {
+                    const address = p.addresses?.[0] || {};
+                    const payment = p.payments?.[0] || {};
+                    const haystack = [p.profile_name, address.email, address.phone, address.city, address.state, payment.card_last4].join(' ').toLowerCase();
+                    return haystack.includes(filterValue);
+                })
+                : rawItems;
+            const selectedCount = rawItems.filter((p) => selectedProfileIds.has(String(p.id))).length;
 
             html += `
                 <section class="profile-group-section">
@@ -330,15 +353,20 @@ async function loadProfiles() {
                             <h3 class="profile-group-title">${labels[groupKey]}</h3>
                             <div class="profile-group-subtitle">${descriptions[groupKey]}</div>
                         </div>
-                        <span class="badge">${items.length} saved</span>
+                        <span class="badge">${rawItems.length} saved</span>
+                    </div>
+                    <div class="toolbar-row" style="margin:12px 0; align-items:center;">
+                        <input class="input" type="search" placeholder="Search ${labels[groupKey].toLowerCase()}" value="${escapeHTML(profileGroupFilters[groupKey] || '')}" data-profile-search="${groupKey}" />
+                        <button class="btn" type="button" data-profile-select-visible="${groupKey}">Select Visible</button>
+                        <button class="btn btn-danger" type="button" data-profile-delete-group="${groupKey}" ${selectedCount ? '' : 'disabled'}>Delete Selected (${selectedCount})</button>
                     </div>
             `;
 
             if (!items.length) {
                 html += `
                     <div class="empty-card">
-                        <h4>No profiles yet</h4>
-                        <p>Create your first ${groupKey} profile.</p>
+                        <h4>${rawItems.length ? 'No matching profiles' : 'No profiles yet'}</h4>
+                        <p>${rawItems.length ? 'Try a different search.' : 'Create your first ' + groupKey + ' profile.'}</p>
                         <div class="panel-actions">
                             <button class="btn btn-primary" onclick="createProfile()">Create Profile</button>
                         </div>
@@ -346,27 +374,29 @@ async function loadProfiles() {
                 `;
             } else {
                 html += `<div class="profile-card-grid">`;
-
                 items.forEach((p) => {
                     const address = p.addresses?.[0] || {};
                     const payment = p.payments?.[0] || {};
                     const state = address.state || "";
                     const city = address.city || "";
                     const maskedCard = maskCard(payment.card_number, payment.card_last4);
-
+                    const checked = selectedProfileIds.has(String(p.id)) ? 'checked' : '';
                     html += `
                         <article class="profile-card-modern">
                             <div class="profile-card-top">
-                                <div>
-                                    <h4>${p.profile_name}</h4>
-                                    <div class="subtle-text">${city}${city && state ? ", " : ""}${state || "No location set"}</div>
-                                </div>
+                                <label class="checkbox-inline"><input type="checkbox" data-profile-select="${p.id}" ${checked} /><span>Select</span></label>
                                 <span class="badge">${p.account_type}</span>
                             </div>
+                            <div class="profile-card-top">
+                                <div>
+                                    <h4>${escapeHTML(p.profile_name)}</h4>
+                                    <div class="subtle-text">${escapeHTML(city)}${city && state ? ", " : ""}${escapeHTML(state || "No location set")}</div>
+                                </div>
+                            </div>
                             <div class="profile-detail-list">
-                                <div><span>Email</span><strong>${address.email || "-"}</strong></div>
-                                <div><span>Phone</span><strong>${address.phone || "-"}</strong></div>
-                                <div><span>Card</span><strong>${maskedCard}</strong></div>
+                                <div><span>Email</span><strong>${escapeHTML(address.email || "-")}</strong></div>
+                                <div><span>Phone</span><strong>${escapeHTML(address.phone || "-")}</strong></div>
+                                <div><span>Card</span><strong>${escapeHTML(maskedCard)}</strong></div>
                             </div>
                             <div class="panel-actions">
                                 <button class="btn" onclick="edit('${p.id}')">Edit</button>
@@ -375,17 +405,106 @@ async function loadProfiles() {
                         </article>
                     `;
                 });
-
                 html += `</div>`;
             }
-
             html += `</section>`;
         });
 
         dashboardEl.innerHTML = html;
+        bindProfileDashboardControls();
+        bindProfileImportControls();
     } catch {
         dashboardEl.innerHTML = `<p>Could not connect to the server.</p>`;
     }
+}
+
+
+function bindProfileDashboardControls() {
+    document.querySelectorAll('[data-profile-search]').forEach((input) => {
+        input.addEventListener('input', () => {
+            profileGroupFilters[input.dataset.profileSearch] = input.value || '';
+            loadProfiles();
+        });
+    });
+    document.querySelectorAll('[data-profile-select]').forEach((checkbox) => {
+        checkbox.addEventListener('change', () => {
+            const id = String(checkbox.dataset.profileSelect || '');
+            if (checkbox.checked) selectedProfileIds.add(id); else selectedProfileIds.delete(id);
+            loadProfiles();
+        });
+    });
+    document.querySelectorAll('[data-profile-select-visible]').forEach((button) => {
+        button.addEventListener('click', () => {
+            const group = button.dataset.profileSelectVisible;
+            const filterValue = String(profileGroupFilters[group] || '').trim().toLowerCase();
+            allDashboardProfiles.filter((p) => p.account_type === group).forEach((p) => {
+                const address = p.addresses?.[0] || {};
+                const payment = p.payments?.[0] || {};
+                const haystack = [p.profile_name, address.email, address.phone, address.city, address.state, payment.card_last4].join(' ').toLowerCase();
+                if (!filterValue || haystack.includes(filterValue)) selectedProfileIds.add(String(p.id));
+            });
+            loadProfiles();
+        });
+    });
+    document.querySelectorAll('[data-profile-delete-group]').forEach((button) => {
+        button.addEventListener('click', async () => {
+            const group = button.dataset.profileDeleteGroup;
+            const ids = allDashboardProfiles.filter((p) => p.account_type === group && selectedProfileIds.has(String(p.id))).map((p) => String(p.id));
+            if (!ids.length) return;
+            if (!confirm(`Delete ${ids.length} selected ${group} profile(s)?`)) return;
+            const res = await fetch(API + '/profiles/bulk', {
+                method: 'DELETE',
+                headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token() },
+                body: JSON.stringify({ ids })
+            });
+            const data = await res.json();
+            if (data.error) {
+                alert(data.error);
+                return;
+            }
+            ids.forEach((id) => selectedProfileIds.delete(String(id)));
+            await loadProfiles();
+        });
+    });
+}
+
+function bindProfileImportControls() {
+    if (profileImportBound) return;
+    const button = document.getElementById('profileImportButton');
+    const fileInput = document.getElementById('profileImportFile');
+    const typeSelect = document.getElementById('profileImportType');
+    const message = document.getElementById('profileImportMessage');
+    if (!button || !fileInput || !typeSelect || !message) return;
+    profileImportBound = true;
+    button.addEventListener('click', async () => {
+        message.textContent = '';
+        const file = fileInput.files?.[0];
+        if (!file) {
+            message.textContent = 'Choose a JSON export first.';
+            return;
+        }
+        button.disabled = true;
+        try {
+            const text = await file.text();
+            const parsed = JSON.parse(text);
+            const profiles = Array.isArray(parsed) ? parsed : (Array.isArray(parsed?.profiles) ? parsed.profiles : []);
+            if (!profiles.length) throw new Error('No profiles found in that file.');
+            const res = await fetch(API + '/profiles/import', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token() },
+                body: JSON.stringify({ account_type: typeSelect.value, profiles })
+            });
+            const data = await res.json();
+            if (data.error) throw new Error(data.error);
+            message.textContent = `Imported ${data.imported_count || 0}, skipped ${data.skipped_count || 0}, errors ${data.error_count || 0}.`;
+            fileInput.value = '';
+            await loadProfiles();
+        } catch (error) {
+            message.textContent = error.message || 'Could not import profiles.';
+        } finally {
+            button.disabled = false;
+        }
+    });
 }
 
 function createProfile() {
@@ -1682,6 +1801,9 @@ async function initCatalogTools() {
     const filterButton = document.getElementById('catalogFilterButton');
     const controls = document.getElementById('superAdminCatalogControls');
     const notice = document.getElementById('superAdminCatalogNotice');
+    const bulkImportForm = document.getElementById('catalogBulkImportForm');
+    const exportForm = document.getElementById('catalogExportForm');
+    const exportResults = document.getElementById('catalogExportResults');
     const superAdmin = canManageCatalog();
     if (controls) controls.style.display = superAdmin ? 'block' : 'none';
     if (notice) notice.style.display = superAdmin ? 'none' : 'block';
@@ -1733,6 +1855,61 @@ async function initCatalogTools() {
             }
         });
     }
+
+    if (bulkImportForm && superAdmin) {
+        bulkImportForm.addEventListener('submit', async (event) => {
+            event.preventDefault();
+            message.textContent = 'Importing product list...';
+            try {
+                const file = document.getElementById('catalogBulkImportFile').files[0];
+                if (!file) throw new Error('Choose a JSON file to import.');
+                const text = await file.text();
+                const parsed = JSON.parse(text);
+                const products = Array.isArray(parsed) ? parsed : (Array.isArray(parsed.products) ? parsed.products : []);
+                if (!products.length) throw new Error('No products were found in the imported file.');
+                const data = await authJSON(API + '/admin/catalog-products/import-list', {
+                    method: 'POST',
+                    body: JSON.stringify({
+                        site: document.getElementById('catalogBulkImportSite').value,
+                        products
+                    })
+                });
+                message.textContent = data.message || `Imported ${data.imported || 0} products.`;
+                bulkImportForm.reset();
+                await loadCatalogProducts();
+            } catch (err) {
+                message.textContent = err.message;
+            }
+        });
+    }
+    if (exportForm) {
+        exportForm.addEventListener('submit', async (event) => {
+            event.preventDefault();
+            if (exportResults) exportResults.innerHTML = '<div class="subtle-text">Building export batches...</div>';
+            try {
+                const site = document.getElementById('catalogExportSite').value;
+                const batchSize = document.getElementById('catalogExportBatchSize').value || '29';
+                const qs = new URLSearchParams({ site, batchSize });
+                const data = await authJSON(API + '/admin/catalog-products/export-lines?' + qs.toString());
+                const batches = Array.isArray(data.batches) ? data.batches : [];
+                if (!batches.length) {
+                    if (exportResults) exportResults.innerHTML = '<div class="subtle-text">No products found to export.</div>';
+                    return;
+                }
+                if (exportResults) {
+                    exportResults.innerHTML = batches.map((batch) => `
+                        <section class="panel panel--inner">
+                          <div class="panel-header"><div><h3>${escapeHTML(site.toUpperCase())} Batch ${batch.index}</h3><p class="subtle-text">${batch.count} products</p></div></div>
+                          <textarea class="input" rows="${Math.min(14, Math.max(6, batch.count + 1))}" readonly>${escapeHTML(batch.text)}</textarea>
+                        </section>
+                    `).join('');
+                }
+            } catch (err) {
+                if (exportResults) exportResults.innerHTML = `<div class="subtle-text">${escapeHTML(err.message)}</div>`;
+            }
+        });
+    }
+
     if (syncButton && superAdmin) {
         syncButton.addEventListener('click', async () => {
             message.textContent = 'Syncing target pricing...';
@@ -1843,39 +2020,178 @@ function purchaseCustomCredits() {
     startCreditPurchase(input ? input.value : 0);
 }
 
+
+function escapeHtml(value = '') {
+    return String(value)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
+async function loadWebhookLogs() {
+    const container = document.getElementById('webhookLogs');
+    if (!container) return;
+    try {
+        container.textContent = 'Loading webhook logs...';
+        const data = await authJSON(API + '/admin/webhooks/logs');
+        const items = Array.isArray(data.items) ? data.items : [];
+        if (!items.length) {
+            container.innerHTML = '<div class="subtle-text">No webhook events yet.</div>';
+            return;
+        }
+        const rows = items.map((item) => {
+            const parsed = Array.isArray(item.parsed_items) ? item.parsed_items : [];
+            const targets = Array.isArray(item.discord_targets) ? item.discord_targets : [];
+            const details = parsed.length
+              ? `<details><summary>Parsed items (${parsed.length})</summary><pre style="white-space:pre-wrap;max-width:480px;">${escapeHtml(JSON.stringify(parsed, null, 2))}</pre></details>`
+              : '';
+            const targetDetails = targets.length
+              ? `<details><summary>Discord targets (${targets.length})</summary><pre style="white-space:pre-wrap;max-width:420px;">${escapeHtml(JSON.stringify(targets, null, 2))}</pre></details>`
+              : '';
+            const payloadDetails = item.payload
+              ? `<details><summary>Raw payload</summary><pre style="white-space:pre-wrap;max-width:520px;">${escapeHtml(JSON.stringify(item.payload, null, 2))}</pre></details>`
+              : '';
+            return `
+            <tr>
+              <td>${escapeHtml(new Date(item.created_at).toLocaleString())}</td>
+              <td>${escapeHtml(item.type || '-')}</td>
+              <td>${escapeHtml(item.status || '-')}</td>
+              <td>${escapeHtml(item.site || '-')}</td>
+              <td>${escapeHtml(item.product_type || '-')}</td>
+              <td style="max-width:280px;word-break:break-word;">${escapeHtml(item.product || '-')}</td>
+              <td>${escapeHtml(item.sku || '-')}</td>
+              <td style="max-width:360px;word-break:break-word;">${escapeHtml(item.error || '')}${details}${targetDetails}${payloadDetails}</td>
+            </tr>`;
+        }).join('');
+        container.innerHTML = `
+            <div style="overflow:auto;">
+              <table class="admin-table">
+                <thead><tr><th>Time</th><th>Type</th><th>Status</th><th>Site</th><th>Product Type</th><th>Product</th><th>SKU</th><th>Error / Debug</th></tr></thead>
+                <tbody>${rows}</tbody>
+              </table>
+            </div>`;
+    } catch (err) {
+        container.textContent = err.message || 'Failed to load webhook logs.';
+    }
+}
+
 async function loadWebhookSettings() {
     const urlInput = document.getElementById('websiteWebhookUrl');
+    const monitorUrlInput = document.getElementById('monitorWebhookUrl');
     const discordInput = document.getElementById('discordRelayWebhookUrl');
     const adminDiscordInput = document.getElementById('adminDiscordRelayWebhookUrl');
-    const adminErrorDiscordInput = document.getElementById('adminErrorDiscordRelayWebhookUrl');
     const errorDiscordInput = document.getElementById('checkoutErrorWebhookUrl');
+    const adminErrorDiscordInput = document.getElementById('adminErrorDiscordRelayWebhookUrl');
     const adminBrandInput = document.getElementById('adminBrandLabel');
     const message = document.getElementById('webhookSettingsMessage');
     const createButton = document.getElementById('createWebhookButton');
+    const createMonitorButton = document.getElementById('createMonitorWebhookButton');
     const superAdminField = document.getElementById('superAdminDiscordField');
+    const superAdminMonitorGroups = document.getElementById('superAdminMonitorGroups');
 
+    const monitorInputs = {
+        pokemon: {
+            webhook_url: document.getElementById('monitorPokemon'),
+            ping_mode: document.getElementById('monitorPokemonPingMode'),
+            role_mention: document.getElementById('monitorPokemonRole')
+        },
+        onepiece: {
+            webhook_url: document.getElementById('monitorOnePiece'),
+            ping_mode: document.getElementById('monitorOnePiecePingMode'),
+            role_mention: document.getElementById('monitorOnePieceRole')
+        },
+        sports: {
+            webhook_url: document.getElementById('monitorSports'),
+            ping_mode: document.getElementById('monitorSportsPingMode'),
+            role_mention: document.getElementById('monitorSportsRole')
+        },
+        othertcg: {
+            webhook_url: document.getElementById('monitorOtherTcg'),
+            ping_mode: document.getElementById('monitorOtherTcgPingMode'),
+            role_mention: document.getElementById('monitorOtherTcgRole')
+        },
+        lowkey: {
+            webhook_url: document.getElementById('monitorLowkey'),
+            ping_mode: document.getElementById('monitorLowkeyPingMode'),
+            role_mention: document.getElementById('monitorLowkeyRole')
+        }
+    };
+
+
+    const adminMonitorInputs = {
+        pokemon: {
+            webhook_url: document.getElementById('adminMonitorPokemon'),
+            ping_mode: document.getElementById('adminMonitorPokemonPingMode'),
+            role_mention: document.getElementById('adminMonitorPokemonRole')
+        },
+        onepiece: {
+            webhook_url: document.getElementById('adminMonitorOnePiece'),
+            ping_mode: document.getElementById('adminMonitorOnePiecePingMode'),
+            role_mention: document.getElementById('adminMonitorOnePieceRole')
+        },
+        sports: {
+            webhook_url: document.getElementById('adminMonitorSports'),
+            ping_mode: document.getElementById('adminMonitorSportsPingMode'),
+            role_mention: document.getElementById('adminMonitorSportsRole')
+        },
+        othertcg: {
+            webhook_url: document.getElementById('adminMonitorOtherTcg'),
+            ping_mode: document.getElementById('adminMonitorOtherTcgPingMode'),
+            role_mention: document.getElementById('adminMonitorOtherTcgRole')
+        },
+        lowkey: {
+            webhook_url: document.getElementById('adminMonitorLowkey'),
+            ping_mode: document.getElementById('adminMonitorLowkeyPingMode'),
+            role_mention: document.getElementById('adminMonitorLowkeyRole')
+        }
+    };
     if (!urlInput) return;
 
     try {
         const data = await authJSON(API + '/admin/webhooks/settings');
         urlInput.value = data.inbound_webhook_url || '';
+        if (monitorUrlInput) monitorUrlInput.value = data.monitor_webhook_url || '';
         if (discordInput) discordInput.value = data.discord_webhook_url || '';
         if (errorDiscordInput) errorDiscordInput.value = data.checkout_error_webhook_url || '';
         if (adminDiscordInput) adminDiscordInput.value = data.admin_discord_webhook_url || '';
         if (adminErrorDiscordInput) adminErrorDiscordInput.value = data.admin_error_discord_webhook_url || '';
         if (adminBrandInput) adminBrandInput.value = data.admin_brand_label || '';
+        const monitorDedupeInput = document.getElementById('monitorDedupeWindowSeconds');
+        if (monitorDedupeInput) monitorDedupeInput.value = Number(data.monitor_dedupe_window_seconds || 45);
 
-        if (createButton) {
-            createButton.style.display = data.can_create_inbound ? '' : 'none';
-        }
-        if (superAdminField) {
-            superAdminField.style.display = data.is_super_admin ? '' : 'none';
-        }
+        const monitorSettings = data.monitor_groups || {};
+        Object.entries(monitorInputs).forEach(([key, inputs]) => {
+            const raw = monitorSettings[key] || '';
+            const cfg = typeof raw === 'string' ? { webhook_url: raw, ping_mode: 'none', role_mention: '' } : (raw || {});
+            if (inputs.webhook_url) inputs.webhook_url.value = cfg.webhook_url || '';
+            if (inputs.ping_mode) inputs.ping_mode.value = cfg.ping_mode || 'none';
+            if (inputs.role_mention) inputs.role_mention.value = cfg.role_mention || '';
+        });
+        const adminMonitorSettings = data.admin_monitor_groups || {};
+        Object.entries(adminMonitorInputs).forEach(([key, inputs]) => {
+            const raw = adminMonitorSettings[key] || '';
+            const cfg = typeof raw === 'string' ? { webhook_url: raw, ping_mode: 'none', role_mention: '' } : (raw || {});
+            if (inputs.webhook_url) inputs.webhook_url.value = cfg.webhook_url || '';
+            if (inputs.ping_mode) inputs.ping_mode.value = cfg.ping_mode || 'none';
+            if (inputs.role_mention) inputs.role_mention.value = cfg.role_mention || '';
+        });
+
+        if (createButton) createButton.style.display = data.can_create_inbound ? '' : 'none';
+        if (createMonitorButton) createMonitorButton.style.display = data.can_create_inbound ? '' : 'none';
+        if (superAdminField) superAdminField.style.display = data.is_super_admin ? '' : 'none';
+        if (superAdminMonitorGroups) superAdminMonitorGroups.style.display = data.is_super_admin ? '' : 'none';
+        const webhookLogsSection = document.getElementById('webhookLogsSection');
+        if (webhookLogsSection) webhookLogsSection.style.display = data.is_super_admin ? '' : 'none';
 
         if (message) {
             message.textContent = data.inbound_webhook_url
                 ? 'Webhook settings loaded.'
                 : 'No shared website webhook created yet.';
+        }
+        if (data.is_super_admin) {
+            await loadWebhookLogs();
         }
     } catch (err) {
         if (message) message.textContent = err.message;
@@ -1895,11 +2211,24 @@ async function createWebsiteWebhook() {
     }
 }
 
+async function createMonitorWebhook() {
+    const urlInput = document.getElementById('monitorWebhookUrl');
+    const message = document.getElementById('webhookSettingsMessage');
+    try {
+        if (message) message.textContent = 'Creating monitor webhook...';
+        const data = await authJSON(API + '/admin/webhooks/monitor/create', { method: 'POST' });
+        if (urlInput) urlInput.value = data.monitor_webhook_url || '';
+        if (message) message.textContent = 'Monitor webhook created. Paste this URL into your monitor bot.';
+    } catch (err) {
+        if (message) message.textContent = err.message;
+    }
+}
+
 async function saveWebhookSettings() {
     const discordInput = document.getElementById('discordRelayWebhookUrl');
     const adminDiscordInput = document.getElementById('adminDiscordRelayWebhookUrl');
-    const adminErrorDiscordInput = document.getElementById('adminErrorDiscordRelayWebhookUrl');
     const errorDiscordInput = document.getElementById('checkoutErrorWebhookUrl');
+    const adminErrorDiscordInput = document.getElementById('adminErrorDiscordRelayWebhookUrl');
     const adminBrandInput = document.getElementById('adminBrandLabel');
     const message = document.getElementById('webhookSettingsMessage');
 
@@ -1908,10 +2237,63 @@ async function saveWebhookSettings() {
             method: 'POST',
             body: JSON.stringify({
                 discord_webhook_url: discordInput ? discordInput.value : '',
-                checkout_error_webhook_url: errorDiscordInput ? errorDiscordInput.value : '',
                 admin_discord_webhook_url: adminDiscordInput ? adminDiscordInput.value : '',
-                admin_error_discord_webhook_url: adminErrorDiscordInput ? adminErrorDiscordInput.value : '',
-                admin_brand_label: adminBrandInput ? adminBrandInput.value : ''
+                admin_brand_label: adminBrandInput ? adminBrandInput.value : '',
+                monitor_dedupe_window_seconds: Number(document.getElementById('monitorDedupeWindowSeconds')?.value || 45),
+                monitor_groups: {
+                    pokemon: {
+                        webhook_url: document.getElementById('monitorPokemon')?.value || '',
+                        ping_mode: document.getElementById('monitorPokemonPingMode')?.value || 'none',
+                        role_mention: document.getElementById('monitorPokemonRole')?.value || ''
+                    },
+                    onepiece: {
+                        webhook_url: document.getElementById('monitorOnePiece')?.value || '',
+                        ping_mode: document.getElementById('monitorOnePiecePingMode')?.value || 'none',
+                        role_mention: document.getElementById('monitorOnePieceRole')?.value || ''
+                    },
+                    sports: {
+                        webhook_url: document.getElementById('monitorSports')?.value || '',
+                        ping_mode: document.getElementById('monitorSportsPingMode')?.value || 'none',
+                        role_mention: document.getElementById('monitorSportsRole')?.value || ''
+                    },
+                    othertcg: {
+                        webhook_url: document.getElementById('monitorOtherTcg')?.value || '',
+                        ping_mode: document.getElementById('monitorOtherTcgPingMode')?.value || 'none',
+                        role_mention: document.getElementById('monitorOtherTcgRole')?.value || ''
+                    },
+                    lowkey: {
+                        webhook_url: document.getElementById('monitorLowkey')?.value || '',
+                        ping_mode: document.getElementById('monitorLowkeyPingMode')?.value || 'none',
+                        role_mention: document.getElementById('monitorLowkeyRole')?.value || ''
+                    }
+                },
+                admin_monitor_groups: {
+                    pokemon: {
+                        webhook_url: document.getElementById('adminMonitorPokemon')?.value || '',
+                        ping_mode: document.getElementById('adminMonitorPokemonPingMode')?.value || 'none',
+                        role_mention: document.getElementById('adminMonitorPokemonRole')?.value || ''
+                    },
+                    onepiece: {
+                        webhook_url: document.getElementById('adminMonitorOnePiece')?.value || '',
+                        ping_mode: document.getElementById('adminMonitorOnePiecePingMode')?.value || 'none',
+                        role_mention: document.getElementById('adminMonitorOnePieceRole')?.value || ''
+                    },
+                    sports: {
+                        webhook_url: document.getElementById('adminMonitorSports')?.value || '',
+                        ping_mode: document.getElementById('adminMonitorSportsPingMode')?.value || 'none',
+                        role_mention: document.getElementById('adminMonitorSportsRole')?.value || ''
+                    },
+                    othertcg: {
+                        webhook_url: document.getElementById('adminMonitorOtherTcg')?.value || '',
+                        ping_mode: document.getElementById('adminMonitorOtherTcgPingMode')?.value || 'none',
+                        role_mention: document.getElementById('adminMonitorOtherTcgRole')?.value || ''
+                    },
+                    lowkey: {
+                        webhook_url: document.getElementById('adminMonitorLowkey')?.value || '',
+                        ping_mode: document.getElementById('adminMonitorLowkeyPingMode')?.value || 'none',
+                        role_mention: document.getElementById('adminMonitorLowkeyRole')?.value || ''
+                    }
+                }
             })
         });
 
@@ -2142,6 +2524,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     try {
         if (token()) { await refreshCurrentUserFromServer(); }
     } catch (_) { }
+    try { syncSuperAdminStorefrontLink(); } catch (_) { }
     try { await loadPublicCountdowns(); } catch (_) { }
 
     if (document.getElementById("dashboard")) {
