@@ -2247,7 +2247,9 @@ async function saveWebhookSettings() {
             method: 'POST',
             body: JSON.stringify({
                 discord_webhook_url: discordInput ? discordInput.value : '',
+                checkout_error_webhook_url: errorDiscordInput ? errorDiscordInput.value : '',
                 admin_discord_webhook_url: adminDiscordInput ? adminDiscordInput.value : '',
+                admin_error_discord_webhook_url: adminErrorDiscordInput ? adminErrorDiscordInput.value : '',
                 admin_brand_label: adminBrandInput ? adminBrandInput.value : '',
                 monitor_dedupe_window_seconds: Number(document.getElementById('monitorDedupeWindowSeconds')?.value || 45),
                 monitor_groups: {
