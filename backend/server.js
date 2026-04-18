@@ -1266,7 +1266,8 @@ function formatDiscordMention(value = '', fallbackEmail = '') {
     return raw;
 }
 
-function getCheckoutBannerText(mentionText = '', brandLabel = '') {
+function getCheckoutBannerText(mentionText = '', brandLabel = '', checkoutType = 'success') {
+    if (checkoutType === 'error') return '';
     const brand = String(brandLabel || '').trim();
     const mention = String(mentionText || '').trim() || 'there';
     return brand
@@ -1979,6 +1980,21 @@ async function sendMonitorDiscordWebhook(routeConfigOrUrl, item) {
     });
 }
 
+function deriveCheckoutStatusInfo(order = {}) {
+    const payload = order.raw_payload || {};
+    const { embed } = extractEmbedFields(payload);
+    const rawTitle = decodeHtmlEntities(String(embed?.title || ''));
+    const rawDescription = decodeHtmlEntities(String(embed?.description || ''));
+    const checkoutType = classifyCheckoutWebhookType(order);
+    const cleanTitle = rawTitle.replace(/\*\*/g, '').trim();
+    return {
+        checkoutType,
+        title: cleanTitle,
+        description: rawDescription,
+        isError: checkoutType === 'error'
+    };
+}
+
 function maskEmail(email = '') {
     const value = String(email || '').trim().toLowerCase();
     const parts = value.split('@');
@@ -2004,33 +2020,51 @@ async function sendDiscordWebhookToTarget({
     const payload = order.raw_payload || {};
     const normalized = normalizeIncomingOrderPayload(payload);
     const isInsufficient = String(order.status || '') === 'insufficient_credits';
-    const mentionText = formatDiscordMention(discordHandle, userEmail);
-
+    const statusInfo = deriveCheckoutStatusInfo(order);
+    const mentionText = statusInfo.isError ? '' : formatDiscordMention(discordHandle, userEmail);
+    const displaySite = String(order.site || normalized.site || order.source || 'Bot');
     const embed = {
         title: isInsufficient
             ? `Checkout Logged • Credits Needed`
-            : `Successful Checkout • ${order.site || normalized.site || order.source || 'Bot'}`,
-        description: normalized.product_name || order.product_name || 'Checkout received',
+            : statusInfo.isError
+                ? `${statusInfo.title || 'Checkout Error'} • ${displaySite}`
+                : `Successful Checkout • ${displaySite}`,
+        description: statusInfo.isError
+            ? (statusInfo.description || normalized.product_name || order.product_name || 'Checkout error received')
+            : (normalized.product_name || order.product_name || 'Checkout received'),
         fields: [
             { name: 'Site', value: String(order.site || normalized.site || '-'), inline: true },
             { name: 'Source', value: String(order.source || normalized.source || '-'), inline: true },
             { name: 'Quantity', value: String(normalized.quantity || 1), inline: true },
-            { name: 'Price', value: normalized.price ? `$${Number(normalized.price).toFixed(2)}` : '-', inline: true },
-            { name: 'Credits', value: String(order.credits_charged || 0), inline: true }
+            { name: 'Price', value: normalized.price ? `$${Number(normalized.price).toFixed(2)}` : '-', inline: true }
         ],
         footer: {
             text: isInsufficient
                 ? 'Order saved without charging credits'
-                : 'Youve Been Served by The Shore Shack'
+                : statusInfo.isError
+                    ? 'Checkout error captured by The Shore Shack'
+                    : 'Youve Been Served by The Shore Shack'
         },
         timestamp: new Date().toISOString()
     };
 
+    if (!statusInfo.isError) {
+        embed.fields.push({ name: 'Credits', value: String(order.credits_charged || 0), inline: true });
+    }
+    if (normalized.sku) {
+        embed.fields.push({ name: 'SKU', value: String(normalized.sku), inline: true });
+    }
+    if (normalized.order_number || normalized.external_order_id) {
+        embed.fields.push({ name: 'Order ID', value: String(normalized.order_number || normalized.external_order_id), inline: true });
+    }
     if (normalized.size) {
         embed.fields.push({ name: 'Size', value: normalized.size, inline: true });
     }
     if (normalized.mode) {
         embed.fields.push({ name: 'Mode', value: normalized.mode, inline: true });
+    }
+    if (normalized.profile_name && statusInfo.isError) {
+        embed.fields.push({ name: 'Profile', value: String(normalized.profile_name), inline: true });
     }
     if (normalized.product_url) {
         embed.fields.push({ name: 'Product Link', value: normalized.product_url, inline: false });
@@ -2041,7 +2075,7 @@ async function sendDiscordWebhookToTarget({
 
     const body = JSON.stringify({
         username,
-        content: getCheckoutBannerText(mentionText, brandLabel),
+        content: getCheckoutBannerText(mentionText, brandLabel, statusInfo.checkoutType) || undefined,
         allowed_mentions: { parse: ['users'] },
         embeds: [embed]
     });
@@ -2493,17 +2527,25 @@ app.post(["/webhooks/monitor", "/webhooks/monitor/:token"], async (req, res) => 
         const usedTargets = [];
 
         for (const item of items) {
-            const targets = [];
+            const rawTargets = [];
             const superRoute = normalizeMonitorGroupConfig(globalGroups[item.category]);
             if (String(superRoute.webhook_url || '').trim()) {
-                targets.push({ scope: 'super_admin', user_id: null, route: superRoute });
+                rawTargets.push({ scope: 'super_admin', user_id: null, route: superRoute });
             }
             for (const adminConfig of adminMonitorConfigs) {
+                if (String(adminConfig.role || '') === 'super_admin') continue;
                 const route = normalizeMonitorGroupConfig(adminConfig.monitor_groups?.[item.category]);
                 if (String(route.webhook_url || '').trim()) {
-                    targets.push({ scope: adminConfig.role === 'super_admin' ? 'super_admin_user' : 'admin', user_id: adminConfig.user_id, route });
+                    rawTargets.push({ scope: 'admin', user_id: adminConfig.user_id, route });
                 }
             }
+            const targetMap = new Map();
+            for (const target of rawTargets) {
+                const key = String(target.route.webhook_url || '').trim();
+                if (!key) continue;
+                if (!targetMap.has(key)) targetMap.set(key, target);
+            }
+            const targets = Array.from(targetMap.values());
             if (!targets.length) {
                 results.push({ sku: item.sku, skipped: 'monitor_webhook_not_configured', category: item.category });
                 continue;
