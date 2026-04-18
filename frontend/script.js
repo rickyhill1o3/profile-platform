@@ -2182,6 +2182,14 @@ async function loadWebhookSettings() {
         if (createButton) createButton.style.display = data.can_create_inbound ? '' : 'none';
         if (createMonitorButton) createMonitorButton.style.display = data.can_create_inbound ? '' : 'none';
         if (superAdminField) superAdminField.style.display = data.is_super_admin ? '' : 'none';
+        const superAdminErrorField = document.getElementById('superAdminErrorDiscordField');
+        if (superAdminErrorField) superAdminErrorField.style.display = data.is_super_admin ? '' : 'none';
+        const adminSuccessField = document.getElementById('adminSuccessDiscordField');
+        if (adminSuccessField) adminSuccessField.style.display = data.is_super_admin ? 'none' : '';
+        const adminErrorField = document.getElementById('adminErrorDiscordField');
+        if (adminErrorField) adminErrorField.style.display = data.is_super_admin ? 'none' : '';
+        const adminBrandLabelField = document.getElementById('adminBrandLabelField');
+        if (adminBrandLabelField) adminBrandLabelField.style.display = data.is_super_admin ? 'none' : '';
         if (superAdminMonitorGroups) superAdminMonitorGroups.style.display = data.is_super_admin ? '' : 'none';
         if (adminMonitorGroupsSection) adminMonitorGroupsSection.style.display = data.is_super_admin ? 'none' : '';
         const webhookLogsSection = document.getElementById('webhookLogsSection');
