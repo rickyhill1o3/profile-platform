@@ -1223,7 +1223,7 @@ async function getAllAdminMonitorGroupConfigs() {
     const { data: admins, error } = await supabase
         .from('users')
         .select('id, role, email')
-        .in('role', ['admin', 'super_admin']);
+        .eq('role', 'admin');
     if (error) throw new Error(error.message);
     const rows = [];
     for (const adminUser of admins || []) {

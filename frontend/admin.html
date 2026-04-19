@@ -638,6 +638,12 @@
                 onclick="createMonitorWebhook()">Create / Refresh Shared Monitor Webhook</button>
             </div>
 
+            <div class="field field--full" id="monitorDedupeWindowField">
+              <label for="monitorDedupeWindowSeconds">Monitor Duplicate Window (seconds)</label>
+              <input class="input" id="monitorDedupeWindowSeconds" type="number" min="0" max="600" step="1" placeholder="90" />
+              <div class="subtle-text">If the same monitor ping is received again within this window, it will be skipped. Set to 90 if you want a longer duplicate block.</div>
+            </div>
+
             <div class="field field--full" id="superAdminMonitorGroups">
               <label>Super Admin Monitor Routing By Product Group</label>
               <div class="form-grid">

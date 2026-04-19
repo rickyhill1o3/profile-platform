@@ -2089,6 +2089,7 @@ async function loadWebhookSettings() {
     const createButton = document.getElementById('createWebhookButton');
     const createMonitorButton = document.getElementById('createMonitorWebhookButton');
     const superAdminField = document.getElementById('superAdminDiscordField');
+    const monitorDedupeWindowInput = document.getElementById('monitorDedupeWindowSeconds');
     const superAdminMonitorGroups = document.getElementById('superAdminMonitorGroups');
     const adminMonitorGroupsSection = document.getElementById('adminMonitorGroupsSection');
 
@@ -2158,9 +2159,8 @@ async function loadWebhookSettings() {
         if (errorDiscordInput) errorDiscordInput.value = data.checkout_error_webhook_url || '';
         if (adminDiscordInput) adminDiscordInput.value = data.admin_discord_webhook_url || '';
         if (adminErrorDiscordInput) adminErrorDiscordInput.value = data.admin_error_discord_webhook_url || '';
+        if (monitorDedupeWindowInput) monitorDedupeWindowInput.value = String(data.monitor_dedupe_window_seconds ?? 90);
         if (adminBrandInput) adminBrandInput.value = data.admin_brand_label || '';
-        const monitorDedupeInput = document.getElementById('monitorDedupeWindowSeconds');
-        if (monitorDedupeInput) monitorDedupeInput.value = Number(data.monitor_dedupe_window_seconds || 45);
 
         const monitorSettings = data.monitor_groups || {};
         Object.entries(monitorInputs).forEach(([key, inputs]) => {
@@ -2250,8 +2250,8 @@ async function saveWebhookSettings() {
                 checkout_error_webhook_url: errorDiscordInput ? errorDiscordInput.value : '',
                 admin_discord_webhook_url: adminDiscordInput ? adminDiscordInput.value : '',
                 admin_error_discord_webhook_url: adminErrorDiscordInput ? adminErrorDiscordInput.value : '',
+                monitor_dedupe_window_seconds: monitorDedupeWindowInput ? Number(monitorDedupeWindowInput.value || 90) : 90,
                 admin_brand_label: adminBrandInput ? adminBrandInput.value : '',
-                monitor_dedupe_window_seconds: Number(document.getElementById('monitorDedupeWindowSeconds')?.value || 45),
                 monitor_groups: {
                     pokemon: {
                         webhook_url: document.getElementById('monitorPokemon')?.value || '',
