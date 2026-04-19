@@ -1266,8 +1266,7 @@ function formatDiscordMention(value = '', fallbackEmail = '') {
     return raw;
 }
 
-function getCheckoutBannerText(mentionText = '', brandLabel = '', checkoutType = 'success') {
-    if (checkoutType === 'error') return '';
+function getCheckoutBannerText(mentionText = '', brandLabel = '') {
     const brand = String(brandLabel || '').trim();
     const mention = String(mentionText || '').trim() || 'there';
     return brand
@@ -1980,21 +1979,6 @@ async function sendMonitorDiscordWebhook(routeConfigOrUrl, item) {
     });
 }
 
-function deriveCheckoutStatusInfo(order = {}) {
-    const payload = order.raw_payload || {};
-    const { embed } = extractEmbedFields(payload);
-    const rawTitle = decodeHtmlEntities(String(embed?.title || ''));
-    const rawDescription = decodeHtmlEntities(String(embed?.description || ''));
-    const checkoutType = classifyCheckoutWebhookType(order);
-    const cleanTitle = rawTitle.replace(/\*\*/g, '').trim();
-    return {
-        checkoutType,
-        title: cleanTitle,
-        description: rawDescription,
-        isError: checkoutType === 'error'
-    };
-}
-
 function maskEmail(email = '') {
     const value = String(email || '').trim().toLowerCase();
     const parts = value.split('@');
@@ -2003,6 +1987,7 @@ function maskEmail(email = '') {
     const maskedName = name.length <= 2 ? `${name[0] || '*'}*` : `${name.slice(0, 2)}***`;
     return `${maskedName}@${domain}`;
 }
+
 
 async function sendDiscordWebhookToTarget({
     webhookUrl,
@@ -2019,52 +2004,66 @@ async function sendDiscordWebhookToTarget({
 
     const payload = order.raw_payload || {};
     const normalized = normalizeIncomingOrderPayload(payload);
+    const checkoutType = classifyCheckoutWebhookType(order);
     const isInsufficient = String(order.status || '') === 'insufficient_credits';
-    const statusInfo = deriveCheckoutStatusInfo(order);
-    const mentionText = statusInfo.isError ? '' : formatDiscordMention(discordHandle, userEmail);
-    const displaySite = String(order.site || normalized.site || order.source || 'Bot');
-    const embed = {
-        title: isInsufficient
+    const mentionText = checkoutType === 'success' ? formatDiscordMention(discordHandle, userEmail) : '';
+
+    const siteLabel = String(order.site || normalized.site || order.source || 'Bot');
+    let title = '';
+    let footerText = '';
+    let description = '';
+
+    if (checkoutType === 'error') {
+        const { embed } = extractEmbedFields(payload);
+        const rawTitle = decodeHtmlEntities(String(embed?.title || '')).replace(/\*\*/g, '').trim();
+        const rawDesc = decodeHtmlEntities(String(embed?.description || '')).trim();
+        title = `${rawTitle || 'Checkout Error'} • ${siteLabel}`;
+        description = rawDesc || normalized.product_name || order.product_name || 'Checkout error received';
+        footerText = 'Checkout error captured by The Shore Shack';
+    } else {
+        title = isInsufficient
             ? `Checkout Logged • Credits Needed`
-            : statusInfo.isError
-                ? `${statusInfo.title || 'Checkout Error'} • ${displaySite}`
-                : `Successful Checkout • ${displaySite}`,
-        description: statusInfo.isError
-            ? (statusInfo.description || normalized.product_name || order.product_name || 'Checkout error received')
-            : (normalized.product_name || order.product_name || 'Checkout received'),
+            : `Successful Checkout • ${siteLabel}`;
+        description = normalized.product_name || order.product_name || 'Checkout received';
+        footerText = isInsufficient
+            ? 'Order saved without charging credits'
+            : 'Youve Been Served by The Shore Shack';
+    }
+
+    const priceNumber = Number(normalized.price);
+    const priceValue = Number.isFinite(priceNumber) ? `$${priceNumber.toFixed(2)}` : '-';
+
+    const embed = {
+        title,
+        description,
         fields: [
             { name: 'Site', value: String(order.site || normalized.site || '-'), inline: true },
             { name: 'Source', value: String(order.source || normalized.source || '-'), inline: true },
             { name: 'Quantity', value: String(normalized.quantity || 1), inline: true },
-            { name: 'Price', value: normalized.price ? `$${Number(normalized.price).toFixed(2)}` : '-', inline: true }
+            { name: 'Price', value: priceValue, inline: true }
         ],
-        footer: {
-            text: isInsufficient
-                ? 'Order saved without charging credits'
-                : statusInfo.isError
-                    ? 'Checkout error captured by The Shore Shack'
-                    : 'Youve Been Served by The Shore Shack'
-        },
+        footer: { text: footerText },
         timestamp: new Date().toISOString()
     };
 
-    if (!statusInfo.isError) {
+    if (checkoutType === 'success') {
         embed.fields.push({ name: 'Credits', value: String(order.credits_charged || 0), inline: true });
     }
+
     if (normalized.sku) {
         embed.fields.push({ name: 'SKU', value: String(normalized.sku), inline: true });
     }
-    if (normalized.order_number || normalized.external_order_id) {
-        embed.fields.push({ name: 'Order ID', value: String(normalized.order_number || normalized.external_order_id), inline: true });
+    if (normalized.order_number || normalized.external_order_id || order.external_order_id) {
+        embed.fields.push({ name: 'Order ID', value: String(normalized.order_number || normalized.external_order_id || order.external_order_id), inline: true });
+    }
+    if (normalized.profile_name && checkoutType !== 'success') {
+        embed.fields.push({ name: 'Profile', value: String(normalized.profile_name), inline: true });
     }
     if (normalized.size) {
         embed.fields.push({ name: 'Size', value: normalized.size, inline: true });
     }
     if (normalized.mode) {
         embed.fields.push({ name: 'Mode', value: normalized.mode, inline: true });
-    }
-    if (normalized.profile_name && statusInfo.isError) {
-        embed.fields.push({ name: 'Profile', value: String(normalized.profile_name), inline: true });
     }
     if (normalized.product_url) {
         embed.fields.push({ name: 'Product Link', value: normalized.product_url, inline: false });
@@ -2075,7 +2074,7 @@ async function sendDiscordWebhookToTarget({
 
     const body = JSON.stringify({
         username,
-        content: getCheckoutBannerText(mentionText, brandLabel, statusInfo.checkoutType) || undefined,
+        content: checkoutType === 'success' ? getCheckoutBannerText(mentionText, brandLabel) : '',
         allowed_mentions: { parse: ['users'] },
         embeds: [embed]
     });
@@ -2126,7 +2125,7 @@ async function sendDiscordWebhookToTarget({
     });
 }
 
-function classifyCheckoutWebhookType(order) {
+function classifyCheckoutWebhookTypefunction classifyCheckoutWebhookType(order) {
     const payload = order?.raw_payload || {};
     const { embed } = extractEmbedFields(payload);
     const title = decodeHtmlEntities(String(embed?.title || '')).toLowerCase();
@@ -2138,67 +2137,71 @@ function classifyCheckoutWebhookType(order) {
     return String(order?.status || '').includes('insufficient') ? 'error' : 'success';
 }
 
+
 async function sendCheckoutDiscordNotifications(order, user) {
     const results = [];
     const userEmail = String(user?.email || '');
     const userSettings = user?.id ? await getUserSettings(user.id) : {};
     const discordHandle = normalizeDiscordUserId(userSettings?.discord_user_id || '');
 
-    // Route success and failed checkout events to separate webhook URLs
     const checkoutType = classifyCheckoutWebhookType(order);
     const globalSettings = await getAppSetting('webhook_settings', {});
     const globalRoute = await getWebhookRouteFromDb({ scope: 'super_admin', webhookType: checkoutType === 'error' ? 'checkout_error' : 'checkout_success', category: 'all' }).catch(() => null);
     const globalWebhookUrl = String((globalRoute?.webhook_url || (checkoutType === 'error' ? globalSettings?.checkout_error_webhook_url : globalSettings?.discord_webhook_url)) || '').trim();
 
-    if (globalWebhookUrl) {
-        results.push({
-            scope: 'super_admin',
-            ...(await sendDiscordWebhookToTarget({
-                webhookUrl: globalWebhookUrl,
-                order,
-                userEmail,
-                discordHandle,
-                brandLabel: '',
-                username: 'The Shore Shack'
-            }))
-        });
-    } else {
-        results.push({ scope: 'super_admin', skipped: 'discord_webhook_not_configured' });
+    const destinations = [];
+    const seen = new Set();
+
+    function addDestination(scope, webhookUrl, extra = {}) {
+        const url = String(webhookUrl || '').trim();
+        if (!url) return;
+        if (seen.has(url)) return;
+        seen.add(url);
+        destinations.push({ scope, webhookUrl: url, ...extra });
     }
 
-    // Also send to owner admin webhook if the user belongs to an admin
+    addDestination('super_admin', globalWebhookUrl, { brandLabel: '', username: 'The Shore Shack' });
+
+    // admin checkout should also go to their own admin webhook
+    if (user?.role === 'admin' && user?.id) {
+        const adminSettings = await getAdminWebhookSettings(user.id);
+        const adminRoute = await getWebhookRouteFromDb({ scope: 'admin', userId: user.id, webhookType: checkoutType === 'error' ? 'checkout_error' : 'checkout_success', category: 'all' }).catch(() => null);
+        const adminWebhookUrl = String((adminRoute?.webhook_url || (checkoutType === 'error' ? adminSettings?.checkout_error_webhook_url : adminSettings?.discord_webhook_url)) || '').trim();
+        const brandLabel = String(adminSettings?.brand_label || '').trim();
+        addDestination('owner_admin', adminWebhookUrl, { admin_user_id: user.id, brandLabel, username: brandLabel || 'The Shore Shack' });
+    }
+
     if (user?.owner_admin_id) {
         const adminSettings = await getAdminWebhookSettings(user.owner_admin_id);
         const adminRoute = await getWebhookRouteFromDb({ scope: 'admin', userId: user.owner_admin_id, webhookType: checkoutType === 'error' ? 'checkout_error' : 'checkout_success', category: 'all' }).catch(() => null);
         const adminWebhookUrl = String((adminRoute?.webhook_url || (checkoutType === 'error' ? adminSettings?.checkout_error_webhook_url : adminSettings?.discord_webhook_url)) || '').trim();
         const brandLabel = String(adminSettings?.brand_label || '').trim();
+        addDestination('owner_admin', adminWebhookUrl, { admin_user_id: user.owner_admin_id, brandLabel, username: brandLabel || 'The Shore Shack' });
+    }
 
-        if (adminWebhookUrl) {
-            results.push({
-                scope: 'owner_admin',
-                admin_user_id: user.owner_admin_id,
-                ...(await sendDiscordWebhookToTarget({
-                    webhookUrl: adminWebhookUrl,
-                    order,
-                    userEmail,
-                    discordHandle,
-                    brandLabel,
-                    username: brandLabel || 'The Shore Shack'
-                }))
-            });
-        } else {
-            results.push({
-                scope: 'owner_admin',
-                admin_user_id: user.owner_admin_id,
-                skipped: 'discord_webhook_not_configured'
-            });
-        }
+    if (!destinations.length) {
+        return [{ scope: 'none', skipped: 'discord_webhook_not_configured' }];
+    }
+
+    for (const dest of destinations) {
+        results.push({
+            scope: dest.scope,
+            ...(dest.admin_user_id ? { admin_user_id: dest.admin_user_id } : {}),
+            ...(await sendDiscordWebhookToTarget({
+                webhookUrl: dest.webhookUrl,
+                order,
+                userEmail,
+                discordHandle,
+                brandLabel: dest.brandLabel || '',
+                username: dest.username || 'The Shore Shack'
+            }))
+        });
     }
 
     return results;
 }
 
-async function recordSuccessfulCheckout(payload) {
+async function recordSuccessfulCheckoutasync function recordSuccessfulCheckout(payload) {
     const normalized = normalizeIncomingOrderPayload(payload);
     const externalOrderId = normalized.external_order_id;
 
@@ -2527,25 +2530,27 @@ app.post(["/webhooks/monitor", "/webhooks/monitor/:token"], async (req, res) => 
         const usedTargets = [];
 
         for (const item of items) {
-            const rawTargets = [];
+            const targets = [];
+            const seenTargetUrls = new Set();
             const superRoute = normalizeMonitorGroupConfig(globalGroups[item.category]);
-            if (String(superRoute.webhook_url || '').trim()) {
-                rawTargets.push({ scope: 'super_admin', user_id: null, route: superRoute });
+            const superUrl = String(superRoute.webhook_url || '').trim();
+            if (superUrl) {
+                targets.push({ scope: 'super_admin', user_id: null, route: superRoute });
+                seenTargetUrls.add(superUrl);
             }
             for (const adminConfig of adminMonitorConfigs) {
-                if (String(adminConfig.role || '') === 'super_admin') continue;
                 const route = normalizeMonitorGroupConfig(adminConfig.monitor_groups?.[item.category]);
-                if (String(route.webhook_url || '').trim()) {
-                    rawTargets.push({ scope: 'admin', user_id: adminConfig.user_id, route });
+                const routeUrl = String(route.webhook_url || '').trim();
+                if (!routeUrl) continue;
+                // do not double-send super admin's own admin monitor row; and dedupe by webhook url
+                if (adminConfig.role === 'super_admin') {
+                    if (seenTargetUrls.has(routeUrl)) continue;
+                    continue;
                 }
+                if (seenTargetUrls.has(routeUrl)) continue;
+                seenTargetUrls.add(routeUrl);
+                targets.push({ scope: 'admin', user_id: adminConfig.user_id, route });
             }
-            const targetMap = new Map();
-            for (const target of rawTargets) {
-                const key = String(target.route.webhook_url || '').trim();
-                if (!key) continue;
-                if (!targetMap.has(key)) targetMap.set(key, target);
-            }
-            const targets = Array.from(targetMap.values());
             if (!targets.length) {
                 results.push({ sku: item.sku, skipped: 'monitor_webhook_not_configured', category: item.category });
                 continue;
