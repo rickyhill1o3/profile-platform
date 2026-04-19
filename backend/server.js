@@ -2125,7 +2125,7 @@ async function sendDiscordWebhookToTarget({
     });
 }
 
-function classifyCheckoutWebhookTypefunction classifyCheckoutWebhookType(order) {
+function classifyCheckoutWebhookType(order) {
     const payload = order?.raw_payload || {};
     const { embed } = extractEmbedFields(payload);
     const title = decodeHtmlEntities(String(embed?.title || '')).toLowerCase();
@@ -2201,7 +2201,7 @@ async function sendCheckoutDiscordNotifications(order, user) {
     return results;
 }
 
-async function recordSuccessfulCheckoutasync function recordSuccessfulCheckout(payload) {
+async function recordSuccessfulCheckout(payload) {
     const normalized = normalizeIncomingOrderPayload(payload);
     const externalOrderId = normalized.external_order_id;
 
