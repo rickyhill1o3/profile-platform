@@ -1275,6 +1275,39 @@ function getCheckoutBannerText(mentionText = '', brandLabel = '') {
 }
 
 const discordWebhookQueues = new Map();
+const discordDeliveryDedupe = new Map();
+
+function pruneDiscordDeliveryDedupe(now = Date.now()) {
+    for (const [key, expiresAt] of discordDeliveryDedupe.entries()) {
+        if (!Number.isFinite(expiresAt) || expiresAt <= now) {
+            discordDeliveryDedupe.delete(key);
+        }
+    }
+}
+
+function shouldSkipDiscordDelivery(dedupeKey, windowSeconds = 60) {
+    if (!dedupeKey || !windowSeconds) return false;
+    const now = Date.now();
+    pruneDiscordDeliveryDedupe(now);
+    const expiresAt = discordDeliveryDedupe.get(dedupeKey);
+    if (Number.isFinite(expiresAt) && expiresAt > now) return true;
+    discordDeliveryDedupe.set(dedupeKey, now + (Math.max(1, Number(windowSeconds) || 60) * 1000));
+    return false;
+}
+
+function clearDiscordDeliveryDedupe(dedupeKey) {
+    if (!dedupeKey) return;
+    discordDeliveryDedupe.delete(dedupeKey);
+}
+
+function getDiscordDeliveryDedupeKey(webhookUrl = '', order = null) {
+    const trimmedWebhookUrl = String(webhookUrl || '').trim();
+    if (!trimmedWebhookUrl || !order?.raw_payload) return '';
+    const checkoutFingerprint = buildCheckoutDedupeFingerprint(order.raw_payload || {});
+    const checkoutType = classifyCheckoutWebhookType(order);
+    if (!checkoutFingerprint) return '';
+    return `${trimmedWebhookUrl}::${checkoutType}::${checkoutFingerprint}`;
+}
 
 function getDiscordQueue(webhookUrl) {
     const key = String(webhookUrl || '').trim();
@@ -2079,6 +2112,12 @@ async function sendDiscordWebhookToTarget({
         embeds: [embed]
     });
 
+    const deliveryDedupeKey = getDiscordDeliveryDedupeKey(trimmedWebhookUrl, order);
+    if (shouldSkipDiscordDelivery(deliveryDedupeKey, 60)) {
+        console.log(`Discord delivery dedupe skipped -> ${trimmedWebhookUrl.slice(0, 40)}...`);
+        return { success: true, queued: false, dedupe_skipped: true, dedupe_window_seconds: 60 };
+    }
+
     return enqueueDiscordWebhookJob(trimmedWebhookUrl, async () => {
         for (let attempt = 1; attempt <= 5; attempt++) {
             console.log(`Discord queue send attempt ${attempt} -> ${trimmedWebhookUrl.slice(0, 40)}...`);
@@ -2119,8 +2158,10 @@ async function sendDiscordWebhookToTarget({
                 await new Promise((resolve) => setTimeout(resolve, backoffMs));
                 continue;
             }
+            clearDiscordDeliveryDedupe(deliveryDedupeKey);
             throw new Error(`Discord webhook failed (${response.status}): ${bodyText || response.statusText}`);
         }
+        clearDiscordDeliveryDedupe(deliveryDedupeKey);
         throw new Error('Discord webhook failed after maximum retry attempts');
     });
 }
