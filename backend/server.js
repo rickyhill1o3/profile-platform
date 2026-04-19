@@ -1415,7 +1415,7 @@ async function getMonitorDedupeWindowSeconds() {
     const currentGlobal = await getAppSetting('webhook_settings', {});
     const raw = Number(currentGlobal?.monitor_dedupe_window_seconds);
     if (Number.isFinite(raw) && raw >= 0) return Math.min(600, Math.round(raw));
-    return 45;
+    return 90;
 }
 
 function buildMonitorDedupeFingerprint(site = '', items = []) {
@@ -2918,7 +2918,7 @@ app.get('/admin/webhooks/settings', auth, admin, async (req, res) => {
             admin_brand_label: String(adminSettings?.brand_label || ''),
             monitor_groups: Object.keys(superMonitorGroups).length ? superMonitorGroups : (globalSettings?.monitor_groups || {}),
             admin_monitor_groups: Object.keys(adminMonitorGroups).length ? adminMonitorGroups : (adminSettings?.monitor_groups || {}),
-            monitor_dedupe_window_seconds: Number(globalSettings?.monitor_dedupe_window_seconds || 45),
+            monitor_dedupe_window_seconds: Number(globalSettings?.monitor_dedupe_window_seconds || 90),
             can_create_inbound: currentUser.role === 'super_admin',
             is_super_admin: currentUser.role === 'super_admin'
         });
@@ -2987,7 +2987,7 @@ app.post('/admin/webhooks/settings', auth, admin, async (req, res) => {
             const discordWebhookUrl = String(req.body?.discord_webhook_url || '').trim();
             const checkoutErrorWebhookUrl = String(req.body?.checkout_error_webhook_url || '').trim();
             const currentGlobal = await getAppSetting('webhook_settings', {});
-            const monitorDedupeWindowSeconds = Math.max(0, Math.min(600, Number(req.body?.monitor_dedupe_window_seconds ?? currentGlobal.monitor_dedupe_window_seconds ?? 45) || 45));
+            const monitorDedupeWindowSeconds = Math.max(0, Math.min(600, Number(req.body?.monitor_dedupe_window_seconds ?? currentGlobal.monitor_dedupe_window_seconds ?? 90) || 90));
             await setAppSetting('webhook_settings', {
                 ...currentGlobal,
                 discord_webhook_url: discordWebhookUrl,

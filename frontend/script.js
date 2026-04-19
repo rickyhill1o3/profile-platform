@@ -2240,6 +2240,7 @@ async function saveWebhookSettings() {
     const errorDiscordInput = document.getElementById('checkoutErrorWebhookUrl');
     const adminErrorDiscordInput = document.getElementById('adminErrorDiscordRelayWebhookUrl');
     const adminBrandInput = document.getElementById('adminBrandLabel');
+    const monitorDedupeWindowInput = document.getElementById('monitorDedupeWindowSeconds');
     const message = document.getElementById('webhookSettingsMessage');
 
     try {
