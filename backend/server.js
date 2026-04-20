@@ -2484,14 +2484,28 @@ async function validateInboundWebhookToken(req) {
 
 
 app.post(["/webhooks/monitor", "/webhooks/monitor/:token"], async (req, res) => {
-    let logId = null;
+    const payload = req.body || {};
+    const requestMeta = { path: req.originalUrl, hasToken: !!req.params.token, body: payload };
+
+    let token = '';
+    let expected = '';
     try {
-        console.log('📩 MONITOR WEBHOOK HIT', { path: req.originalUrl, hasToken: !!req.params.token, body: req.body });
-        const token = String(req.params.token || req.query.token || '').trim();
-        const expected = await getMonitorWebhookToken();
+        console.log('📩 MONITOR WEBHOOK HIT', requestMeta);
+        token = String(req.params.token || req.query.token || '').trim();
+        expected = await getMonitorWebhookToken();
         if (expected && token !== expected) return res.status(401).json({ error: 'Invalid monitor webhook url' });
 
-        const payload = req.body || {};
+        // Acknowledge immediately like Discord so the sender stops retrying while we process.
+        res.status(204).end();
+    } catch (err) {
+        console.error('Monitor webhook pre-ack error:', err);
+        if (!res.headersSent) res.status(400).json({ error: err.message });
+        return;
+    }
+
+    let logId = null;
+    (async () => {
+        try {
         const rawItems = extractMonitorItems(payload).map((item) => ({
             ...item,
             category: classifyMonitorType({ title: item.title, productType: item.productType, url: item.url }),
@@ -2628,16 +2642,20 @@ app.post(["/webhooks/monitor", "/webhooks/monitor/:token"], async (req, res) => 
             fingerprint
         });
 
-        res.json({ success: true, item_count: items.length, results });
+        console.log('Monitor webhook processed successfully', { item_count: items.length, results_count: results.length });
     } catch (err) {
         console.error('Monitor webhook error:', err);
         if (logId) await updateWebhookLogEntry(logId, { status: 'failed', error: err.message }).catch(() => null);
-        res.status(400).json({ error: err.message });
     }
+    })().catch((err) => {
+        console.error('Monitor webhook async processing error:', err);
+    });
 });
 
 app.post(["/webhooks/orders", "/webhooks/orders/:token"], async (req, res) => {
-    let logId = null;
+    const payload = req.body || {};
+    let active = null;
+
     try {
         console.log("Inbound webhook hit", {
             path: req.originalUrl,
@@ -2645,7 +2663,7 @@ app.post(["/webhooks/orders", "/webhooks/orders/:token"], async (req, res) => {
             tokenPreview: req.params.token ? String(req.params.token).slice(0, 8) : null
         });
 
-        const active = await getActiveInboundWebhook();
+        active = await getActiveInboundWebhook();
         console.log("Active webhook token preview:", active?.token ? String(active.token).slice(0, 8) : null);
 
         const allowed = await validateInboundWebhookToken(req);
@@ -2659,7 +2677,17 @@ app.post(["/webhooks/orders", "/webhooks/orders/:token"], async (req, res) => {
         }
 
         console.log("Inbound webhook accepted");
-        const payload = req.body || {};
+        // Acknowledge immediately like Discord so the sender stops retrying while we process.
+        res.status(204).end();
+    } catch (err) {
+        console.error("Inbound webhook pre-ack error:", err);
+        if (!res.headersSent) res.status(400).json({ error: err.message });
+        return;
+    }
+
+    let logId = null;
+    (async () => {
+    try {
         const normalized = normalizeIncomingOrderPayload(payload);
         const checkoutType = classifyCheckoutWebhookType({ raw_payload: payload, status: '' });
         const fingerprint = buildCheckoutDedupeFingerprint(payload);
@@ -2718,10 +2746,8 @@ app.post(["/webhooks/orders", "/webhooks/orders/:token"], async (req, res) => {
         const finalError = result?.duplicate ? 'Skipped duplicate checkout webhook by order id' : '';
         await updateWebhookLogEntry(logId, { status: finalStatus, error: finalError, discord_targets: Array.isArray(finalDiscordResults) ? finalDiscordResults : [] }).catch(() => null);
         console.log("Inbound webhook processed successfully");
-        res.json({ success: true, ...result, discord: finalDiscordResults });
     } catch (err) {
         console.error("Inbound webhook error:", err);
-        const payload = req.body || {};
         try {
             const discordResults = await sendCheckoutDiscordNotificationsForPayload(payload, null, { status: 'checkout_error' });
             if (logId) await updateWebhookLogEntry(logId, { status: 'unmatched_user', error: err.message || 'Could not match webhook payload to a user', discord_targets: Array.isArray(discordResults) ? discordResults : [] }).catch(() => null);
@@ -2729,8 +2755,10 @@ app.post(["/webhooks/orders", "/webhooks/orders/:token"], async (req, res) => {
             console.error('Unmatched checkout discord relay failed:', discordErr);
             if (logId) await updateWebhookLogEntry(logId, { status: 'unmatched_user', error: `${err.message || 'Could not match webhook payload to a user'} | Discord relay failed: ${discordErr.message || discordErr}` }).catch(() => null);
         }
-        res.status(400).json({ error: err.message, forwarded: true });
     }
+    })().catch((err) => {
+        console.error('Inbound webhook async processing error:', err);
+    });
 });
 
 app.get("/admin/credits/users", auth, admin, async (req, res) => {
