@@ -1267,11 +1267,11 @@ function formatDiscordMention(value = '', fallbackEmail = '') {
 }
 
 function getCheckoutBannerText(mentionText = '', brandLabel = '') {
-    const brand = String(brandLabel || '').trim();
-    const mention = String(mentionText || '').trim() || 'there';
+    const brand = String(brandLabel || '').trim().toUpperCase();
+    const mention = String(mentionText || '').trim() || 'THERE';
     return brand
-        ? `Thank you ${mention} for checking out with The Shore Shack x ${brand.toUpperCase()}`
-        : `Thank you ${mention} for checking out with The Shore Shack`;
+        ? `THANK YOU ${mention} FOR CHECKING OUT WITH THE SHORE SHACK & ${brand}!!!`
+        : `THANK YOU ${mention} FOR CHECKING OUT WITH THE SHORE SHACK!!!`;
 }
 
 const discordWebhookQueues = new Map();
