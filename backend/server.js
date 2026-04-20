@@ -1276,6 +1276,37 @@ function getCheckoutBannerText(mentionText = '', brandLabel = '') {
 
 const discordWebhookQueues = new Map();
 const discordDeliveryInFlight = new Set();
+const inboundWebhookInFlight = new Map();
+const inboundWebhookRecent = new Map();
+
+function cleanupInboundWebhookDedupe(now = Date.now()) {
+    for (const [key, expiresAt] of inboundWebhookRecent.entries()) {
+        if (Number(expiresAt || 0) <= now) inboundWebhookRecent.delete(key);
+    }
+}
+
+function claimInboundWebhook(key, windowSeconds = 45) {
+    if (!key) return { claimed: true, duplicate: false, reason: '' };
+    const now = Date.now();
+    cleanupInboundWebhookDedupe(now);
+    if (inboundWebhookInFlight.has(key)) return { claimed: false, duplicate: true, reason: 'in_flight' };
+    const recentUntil = Number(inboundWebhookRecent.get(key) || 0);
+    if (recentUntil > now) return { claimed: false, duplicate: true, reason: 'recent' };
+    inboundWebhookInFlight.set(key, now);
+    return { claimed: true, duplicate: false, reason: '' };
+}
+
+function releaseInboundWebhook(key, windowSeconds = 45) {
+    if (!key) return;
+    inboundWebhookInFlight.delete(key);
+    const ttlMs = Math.max(1, Number(windowSeconds || 45)) * 1000;
+    inboundWebhookRecent.set(key, Date.now() + ttlMs);
+}
+
+function abandonInboundWebhook(key) {
+    if (!key) return;
+    inboundWebhookInFlight.delete(key);
+}
 
 function isDiscordDeliveryInFlight(dedupeKey = '') {
     return !!dedupeKey && discordDeliveryInFlight.has(String(dedupeKey));
@@ -2487,7 +2518,6 @@ app.post(["/webhooks/monitor", "/webhooks/monitor/:token"], async (req, res) => 
     const payload = req.body || {};
     const requestMeta = { path: req.originalUrl, hasToken: !!req.params.token, body: payload };
 
-    let logId = null;
     try {
         console.log('📩 MONITOR WEBHOOK HIT', requestMeta);
         const token = String(req.params.token || req.query.token || '').trim();
@@ -2499,16 +2529,16 @@ app.post(["/webhooks/monitor", "/webhooks/monitor/:token"], async (req, res) => 
             category: classifyMonitorType({ title: item.title, productType: item.productType, url: item.url }),
             url: buildProductUrl(item.site, item.sku, item.url, item.title, item.image)
         }));
-
         const items = await enrichMonitorItems(rawItems);
         const first = items[0] || {};
         const site = String(first.site || payload.site || payload.source || '').trim().toLowerCase();
         const dedupeWindowSeconds = await getMonitorDedupeWindowSeconds();
         const fingerprint = buildMonitorDedupeFingerprint(site, items);
-        const duplicate = await findRecentDuplicateMonitorLog(fingerprint, dedupeWindowSeconds);
+        const claim = claimInboundWebhook(`monitor:${fingerprint}`, dedupeWindowSeconds);
 
-        if (duplicate) {
-            logId = (await appendWebhookLogEntry({
+        if (claim.duplicate) {
+            const duplicate = await findRecentDuplicateMonitorLog(fingerprint, dedupeWindowSeconds);
+            await appendWebhookLogEntry({
                 type: 'monitor',
                 status: 'duplicate_skipped',
                 site,
@@ -2522,102 +2552,108 @@ app.post(["/webhooks/monitor", "/webhooks/monitor/:token"], async (req, res) => 
                     title: item.title || '', sku: item.sku || '', site: item.site || '', price: item.price ?? null,
                     stock: item.stock ?? null, cartLimit: item.cartLimit ?? null, url: item.url || '', image: item.image || '', category: item.category || ''
                 })),
-                discord_targets: duplicate.discord_targets || []
-            })).id;
+                discord_targets: duplicate?.discord_targets || []
+            }).catch(() => null);
             return res.status(204).end();
         }
 
-        logId = (await appendWebhookLogEntry({
-            type: 'monitor',
-            status: 'received',
-            site,
-            product_type: String(first.category || ''),
-            product: String(first.title || first.url || ''),
-            sku: String(first.sku || ''),
-            payload,
-            fingerprint,
-            parsed_items: items.map((item) => ({
-                title: item.title || '', sku: item.sku || '', site: item.site || '', price: item.price ?? null,
-                stock: item.stock ?? null, cartLimit: item.cartLimit ?? null, url: item.url || '', image: item.image || '', category: item.category || ''
-            }))
-        })).id;
+        res.status(204).end();
+        setImmediate(async () => {
+            let logId = null;
+            try {
+                logId = (await appendWebhookLogEntry({
+                    type: 'monitor',
+                    status: 'received',
+                    site,
+                    product_type: String(first.category || ''),
+                    product: String(first.title || first.url || ''),
+                    sku: String(first.sku || ''),
+                    payload,
+                    fingerprint,
+                    parsed_items: items.map((item) => ({
+                        title: item.title || '', sku: item.sku || '', site: item.site || '', price: item.price ?? null,
+                        stock: item.stock ?? null, cartLimit: item.cartLimit ?? null, url: item.url || '', image: item.image || '', category: item.category || ''
+                    }))
+                })).id;
 
-        const globalSettings = await getAppSetting('webhook_settings', {});
-        const superRows = await listDiscordWebhookRoutes({ scope: 'super_admin', webhookType: 'monitor' }).catch(() => []);
-        const globalGroups = {};
-        for (const row of superRows) globalGroups[row.category] = { webhook_url: row.webhook_url, ping_mode: row.ping_mode, role_mention: row.role_mention };
-        if (!Object.keys(globalGroups).length) Object.assign(globalGroups, globalSettings?.monitor_groups || {});
-        const adminMonitorConfigs = await getAllAdminMonitorGroupConfigs();
-        const results = [];
-        const usedTargets = [];
+                const globalSettings = await getAppSetting('webhook_settings', {});
+                const superRows = await listDiscordWebhookRoutes({ scope: 'super_admin', webhookType: 'monitor' }).catch(() => []);
+                const globalGroups = {};
+                for (const row of superRows) globalGroups[row.category] = { webhook_url: row.webhook_url, ping_mode: row.ping_mode, role_mention: row.role_mention };
+                if (!Object.keys(globalGroups).length) Object.assign(globalGroups, globalSettings?.monitor_groups || {});
+                const adminMonitorConfigs = await getAllAdminMonitorGroupConfigs();
+                const results = [];
+                const usedTargets = [];
 
-        for (const item of items) {
-            const targets = [];
-            const seenTargetUrls = new Set();
-            const superRoute = normalizeMonitorGroupConfig(globalGroups[item.category]);
-            const superUrl = String(superRoute.webhook_url || '').trim();
-            if (superUrl) {
-                targets.push({ scope: 'super_admin', user_id: null, route: superRoute });
-                seenTargetUrls.add(superUrl);
-            }
-            for (const adminConfig of adminMonitorConfigs) {
-                const route = normalizeMonitorGroupConfig(adminConfig.monitor_groups?.[item.category]);
-                const routeUrl = String(route.webhook_url || '').trim();
-                if (!routeUrl) continue;
-                if (adminConfig.role === 'super_admin') {
-                    if (seenTargetUrls.has(routeUrl)) continue;
-                    continue;
+                for (const item of items) {
+                    const targets = [];
+                    const seenTargetUrls = new Set();
+                    const superRoute = normalizeMonitorGroupConfig(globalGroups[item.category]);
+                    const superUrl = String(superRoute.webhook_url || '').trim();
+                    if (superUrl) {
+                        targets.push({ scope: 'super_admin', user_id: null, route: superRoute });
+                        seenTargetUrls.add(superUrl);
+                    }
+                    for (const adminConfig of adminMonitorConfigs) {
+                        const route = normalizeMonitorGroupConfig(adminConfig.monitor_groups?.[item.category]);
+                        const routeUrl = String(route.webhook_url || '').trim();
+                        if (!routeUrl) continue;
+                        if (adminConfig.role === 'super_admin') {
+                            if (seenTargetUrls.has(routeUrl)) continue;
+                            continue;
+                        }
+                        if (seenTargetUrls.has(routeUrl)) continue;
+                        seenTargetUrls.add(routeUrl);
+                        targets.push({ scope: 'admin', user_id: adminConfig.user_id, route });
+                    }
+                    if (!targets.length) {
+                        results.push({ sku: item.sku, skipped: 'monitor_webhook_not_configured', category: item.category });
+                        continue;
+                    }
+                    for (const target of targets) {
+                        const url = String(target.route.webhook_url || '').trim();
+                        usedTargets.push({ category: item.category, scope: target.scope, user_id: target.user_id, webhook_url: url.slice(0, 80), ping_mode: target.route.ping_mode || 'none', role_mention: target.route.role_mention || '' });
+                        try {
+                            const sendResult = await sendMonitorDiscordWebhook(target.route, item);
+                            results.push({ sku: item.sku, category: item.category, scope: target.scope, user_id: target.user_id, success: true, attempt: sendResult?.attempt || 1, ping_mode: sendResult?.ping_mode || 'none', role_mention: sendResult?.role_mention || '' });
+                        } catch (sendErr) {
+                            results.push({ sku: item.sku, category: item.category, scope: target.scope, user_id: target.user_id, success: false, error: sendErr.message });
+                        }
+                    }
                 }
-                if (seenTargetUrls.has(routeUrl)) continue;
-                seenTargetUrls.add(routeUrl);
-                targets.push({ scope: 'admin', user_id: adminConfig.user_id, route });
-            }
-            if (!targets.length) {
-                results.push({ sku: item.sku, skipped: 'monitor_webhook_not_configured', category: item.category });
-                continue;
-            }
-            for (const target of targets) {
-                const url = String(target.route.webhook_url || '').trim();
-                usedTargets.push({ category: item.category, scope: target.scope, user_id: target.user_id, webhook_url: url.slice(0, 80), ping_mode: target.route.ping_mode || 'none', role_mention: target.route.role_mention || '' });
-                try {
-                    const sendResult = await sendMonitorDiscordWebhook(target.route, item);
-                    results.push({ sku: item.sku, category: item.category, scope: target.scope, user_id: target.user_id, success: true, attempt: sendResult?.attempt || 1, ping_mode: sendResult?.ping_mode || 'none', role_mention: sendResult?.role_mention || '' });
-                } catch (sendErr) {
-                    results.push({ sku: item.sku, category: item.category, scope: target.scope, user_id: target.user_id, success: false, error: sendErr.message });
-                }
-            }
-        }
 
-        const failed = results.filter((r) => !r.success && !r.skipped);
-        const skipped = results.filter((r) => r.skipped);
+                const failed = results.filter((r) => !r.success && !r.skipped);
+                const skipped = results.filter((r) => r.skipped);
 
-        await updateWebhookLogEntry(logId, {
-            status: failed.length ? 'failed' : 'processed',
-            product_type: String(first.category || ''),
-            product: String(first.title || first.url || ''),
-            sku: String(first.sku || ''),
-            error: failed.length ? failed.map((x) => `${x.sku || '-'}: ${x.error}`).join(' | ') : (skipped.length ? 'Some items skipped due to missing group webhook url' : ''),
-            parsed_items: items.map((item) => ({
-                title: item.title || '', sku: item.sku || '', site: item.site || '', price: item.price ?? null,
-                stock: item.stock ?? null, cartLimit: item.cartLimit ?? null, url: item.url || '', image: item.image || '', category: item.category || ''
-            })),
-            discord_targets: usedTargets,
-            fingerprint
+                await updateWebhookLogEntry(logId, {
+                    status: failed.length ? 'failed' : 'processed',
+                    product_type: String(first.category || ''),
+                    product: String(first.title || first.url || ''),
+                    sku: String(first.sku || ''),
+                    error: failed.length ? failed.map((x) => `${x.sku || '-'}: ${x.error}`).join(' | ') : (skipped.length ? 'Some items skipped due to missing group webhook url' : ''),
+                    parsed_items: items.map((item) => ({
+                        title: item.title || '', sku: item.sku || '', site: item.site || '', price: item.price ?? null,
+                        stock: item.stock ?? null, cartLimit: item.cartLimit ?? null, url: item.url || '', image: item.image || '', category: item.category || ''
+                    })),
+                    discord_targets: usedTargets,
+                    fingerprint
+                });
+            } catch (err) {
+                console.error('Monitor webhook processing failed:', err);
+                if (logId) await updateWebhookLogEntry(logId, { status: 'failed', error: err.message || String(err), fingerprint }).catch(() => null);
+                else await appendWebhookLogEntry({ type: 'monitor', status: 'failed', site, product_type: String(first.category || ''), product: String(first.title || first.url || ''), sku: String(first.sku || ''), error: err.message || String(err), payload, fingerprint }).catch(() => null);
+            } finally {
+                releaseInboundWebhook(`monitor:${fingerprint}`, dedupeWindowSeconds);
+            }
         });
-
-        console.log('Monitor webhook processed successfully', { item_count: items.length, results_count: results.length });
-        return res.status(204).end();
     } catch (err) {
-        console.error('Monitor webhook error:', err);
-        if (logId) await updateWebhookLogEntry(logId, { status: 'failed', error: err.message }).catch(() => null);
-        if (!res.headersSent) return res.status(500).json({ error: err.message });
+        console.error('Monitor webhook setup failed:', err);
+        return res.status(500).json({ error: err.message || String(err) });
     }
 });
 
 app.post(["/webhooks/orders", "/webhooks/orders/:token"], async (req, res) => {
     const payload = req.body || {};
-    let active = null;
-    let logId = null;
 
     try {
         console.log("Inbound webhook hit", {
@@ -2626,7 +2662,7 @@ app.post(["/webhooks/orders", "/webhooks/orders/:token"], async (req, res) => {
             tokenPreview: req.params.token ? String(req.params.token).slice(0, 8) : null
         });
 
-        active = await getActiveInboundWebhook();
+        const active = await getActiveInboundWebhook();
         console.log("Active webhook token preview:", active?.token ? String(active.token).slice(0, 8) : null);
 
         const allowed = await validateInboundWebhookToken(req);
@@ -2642,66 +2678,90 @@ app.post(["/webhooks/orders", "/webhooks/orders/:token"], async (req, res) => {
         const normalized = normalizeIncomingOrderPayload(payload);
         const checkoutType = classifyCheckoutWebhookType({ raw_payload: payload, status: '' });
         const fingerprint = buildCheckoutDedupeFingerprint(payload);
-        const duplicateRow = await findRecentDuplicateCheckoutLog(fingerprint, 45);
-        logId = (await appendWebhookLogEntry({
-            type: 'checkout',
-            status: duplicateRow ? 'duplicate_skipped' : 'received',
-            site: String(normalized.site || payload.site || '').trim(),
-            product_type: '',
-            product: String(normalized.product_name || payload.product_name || ''),
-            sku: String(normalized.sku || payload.sku || ''),
-            payload,
-            fingerprint
-        })).id;
+        const dedupeWindowSeconds = 45;
+        const claim = claimInboundWebhook(`checkout:${fingerprint}`, dedupeWindowSeconds);
 
-        if (duplicateRow) {
-            await updateWebhookLogEntry(logId, { status: 'duplicate_skipped', error: 'Skipped duplicate checkout webhook within 45 seconds', discord_targets: duplicateRow.discord_targets || [] }).catch(() => null);
-            return res.status(204).end();
-        }
-
-        const matchedUser = await findUserForWebhook(payload).catch(() => null);
-        const discordResults = await sendCheckoutDiscordNotificationsForPayload(payload, matchedUser, {
-            status: checkoutType === 'error' ? 'checkout_error' : 'processed'
-        }).catch((err) => {
-            console.error('Checkout discord relay failed:', err);
-            return [{ success: false, error: err.message || String(err) }];
-        });
-
-        if (checkoutType === 'error') {
-            await updateWebhookLogEntry(logId, {
-                status: matchedUser?.id ? 'processed' : 'unmatched_user',
-                error: matchedUser?.id ? '' : 'Could not match webhook payload to a user',
-                discord_targets: Array.isArray(discordResults) ? discordResults : []
+        if (claim.duplicate) {
+            const duplicateRow = await findRecentDuplicateCheckoutLog(fingerprint, dedupeWindowSeconds);
+            await appendWebhookLogEntry({
+                type: 'checkout',
+                status: 'duplicate_skipped',
+                site: String(normalized.site || payload.site || '').trim(),
+                product_type: '',
+                product: String(normalized.product_name || payload.product_name || ''),
+                sku: String(normalized.sku || payload.sku || ''),
+                payload,
+                fingerprint,
+                error: `Skipped duplicate checkout webhook within ${dedupeWindowSeconds} seconds`,
+                discord_targets: duplicateRow?.discord_targets || []
             }).catch(() => null);
             return res.status(204).end();
         }
 
-        const result = await recordSuccessfulCheckout(payload);
-        let finalDiscordResults = discordResults;
-        if (!matchedUser && result?.order && !result?.duplicate) {
-            const resolvedUser = await findUserForWebhook(payload).catch(() => null);
-            if (resolvedUser?.id) {
-                finalDiscordResults = await sendCheckoutDiscordNotifications(result.order, resolvedUser).catch((err) => {
-                    console.error('Checkout discord relay after order processing failed:', err);
-                    return discordResults;
-                });
-            }
-        }
+        res.status(204).end();
+        setImmediate(async () => {
+            let logId = null;
+            try {
+                logId = (await appendWebhookLogEntry({
+                    type: 'checkout',
+                    status: 'received',
+                    site: String(normalized.site || payload.site || '').trim(),
+                    product_type: '',
+                    product: String(normalized.product_name || payload.product_name || ''),
+                    sku: String(normalized.sku || payload.sku || ''),
+                    payload,
+                    fingerprint
+                })).id;
 
-        const finalStatus = result?.duplicate ? 'duplicate_skipped' : (matchedUser?.id ? 'processed' : 'unmatched_user');
-        const finalError = result?.duplicate ? 'Skipped duplicate checkout webhook by order id' : (matchedUser?.id ? '' : 'Could not match webhook payload to a user');
-        await updateWebhookLogEntry(logId, { status: finalStatus, error: finalError, discord_targets: Array.isArray(finalDiscordResults) ? finalDiscordResults : [] }).catch(() => null);
-        console.log("Inbound webhook processed successfully");
-        return res.status(204).end();
+                const matchedUser = await findUserForWebhook(payload).catch(() => null);
+                const discordResults = await sendCheckoutDiscordNotificationsForPayload(payload, matchedUser, {
+                    status: checkoutType === 'error' ? 'checkout_error' : 'processed'
+                }).catch((err) => {
+                    console.error('Checkout discord relay failed:', err);
+                    return [{ success: false, error: err.message || String(err) }];
+                });
+
+                if (checkoutType === 'error') {
+                    await updateWebhookLogEntry(logId, {
+                        status: matchedUser?.id ? 'processed' : 'unmatched_user',
+                        error: matchedUser?.id ? '' : 'Could not match webhook payload to a user',
+                        discord_targets: Array.isArray(discordResults) ? discordResults : []
+                    }).catch(() => null);
+                    return;
+                }
+
+                const result = await recordSuccessfulCheckout(payload);
+                let finalDiscordResults = discordResults;
+                if (!matchedUser && result?.order && !result?.duplicate) {
+                    const resolvedUser = await findUserForWebhook(payload).catch(() => null);
+                    if (resolvedUser?.id) {
+                        finalDiscordResults = await sendCheckoutDiscordNotifications(result.order, resolvedUser).catch((err) => {
+                            console.error('Checkout discord relay after order processing failed:', err);
+                            return discordResults;
+                        });
+                    }
+                }
+
+                const finalStatus = result?.duplicate ? 'duplicate_skipped' : (matchedUser?.id ? 'processed' : 'unmatched_user');
+                const finalError = result?.duplicate ? 'Skipped duplicate checkout webhook by order id' : (matchedUser?.id ? '' : 'Could not match webhook payload to a user');
+                await updateWebhookLogEntry(logId, { status: finalStatus, error: finalError, discord_targets: Array.isArray(finalDiscordResults) ? finalDiscordResults : [] }).catch(() => null);
+                console.log("Inbound webhook processed successfully");
+            } catch (err) {
+                console.error("Inbound webhook error:", err);
+                try {
+                    const discordResults = await sendCheckoutDiscordNotificationsForPayload(payload, null, { status: 'checkout_error' });
+                    if (logId) await updateWebhookLogEntry(logId, { status: 'unmatched_user', error: `${err.message || 'Could not match webhook payload to a user'}`, discord_targets: Array.isArray(discordResults) ? discordResults : [] }).catch(() => null);
+                    else await appendWebhookLogEntry({ type: 'checkout', status: 'unmatched_user', site: String(normalized.site || payload.site || '').trim(), product: String(normalized.product_name || payload.product_name || ''), sku: String(normalized.sku || payload.sku || ''), error: `${err.message || 'Could not match webhook payload to a user'}`, payload, fingerprint, discord_targets: Array.isArray(discordResults) ? discordResults : [] }).catch(() => null);
+                } catch (discordErr) {
+                    console.error('Unmatched checkout discord relay failed:', discordErr);
+                    if (logId) await updateWebhookLogEntry(logId, { status: 'unmatched_user', error: `${err.message || 'Could not match webhook payload to a user'} | Discord relay failed: ${discordErr.message || discordErr}` }).catch(() => null);
+                }
+            } finally {
+                releaseInboundWebhook(`checkout:${fingerprint}`, dedupeWindowSeconds);
+            }
+        });
     } catch (err) {
-        console.error("Inbound webhook error:", err);
-        try {
-            const discordResults = await sendCheckoutDiscordNotificationsForPayload(payload, null, { status: 'checkout_error' });
-            if (logId) await updateWebhookLogEntry(logId, { status: 'unmatched_user', error: `${err.message || 'Could not match webhook payload to a user'}`, discord_targets: Array.isArray(discordResults) ? discordResults : [] }).catch(() => null);
-        } catch (discordErr) {
-            console.error('Unmatched checkout discord relay failed:', discordErr);
-            if (logId) await updateWebhookLogEntry(logId, { status: 'unmatched_user', error: `${err.message || 'Could not match webhook payload to a user'} | Discord relay failed: ${discordErr.message || discordErr}` }).catch(() => null);
-        }
+        console.error('Inbound webhook setup error:', err);
         if (!res.headersSent) return res.status(500).json({ error: err.message });
     }
 });
