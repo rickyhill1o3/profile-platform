@@ -2487,25 +2487,13 @@ app.post(["/webhooks/monitor", "/webhooks/monitor/:token"], async (req, res) => 
     const payload = req.body || {};
     const requestMeta = { path: req.originalUrl, hasToken: !!req.params.token, body: payload };
 
-    let token = '';
-    let expected = '';
+    let logId = null;
     try {
         console.log('📩 MONITOR WEBHOOK HIT', requestMeta);
-        token = String(req.params.token || req.query.token || '').trim();
-        expected = await getMonitorWebhookToken();
+        const token = String(req.params.token || req.query.token || '').trim();
+        const expected = await getMonitorWebhookToken();
         if (expected && token !== expected) return res.status(401).json({ error: 'Invalid monitor webhook url' });
 
-        // Acknowledge immediately like Discord so the sender stops retrying while we process.
-        res.status(204).end();
-    } catch (err) {
-        console.error('Monitor webhook pre-ack error:', err);
-        if (!res.headersSent) res.status(400).json({ error: err.message });
-        return;
-    }
-
-    let logId = null;
-    (async () => {
-        try {
         const rawItems = extractMonitorItems(payload).map((item) => ({
             ...item,
             category: classifyMonitorType({ title: item.title, productType: item.productType, url: item.url }),
@@ -2513,7 +2501,6 @@ app.post(["/webhooks/monitor", "/webhooks/monitor/:token"], async (req, res) => 
         }));
 
         const items = await enrichMonitorItems(rawItems);
-
         const first = items[0] || {};
         const site = String(first.site || payload.site || payload.source || '').trim().toLowerCase();
         const dedupeWindowSeconds = await getMonitorDedupeWindowSeconds();
@@ -2532,19 +2519,12 @@ app.post(["/webhooks/monitor", "/webhooks/monitor/:token"], async (req, res) => 
                 payload,
                 fingerprint,
                 parsed_items: items.map((item) => ({
-                    title: item.title || '',
-                    sku: item.sku || '',
-                    site: item.site || '',
-                    price: item.price ?? null,
-                    stock: item.stock ?? null,
-                    cartLimit: item.cartLimit ?? null,
-                    url: item.url || '',
-                    image: item.image || '',
-                    category: item.category || ''
+                    title: item.title || '', sku: item.sku || '', site: item.site || '', price: item.price ?? null,
+                    stock: item.stock ?? null, cartLimit: item.cartLimit ?? null, url: item.url || '', image: item.image || '', category: item.category || ''
                 })),
                 discord_targets: duplicate.discord_targets || []
             })).id;
-            return res.json({ success: true, skipped: true, reason: 'duplicate_within_window', dedupe_window_seconds: dedupeWindowSeconds });
+            return res.status(204).end();
         }
 
         logId = (await appendWebhookLogEntry({
@@ -2557,15 +2537,8 @@ app.post(["/webhooks/monitor", "/webhooks/monitor/:token"], async (req, res) => 
             payload,
             fingerprint,
             parsed_items: items.map((item) => ({
-                title: item.title || '',
-                sku: item.sku || '',
-                site: item.site || '',
-                price: item.price ?? null,
-                stock: item.stock ?? null,
-                cartLimit: item.cartLimit ?? null,
-                url: item.url || '',
-                image: item.image || '',
-                category: item.category || ''
+                title: item.title || '', sku: item.sku || '', site: item.site || '', price: item.price ?? null,
+                stock: item.stock ?? null, cartLimit: item.cartLimit ?? null, url: item.url || '', image: item.image || '', category: item.category || ''
             }))
         })).id;
 
@@ -2591,7 +2564,6 @@ app.post(["/webhooks/monitor", "/webhooks/monitor/:token"], async (req, res) => 
                 const route = normalizeMonitorGroupConfig(adminConfig.monitor_groups?.[item.category]);
                 const routeUrl = String(route.webhook_url || '').trim();
                 if (!routeUrl) continue;
-                // do not double-send super admin's own admin monitor row; and dedupe by webhook url
                 if (adminConfig.role === 'super_admin') {
                     if (seenTargetUrls.has(routeUrl)) continue;
                     continue;
@@ -2624,37 +2596,28 @@ app.post(["/webhooks/monitor", "/webhooks/monitor/:token"], async (req, res) => 
             product_type: String(first.category || ''),
             product: String(first.title || first.url || ''),
             sku: String(first.sku || ''),
-            error: failed.length
-                ? failed.map((x) => `${x.sku || '-'}: ${x.error}`).join(' | ')
-                : (skipped.length ? 'Some items skipped due to missing group webhook url' : ''),
+            error: failed.length ? failed.map((x) => `${x.sku || '-'}: ${x.error}`).join(' | ') : (skipped.length ? 'Some items skipped due to missing group webhook url' : ''),
             parsed_items: items.map((item) => ({
-                title: item.title || '',
-                sku: item.sku || '',
-                site: item.site || '',
-                price: item.price ?? null,
-                stock: item.stock ?? null,
-                cartLimit: item.cartLimit ?? null,
-                url: item.url || '',
-                image: item.image || '',
-                category: item.category || ''
+                title: item.title || '', sku: item.sku || '', site: item.site || '', price: item.price ?? null,
+                stock: item.stock ?? null, cartLimit: item.cartLimit ?? null, url: item.url || '', image: item.image || '', category: item.category || ''
             })),
             discord_targets: usedTargets,
             fingerprint
         });
 
         console.log('Monitor webhook processed successfully', { item_count: items.length, results_count: results.length });
+        return res.status(204).end();
     } catch (err) {
         console.error('Monitor webhook error:', err);
         if (logId) await updateWebhookLogEntry(logId, { status: 'failed', error: err.message }).catch(() => null);
+        if (!res.headersSent) return res.status(500).json({ error: err.message });
     }
-    })().catch((err) => {
-        console.error('Monitor webhook async processing error:', err);
-    });
 });
 
 app.post(["/webhooks/orders", "/webhooks/orders/:token"], async (req, res) => {
     const payload = req.body || {};
     let active = null;
+    let logId = null;
 
     try {
         console.log("Inbound webhook hit", {
@@ -2667,7 +2630,6 @@ app.post(["/webhooks/orders", "/webhooks/orders/:token"], async (req, res) => {
         console.log("Active webhook token preview:", active?.token ? String(active.token).slice(0, 8) : null);
 
         const allowed = await validateInboundWebhookToken(req);
-
         if (!allowed) {
             console.log("Inbound webhook rejected: invalid token", {
                 provided: req.params.token ? String(req.params.token).slice(0, 8) : null,
@@ -2677,17 +2639,6 @@ app.post(["/webhooks/orders", "/webhooks/orders/:token"], async (req, res) => {
         }
 
         console.log("Inbound webhook accepted");
-        // Acknowledge immediately like Discord so the sender stops retrying while we process.
-        res.status(204).end();
-    } catch (err) {
-        console.error("Inbound webhook pre-ack error:", err);
-        if (!res.headersSent) res.status(400).json({ error: err.message });
-        return;
-    }
-
-    let logId = null;
-    (async () => {
-    try {
         const normalized = normalizeIncomingOrderPayload(payload);
         const checkoutType = classifyCheckoutWebhookType({ raw_payload: payload, status: '' });
         const fingerprint = buildCheckoutDedupeFingerprint(payload);
@@ -2704,13 +2655,11 @@ app.post(["/webhooks/orders", "/webhooks/orders/:token"], async (req, res) => {
         })).id;
 
         if (duplicateRow) {
-            await updateWebhookLogEntry(logId, { status: 'duplicate_skipped', error: 'Skipped duplicate checkout webhook within 45 seconds' }).catch(() => null);
-            return res.json({ success: true, duplicate: true, skipped: 'duplicate_checkout_within_45_seconds' });
+            await updateWebhookLogEntry(logId, { status: 'duplicate_skipped', error: 'Skipped duplicate checkout webhook within 45 seconds', discord_targets: duplicateRow.discord_targets || [] }).catch(() => null);
+            return res.status(204).end();
         }
 
         const matchedUser = await findUserForWebhook(payload).catch(() => null);
-
-        // Always relay checkout webhooks to Discord, even if no user is matched.
         const discordResults = await sendCheckoutDiscordNotificationsForPayload(payload, matchedUser, {
             status: checkoutType === 'error' ? 'checkout_error' : 'processed'
         }).catch((err) => {
@@ -2718,20 +2667,17 @@ app.post(["/webhooks/orders", "/webhooks/orders/:token"], async (req, res) => {
             return [{ success: false, error: err.message || String(err) }];
         });
 
-        // Error / OOS style checkouts should not attempt credit charging or order creation.
         if (checkoutType === 'error') {
             await updateWebhookLogEntry(logId, {
-                status: 'processed',
-                error: '',
+                status: matchedUser?.id ? 'processed' : 'unmatched_user',
+                error: matchedUser?.id ? '' : 'Could not match webhook payload to a user',
                 discord_targets: Array.isArray(discordResults) ? discordResults : []
             }).catch(() => null);
-            return res.json({ success: true, checkout_type: 'error', discord: discordResults, matched_user: matchedUser?.id || null });
+            return res.status(204).end();
         }
 
         const result = await recordSuccessfulCheckout(payload);
         let finalDiscordResults = discordResults;
-
-        // If the real order processing matched a user, resend using the real matched user context only when none was available before.
         if (!matchedUser && result?.order && !result?.duplicate) {
             const resolvedUser = await findUserForWebhook(payload).catch(() => null);
             if (resolvedUser?.id) {
@@ -2742,23 +2688,22 @@ app.post(["/webhooks/orders", "/webhooks/orders/:token"], async (req, res) => {
             }
         }
 
-        const finalStatus = result?.duplicate ? 'duplicate_skipped' : 'processed';
-        const finalError = result?.duplicate ? 'Skipped duplicate checkout webhook by order id' : '';
+        const finalStatus = result?.duplicate ? 'duplicate_skipped' : (matchedUser?.id ? 'processed' : 'unmatched_user');
+        const finalError = result?.duplicate ? 'Skipped duplicate checkout webhook by order id' : (matchedUser?.id ? '' : 'Could not match webhook payload to a user');
         await updateWebhookLogEntry(logId, { status: finalStatus, error: finalError, discord_targets: Array.isArray(finalDiscordResults) ? finalDiscordResults : [] }).catch(() => null);
         console.log("Inbound webhook processed successfully");
+        return res.status(204).end();
     } catch (err) {
         console.error("Inbound webhook error:", err);
         try {
             const discordResults = await sendCheckoutDiscordNotificationsForPayload(payload, null, { status: 'checkout_error' });
-            if (logId) await updateWebhookLogEntry(logId, { status: 'unmatched_user', error: err.message || 'Could not match webhook payload to a user', discord_targets: Array.isArray(discordResults) ? discordResults : [] }).catch(() => null);
+            if (logId) await updateWebhookLogEntry(logId, { status: 'unmatched_user', error: `${err.message || 'Could not match webhook payload to a user'}`, discord_targets: Array.isArray(discordResults) ? discordResults : [] }).catch(() => null);
         } catch (discordErr) {
             console.error('Unmatched checkout discord relay failed:', discordErr);
             if (logId) await updateWebhookLogEntry(logId, { status: 'unmatched_user', error: `${err.message || 'Could not match webhook payload to a user'} | Discord relay failed: ${discordErr.message || discordErr}` }).catch(() => null);
         }
+        if (!res.headersSent) return res.status(500).json({ error: err.message });
     }
-    })().catch((err) => {
-        console.error('Inbound webhook async processing error:', err);
-    });
 });
 
 app.get("/admin/credits/users", auth, admin, async (req, res) => {
