@@ -2714,42 +2714,47 @@ app.post(["/webhooks/orders", "/webhooks/orders/:token"], async (req, res) => {
                 })).id;
 
                 const matchedUser = await findUserForWebhook(payload).catch(() => null);
-                const discordResults = await sendCheckoutDiscordNotificationsForPayload(payload, matchedUser, {
-                    status: checkoutType === 'error' ? 'checkout_error' : 'processed'
-                }).catch((err) => {
-                    console.error('Checkout discord relay failed:', err);
-                    return [{ success: false, error: err.message || String(err) }];
-                });
+                let checkoutDiscordSent = false;
+                let finalDiscordResults = [];
 
                 if (checkoutType === 'error') {
+                    finalDiscordResults = await sendCheckoutDiscordNotificationsForPayload(payload, matchedUser, {
+                        status: 'checkout_error'
+                    }).catch((err) => {
+                        console.error('Checkout discord relay failed:', err);
+                        return [{ success: false, error: err.message || String(err) }];
+                    });
+                    checkoutDiscordSent = true;
                     await updateWebhookLogEntry(logId, {
                         status: matchedUser?.id ? 'processed' : 'unmatched_user',
                         error: matchedUser?.id ? '' : 'Could not match webhook payload to a user',
-                        discord_targets: Array.isArray(discordResults) ? discordResults : []
+                        discord_targets: Array.isArray(finalDiscordResults) ? finalDiscordResults : []
                     }).catch(() => null);
                     return;
                 }
 
                 const result = await recordSuccessfulCheckout(payload);
-                let finalDiscordResults = discordResults;
-                if (!matchedUser && result?.order && !result?.duplicate) {
-                    const resolvedUser = await findUserForWebhook(payload).catch(() => null);
-                    if (resolvedUser?.id) {
-                        finalDiscordResults = await sendCheckoutDiscordNotifications(result.order, resolvedUser).catch((err) => {
-                            console.error('Checkout discord relay after order processing failed:', err);
-                            return discordResults;
-                        });
-                    }
-                }
+                const resolvedUser = matchedUser?.id ? matchedUser : await findUserForWebhook(payload).catch(() => null);
+                finalDiscordResults = await sendCheckoutDiscordNotificationsForPayload(payload, resolvedUser, {
+                    status: 'processed'
+                }).catch((err) => {
+                    console.error('Checkout discord relay failed:', err);
+                    return [{ success: false, error: err.message || String(err) }];
+                });
+                checkoutDiscordSent = true;
 
-                const finalStatus = result?.duplicate ? 'duplicate_skipped' : (matchedUser?.id ? 'processed' : 'unmatched_user');
-                const finalError = result?.duplicate ? 'Skipped duplicate checkout webhook by order id' : (matchedUser?.id ? '' : 'Could not match webhook payload to a user');
+                const finalStatus = result?.duplicate ? 'duplicate_skipped' : (resolvedUser?.id ? 'processed' : 'unmatched_user');
+                const finalError = result?.duplicate ? 'Skipped duplicate checkout webhook by order id' : (resolvedUser?.id ? '' : 'Could not match webhook payload to a user');
                 await updateWebhookLogEntry(logId, { status: finalStatus, error: finalError, discord_targets: Array.isArray(finalDiscordResults) ? finalDiscordResults : [] }).catch(() => null);
                 console.log("Inbound webhook processed successfully");
             } catch (err) {
                 console.error("Inbound webhook error:", err);
                 try {
-                    const discordResults = await sendCheckoutDiscordNotificationsForPayload(payload, null, { status: 'checkout_error' });
+                    const shouldRelayAsError = checkoutType === 'error';
+                    let discordResults = [];
+                    if (shouldRelayAsError) {
+                        discordResults = await sendCheckoutDiscordNotificationsForPayload(payload, null, { status: 'checkout_error' });
+                    }
                     if (logId) await updateWebhookLogEntry(logId, { status: 'unmatched_user', error: `${err.message || 'Could not match webhook payload to a user'}`, discord_targets: Array.isArray(discordResults) ? discordResults : [] }).catch(() => null);
                     else await appendWebhookLogEntry({ type: 'checkout', status: 'unmatched_user', site: String(normalized.site || payload.site || '').trim(), product: String(normalized.product_name || payload.product_name || ''), sku: String(normalized.sku || payload.sku || ''), error: `${err.message || 'Could not match webhook payload to a user'}`, payload, fingerprint, discord_targets: Array.isArray(discordResults) ? discordResults : [] }).catch(() => null);
                 } catch (discordErr) {
