@@ -1566,13 +1566,20 @@ async function findRecentDuplicateCheckoutLog(fingerprint, windowSeconds = 45) {
 }
 
 async function sendCheckoutDiscordNotificationsForPayload(payload = {}, matchedUser = null, extra = {}) {
+    if (extra?.order && typeof extra.order === 'object') {
+        return sendCheckoutDiscordNotifications(extra.order, matchedUser || null);
+    }
+
     const normalized = normalizeIncomingOrderPayload(payload || {});
+    const explicitCredits = extra?.credits_charged !== undefined && extra?.credits_charged !== null
+        ? asWholeCredits(extra.credits_charged, 0)
+        : 0;
     const pseudoOrder = {
         raw_payload: payload,
         status: extra.status || 'processed',
         site: normalized.site,
         source: normalized.source,
-        credits_charged: 0,
+        credits_charged: explicitCredits,
         product_name: normalized.product_name,
         external_order_id: normalized.external_order_id,
         order_number: normalized.order_number,
@@ -2087,7 +2094,8 @@ async function sendDiscordWebhookToTarget({
     userEmail = '',
     discordHandle = '',
     brandLabel = '',
-    username = 'The Shore Shack'
+    username = 'The Shore Shack',
+    includeSensitive = false
 }) {
     const trimmedWebhookUrl = String(webhookUrl || '').trim();
     if (!trimmedWebhookUrl) {
@@ -2099,6 +2107,9 @@ async function sendDiscordWebhookToTarget({
     const checkoutType = classifyCheckoutWebhookType(order);
     const isInsufficient = String(order.status || '') === 'insufficient_credits';
     const mentionText = checkoutType === 'success' ? formatDiscordMention(discordHandle, userEmail) : '';
+    const { fields: rawFields } = extractEmbedFields(payload);
+    const fraudStatus = decodeHtmlEntities(String(rawFields['fraud status'] || payload.fraud_status || '')).trim();
+    const proxyValue = decodeHtmlEntities(String(rawFields['proxy'] || payload.proxy || payload.proxy_used || '')).trim();
 
     const siteLabel = String(order.site || normalized.site || order.source || 'Bot');
     let title = '';
@@ -2145,8 +2156,14 @@ async function sendDiscordWebhookToTarget({
     if (normalized.sku) {
         embed.fields.push({ name: 'SKU', value: String(normalized.sku), inline: true });
     }
-    if (normalized.order_number || normalized.external_order_id || order.external_order_id) {
+    if (includeSensitive && (normalized.order_number || normalized.external_order_id || order.external_order_id)) {
         embed.fields.push({ name: 'Order ID', value: String(normalized.order_number || normalized.external_order_id || order.external_order_id), inline: true });
+    }
+    if (fraudStatus) {
+        embed.fields.push({ name: 'Fraud Status', value: fraudStatus, inline: true });
+    }
+    if (includeSensitive && proxyValue) {
+        embed.fields.push({ name: 'Proxy', value: proxyValue, inline: true });
     }
     if (normalized.profile_name && checkoutType !== 'success') {
         embed.fields.push({ name: 'Profile', value: String(normalized.profile_name), inline: true });
@@ -2296,7 +2313,8 @@ async function sendCheckoutDiscordNotifications(order, user) {
                 userEmail,
                 discordHandle,
                 brandLabel: dest.brandLabel || '',
-                username: dest.username || 'The Shore Shack'
+                username: dest.username || 'The Shore Shack',
+                includeSensitive: dest.scope === 'super_admin'
             }))
         });
     }
@@ -2805,9 +2823,13 @@ app.post(["/webhooks/orders", "/webhooks/orders/:token"], async (req, res) => {
                     return;
                 }
 
+                let recordedOrder = null;
+                let recordedCreditsCharged = null;
                 if (resolvedUser?.id) {
                     try {
                         const result = await recordSuccessfulCheckout(payload);
+                        recordedOrder = result?.order || null;
+                        recordedCreditsCharged = result?.order?.credits_charged ?? result?.credits_charged ?? null;
                         if (result?.duplicate) {
                             finalStatus = 'duplicate_skipped';
                             finalError = 'Skipped duplicate checkout webhook by order id';
@@ -2828,7 +2850,9 @@ app.post(["/webhooks/orders", "/webhooks/orders/:token"], async (req, res) => {
                 }
 
                 finalDiscordResults = await sendCheckoutDiscordNotificationsForPayload(payload, resolvedUser, {
-                    status: 'processed'
+                    status: 'processed',
+                    ...(recordedOrder ? { order: recordedOrder } : {}),
+                    ...(recordedCreditsCharged !== null ? { credits_charged: recordedCreditsCharged } : {})
                 }).catch((err) => {
                     console.error('Checkout discord relay failed:', err);
                     return [{ success: false, error: err.message || String(err) }];
