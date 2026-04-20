@@ -454,6 +454,131 @@ function escapeExportField(value) {
     return String(value ?? '').replace(/\r?\n|;/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
+function normalizeExportGroupLabel(value, fallback = 'Other') {
+    const clean = escapeExportField(value);
+    return clean || fallback;
+}
+
+function normalizeTextForExportGrouping(value) {
+    return String(value || '')
+        .toLowerCase()
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .replace(/[^a-z0-9]+/g, ' ')
+        .trim();
+}
+
+function inferTargetCategoryGroup(row) {
+    const metadata = row && typeof row.metadata === 'object' && row.metadata ? row.metadata : {};
+    const explicit = normalizeTextForExportGrouping(metadata.category || metadata.product_type || metadata.group || '');
+    if (explicit === 'onepiece' || explicit === 'one piece') return 'One Piece';
+    if (explicit === 'sports') return 'Sports';
+    if (explicit === 'magic' || explicit === 'mtg') return 'Magic';
+    if (explicit === 'othertcg' || explicit === 'other tcg' || explicit === 'all other tcg') return 'All Other TCG';
+    if (explicit === 'lowkey' || explicit === 'other') return 'Lowkey';
+
+    const hay = normalizeTextForExportGrouping(`${row?.product_name || ''} ${row?.sku || ''}`);
+    if (/one\s*piece/.test(hay)) return 'One Piece';
+    if (/topps|panini|upper deck|sports card|baseball card|basketball card|football card|soccer card|hockey card/.test(hay)) return 'Sports';
+    if (/\bmagic\b|\bmtg\b/.test(hay)) return 'Magic';
+    if (/lorcana|yu\s*gi\s*oh|yugioh|digimon|dragon ball|union arena|weiss|gundam card|final fantasy tcg/.test(hay)) return 'All Other TCG';
+    return 'Lowkey';
+}
+
+const POKEMON_GROUP_ALIASES = [
+    ['Ascending Heroes', ['ascending heroes']],
+    ['151', ['pokemon 151', 'scarlet violet 151', 'scarlet and violet 151', 'sv 151', ' 151 ']],
+    ['Prismatic Evolutions', ['prismatic evolutions', 'prismatic']],
+    ['Perfect Order', ['perfect order']],
+    ['Chaos Rising', ['chaos rising']],
+    ['Surging Sparks', ['surging sparks']],
+    ['Destined Rivals', ['destined rivals']],
+    ['Journey Together', ['journey together']],
+    ['Stellar Crown', ['stellar crown']],
+    ['Twilight Masquerade', ['twilight masquerade']],
+    ['Temporal Forces', ['temporal forces']],
+    ['Paldean Fates', ['paldean fates']],
+    ['Shrouded Fable', ['shrouded fable']],
+    ['Paradox Rift', ['paradox rift']],
+    ['Obsidian Flames', ['obsidian flames']],
+    ['Crown Zenith', ['crown zenith']]
+];
+
+function inferPokemonGroup(row) {
+    const metadata = row && typeof row.metadata === 'object' && row.metadata ? row.metadata : {};
+    const explicit = normalizeExportGroupLabel(
+        metadata.pokemon_group || metadata.pokemonGroup || metadata.set_name || metadata.setName || metadata.series || metadata.group,
+        ''
+    );
+    if (explicit) return explicit;
+
+    const rawTitle = escapeExportField(row?.product_name || '');
+    const normalized = ` ${normalizeTextForExportGrouping(rawTitle)} `;
+
+    for (const [label, aliases] of POKEMON_GROUP_ALIASES) {
+        if (aliases.some((alias) => normalized.includes(` ${normalizeTextForExportGrouping(alias)} `))) return label;
+    }
+
+    const descriptorPattern = /(.+?)\s+(elite trainer box|booster bundle|booster display box|booster box|booster pack|sleeved booster|poster collection|binder collection|mini tin|tin|premium collection|super premium collection|collection|accessory pouch|build battle box|build and battle box|checklane blister|blister|3 pack blister|trainer box|surprise box|tech sticker collection|figure collection|premium box)\b/i;
+    const match = rawTitle.match(descriptorPattern);
+    if (match) {
+        const candidate = normalizeExportGroupLabel(
+            match[1]
+                .replace(/pokemon center/ig, '')
+                .replace(/pokemon|pok[eé]mon/ig, '')
+                .replace(/trading card game|tcg/ig, '')
+                .replace(/scarlet\s*(?:&|and)\s*violet/ig, '')
+                .replace(/[–—:-]+$/g, '')
+                .trim(),
+            ''
+        );
+        if (candidate && candidate.length <= 40) return candidate;
+    }
+
+    return 'Other Pokémon';
+}
+
+function getExportGroupLabel(site, row) {
+    const title = String(row?.product_name || '');
+    if (site === 'target' && /pokemon|pok[eé]mon/i.test(title)) return inferPokemonGroup(row);
+    if (site === 'target') return inferTargetCategoryGroup(row);
+    if (site === 'pokemon') return inferPokemonGroup(row);
+    return 'All Products';
+}
+
+function buildGroupedExportBatches(site, data, batchSize) {
+    const rows = (data || [])
+        .filter((row) => row && row.is_enabled)
+        .filter((row) => !(row.metadata && row.metadata.virtual));
+
+    const grouped = new Map();
+    for (const row of rows) {
+        const price = row.default_max_price === null || row.default_max_price === undefined ? '' : Number(row.default_max_price).toFixed(2).replace(/\.00$/, '.00');
+        const line = `${escapeExportField(row.sku)};${escapeExportField(row.product_name)};${price}`;
+        const group = getExportGroupLabel(site, row);
+        if (!grouped.has(group)) grouped.set(group, []);
+        grouped.get(group).push(line);
+    }
+
+    const groups = Array.from(grouped.entries())
+        .sort((a, b) => a[0].localeCompare(b[0]))
+        .map(([group, lines]) => ({
+            group,
+            total: lines.length,
+            batches: chunkLines(lines, batchSize).map((items, index) => ({
+                index: index + 1,
+                text: items.join('\n'),
+                count: items.length
+            }))
+        }));
+
+    return {
+        total: rows.length,
+        groups,
+        batches: groups.flatMap((group) => group.batches)
+    };
+}
+
 async function importCatalogList(supabase, site, listInput) {
     const normalizedSite = normalizeSite(site);
     const entries = parseImportedCatalogList(listInput);
@@ -978,16 +1103,14 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
                 .eq('is_enabled', true)
                 .order('product_name', { ascending: true });
             if (error) throw new Error(error.message);
-            const rows = (data || []).filter((row) => !(row.metadata && row.metadata.virtual)).map((row) => {
-                const price = row.default_max_price === null || row.default_max_price === undefined ? '' : Number(row.default_max_price).toFixed(2).replace(/\.00$/, '.00');
-                return `${escapeExportField(row.sku)};${escapeExportField(row.product_name)};${price}`;
-            });
+            const grouped = buildGroupedExportBatches(site, data || [], batchSize);
             res.json({
                 success: true,
                 site,
-                total: rows.length,
+                total: grouped.total,
                 batchSize,
-                batches: chunkLines(rows, batchSize).map((lines, index) => ({ index: index + 1, text: lines.join('\n'), count: lines.length }))
+                groups: grouped.groups,
+                batches: grouped.batches
             });
         } catch (err) {
             res.status(400).json({ error: err.message });

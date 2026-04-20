@@ -1891,18 +1891,34 @@ async function initCatalogTools() {
                 const batchSize = document.getElementById('catalogExportBatchSize').value || '29';
                 const qs = new URLSearchParams({ site, batchSize });
                 const data = await authJSON(API + '/admin/catalog-products/export-lines?' + qs.toString());
+                const groups = Array.isArray(data.groups) ? data.groups : [];
                 const batches = Array.isArray(data.batches) ? data.batches : [];
-                if (!batches.length) {
+                if (!groups.length && !batches.length) {
                     if (exportResults) exportResults.innerHTML = '<div class="subtle-text">No products found to export.</div>';
                     return;
                 }
                 if (exportResults) {
-                    exportResults.innerHTML = batches.map((batch) => `
+                    const renderBatch = (batch, label, groupLabel) => `
                         <section class="panel panel--inner">
-                          <div class="panel-header"><div><h3>${escapeHTML(site.toUpperCase())} Batch ${batch.index}</h3><p class="subtle-text">${batch.count} products</p></div></div>
+                          <div class="panel-header"><div><h3>${escapeHTML(label)}</h3><p class="subtle-text">${escapeHTML(groupLabel)} · ${batch.count} products</p></div></div>
                           <textarea class="input" rows="${Math.min(14, Math.max(6, batch.count + 1))}" readonly>${escapeHTML(batch.text)}</textarea>
                         </section>
-                    `).join('');
+                    `;
+                    if (groups.length) {
+                        exportResults.innerHTML = groups.map((group) => {
+                            const groupBatches = Array.isArray(group.batches) ? group.batches : [];
+                            return `
+                                <section class="panel panel--inner">
+                                  <div class="panel-header"><div><h3>${escapeHTML(group.group || 'Group')}</h3><p class="subtle-text">${group.total || 0} products</p></div></div>
+                                  <div class="stack-list">
+                                    ${groupBatches.map((batch) => renderBatch(batch, `${site.toUpperCase()} Batch ${batch.index}`, group.group || 'Group')).join('')}
+                                  </div>
+                                </section>
+                            `;
+                        }).join('');
+                    } else {
+                        exportResults.innerHTML = batches.map((batch) => renderBatch(batch, `${site.toUpperCase()} Batch ${batch.index}`, site.toUpperCase())).join('');
+                    }
                 }
             } catch (err) {
                 if (exportResults) exportResults.innerHTML = `<div class="subtle-text">${escapeHTML(err.message)}</div>`;
