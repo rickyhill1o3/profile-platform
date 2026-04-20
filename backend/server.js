@@ -1279,6 +1279,43 @@ const discordDeliveryInFlight = new Set();
 const inboundWebhookInFlight = new Map();
 const inboundWebhookRecent = new Map();
 
+const webhookJobQueue = [];
+let webhookJobRunnerActive = false;
+
+function runWebhookJobQueue() {
+    if (webhookJobRunnerActive) return;
+    webhookJobRunnerActive = true;
+    const drain = async () => {
+        try {
+            while (webhookJobQueue.length) {
+                const job = webhookJobQueue.shift();
+                if (typeof job !== 'function') continue;
+                try {
+                    await job();
+                } catch (err) {
+                    console.error('Webhook job failed:', err);
+                }
+            }
+        } finally {
+            webhookJobRunnerActive = false;
+            if (webhookJobQueue.length) {
+                setTimeout(runWebhookJobQueue, 0);
+            }
+        }
+    };
+    Promise.resolve().then(drain).catch((err) => {
+        webhookJobRunnerActive = false;
+        console.error('Webhook queue runner crashed:', err);
+        if (webhookJobQueue.length) setTimeout(runWebhookJobQueue, 0);
+    });
+}
+
+function enqueueWebhookJob(job) {
+    if (typeof job !== 'function') throw new Error('Webhook job must be a function');
+    webhookJobQueue.push(job);
+    runWebhookJobQueue();
+}
+
 function cleanupInboundWebhookDedupe(now = Date.now()) {
     for (const [key, expiresAt] of inboundWebhookRecent.entries()) {
         if (Number(expiresAt || 0) <= now) inboundWebhookRecent.delete(key);
