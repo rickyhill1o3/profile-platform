@@ -3355,6 +3355,41 @@ app.post("/user/settings", auth, async (req, res) => {
     }
 });
 
+app.get("/user/activity", auth, async (req, res) => {
+    try {
+        const currentUser = req.currentUser || await getCurrentUser(req);
+        const [balanceRow, txRows, orderRows] = await Promise.all([
+            ensureUserCreditBalance(currentUser.id),
+            (async () => {
+                const { data, error } = await maybeMany("credit_transactions", (qb) =>
+                    qb.select("*").eq("user_id", currentUser.id).order("created_at", { ascending: false }).limit(250)
+                );
+                if (error) throw new Error(error.message);
+                return data || [];
+            })(),
+            (async () => {
+                const { data, error } = await maybeMany("orders", (qb) =>
+                    qb.select("*").eq("user_id", currentUser.id).order("created_at", { ascending: false }).limit(250)
+                );
+                if (error) throw new Error(error.message);
+                return data || [];
+            })()
+        ]);
+
+        res.json({
+            user: { id: currentUser.id, email: currentUser.email, role: currentUser.role },
+            balance: asSignedCredits(balanceRow.balance, 0),
+            lifetime_credits_granted: asWholeCredits(balanceRow.lifetime_credits_granted, 0),
+            lifetime_credits_spent: asWholeCredits(balanceRow.lifetime_credits_spent, 0),
+            needs_removal: asSignedCredits(balanceRow.balance, 0) < 0,
+            transactions: txRows,
+            orders: orderRows
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
 app.post("/auth/forgot-password", async (req, res) => {
     try {
         const email = String(req.body?.email || "").trim().toLowerCase();
