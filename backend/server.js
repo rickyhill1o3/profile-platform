@@ -2557,8 +2557,7 @@ app.post(["/webhooks/monitor", "/webhooks/monitor/:token"], async (req, res) => 
             return res.status(204).end();
         }
 
-        res.status(204).end();
-        setImmediate(async () => {
+        const processCheckoutWebhook = async () => {
             let logId = null;
             let checkoutDiscordSent = false;
             try {
@@ -2792,7 +2791,13 @@ app.post(["/webhooks/orders", "/webhooks/orders/:token"], async (req, res) => {
             } finally {
                 releaseInboundWebhook(`checkout:${fingerprint}`, dedupeWindowSeconds);
             }
+        };
+
+        const checkoutProcessingPromise = processCheckoutWebhook().catch((err) => {
+            console.error('Unhandled checkout webhook background error:', err);
         });
+        void checkoutProcessingPromise;
+        return res.status(204).end();
     } catch (err) {
         console.error('Inbound webhook setup error:', err);
         if (!res.headersSent) return res.status(500).json({ error: err.message });
