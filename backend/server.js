@@ -2584,6 +2584,35 @@ app.post(["/webhooks/monitor", "/webhooks/monitor/:token"], async (req, res) => 
                 const results = [];
                 const usedTargets = [];
 
+                if (!items.length) {
+                    const fallbackCategory = 'lowkey';
+                    const superRoute = normalizeMonitorGroupConfig(globalGroups[fallbackCategory] || {});
+                    const superUrl = String(superRoute.webhook_url || '').trim();
+                    if (superUrl) {
+                        usedTargets.push({ category: fallbackCategory, scope: 'super_admin', user_id: null, webhook_url: superUrl.slice(0, 80), ping_mode: superRoute.ping_mode || 'none', role_mention: superRoute.role_mention || '' });
+                        try {
+                            const embed = Array.isArray(payload?.embeds) ? payload.embeds[0] || {} : {};
+                            const testItem = {
+                                title: String(embed?.author?.name || embed?.title || 'Monitor Test'),
+                                sku: '',
+                                site: String((Array.isArray(embed?.fields) ? (embed.fields.find((f) => String(f?.name || '').toLowerCase() === 'site')?.value || '') : '') || payload.site || 'unknown').trim().toLowerCase(),
+                                price: '',
+                                stock: null,
+                                cartLimit: null,
+                                url: '',
+                                image: String(embed?.thumbnail?.url || payload?.avatar_url || ''),
+                                category: fallbackCategory
+                            };
+                            const sendResult = await sendMonitorDiscordWebhook(superRoute, testItem);
+                            results.push({ sku: '', category: fallbackCategory, scope: 'super_admin', user_id: null, success: true, attempt: sendResult?.attempt || 1, ping_mode: sendResult?.ping_mode || 'none', role_mention: sendResult?.role_mention || '' });
+                        } catch (sendErr) {
+                            results.push({ sku: '', category: fallbackCategory, scope: 'super_admin', user_id: null, success: false, error: sendErr.message });
+                        }
+                    } else {
+                        results.push({ sku: '', skipped: 'monitor_webhook_not_configured', category: fallbackCategory });
+                    }
+                }
+
                 for (const item of items) {
                     const targets = [];
                     const seenTargetUrls = new Set();
@@ -2646,10 +2675,9 @@ app.post(["/webhooks/monitor", "/webhooks/monitor/:token"], async (req, res) => 
             }
         };
 
-        const monitorProcessingPromise = processMonitorWebhook().catch((err) => {
-            console.error('Unhandled monitor webhook background error:', err);
+        enqueueWebhookJob(async () => {
+            await processMonitorWebhook();
         });
-        void monitorProcessingPromise;
         return res.status(204).end();
     } catch (err) {
         console.error('Monitor webhook setup failed:', err);
@@ -2797,10 +2825,9 @@ app.post(["/webhooks/orders", "/webhooks/orders/:token"], async (req, res) => {
             }
         };
 
-        const checkoutProcessingPromise = processCheckoutWebhook().catch((err) => {
-            console.error('Unhandled checkout webhook background error:', err);
+        enqueueWebhookJob(async () => {
+            await processCheckoutWebhook();
         });
-        void checkoutProcessingPromise;
         return res.status(204).end();
     } catch (err) {
         console.error('Inbound webhook setup error:', err);
