@@ -2557,9 +2557,8 @@ app.post(["/webhooks/monitor", "/webhooks/monitor/:token"], async (req, res) => 
             return res.status(204).end();
         }
 
-        const processCheckoutWebhook = async () => {
+        const processMonitorWebhook = async () => {
             let logId = null;
-            let checkoutDiscordSent = false;
             try {
                 logId = (await appendWebhookLogEntry({
                     type: 'monitor',
@@ -2645,7 +2644,13 @@ app.post(["/webhooks/monitor", "/webhooks/monitor/:token"], async (req, res) => 
             } finally {
                 releaseInboundWebhook(`monitor:${fingerprint}`, dedupeWindowSeconds);
             }
+        };
+
+        const monitorProcessingPromise = processMonitorWebhook().catch((err) => {
+            console.error('Unhandled monitor webhook background error:', err);
         });
+        void monitorProcessingPromise;
+        return res.status(204).end();
     } catch (err) {
         console.error('Monitor webhook setup failed:', err);
         return res.status(500).json({ error: err.message || String(err) });
@@ -2698,8 +2703,7 @@ app.post(["/webhooks/orders", "/webhooks/orders/:token"], async (req, res) => {
             return res.status(204).end();
         }
 
-        res.status(204).end();
-        setImmediate(async () => {
+        const processCheckoutWebhook = async () => {
             let logId = null;
             let checkoutDiscordSent = false;
             try {
