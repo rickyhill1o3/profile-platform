@@ -454,6 +454,7 @@ function escapeExportField(value) {
     return String(value ?? '').replace(/\r?\n|;/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
+
 function normalizeExportGroupLabel(value, fallback = 'Other') {
     const clean = escapeExportField(value);
     return clean || fallback;
@@ -468,6 +469,58 @@ function normalizeTextForExportGrouping(value) {
         .trim();
 }
 
+const POKEMON_SET_ALIASES = [
+    ['Mega Evolution', ['mega evolution', 'mega charizard', 'mega gengar', 'mega meganium', 'mega feraligatr', 'mega emboar']],
+    ['Ascending Heroes', ['ascending heroes', 'ascended heroes']],
+    ['Phantasmal Flames', ['phantasmal flames']],
+    ['Perfect Order', ['perfect order']],
+    ['Chaos Rising', ['chaos rising']],
+    ['151', ['pokemon 151', 'scarlet violet 151', 'scarlet and violet 151', 'sv 151', ' 151 ']],
+    ['Prismatic Evolutions', ['prismatic evolutions', 'prismatic']],
+    ['Surging Sparks', ['surging sparks']],
+    ['Destined Rivals', ['destined rivals']],
+    ['Journey Together', ['journey together']],
+    ['Stellar Crown', ['stellar crown']],
+    ['Twilight Masquerade', ['twilight masquerade']],
+    ['Temporal Forces', ['temporal forces']],
+    ['Paldean Fates', ['paldean fates']],
+    ['Paldea Evolved', ['paldea evolved']],
+    ['Shrouded Fable', ['shrouded fable']],
+    ['Paradox Rift', ['paradox rift']],
+    ['Obsidian Flames', ['obsidian flames']],
+    ['Crown Zenith', ['crown zenith']],
+    ['Silver Tempest', ['silver tempest']],
+    ['Blooming Waters', ['blooming waters']],
+    ['Pokémon Day', ['pokemon day 2026', 'pokemon day']],
+    ['First Partner', ['first partner illustration', 'first partner']],
+    ['Unova', ['unova', 'victini illustration']],
+    ['Special Collections', ['lugia ex latias ex', 'adventure chest', 'battle deck']]
+];
+
+const POKEMON_MEGA_FAMILY = new Set([
+    'Mega Evolution',
+    'Ascending Heroes',
+    'Phantasmal Flames',
+    'Perfect Order',
+    'Chaos Rising'
+]);
+
+const POKEMON_MAINLINE_FAMILY = new Set([
+    '151',
+    'Prismatic Evolutions',
+    'Surging Sparks',
+    'Destined Rivals',
+    'Journey Together',
+    'Stellar Crown',
+    'Twilight Masquerade',
+    'Temporal Forces',
+    'Paldean Fates',
+    'Paldea Evolved',
+    'Shrouded Fable',
+    'Paradox Rift',
+    'Obsidian Flames'
+]);
+
 function inferTargetCategoryGroup(row) {
     const metadata = row && typeof row.metadata === 'object' && row.metadata ? row.metadata : {};
     const explicit = normalizeTextForExportGrouping(metadata.category || metadata.product_type || metadata.group || '');
@@ -479,32 +532,13 @@ function inferTargetCategoryGroup(row) {
 
     const hay = normalizeTextForExportGrouping(`${row?.product_name || ''} ${row?.sku || ''}`);
     if (/one\s*piece/.test(hay)) return 'One Piece';
-    if (/topps|panini|upper deck|sports card|baseball card|basketball card|football card|soccer card|hockey card/.test(hay)) return 'Sports';
+    if (/topps|panini|upper deck|sports card|baseball card|basketball card|football card|soccer card|hockey card|wnba|nba chrome/.test(hay)) return 'Sports';
     if (/\bmagic\b|\bmtg\b/.test(hay)) return 'Magic';
     if (/lorcana|yu\s*gi\s*oh|yugioh|digimon|dragon ball|union arena|weiss|gundam card|final fantasy tcg/.test(hay)) return 'All Other TCG';
     return 'Lowkey';
 }
 
-const POKEMON_GROUP_ALIASES = [
-    ['Ascending Heroes', ['ascending heroes']],
-    ['151', ['pokemon 151', 'scarlet violet 151', 'scarlet and violet 151', 'sv 151', ' 151 ']],
-    ['Prismatic Evolutions', ['prismatic evolutions', 'prismatic']],
-    ['Perfect Order', ['perfect order']],
-    ['Chaos Rising', ['chaos rising']],
-    ['Surging Sparks', ['surging sparks']],
-    ['Destined Rivals', ['destined rivals']],
-    ['Journey Together', ['journey together']],
-    ['Stellar Crown', ['stellar crown']],
-    ['Twilight Masquerade', ['twilight masquerade']],
-    ['Temporal Forces', ['temporal forces']],
-    ['Paldean Fates', ['paldean fates']],
-    ['Shrouded Fable', ['shrouded fable']],
-    ['Paradox Rift', ['paradox rift']],
-    ['Obsidian Flames', ['obsidian flames']],
-    ['Crown Zenith', ['crown zenith']]
-];
-
-function inferPokemonGroup(row) {
+function inferPokemonSubgroup(row) {
     const metadata = row && typeof row.metadata === 'object' && row.metadata ? row.metadata : {};
     const explicit = normalizeExportGroupLabel(
         metadata.pokemon_group || metadata.pokemonGroup || metadata.set_name || metadata.setName || metadata.series || metadata.group,
@@ -515,11 +549,11 @@ function inferPokemonGroup(row) {
     const rawTitle = escapeExportField(row?.product_name || '');
     const normalized = ` ${normalizeTextForExportGrouping(rawTitle)} `;
 
-    for (const [label, aliases] of POKEMON_GROUP_ALIASES) {
+    for (const [label, aliases] of POKEMON_SET_ALIASES) {
         if (aliases.some((alias) => normalized.includes(` ${normalizeTextForExportGrouping(alias)} `))) return label;
     }
 
-    const descriptorPattern = /(.+?)\s+(elite trainer box|booster bundle|booster display box|booster box|booster pack|sleeved booster|poster collection|binder collection|mini tin|tin|premium collection|super premium collection|collection|accessory pouch|build battle box|build and battle box|checklane blister|blister|3 pack blister|trainer box|surprise box|tech sticker collection|figure collection|premium box)\b/i;
+    const descriptorPattern = /(.+?)\s+(elite trainer box|booster bundle|booster display box|booster display|display box|booster box|booster pack|sleeved booster|poster collection|binder collection|mini tin|tin|premium collection|super premium collection|collection|accessory pouch|build battle box|build and battle box|checklane blister|blister|3 booster blister|3 pack blister|trainer box|surprise box|tech sticker collection|figure collection|premium box)\b/i;
     const match = rawTitle.match(descriptorPattern);
     if (match) {
         const candidate = normalizeExportGroupLabel(
@@ -527,22 +561,106 @@ function inferPokemonGroup(row) {
                 .replace(/pokemon center/ig, '')
                 .replace(/pokemon|pok[eé]mon/ig, '')
                 .replace(/trading card game|tcg/ig, '')
-                .replace(/scarlet\s*(?:&|and)\s*violet/ig, '')
+                .replace(/scarlet\s*(?:&|and)\s*violet|scarlet violet|sv\s*s?\d(?:\.\d)?/ig, '')
                 .replace(/[–—:-]+$/g, '')
                 .trim(),
             ''
         );
-        if (candidate && candidate.length <= 40) return candidate;
+        if (candidate && candidate.length <= 50) return candidate;
     }
 
     return 'Other Pokémon';
 }
 
+function isPokemonTargetRow(row) {
+    const metadata = row && typeof row.metadata === 'object' && row.metadata ? row.metadata : {};
+    const hay = ` ${normalizeTextForExportGrouping([
+        row?.product_name,
+        row?.sku,
+        metadata.pokemon_group,
+        metadata.pokemonGroup,
+        metadata.set_name,
+        metadata.setName,
+        metadata.series,
+        metadata.group,
+        metadata.category,
+        metadata.product_type
+    ].filter(Boolean).join(' '))} `;
+
+    if (/\bpokemon\b|\bpok mon\b/.test(hay)) return true;
+    return POKEMON_SET_ALIASES.some(([, aliases]) => aliases.some((alias) => hay.includes(` ${normalizeTextForExportGrouping(alias)} `)));
+}
+
+function getPokemonFamilyLabel(subgroup) {
+    if (POKEMON_MEGA_FAMILY.has(subgroup)) return 'Pokémon - Mega Evolution';
+    if (POKEMON_MAINLINE_FAMILY.has(subgroup)) return 'Pokémon - Mainline';
+    return 'Pokémon - Specialty';
+}
+
+function classifyTargetExportRow(row) {
+    if (isPokemonTargetRow(row)) {
+        const subgroup = inferPokemonSubgroup(row);
+        return {
+            rawGroup: subgroup,
+            group: getPokemonFamilyLabel(subgroup),
+            type: 'pokemon'
+        };
+    }
+
+    const category = inferTargetCategoryGroup(row);
+    if (category === 'One Piece' || category === 'Magic' || category === 'All Other TCG') {
+        return { rawGroup: category, group: 'Non-Pokémon TCG', type: 'non_pokemon' };
+    }
+    return { rawGroup: category, group: 'Non-Pokémon / Misc', type: 'non_pokemon' };
+}
+
+function sortExportGroups(a, b) {
+    const order = [
+        'Pokémon - Mainline',
+        'Pokémon - Mega Evolution',
+        'Pokémon - Specialty',
+        'Non-Pokémon TCG',
+        'Non-Pokémon / Misc',
+        'All Products'
+    ];
+    const ai = order.indexOf(a.group);
+    const bi = order.indexOf(b.group);
+    if (ai !== -1 || bi !== -1) {
+        if (ai === -1) return 1;
+        if (bi === -1) return -1;
+        if (ai !== bi) return ai - bi;
+    }
+    return a.group.localeCompare(b.group);
+}
+
+function consolidateSmallExportGroups(grouped, minimumGroupSize = 20) {
+    const map = new Map(grouped);
+    const specialty = map.get('Pokémon - Specialty') || [];
+    const mainline = map.get('Pokémon - Mainline') || [];
+    const mega = map.get('Pokémon - Mega Evolution') || [];
+
+    if (specialty.length && specialty.length < minimumGroupSize) {
+        if (mainline.length >= mega.length) {
+            map.set('Pokémon - Mainline', mainline.concat(specialty));
+        } else {
+            map.set('Pokémon - Mega Evolution', mega.concat(specialty));
+        }
+        map.delete('Pokémon - Specialty');
+    }
+
+    const nonPokemonTcg = map.get('Non-Pokémon TCG') || [];
+    const nonPokemonMisc = map.get('Non-Pokémon / Misc') || [];
+    if (nonPokemonTcg.length && nonPokemonTcg.length < minimumGroupSize) {
+        map.set('Non-Pokémon / Misc', nonPokemonMisc.concat(nonPokemonTcg));
+        map.delete('Non-Pokémon TCG');
+    }
+
+    return map;
+}
+
 function getExportGroupLabel(site, row) {
-    const title = String(row?.product_name || '');
-    if (site === 'target' && /pokemon|pok[eé]mon/i.test(title)) return inferPokemonGroup(row);
-    if (site === 'target') return inferTargetCategoryGroup(row);
-    if (site === 'pokemon') return inferPokemonGroup(row);
+    if (site === 'target') return classifyTargetExportRow(row).group;
+    if (site === 'pokemon') return getPokemonFamilyLabel(inferPokemonSubgroup(row));
     return 'All Products';
 }
 
@@ -551,7 +669,7 @@ function buildGroupedExportBatches(site, data, batchSize) {
         .filter((row) => row && row.is_enabled)
         .filter((row) => !(row.metadata && row.metadata.virtual));
 
-    const grouped = new Map();
+    let grouped = new Map();
     for (const row of rows) {
         const price = row.default_max_price === null || row.default_max_price === undefined ? '' : Number(row.default_max_price).toFixed(2).replace(/\.00$/, '.00');
         const line = `${escapeExportField(row.sku)};${escapeExportField(row.product_name)};${price}`;
@@ -560,9 +678,14 @@ function buildGroupedExportBatches(site, data, batchSize) {
         grouped.get(group).push(line);
     }
 
+    if (site === 'target' || site === 'pokemon') {
+        grouped = consolidateSmallExportGroups(grouped, 20);
+    }
+
     const groups = Array.from(grouped.entries())
-        .sort((a, b) => a[0].localeCompare(b[0]))
-        .map(([group, lines]) => ({
+        .map(([group, lines]) => ({ group, lines }))
+        .sort(sortExportGroups)
+        .map(({ group, lines }) => ({
             group,
             total: lines.length,
             batches: chunkLines(lines, batchSize).map((items, index) => ({
