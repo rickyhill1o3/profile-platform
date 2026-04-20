@@ -1275,29 +1275,20 @@ function getCheckoutBannerText(mentionText = '', brandLabel = '') {
 }
 
 const discordWebhookQueues = new Map();
-const discordDeliveryDedupe = new Map();
+const discordDeliveryInFlight = new Set();
 
-function pruneDiscordDeliveryDedupe(now = Date.now()) {
-    for (const [key, expiresAt] of discordDeliveryDedupe.entries()) {
-        if (!Number.isFinite(expiresAt) || expiresAt <= now) {
-            discordDeliveryDedupe.delete(key);
-        }
-    }
+function isDiscordDeliveryInFlight(dedupeKey = '') {
+    return !!dedupeKey && discordDeliveryInFlight.has(String(dedupeKey));
 }
 
-function shouldSkipDiscordDelivery(dedupeKey, windowSeconds = 60) {
-    if (!dedupeKey || !windowSeconds) return false;
-    const now = Date.now();
-    pruneDiscordDeliveryDedupe(now);
-    const expiresAt = discordDeliveryDedupe.get(dedupeKey);
-    if (Number.isFinite(expiresAt) && expiresAt > now) return true;
-    discordDeliveryDedupe.set(dedupeKey, now + (Math.max(1, Number(windowSeconds) || 60) * 1000));
-    return false;
-}
-
-function clearDiscordDeliveryDedupe(dedupeKey) {
+function markDiscordDeliveryInFlight(dedupeKey = '') {
     if (!dedupeKey) return;
-    discordDeliveryDedupe.delete(dedupeKey);
+    discordDeliveryInFlight.add(String(dedupeKey));
+}
+
+function clearDiscordDeliveryInFlight(dedupeKey = '') {
+    if (!dedupeKey) return;
+    discordDeliveryInFlight.delete(String(dedupeKey));
 }
 
 function getDiscordDeliveryDedupeKey(webhookUrl = '', order = null) {
@@ -2113,57 +2104,60 @@ async function sendDiscordWebhookToTarget({
     });
 
     const deliveryDedupeKey = getDiscordDeliveryDedupeKey(trimmedWebhookUrl, order);
-    if (shouldSkipDiscordDelivery(deliveryDedupeKey, 60)) {
-        console.log(`Discord delivery dedupe skipped -> ${trimmedWebhookUrl.slice(0, 40)}...`);
-        return { success: true, queued: false, dedupe_skipped: true, dedupe_window_seconds: 60 };
+    if (isDiscordDeliveryInFlight(deliveryDedupeKey)) {
+        console.log(`Discord delivery in-flight dedupe skipped -> ${trimmedWebhookUrl.slice(0, 40)}...`);
+        return { success: true, queued: false, dedupe_skipped: true, dedupe_reason: 'in_flight' };
     }
 
-    return enqueueDiscordWebhookJob(trimmedWebhookUrl, async () => {
-        for (let attempt = 1; attempt <= 5; attempt++) {
-            console.log(`Discord queue send attempt ${attempt} -> ${trimmedWebhookUrl.slice(0, 40)}...`);
-            const response = await globalThis.fetch(trimmedWebhookUrl, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body
-            });
-            if (response.ok) {
-                console.log(`Discord queue send success on attempt ${attempt}`);
-                return { success: true, attempt, queued: true };
-            }
-            const contentType = response.headers.get('content-type') || '';
-            let bodyText = '';
-            let json = null;
-            if (contentType.includes('application/json')) {
-                json = await response.json().catch(() => null);
-                bodyText = JSON.stringify(json || {});
-            } else {
-                bodyText = await response.text().catch(() => '');
-            }
-            console.error(`Discord queue send response ${response.status} on attempt ${attempt}: ${bodyText}`);
-            if (response.status === 429) {
-                let retryAfterMs = 5000;
-                if (json?.retry_after != null) {
-                    retryAfterMs = Math.ceil(Number(json.retry_after) * 1000);
-                } else {
-                    const retryAfterHeader = response.headers.get('retry-after');
-                    if (retryAfterHeader) retryAfterMs = Math.ceil(Number(retryAfterHeader) * 1000) || retryAfterMs;
+    markDiscordDeliveryInFlight(deliveryDedupeKey);
+    try {
+        return await enqueueDiscordWebhookJob(trimmedWebhookUrl, async () => {
+            for (let attempt = 1; attempt <= 5; attempt++) {
+                console.log(`Discord queue send attempt ${attempt} -> ${trimmedWebhookUrl.slice(0, 40)}...`);
+                const response = await globalThis.fetch(trimmedWebhookUrl, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body
+                });
+                if (response.ok) {
+                    console.log(`Discord queue send success on attempt ${attempt}`);
+                    return { success: true, attempt, queued: true };
                 }
-                console.log(`Discord queue rate limited. Waiting ${retryAfterMs}ms before retry...`);
-                await new Promise((resolve) => setTimeout(resolve, retryAfterMs));
-                continue;
+                const contentType = response.headers.get('content-type') || '';
+                let bodyText = '';
+                let json = null;
+                if (contentType.includes('application/json')) {
+                    json = await response.json().catch(() => null);
+                    bodyText = JSON.stringify(json || {});
+                } else {
+                    bodyText = await response.text().catch(() => '');
+                }
+                console.error(`Discord queue send response ${response.status} on attempt ${attempt}: ${bodyText}`);
+                if (response.status === 429) {
+                    let retryAfterMs = 5000;
+                    if (json?.retry_after != null) {
+                        retryAfterMs = Math.ceil(Number(json.retry_after) * 1000);
+                    } else {
+                        const retryAfterHeader = response.headers.get('retry-after');
+                        if (retryAfterHeader) retryAfterMs = Math.ceil(Number(retryAfterHeader) * 1000) || retryAfterMs;
+                    }
+                    console.log(`Discord queue rate limited. Waiting ${retryAfterMs}ms before retry...`);
+                    await new Promise((resolve) => setTimeout(resolve, retryAfterMs));
+                    continue;
+                }
+                if (response.status === 403 || bodyText.includes('Error 1015') || bodyText.includes('rate limited')) {
+                    const backoffMs = 15000 * attempt;
+                    console.log(`Discord queue Cloudflare/backoff wait ${backoffMs}ms...`);
+                    await new Promise((resolve) => setTimeout(resolve, backoffMs));
+                    continue;
+                }
+                throw new Error(`Discord webhook failed (${response.status}): ${bodyText || response.statusText}`);
             }
-            if (response.status === 403 || bodyText.includes('Error 1015') || bodyText.includes('rate limited')) {
-                const backoffMs = 15000 * attempt;
-                console.log(`Discord queue Cloudflare/backoff wait ${backoffMs}ms...`);
-                await new Promise((resolve) => setTimeout(resolve, backoffMs));
-                continue;
-            }
-            clearDiscordDeliveryDedupe(deliveryDedupeKey);
-            throw new Error(`Discord webhook failed (${response.status}): ${bodyText || response.statusText}`);
-        }
-        clearDiscordDeliveryDedupe(deliveryDedupeKey);
-        throw new Error('Discord webhook failed after maximum retry attempts');
-    });
+            throw new Error('Discord webhook failed after maximum retry attempts');
+        });
+    } finally {
+        clearDiscordDeliveryInFlight(deliveryDedupeKey);
+    }
 }
 
 function classifyCheckoutWebhookType(order) {
