@@ -2087,6 +2087,13 @@ function maskEmail(email = '') {
     return `${maskedName}@${domain}`;
 }
 
+function spoilerDiscordValue(value = '') {
+    const raw = String(value || '').trim();
+    if (!raw || raw === '-') return '-';
+    if (/^\|\|[\s\S]*\|\|$/.test(raw)) return raw;
+    return `||${raw}||`;
+}
+
 
 async function sendDiscordWebhookToTarget({
     webhookUrl,
@@ -2154,19 +2161,20 @@ async function sendDiscordWebhookToTarget({
     }
 
     if (normalized.sku) {
-        embed.fields.push({ name: 'SKU', value: String(normalized.sku), inline: true });
+        embed.fields.push({ name: 'SKU', value: spoilerDiscordValue(normalized.sku), inline: true });
     }
     if (includeSensitive && (normalized.order_number || normalized.external_order_id || order.external_order_id)) {
-        embed.fields.push({ name: 'Order ID', value: String(normalized.order_number || normalized.external_order_id || order.external_order_id), inline: true });
+        embed.fields.push({ name: 'Order ID', value: spoilerDiscordValue(normalized.order_number || normalized.external_order_id || order.external_order_id), inline: true });
     }
     if (fraudStatus) {
         embed.fields.push({ name: 'Fraud Status', value: fraudStatus, inline: true });
     }
     if (includeSensitive && proxyValue) {
-        embed.fields.push({ name: 'Proxy', value: proxyValue, inline: true });
+        embed.fields.push({ name: 'Proxy', value: spoilerDiscordValue(proxyValue), inline: true });
     }
-    if (normalized.profile_name && checkoutType !== 'success') {
-        embed.fields.push({ name: 'Profile', value: String(normalized.profile_name), inline: true });
+    const profileValue = normalized.profile_name || normalized.account_email || userEmail;
+    if (profileValue) {
+        embed.fields.push({ name: 'Profile', value: spoilerDiscordValue(profileValue), inline: true });
     }
     if (normalized.size) {
         embed.fields.push({ name: 'Size', value: normalized.size, inline: true });
@@ -2252,7 +2260,7 @@ function classifyCheckoutWebhookType(order) {
     const description = decodeHtmlEntities(String(embed?.description || '')).toLowerCase();
     const authorName = decodeHtmlEntities(String(embed?.author?.name || '')).toLowerCase();
     const hay = `${title} ${description} ${authorName}`;
-    if (/checkout oos|failed|declined|error|canceled|cancelled|payment failed|out of stock/.test(hay)) return 'error';
+    if (/relogin|required|action required|warning|login required|account locked|account disabled|account verification|captcha|checkout oos|failed|declined|error|canceled|cancelled|payment failed|out of stock/.test(hay)) return 'error';
     if (/successful checkout|success|confirmed|order confirmed/.test(hay)) return 'success';
     return String(order?.status || '').includes('insufficient') ? 'error' : 'success';
 }
