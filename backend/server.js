@@ -700,7 +700,7 @@ async function adjustUserCredits({ userId, delta, reason, note = "", metadata = 
     return nextBalance;
 }
 
-async function getProductCreditCost({ productId = null, site = "", sku = "" }) {
+async function getProductCreditCost({ productId = null, site = "", sku = "", productName = "" }) {
     if (productId) {
         const { data, error } = await supabase
             .from("catalog_products")
@@ -722,6 +722,31 @@ async function getProductCreditCost({ productId = null, site = "", sku = "" }) {
             .maybeSingle();
         if (error) throw new Error(error.message);
         if (data?.id) return { credits: asWholeCredits(data.credit_cost, 0), product: data };
+    }
+
+    const cleanName = decodeHtmlEntities(String(productName || "")).trim();
+    if (site && cleanName) {
+        const tokens = cleanName
+            .toLowerCase()
+            .replace(/[^a-z0-9]+/g, ' ')
+            .split(/\s+/)
+            .filter((token) => token.length >= 4)
+            .slice(0, 5);
+        let query = supabase
+            .from("catalog_products")
+            .select("id, credit_cost, site, sku, product_name")
+            .eq("site", String(site).toLowerCase())
+            .order("created_at", { ascending: false })
+            .limit(25);
+        if (tokens.length) {
+            for (const token of tokens) query = query.ilike("product_name", `%${token}%`);
+        } else {
+            query = query.ilike("product_name", `%${cleanName.slice(0, 24)}%`);
+        }
+        const { data, error } = await query;
+        if (error) throw new Error(error.message);
+        const match = Array.isArray(data) ? data[0] : null;
+        if (match?.id) return { credits: asWholeCredits(match.credit_cost, 0), product: match };
     }
 
     return { credits: 0, product: null };
@@ -766,7 +791,7 @@ async function resolveOrderCreditCost(payload) {
     const productId = payload.product_id || payload.product_id || null;
     const countdownId = payload.countdown_id || null;
 
-    const productMatch = await getProductCreditCost({ productId, site, sku });
+    const productMatch = await getProductCreditCost({ productId, site, sku, productName: payload.product_name || payload.product?.name || '' });
     const countdownMatch = await getCountdownCreditCost({ countdownId, productId: productMatch.product?.id || productId, site, sku });
 
     const explicitCredits = payload.credits_charged !== undefined && payload.credits_charged !== null
@@ -788,7 +813,7 @@ function normalizeFieldLabel(value = "") {
 }
 
 function cleanFieldValue(value = "") {
-    return String(value || "")
+    return decodeHtmlEntities(String(value || ""))
         .replace(/\|\|/g, " ")
         .replace(/\*\*/g, " ")
         .replace(/__+/g, " ")
@@ -875,21 +900,100 @@ function stableExternalOrderId(payload = {}, normalized = {}) {
     return 'wh_' + crypto.createHash('sha256').update(fingerprint).digest('hex').slice(0, 32);
 }
 
+
+function getFirstFieldValueByPrefix(fields = {}, prefix = '') {
+    const wanted = String(prefix || '').trim().toLowerCase();
+    if (!wanted) return '';
+    if (fields[wanted]) return fields[wanted];
+    const keys = Object.keys(fields || {}).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+    for (const key of keys) {
+        if (key === wanted || key.startsWith(`${wanted} `)) return fields[key];
+    }
+    return '';
+}
+
+function countIndexedFields(fields = {}, prefix = '') {
+    const wanted = String(prefix || '').trim().toLowerCase();
+    if (!wanted) return 0;
+    const indexes = new Set();
+    for (const key of Object.keys(fields || {})) {
+        const match = key.match(new RegExp(`^${wanted}\\s+(\\d+)$`, 'i'));
+        if (match) indexes.add(Number(match[1]));
+    }
+    return indexes.size;
+}
+
+function isPokemonCenterPayload(payload = {}, embed = {}, fields = {}) {
+    const hay = [payload.username, embed.title, embed.description, embed.footer?.text, fields.site, payload.site]
+        .filter(Boolean)
+        .join(' ')
+        .toLowerCase();
+    return hay.includes('pokemoncenter') || hay.includes('pokemon center');
+}
+
+function isPokemonCenterModuleEvent(payload = {}) {
+    const { embed, fields } = buildFieldMapFromEmbeds(payload || {});
+    const title = decodeHtmlEntities(String(embed?.title || '')).toLowerCase();
+    const description = decodeHtmlEntities(String(embed?.description || '')).toLowerCase();
+    const site = decodeHtmlEntities(String(fields.site || payload.site || '')).toLowerCase();
+    if (!site.includes('pokemon')) return false;
+    return /module\s+(unlocked|locked)/i.test(`${title} ${description}`);
+}
+
+function isPokemonCenterLimitEvent(payload = {}) {
+    const { embed, fields } = buildFieldMapFromEmbeds(payload || {});
+    const title = decodeHtmlEntities(String(embed?.title || '')).toLowerCase();
+    const description = decodeHtmlEntities(String(embed?.description || '')).toLowerCase();
+    const site = decodeHtmlEntities(String(fields.site || payload.site || '')).toLowerCase();
+    if (!site.includes('pokemon')) return false;
+    return /task\s+limit\s+changed|limit\s+changed|changed\s+from\s+.*\s+to/i.test(`${title} ${description}`);
+}
+
+function isPokemonCenterStatusEvent(payload = {}) {
+    return isPokemonCenterModuleEvent(payload) || isPokemonCenterLimitEvent(payload);
+}
+
+function pokemonStatusEventToMonitorItem(payload = {}) {
+    const { embed, fields } = buildFieldMapFromEmbeds(payload || {});
+    const title = decodeHtmlEntities(String(embed?.title || 'Pokemon Center Notification')).replace(/\*\*/g, '').trim() || 'Pokemon Center Notification';
+    const description = decodeHtmlEntities(String(embed?.description || title)).replace(/\*\*/g, '').trim() || title;
+    const isLimit = isPokemonCenterLimitEvent(payload);
+    return {
+        sku: isLimit ? 'limit-change' : 'module-status',
+        title: description,
+        price: '',
+        url: 'https://www.pokemoncenter.com/',
+        image: String(embed?.thumbnail?.url || embed?.image?.url || '').trim(),
+        site: 'pokemon',
+        category: 'pokemon',
+        stock: null,
+        cartLimit: fields.limit || null,
+        isStatusEvent: true,
+        statusEventType: isLimit ? 'limit_change' : 'module_status'
+    };
+}
+
 function normalizeIncomingOrderPayload(payload = {}) {
     const { embed, fields } = buildFieldMapFromEmbeds(payload);
     const source = inferSourceFromPayload(payload, embed, fields);
     const site = inferSiteFromPayload(payload, embed, fields);
-    const productFieldRaw = payload.product_name || payload.product?.name || fields['product'] || fields['product name'] || embed.description || '';
-    const productLink = extractMarkdownLink(payload.product_url || payload.url || fields['product'] || fields['share link'] || fields['input'] || '');
+    const indexedProductValue = getFirstFieldValueByPrefix(fields, 'product');
+    const indexedPriceValue = getFirstFieldValueByPrefix(fields, 'price');
+    const productFieldRaw = payload.product_name || payload.product?.name || fields['product'] || fields['product name'] || indexedProductValue || embed.description || '';
+    const productLink = extractMarkdownLink(payload.product_url || payload.url || fields['product'] || indexedProductValue || fields['share link'] || fields['input'] || '');
     const orderLink = extractMarkdownLink(fields['order id'] || fields['order number'] || payload.order_number || '');
     const productName = cleanFieldValue(productLink?.text || productFieldRaw || '');
     const orderNumber = cleanFieldValue(orderLink?.text || payload.order_number || fields['order id'] || fields['order number'] || '').replace(/^#/, '');
     const accountEmail = extractEmail(payload.user_email || payload.email || fields['account'] || fields['email'] || '');
     const profileName = cleanFieldValue(payload.profile_name || fields['profile'] || '');
     const sku = cleanFieldValue(payload.sku || payload.product_sku || fields['sku'] || '') || cleanFieldValue(productLink?.url || '').match(/(?:A-|ip\/seort\/|ip\/)(\d{6,})/)?.[1] || '';
+    const indexedProductCount = countIndexedFields(fields, 'product');
     const quantityRaw = payload.quantity ?? fields['quantity'];
-    const quantity = Number.isFinite(Number(quantityRaw)) ? Math.max(1, Math.round(Number(quantityRaw))) : 1;
-    const priceRaw = payload.price ?? fields['price'] ?? fields['product price'];
+    const pokemonCenterPayload = isPokemonCenterPayload(payload, embed, fields);
+    const quantity = pokemonCenterPayload && indexedProductCount > 0
+        ? indexedProductCount
+        : (Number.isFinite(Number(quantityRaw)) ? Math.max(1, Math.round(Number(quantityRaw))) : 1);
+    const priceRaw = payload.price ?? fields['price'] ?? indexedPriceValue ?? fields['product price'];
     const priceMatch = String(priceRaw || '').replace(/[^0-9.]/g, '');
     const price = priceMatch ? Number(priceMatch) : null;
     const productUrl = String(productLink?.url || payload.product_url || payload.url || fields['input'] || fields['share link'] || '').trim();
@@ -1565,6 +1669,49 @@ async function findRecentDuplicateCheckoutLog(fingerprint, windowSeconds = 45) {
     )) || null;
 }
 
+
+async function sendPokemonCenterStatusToMonitorRoutes(payload = {}, { superAdminOnly = false } = {}) {
+    const item = pokemonStatusEventToMonitorItem(payload || {});
+    const results = [];
+    const usedTargets = [];
+    const globalSettings = await getAppSetting('webhook_settings', {});
+    const superRows = await listDiscordWebhookRoutes({ scope: 'super_admin', webhookType: 'monitor' }).catch(() => []);
+    const globalGroups = {};
+    for (const row of superRows) globalGroups[row.category] = { webhook_url: row.webhook_url, ping_mode: row.ping_mode, role_mention: row.role_mention };
+    if (!Object.keys(globalGroups).length) Object.assign(globalGroups, globalSettings?.monitor_groups || {});
+    const superRoute = normalizeMonitorGroupConfig(globalGroups.pokemon);
+    if (String(superRoute.webhook_url || '').trim()) {
+        usedTargets.push({ category: 'pokemon', scope: 'super_admin', user_id: null, webhook_url: String(superRoute.webhook_url).slice(0, 80), ping_mode: superRoute.ping_mode || 'none', role_mention: superRoute.role_mention || '' });
+        try {
+            const sendResult = await sendMonitorDiscordWebhook(superRoute, item);
+            results.push({ sku: item.sku, category: 'pokemon', scope: 'super_admin', user_id: null, success: true, attempt: sendResult?.attempt || 1, ping_mode: sendResult?.ping_mode || 'none', role_mention: sendResult?.role_mention || '' });
+        } catch (err) {
+            results.push({ sku: item.sku, category: 'pokemon', scope: 'super_admin', user_id: null, success: false, error: err.message || String(err) });
+        }
+    } else {
+        results.push({ sku: item.sku, category: 'pokemon', scope: 'super_admin', skipped: 'monitor_webhook_not_configured' });
+    }
+
+    if (!superAdminOnly) {
+        const adminMonitorConfigs = await getAllAdminMonitorGroupConfigs().catch(() => []);
+        const seen = new Set([String(superRoute.webhook_url || '').trim()].filter(Boolean));
+        for (const adminConfig of adminMonitorConfigs) {
+            const route = normalizeMonitorGroupConfig(adminConfig.monitor_groups?.pokemon);
+            const url = String(route.webhook_url || '').trim();
+            if (!url || seen.has(url)) continue;
+            seen.add(url);
+            usedTargets.push({ category: 'pokemon', scope: 'admin', user_id: adminConfig.user_id, webhook_url: url.slice(0, 80), ping_mode: route.ping_mode || 'none', role_mention: route.role_mention || '' });
+            try {
+                const sendResult = await sendMonitorDiscordWebhook(route, item);
+                results.push({ sku: item.sku, category: 'pokemon', scope: 'admin', user_id: adminConfig.user_id, success: true, attempt: sendResult?.attempt || 1, ping_mode: sendResult?.ping_mode || 'none', role_mention: sendResult?.role_mention || '' });
+            } catch (err) {
+                results.push({ sku: item.sku, category: 'pokemon', scope: 'admin', user_id: adminConfig.user_id, success: false, error: err.message || String(err) });
+            }
+        }
+    }
+    return { item, results, usedTargets };
+}
+
 async function sendCheckoutDiscordNotificationsForPayload(payload = {}, matchedUser = null, extra = {}) {
     if (extra?.order && typeof extra.order === 'object') {
         return sendCheckoutDiscordNotifications(extra.order, matchedUser || null);
@@ -2051,7 +2198,7 @@ async function sendMonitorDiscordWebhook(routeConfigOrUrl, item) {
         allowed_mentions: { parse: ['everyone', 'roles'] },
         embeds: [{
             title: decodeHtmlEntities(item.title || item.sku || 'In stock item'),
-            description: 'Item restocked',
+            description: item.isStatusEvent ? 'Pokemon Center status notification' : 'Item restocked',
             url: finalUrl || undefined,
             fields,
             thumbnail: item.image ? { url: item.image } : undefined,
@@ -2255,6 +2402,7 @@ async function sendDiscordWebhookToTarget({
 
 function classifyCheckoutWebhookType(order) {
     const payload = order?.raw_payload || {};
+    if (isPokemonCenterStatusEvent(payload)) return 'error';
     const { embed } = extractEmbedFields(payload);
     const title = decodeHtmlEntities(String(embed?.title || '')).toLowerCase();
     const description = decodeHtmlEntities(String(embed?.description || '')).toLowerCase();
@@ -2809,6 +2957,23 @@ app.post(["/webhooks/orders", "/webhooks/orders/:token"], async (req, res) => {
                     fingerprint
                 })).id;
 
+                if (isPokemonCenterStatusEvent(payload)) {
+                    const superAdminOnly = isPokemonCenterLimitEvent(payload);
+                    const statusResult = await sendPokemonCenterStatusToMonitorRoutes(payload, { superAdminOnly });
+                    const failed = statusResult.results.filter((r) => !r.success && !r.skipped);
+                    await updateWebhookLogEntry(logId, {
+                        type: 'monitor',
+                        status: failed.length ? 'failed' : 'processed',
+                        site: 'pokemon',
+                        product_type: 'pokemon',
+                        product: String(statusResult.item.title || ''),
+                        sku: String(statusResult.item.sku || ''),
+                        error: failed.length ? failed.map((x) => x.error).join(' | ') : '',
+                        parsed_items: [{ title: statusResult.item.title || '', sku: statusResult.item.sku || '', site: 'pokemon', price: '', stock: null, cartLimit: statusResult.item.cartLimit ?? null, url: statusResult.item.url || '', image: statusResult.item.image || '', category: 'pokemon' }],
+                        discord_targets: statusResult.usedTargets
+                    }).catch(() => null);
+                    return;
+                }
                 const matchedUser = await findUserForWebhook(payload).catch(() => null);
                 let resolvedUser = matchedUser?.id ? matchedUser : null;
                 let finalDiscordResults = [];
