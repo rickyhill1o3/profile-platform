@@ -1,13 +1,13 @@
-name: Supabase Nightly Backup PG17
+name: Supabase Backup PG17
 
 on:
+  workflow_dispatch:
   schedule:
     - cron: '15 7 * * *'
-  workflow_dispatch:
 
 jobs:
   backup:
-    name: Create Supabase backup
+    name: Create Supabase backup with PostgreSQL 17
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
@@ -23,16 +23,17 @@ jobs:
           wget -qO- https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo apt-key add -
           sudo apt-get update
           sudo apt-get install -y postgresql-client-17
+          /usr/lib/postgresql/17/bin/pg_dump --version
 
       - name: Prepare backup folder
         run: mkdir -p backups
 
-      - name: Create full compressed pg_dump backup
+      - name: Create full compressed backup
         env:
           DATABASE_URL: ${{ secrets.SUPABASE_DATABASE_URL }}
         run: |
           if [ -z "$DATABASE_URL" ]; then
-            echo "Missing SUPABASE_DATABASE_URL repository secret."
+            echo "Missing SUPABASE_DATABASE_URL secret"
             exit 1
           fi
 
@@ -45,7 +46,7 @@ jobs:
             --no-acl \
             --file="backups/supabase-full-$TS.dump"
 
-      - name: Create readable SQL backup too
+      - name: Create readable SQL backup
         env:
           DATABASE_URL: ${{ secrets.SUPABASE_DATABASE_URL }}
         run: |
