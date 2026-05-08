@@ -1,0 +1,61 @@
+name: Supabase Nightly Backup
+
+on:
+  schedule:
+    # Runs every day at 3:15 AM America/New_York during EDT = 07:15 UTC.
+    # You can change this time later.
+    - cron: '15 7 * * *'
+  workflow_dispatch:
+
+jobs:
+  backup:
+    name: Create Supabase backup
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install PostgreSQL client
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client
+
+      - name: Prepare backup folder
+        run: mkdir -p backups
+
+      - name: Create full compressed pg_dump backup
+        env:
+          DATABASE_URL: ${{ secrets.SUPABASE_DATABASE_URL }}
+        run: |
+          if [ -z "$DATABASE_URL" ]; then
+            echo "Missing SUPABASE_DATABASE_URL repository secret."
+            exit 1
+          fi
+          TS=$(date -u +'%Y-%m-%dT%H-%M-%SZ')
+          pg_dump "$DATABASE_URL" \
+            --format=custom \
+            --compress=9 \
+            --no-owner \
+            --no-acl \
+            --file="backups/supabase-full-$TS.dump"
+
+      - name: Create readable SQL backup too
+        env:
+          DATABASE_URL: ${{ secrets.SUPABASE_DATABASE_URL }}
+        run: |
+          TS=$(date -u +'%Y-%m-%dT%H-%M-%SZ')
+          pg_dump "$DATABASE_URL" \
+            --format=plain \
+            --no-owner \
+            --no-acl \
+            --file="backups/supabase-full-$TS.sql"
+          gzip "backups/supabase-full-$TS.sql"
+
+      - name: Upload backup artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: supabase-backup-${{ github.run_id }}
+          path: backups/*
+          retention-days: 30
