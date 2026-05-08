@@ -1,9 +1,7 @@
-name: Supabase Nightly Backup
+name: Supabase Nightly Backup PG17
 
 on:
   schedule:
-    # Runs every day at 3:15 AM America/New_York during EDT = 07:15 UTC.
-    # You can change this time later.
     - cron: '15 7 * * *'
   workflow_dispatch:
 
@@ -17,10 +15,14 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Install PostgreSQL client
+      - name: Install PostgreSQL 17 client
         run: |
           sudo apt-get update
-          sudo apt-get install -y postgresql-client
+          sudo apt-get install -y wget gnupg lsb-release
+          echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" | sudo tee /etc/apt/sources.list.d/pgdg.list
+          wget -qO- https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo apt-key add -
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client-17
 
       - name: Prepare backup folder
         run: mkdir -p backups
@@ -33,8 +35,10 @@ jobs:
             echo "Missing SUPABASE_DATABASE_URL repository secret."
             exit 1
           fi
+
           TS=$(date -u +'%Y-%m-%dT%H-%M-%SZ')
-          pg_dump "$DATABASE_URL" \
+
+          /usr/lib/postgresql/17/bin/pg_dump "$DATABASE_URL" \
             --format=custom \
             --compress=9 \
             --no-owner \
@@ -46,11 +50,13 @@ jobs:
           DATABASE_URL: ${{ secrets.SUPABASE_DATABASE_URL }}
         run: |
           TS=$(date -u +'%Y-%m-%dT%H-%M-%SZ')
-          pg_dump "$DATABASE_URL" \
+
+          /usr/lib/postgresql/17/bin/pg_dump "$DATABASE_URL" \
             --format=plain \
             --no-owner \
             --no-acl \
             --file="backups/supabase-full-$TS.sql"
+
           gzip "backups/supabase-full-$TS.sql"
 
       - name: Upload backup artifact
