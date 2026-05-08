@@ -1420,6 +1420,311 @@ function enqueueWebhookJob(job) {
     runWebhookJobQueue();
 }
 
+
+// =========================
+// SUPABASE FAILSAFE WEBHOOK QUEUE
+// =========================
+const FAILSAFE_QUEUE_DIR = path.join(__dirname, 'webhook_failover_queue');
+const FAILSAFE_REPLAY_INTERVAL_MS = Number(process.env.WEBHOOK_FAILSAFE_REPLAY_INTERVAL_MS || 60000);
+const FAILSAFE_REPLAY_BATCH_SIZE = Number(process.env.WEBHOOK_FAILSAFE_REPLAY_BATCH_SIZE || 25);
+const FAILSAFE_ALERT_TARGETS_FILE = path.join(FAILSAFE_QUEUE_DIR, 'database_outage_checkout_webhooks.json');
+let outageAlertTargetsCache = [];
+let lastOutageAlertTargetRefreshAt = 0;
+let lastDatabaseOutageAlertAt = 0;
+let lastDatabaseRecoveryAlertAt = 0;
+let databaseWasDown = false;
+let failsafeReplayRunning = false;
+
+function ensureFailsafeQueueDir() {
+    try {
+        fs.mkdirSync(FAILSAFE_QUEUE_DIR, { recursive: true });
+    } catch (err) {
+        console.error('Failed to create webhook failover queue directory:', err);
+    }
+}
+
+function isLikelyDatabaseError(err = {}) {
+    const message = String(err?.message || err || '').toLowerCase();
+    return !!(
+        message.includes('supabase') ||
+        message.includes('database') ||
+        message.includes('postgres') ||
+        message.includes('fetch failed') ||
+        message.includes('network') ||
+        message.includes('timeout') ||
+        message.includes('econn') ||
+        message.includes('etimedout') ||
+        message.includes('enotfound') ||
+        message.includes('terminated') ||
+        message.includes('connection') ||
+        message.includes('pgrst')
+    );
+}
+
+function readDatabaseOutageAlertTargetsCache() {
+    ensureFailsafeQueueDir();
+    try {
+        const raw = fs.readFileSync(FAILSAFE_ALERT_TARGETS_FILE, 'utf8');
+        const parsed = JSON.parse(raw || '[]');
+        if (!Array.isArray(parsed)) return [];
+        return parsed
+            .map((row) => ({
+                scope: String(row.scope || '').trim(),
+                user_id: row.user_id || null,
+                webhook_type: String(row.webhook_type || '').trim(),
+                webhook_url: String(row.webhook_url || '').trim()
+            }))
+            .filter((row) => row.webhook_url);
+    } catch {
+        return [];
+    }
+}
+
+function writeDatabaseOutageAlertTargetsCache(targets = []) {
+    ensureFailsafeQueueDir();
+    const cleaned = [];
+    const seenUrls = new Set();
+    for (const target of Array.isArray(targets) ? targets : []) {
+        const webhookUrl = String(target?.webhook_url || '').trim();
+        if (!webhookUrl || seenUrls.has(webhookUrl)) continue;
+        seenUrls.add(webhookUrl);
+        cleaned.push({
+            scope: String(target.scope || '').trim(),
+            user_id: target.user_id || null,
+            webhook_type: String(target.webhook_type || '').trim(),
+            webhook_url: webhookUrl
+        });
+    }
+    fs.writeFileSync(FAILSAFE_ALERT_TARGETS_FILE, JSON.stringify(cleaned, null, 2));
+    outageAlertTargetsCache = cleaned;
+    lastOutageAlertTargetRefreshAt = Date.now();
+    return cleaned;
+}
+
+async function refreshDatabaseOutageAlertTargets({ force = false } = {}) {
+    const now = Date.now();
+    if (!force && outageAlertTargetsCache.length && now - lastOutageAlertTargetRefreshAt < 5 * 60 * 1000) {
+        return outageAlertTargetsCache;
+    }
+
+    const { data, error } = await supabase
+        .from('discord_webhook_routes')
+        .select('*')
+        .eq('is_active', true)
+        .in('scope', ['super_admin', 'admin'])
+        .in('webhook_type', ['checkout_error', 'checkout_success']);
+
+    if (error) throw new Error(error.message);
+
+    const rows = Array.isArray(data) ? data.map(normalizeDiscordWebhookRouteRow) : [];
+    const byAccount = new Map();
+
+    for (const row of rows) {
+        const webhookUrl = String(row.webhook_url || '').trim();
+        if (!webhookUrl) continue;
+        const key = `${row.scope}:${row.user_id || SUPER_ADMIN_ROUTE_USER_ID}`;
+        const existing = byAccount.get(key);
+        const currentIsError = row.webhook_type === 'checkout_error';
+        const existingIsError = existing?.webhook_type === 'checkout_error';
+
+        // Prefer each account's checkout_error webhook. If it does not exist,
+        // use checkout_success so the outage still reaches that account's checkout channel.
+        if (!existing || (currentIsError && !existingIsError)) {
+            byAccount.set(key, {
+                scope: row.scope,
+                user_id: row.user_id || null,
+                webhook_type: row.webhook_type,
+                webhook_url: webhookUrl
+            });
+        }
+    }
+
+    return writeDatabaseOutageAlertTargetsCache([...byAccount.values()]);
+}
+
+function buildDatabaseStatusAlertPayload(message, { recovered = false } = {}) {
+    return {
+        username: 'The Shore Shack',
+        embeds: [{
+            title: recovered ? '✅ Database Recovered' : '🚨 Database Outage Detected',
+            description: String(message || ''),
+            color: recovered ? 65280 : 16711680,
+            fields: [
+                {
+                    name: 'Status',
+                    value: recovered
+                        ? 'Supabase is responding again. Queued webhooks will replay automatically.'
+                        : 'The website database is temporarily unavailable. Incoming webhooks are being saved to the failover queue.',
+                    inline: false
+                },
+                {
+                    name: 'Action',
+                    value: recovered
+                        ? 'No action needed. Please verify queued checkout/monitor events replayed.'
+                        : 'Customers may have trouble logging in or viewing account data until Supabase recovers.',
+                    inline: false
+                }
+            ],
+            timestamp: new Date().toISOString()
+        }]
+    };
+}
+
+async function sendDatabaseOutageAlert(message, { recovered = false } = {}) {
+    const now = Date.now();
+    const minGapMs = recovered ? 5 * 60 * 1000 : 15 * 60 * 1000;
+    if (recovered) {
+        if (now - lastDatabaseRecoveryAlertAt < minGapMs) return;
+        lastDatabaseRecoveryAlertAt = now;
+    } else {
+        if (now - lastDatabaseOutageAlertAt < minGapMs) return;
+        lastDatabaseOutageAlertAt = now;
+    }
+
+    let targets = outageAlertTargetsCache.length ? outageAlertTargetsCache : readDatabaseOutageAlertTargetsCache();
+
+    // If Supabase is healthy/recovered, refresh the checkout alert target cache before notifying.
+    // If Supabase is down, this will fail and the saved local cache will be used instead.
+    if (recovered || !targets.length) {
+        try {
+            targets = await refreshDatabaseOutageAlertTargets({ force: true });
+        } catch (refreshErr) {
+            targets = targets.length ? targets : readDatabaseOutageAlertTargetsCache();
+            console.warn('Using cached checkout webhook outage targets:', refreshErr.message || refreshErr);
+        }
+    }
+
+    if (!targets.length) {
+        console.warn('Database outage alert skipped because no cached checkout webhook routes are available yet.');
+        return;
+    }
+
+    const payload = buildDatabaseStatusAlertPayload(message, { recovered });
+    const results = [];
+
+    for (const target of targets) {
+        const webhookUrl = String(target.webhook_url || '').trim();
+        if (!webhookUrl) continue;
+        try {
+            const response = await globalThis.fetch(webhookUrl, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+            const text = response.ok ? '' : await response.text().catch(() => '');
+            results.push({ scope: target.scope, user_id: target.user_id, webhook_type: target.webhook_type, success: response.ok, status: response.status, error: text });
+        } catch (alertErr) {
+            results.push({ scope: target.scope, user_id: target.user_id, webhook_type: target.webhook_type, success: false, error: alertErr.message || String(alertErr) });
+        }
+    }
+
+    const failed = results.filter((row) => !row.success);
+    if (failed.length) {
+        console.error('Some database outage checkout alerts failed:', failed);
+    }
+}
+
+async function isSupabaseHealthy() {
+    try {
+        const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error('Supabase health check timeout')), 5000));
+        const check = supabase.from('users').select('id').limit(1);
+        const { error } = await Promise.race([check, timeout]);
+        if (error) throw new Error(error.message);
+        await refreshDatabaseOutageAlertTargets().catch((refreshErr) => console.warn('Could not refresh database outage alert target cache:', refreshErr.message || refreshErr));
+        if (databaseWasDown) {
+            databaseWasDown = false;
+            await sendDatabaseOutageAlert('Supabase is responding again. Webhook failover queue replay will run automatically.', { recovered: true });
+        }
+        return true;
+    } catch (err) {
+        databaseWasDown = true;
+        await sendDatabaseOutageAlert(`Supabase is not responding. Incoming webhooks will be saved to the local failover queue. Error: ${err.message || err}`);
+        return false;
+    }
+}
+
+async function queueWebhookForReplay({ type = 'unknown', token = '', originalUrl = '', payload = {}, reason = '' } = {}) {
+    ensureFailsafeQueueDir();
+    const id = `${Date.now()}-${crypto.randomBytes(8).toString('hex')}`;
+    const row = {
+        id,
+        type,
+        token: String(token || ''),
+        originalUrl: String(originalUrl || ''),
+        payload: payload || {},
+        reason: String(reason || ''),
+        created_at: new Date().toISOString(),
+        attempts: 0,
+        last_error: ''
+    };
+    const file = path.join(FAILSAFE_QUEUE_DIR, `${id}.json`);
+    fs.writeFileSync(file, JSON.stringify(row, null, 2));
+    console.warn(`Webhook saved to failover queue: ${file}`);
+    return row;
+}
+
+function listQueuedWebhookFiles() {
+    ensureFailsafeQueueDir();
+    return fs.readdirSync(FAILSAFE_QUEUE_DIR)
+        .filter((name) => name.endsWith('.json'))
+        .map((name) => path.join(FAILSAFE_QUEUE_DIR, name))
+        .sort();
+}
+
+async function replayQueuedWebhookFile(file) {
+    const raw = fs.readFileSync(file, 'utf8');
+    const job = JSON.parse(raw);
+    const type = String(job.type || '').toLowerCase();
+    const token = encodeURIComponent(String(job.token || ''));
+    const endpoint = type === 'monitor'
+        ? `/webhooks/monitor/${token}`
+        : `/webhooks/orders/${token}`;
+    const url = `http://127.0.0.1:${PORT}${endpoint}`;
+
+    try {
+        const response = await fetch(url, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-Failover-Replay': '1'
+            },
+            body: JSON.stringify(job.payload || {})
+        });
+        if (!response.ok && response.status !== 204) {
+            throw new Error(`Replay POST failed with status ${response.status}`);
+        }
+        fs.unlinkSync(file);
+        console.log(`Replayed queued webhook and removed ${path.basename(file)}`);
+    } catch (err) {
+        job.attempts = Number(job.attempts || 0) + 1;
+        job.last_error = String(err.message || err);
+        job.last_attempt_at = new Date().toISOString();
+        fs.writeFileSync(file, JSON.stringify(job, null, 2));
+        throw err;
+    }
+}
+
+async function replayWebhookFailoverQueue() {
+    if (failsafeReplayRunning) return;
+    failsafeReplayRunning = true;
+    try {
+        const files = listQueuedWebhookFiles().slice(0, FAILSAFE_REPLAY_BATCH_SIZE);
+        if (!files.length) return;
+        const healthy = await isSupabaseHealthy();
+        if (!healthy) return;
+        for (const file of files) {
+            try {
+                await replayQueuedWebhookFile(file);
+            } catch (err) {
+                console.error('Queued webhook replay failed:', err.message || err);
+                break;
+            }
+        }
+    } finally {
+        failsafeReplayRunning = false;
+    }
+}
+
 function cleanupInboundWebhookDedupe(now = Date.now()) {
     for (const [key, expiresAt] of inboundWebhookRecent.entries()) {
         if (Number(expiresAt || 0) <= now) inboundWebhookRecent.delete(key);
@@ -2717,6 +3022,17 @@ app.post("/billing/create-checkout-session", auth, async (req, res) => {
     }
 });
 
+
+app.get('/api/health/database', async (req, res) => {
+    const healthy = await isSupabaseHealthy();
+    const queued = listQueuedWebhookFiles().length;
+    res.status(healthy ? 200 : 503).json({
+        ok: healthy,
+        database: healthy ? 'online' : 'offline',
+        queued_webhooks: queued
+    });
+});
+
 async function validateInboundWebhookToken(req) {
     const active = await getActiveInboundWebhook();
     if (!active?.token) return true;
@@ -2771,6 +3087,10 @@ app.post(["/webhooks/monitor", "/webhooks/monitor/:token"], async (req, res) => 
         const processMonitorWebhook = async () => {
             let logId = null;
             try {
+                if (!(await isSupabaseHealthy())) {
+                    await queueWebhookForReplay({ type: 'monitor', token: String(req.params.token || req.query.token || ''), originalUrl: req.originalUrl, payload, reason: 'Supabase unavailable before monitor processing' });
+                    return;
+                }
                 logId = (await appendWebhookLogEntry({
                     type: 'monitor',
                     status: 'received',
@@ -2946,6 +3266,10 @@ app.post(["/webhooks/orders", "/webhooks/orders/:token"], async (req, res) => {
             let logId = null;
             let checkoutDiscordSent = false;
             try {
+                if (!(await isSupabaseHealthy())) {
+                    await queueWebhookForReplay({ type: 'checkout', token: String(req.params.token || req.query.token || ''), originalUrl: req.originalUrl, payload, reason: 'Supabase unavailable before checkout processing' });
+                    return;
+                }
                 logId = (await appendWebhookLogEntry({
                     type: 'checkout',
                     status: 'received',
@@ -3065,6 +3389,10 @@ app.post(["/webhooks/orders", "/webhooks/orders/:token"], async (req, res) => {
         return res.status(204).end();
     } catch (err) {
         console.error('Inbound webhook setup error:', err);
+        if (isLikelyDatabaseError(err)) {
+            await queueWebhookForReplay({ type: 'checkout', token: String(req.params.token || req.query.token || ''), originalUrl: req.originalUrl, payload, reason: err.message || String(err) }).catch((queueErr) => console.error('Failed to queue checkout webhook after setup error:', queueErr));
+            if (!res.headersSent) return res.status(204).end();
+        }
         if (!res.headersSent) return res.status(500).json({ error: err.message });
     }
 });
@@ -4967,6 +5295,15 @@ shopRoutes = registerShopRoutes({
     SUPER_ADMIN_EMAIL,
     validateDiscountCode
 });
+
+
+ensureFailsafeQueueDir();
+setInterval(() => {
+    replayWebhookFailoverQueue().catch((err) => console.error('Failover queue replay interval failed:', err));
+}, FAILSAFE_REPLAY_INTERVAL_MS);
+setTimeout(() => {
+    replayWebhookFailoverQueue().catch((err) => console.error('Initial failover queue replay failed:', err));
+}, 15000);
 
 const PORT = process.env.PORT || 3000;
 
