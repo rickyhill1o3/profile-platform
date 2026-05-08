@@ -1,0 +1,60 @@
+name: Supabase Backup PG17 Docker
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '15 7 * * *'
+
+jobs:
+  backup:
+    name: Create Supabase backup with PostgreSQL 17 Docker
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Prepare backup folder
+        run: mkdir -p backups
+
+      - name: Create full compressed backup
+        env:
+          DATABASE_URL: ${{ secrets.SUPABASE_DATABASE_URL }}
+        run: |
+          if [ -z "$DATABASE_URL" ]; then
+            echo "Missing SUPABASE_DATABASE_URL secret"
+            exit 1
+          fi
+
+          TS=$(date -u +'%Y-%m-%dT%H-%M-%SZ')
+
+          docker run --rm \
+            -e DATABASE_URL="$DATABASE_URL" \
+            -v "$PWD/backups:/backups" \
+            postgres:17 \
+            bash -lc 'pg_dump "$DATABASE_URL" --format=custom --compress=9 --no-owner --no-acl --file="/backups/supabase-full-'"$TS"'.dump"'
+
+      - name: Create readable SQL backup
+        env:
+          DATABASE_URL: ${{ secrets.SUPABASE_DATABASE_URL }}
+        run: |
+          if [ -z "$DATABASE_URL" ]; then
+            echo "Missing SUPABASE_DATABASE_URL secret"
+            exit 1
+          fi
+
+          TS=$(date -u +'%Y-%m-%dT%H-%M-%SZ')
+
+          docker run --rm \
+            -e DATABASE_URL="$DATABASE_URL" \
+            -v "$PWD/backups:/backups" \
+            postgres:17 \
+            bash -lc 'pg_dump "$DATABASE_URL" --format=plain --no-owner --no-acl --file="/backups/supabase-full-'"$TS"'.sql" && gzip "/backups/supabase-full-'"$TS"'.sql"'
+
+      - name: Upload backup artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: supabase-backup-${{ github.run_id }}
+          path: backups/*
+          retention-days: 30
