@@ -2502,6 +2502,230 @@ async function loadStoreProductPanels() {
 }
 
 
+
+function formatTargetCheckoutSkuList(items = []) {
+    return (Array.isArray(items) ? items : []).map((item) => {
+        const sku = String(item.sku || "").trim();
+        const name = String(item.name || "").trim();
+        const price = item.price === null || item.price === undefined ? "" : String(item.price);
+        return `${sku};${name};${price}`;
+    }).join("\n");
+}
+
+function parseTargetCheckoutListLineCount(value = "") {
+    return String(value || "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean).length;
+}
+
+function renderTargetCheckoutListCard(list, options = {}) {
+    const items = Array.isArray(list.items) ? list.items : [];
+    const checked = options.selected ? "checked" : "";
+    const selectable = options.selectable !== false;
+    const controls = selectable
+        ? `<label class="checkbox-inline"><input type="checkbox" data-target-checkout-list-select="${escapeHTML(list.id)}" ${checked} /><span>Select this list</span></label>`
+        : "";
+
+    return `
+        <article class="target-checkout-list-card">
+            <div class="target-checkout-list-card__header">
+                <div>
+                    <h3>${escapeHTML(list.title || "Untitled List")}</h3>
+                    <p class="subtle-text">${items.length} SKU${items.length === 1 ? "" : "s"}${items.length >= 29 ? " • Full 29 SKU list" : ""}</p>
+                </div>
+                ${controls}
+            </div>
+            <div class="target-checkout-sku-scroll">
+                <table class="mini-table">
+                    <thead><tr><th>SKU</th><th>Product</th><th>Price</th></tr></thead>
+                    <tbody>
+                        ${items.map((item) => `
+                            <tr>
+                                <td>${escapeHTML(item.sku || "-")}</td>
+                                <td>${escapeHTML(item.name || "-")}</td>
+                                <td>${escapeHTML(formatMoney(item.price || 0))}</td>
+                            </tr>
+                        `).join("")}
+                    </tbody>
+                </table>
+            </div>
+        </article>
+    `;
+}
+
+async function loadTargetCheckoutListsForUser() {
+    const panel = document.getElementById("targetCheckoutListsUserPanel");
+    if (!panel) return;
+
+    const message = document.getElementById("targetCheckoutListSelectionMessage");
+    panel.innerHTML = '<div class="subtle-text">Loading checkout lists...</div>';
+
+    try {
+        const data = await authJSON(API + "/target-checkout-lists");
+        const lists = Array.isArray(data.lists) ? data.lists : [];
+        const selected = new Set(Array.isArray(data.selected_list_ids) ? data.selected_list_ids.map(String) : []);
+
+        if (!lists.length) {
+            panel.innerHTML = '<div class="empty-card"><p>No active Target checkout lists have been posted yet.</p></div>';
+            return;
+        }
+
+        panel.innerHTML = lists.map((list) => renderTargetCheckoutListCard(list, {
+            selected: selected.has(String(list.id)),
+            selectable: true
+        })).join("");
+
+        const saveButton = document.getElementById("saveTargetCheckoutListSelections");
+        if (saveButton && !saveButton.dataset.bound) {
+            saveButton.dataset.bound = "1";
+            saveButton.addEventListener("click", async () => {
+                const selectedIds = Array.from(document.querySelectorAll("[data-target-checkout-list-select]:checked"))
+                    .map((input) => input.dataset.targetCheckoutListSelect)
+                    .filter(Boolean);
+                saveButton.disabled = true;
+                if (message) message.textContent = "Saving selected Target lists...";
+                try {
+                    await authJSON(API + "/target-checkout-lists/selections", {
+                        method: "POST",
+                        body: JSON.stringify({ selected_list_ids: selectedIds })
+                    });
+                    if (message) message.textContent = `Saved ${selectedIds.length} selected Target checkout list${selectedIds.length === 1 ? "" : "s"}.`;
+                } catch (err) {
+                    if (message) message.textContent = err.message || "Could not save selected lists.";
+                } finally {
+                    saveButton.disabled = false;
+                }
+            });
+        }
+    } catch (err) {
+        panel.innerHTML = `<div class="empty-card"><p>${escapeHTML(err.message || "Could not load Target checkout lists.")}</p></div>`;
+    }
+}
+
+function clearTargetCheckoutListAdminForm() {
+    const id = document.getElementById("targetCheckoutListId");
+    const title = document.getElementById("targetCheckoutListTitle");
+    const skuList = document.getElementById("targetCheckoutSkuList");
+    if (id) id.value = "";
+    if (title) title.value = "";
+    if (skuList) skuList.value = "";
+}
+
+async function loadTargetCheckoutListsAdmin() {
+    const listEl = document.getElementById("targetCheckoutListsAdminList");
+    if (!listEl) return;
+
+    listEl.innerHTML = '<div class="subtle-text">Loading Target checkout lists...</div>';
+
+    try {
+        const data = await authJSON(API + "/admin/target-checkout-lists");
+        const lists = Array.isArray(data.lists) ? data.lists : [];
+
+        if (!lists.length) {
+            listEl.innerHTML = '<div class="empty-card"><p>No Target checkout lists have been created yet.</p></div>';
+            return;
+        }
+
+        listEl.innerHTML = lists.map((list) => `
+            <section class="target-checkout-admin-list" data-target-checkout-list="${escapeHTML(list.id)}">
+                <div class="target-checkout-list-card__header">
+                    <div>
+                        <h3>${escapeHTML(list.title || "Untitled List")}</h3>
+                        <p class="subtle-text">${Array.isArray(list.items) ? list.items.length : 0} SKU${Array.isArray(list.items) && list.items.length === 1 ? "" : "s"} • Updated ${escapeHTML(formatDateTime(list.updated_at))}</p>
+                    </div>
+                    <div class="panel-actions">
+                        <button class="btn" type="button" data-edit-target-checkout-list="${escapeHTML(list.id)}">Edit</button>
+                        <button class="btn btn-danger" type="button" data-delete-target-checkout-list="${escapeHTML(list.id)}">Delete</button>
+                    </div>
+                </div>
+                <pre class="sku-list-preview">${escapeHTML(formatTargetCheckoutSkuList(list.items))}</pre>
+            </section>
+        `).join("");
+
+        listEl.querySelectorAll("[data-edit-target-checkout-list]").forEach((button) => {
+            button.addEventListener("click", () => {
+                const list = lists.find((entry) => String(entry.id) === String(button.dataset.editTargetCheckoutList));
+                if (!list) return;
+                document.getElementById("targetCheckoutListId").value = list.id;
+                document.getElementById("targetCheckoutListTitle").value = list.title || "";
+                document.getElementById("targetCheckoutSkuList").value = formatTargetCheckoutSkuList(list.items);
+                document.getElementById("targetCheckoutListTitle").scrollIntoView({ behavior: "smooth", block: "center" });
+            });
+        });
+
+        listEl.querySelectorAll("[data-delete-target-checkout-list]").forEach((button) => {
+            button.addEventListener("click", async () => {
+                if (!confirm("Delete this Target checkout list?")) return;
+                try {
+                    await authJSON(API + "/admin/target-checkout-lists/" + encodeURIComponent(button.dataset.deleteTargetCheckoutList), {
+                        method: "DELETE"
+                    });
+                    await loadTargetCheckoutListsAdmin();
+                } catch (err) {
+                    const msg = document.getElementById("targetCheckoutListMessage");
+                    if (msg) msg.textContent = err.message || "Could not delete list.";
+                }
+            });
+        });
+    } catch (err) {
+        listEl.innerHTML = `<div class="empty-card"><p>${escapeHTML(err.message || "Could not load Target checkout lists.")}</p></div>`;
+    }
+}
+
+function initTargetCheckoutListAdmin() {
+    const form = document.getElementById("targetCheckoutListForm");
+    if (!form || form.dataset.bound) return;
+
+    const message = document.getElementById("targetCheckoutListMessage");
+    const clearButton = document.getElementById("clearTargetCheckoutListForm");
+
+    form.dataset.bound = "1";
+    form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+
+        const id = document.getElementById("targetCheckoutListId").value.trim();
+        const title = document.getElementById("targetCheckoutListTitle").value.trim();
+        const skuList = document.getElementById("targetCheckoutSkuList").value.trim();
+        const count = parseTargetCheckoutListLineCount(skuList);
+
+        if (!title) {
+            if (message) message.textContent = "List title is required.";
+            return;
+        }
+        if (!count) {
+            if (message) message.textContent = "Add at least one SKU line.";
+            return;
+        }
+        if (count > 29) {
+            if (message) message.textContent = "Target checkout lists can only contain up to 29 SKUs.";
+            return;
+        }
+
+        const submit = form.querySelector('button[type="submit"]');
+        if (submit) submit.disabled = true;
+        if (message) message.textContent = "Saving Target checkout list...";
+
+        try {
+            await authJSON(API + "/admin/target-checkout-lists", {
+                method: "POST",
+                body: JSON.stringify({ id: id || undefined, title, sku_list: skuList })
+            });
+            if (message) message.textContent = "Target checkout list saved.";
+            clearTargetCheckoutListAdminForm();
+            await loadTargetCheckoutListsAdmin();
+        } catch (err) {
+            if (message) message.textContent = err.message || "Could not save checkout list.";
+        } finally {
+            if (submit) submit.disabled = false;
+        }
+    });
+
+    if (clearButton) {
+        clearButton.addEventListener("click", clearTargetCheckoutListAdminForm);
+    }
+
+    loadTargetCheckoutListsAdmin();
+}
+
+
 function initUserDashboardNavigation() {
     const buttons = Array.from(document.querySelectorAll('[data-user-nav]'));
     const panes = Array.from(document.querySelectorAll('[data-user-pane]'));
@@ -2708,6 +2932,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         initUserDashboardNavigation();
         await loadProfiles();
         try { await loadStoreProductPanels(); } catch (err) { console.error("Store products failed:", err); }
+        try { await loadTargetCheckoutListsForUser(); } catch (err) { console.error("Target checkout lists failed:", err); }
         try { await loadCreditsBalance(); } catch (_) { }
         try { await loadUserActivity(); } catch (_) { }
     }
@@ -2729,6 +2954,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         try { updateExportCount(); } catch (_) { }
         try { await initCountdownManager(); } catch (_) { }
         try { await initCatalogTools(); } catch (_) { }
+        try { initTargetCheckoutListAdmin(); } catch (_) { }
         try { await loadCreditsAdminPane(); } catch (_) { }
         try { await loadWebhookSettings(); } catch (_) { }
     }

@@ -40,6 +40,7 @@
         <p class="eyebrow">Admin Navigation</p>
         <button class="admin-nav-button is-active" type="button" data-admin-nav="invites">Invites</button>
         <button class="admin-nav-button" type="button" data-admin-nav="countdowns">Countdowns + Catalog</button>
+        <button class="admin-nav-button" type="button" data-admin-nav="target-lists">Target Checkout Lists</button>
         <button class="admin-nav-button" type="button" data-admin-nav="exports">Exports</button>
         <button class="admin-nav-button" type="button" data-admin-nav="selections">User Product Selections</button>
         <button class="admin-nav-button" type="button" data-admin-nav="users">Current Users</button>
@@ -300,6 +301,46 @@
             </div>
           </section>
         </section>
+
+        
+        <section class="admin-pane" data-admin-pane="target-lists">
+          <section class="panel">
+            <div class="panel-header">
+              <div>
+                <h2>Target Checkout Lists</h2>
+                <p class="subtle-text">Create active Target checkout lists that users can choose from. Each list supports up to 29 SKUs in <code>sku;name;price</code> format. The SKU is matched to the website catalog name; your pasted price is used.</p>
+              </div>
+            </div>
+            <form id="targetCheckoutListForm" class="form-grid">
+              <input type="hidden" id="targetCheckoutListId" />
+              <div class="field field--full">
+                <label for="targetCheckoutListTitle">List Title</label>
+                <input class="input" id="targetCheckoutListTitle" placeholder="Needoh, Checkout, Electronics..." />
+              </div>
+              <div class="field field--full">
+                <label for="targetCheckoutSkuList">SKU List</label>
+                <textarea class="input" id="targetCheckoutSkuList" rows="10" placeholder="94619824;NeeDoh Nice Cube Glitter and Glow;$5.99&#10;94856729;NeeDoh Teenie Funky Pups - 3pk;$5.99"></textarea>
+                <div class="subtle-text">One item per line. Maximum 29 lines per checkout list. Product names are corrected from the website catalog by SKU when available.</div>
+              </div>
+              <div class="field field--full panel-actions">
+                <button class="btn btn-primary" type="submit">Save Checkout List</button>
+                <button class="btn" type="button" id="clearTargetCheckoutListForm">Clear Form</button>
+              </div>
+            </form>
+            <div id="targetCheckoutListMessage" class="subtle-text"></div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-header">
+              <div>
+                <h2>Current Target Lists</h2>
+                <p class="subtle-text">Users can select one or more of these lists from the Target tab.</p>
+              </div>
+            </div>
+            <div id="targetCheckoutListsAdminList" class="stack-list"></div>
+          </section>
+        </section>
+
 
         <section class="admin-pane" data-admin-pane="exports">
           <section class="panel">
