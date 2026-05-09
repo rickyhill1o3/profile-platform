@@ -37,6 +37,7 @@
       <aside class="admin-sidebar panel">
         <p class="eyebrow">Dashboard Navigation</p>
         <button class="admin-nav-button is-active" type="button" data-user-nav="profiles">Profiles</button>
+        <button class="admin-nav-button" type="button" data-user-nav="raffle">Raffle Builder</button>
         <button class="admin-nav-button" type="button" data-user-nav="selections">Products + Countdowns</button>
         <button class="admin-nav-button" type="button" data-user-nav="credits">Buy Credits</button>
         <button class="admin-nav-button" type="button" data-user-nav="history">Order History</button>
@@ -78,26 +79,39 @@
               </div>
               <div id="profileImportMessage" class="subtle-text"></div>
             </div>
+          </section>
+        </section>
 
-            <div class="banner banner-soft" style="margin-top:16px;">
-              <strong>Raffle profile builder</strong>
-              <p class="subtle-text">Paste emails separated by semicolons, commas, spaces, or new lines. The builder creates raffle profiles with the ZIP you provide and generated profile details. Payment fields use invalid placeholder card-style numbers.</p>
-              <div class="form-grid">
-                <div class="field field--full">
-                  <label for="raffleBuilderEmails">Raffle Emails</label>
-                  <textarea id="raffleBuilderEmails" class="input" rows="4" placeholder="email1@example.com;email2@example.com;email3@example.com"></textarea>
-                </div>
-                <div class="field">
-                  <label for="raffleBuilderZip">ZIP Code</label>
-                  <input id="raffleBuilderZip" class="input" placeholder="27909" />
-                </div>
-                <div class="field field-actions">
-                  <label>&nbsp;</label>
-                  <button class="btn btn-primary" id="raffleBuilderButton" type="button">Build Raffle Profiles</button>
-                </div>
+
+        <section class="admin-pane" data-user-pane="raffle">
+          <section class="panel banner banner-soft">
+            <strong>Raffle profile builder</strong>
+            <p class="subtle-text">Paste emails separated by semicolons, commas, spaces, or new lines. The builder creates unlimited raffle profiles with the ZIP you provide and generated profile details. Payment fields use invalid placeholder card-style numbers.</p>
+            <div class="form-grid">
+              <div class="field field--full">
+                <label for="raffleBuilderEmails">Raffle Emails</label>
+                <textarea id="raffleBuilderEmails" class="input" rows="5" placeholder="email1@example.com;email2@example.com;email3@example.com"></textarea>
               </div>
-              <div id="raffleBuilderMessage" class="subtle-text"></div>
+              <div class="field">
+                <label for="raffleBuilderZip">ZIP Code</label>
+                <input id="raffleBuilderZip" class="input" placeholder="27909" />
+              </div>
+              <div class="field field-actions">
+                <label>&nbsp;</label>
+                <button class="btn btn-primary" id="raffleBuilderButton" type="button">Build Raffle Profiles</button>
+              </div>
             </div>
+            <div id="raffleBuilderMessage" class="subtle-text"></div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-header">
+              <div>
+                <h2>Raffle Profiles</h2>
+                <p class="subtle-text">All bulk-created raffle entries are shown here separately from checkout profiles.</p>
+              </div>
+            </div>
+            <div id="raffleProfilesPanel" class="profile-tab-panel"></div>
           </section>
         </section>
 

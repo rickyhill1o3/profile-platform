@@ -273,7 +273,8 @@ if (signupForm) {
 
 async function loadProfiles() {
     const dashboardEl = document.getElementById("dashboard");
-    if (!dashboardEl) return;
+    const rafflePanel = document.getElementById("raffleProfilesPanel");
+    if (!dashboardEl && !rafflePanel) return;
 
     let user = currentUser();
     const adminButton = document.getElementById("adminPanelButton");
@@ -299,14 +300,17 @@ async function loadProfiles() {
         const profiles = await res.json();
 
         if (!Array.isArray(profiles)) {
-            dashboardEl.innerHTML = `${profiles.error || "Could not load profiles."}`;
+            const msg = `${profiles.error || "Could not load profiles."}`;
+            if (dashboardEl) dashboardEl.innerHTML = msg;
+            if (rafflePanel) rafflePanel.innerHTML = `<div class="empty-card"><p>${escapeHTML(msg)}</p></div>`;
             return;
         }
 
         allDashboardProfiles = profiles;
         const groups = { general: [], walmart: [], target: [], amazon: [], raffle: [] };
         profiles.forEach((p) => {
-            if (groups[p.account_type]) groups[p.account_type].push(p);
+            const key = String(p.account_type || "general").toLowerCase();
+            if (groups[key]) groups[key].push(p);
         });
 
         const setStat = (id, value) => {
@@ -336,9 +340,8 @@ async function loadProfiles() {
             raffle: "Bulk-built raffle entries. Payment fields use invalid placeholder card-style numbers unless edited manually."
         };
 
-        let html = "";
-        Object.keys(groups).forEach((groupKey) => {
-            const rawItems = groups[groupKey];
+        const renderGroup = (groupKey) => {
+            const rawItems = groups[groupKey] || [];
             const filterValue = String(profileGroupFilters[groupKey] || '').trim().toLowerCase();
             const items = filterValue
                 ? rawItems.filter((p) => {
@@ -350,7 +353,7 @@ async function loadProfiles() {
                 : rawItems;
             const selectedCount = rawItems.filter((p) => selectedProfileIds.has(String(p.id))).length;
 
-            html += `
+            let html = `
                 <section class="profile-group-section">
                     <div class="profile-group-header">
                         <div>
@@ -359,7 +362,7 @@ async function loadProfiles() {
                         </div>
                         <span class="badge">${rawItems.length} saved</span>
                     </div>
-                    <div class="toolbar-row" style="margin:12px 0; align-items:center;">
+                    <div class="toolbar-row profile-group-toolbar">
                         <input class="input" type="search" placeholder="Search ${labels[groupKey].toLowerCase()}" value="${escapeHTML(profileGroupFilters[groupKey] || '')}" data-profile-search="${groupKey}" />
                         <button class="btn" type="button" data-profile-select-visible="${groupKey}">Select Visible</button>
                         <button class="btn btn-danger" type="button" data-profile-delete-group="${groupKey}" ${selectedCount ? '' : 'disabled'}>Delete Selected (${selectedCount})</button>
@@ -377,7 +380,7 @@ async function loadProfiles() {
                     </div>
                 `;
             } else {
-                html += `<div class="profile-card-grid">`;
+                html += `<div class="profile-card-scroll"><div class="profile-card-grid profile-card-grid--compact">`;
                 items.forEach((p) => {
                     const address = p.addresses?.[0] || {};
                     const payment = p.payments?.[0] || {};
@@ -389,11 +392,11 @@ async function loadProfiles() {
                         <article class="profile-card-modern">
                             <div class="profile-card-top">
                                 <label class="checkbox-inline"><input type="checkbox" data-profile-select="${p.id}" ${checked} /><span>Select</span></label>
-                                <span class="badge">${p.account_type}</span>
+                                <span class="badge">${escapeHTML(p.account_type || groupKey)}</span>
                             </div>
                             <div class="profile-card-top">
                                 <div>
-                                    <h4>${escapeHTML(p.profile_name)}</h4>
+                                    <h4>${escapeHTML(p.profile_name || "Unnamed Profile")}</h4>
                                     <div class="subtle-text">${escapeHTML(city)}${city && state ? ", " : ""}${escapeHTML(state || "No location set")}</div>
                                 </div>
                             </div>
@@ -409,12 +412,50 @@ async function loadProfiles() {
                         </article>
                     `;
                 });
-                html += `</div>`;
+                html += `</div></div>`;
             }
             html += `</section>`;
-        });
+            return html;
+        };
 
-        dashboardEl.innerHTML = html;
+        if (dashboardEl) {
+            let html = `
+                <div class="panel-header">
+                  <div>
+                    <h2>Your Profiles</h2>
+                    <p class="subtle-text">Profiles are grouped by store. Each group is compact and scrollable so large account lists do not take over the dashboard.</p>
+                  </div>
+                  <div class="panel-actions">
+                    <button class="btn btn-primary" onclick="location='profile.html'">Add Profile</button>
+                  </div>
+                </div>
+                <div class="banner banner-soft" style="margin-top:16px;">
+                  <strong>Import checkout profiles</strong>
+                  <p class="subtle-text">Upload a Refract / Prism JSON export to add multiple profiles at once.</p>
+                  <div class="toolbar-row">
+                    <select id="profileImportType" class="input">
+                      <option value="walmart">Walmart</option>
+                      <option value="target">Target</option>
+                      <option value="amazon">Amazon</option>
+                      <option value="general">General</option>
+                      <option value="raffle">Raffle</option>
+                    </select>
+                    <input id="profileImportFile" class="input" type="file" accept="application/json,.json" />
+                    <button class="btn btn-primary" id="profileImportButton" type="button">Import Profiles</button>
+                  </div>
+                  <div id="profileImportMessage" class="subtle-text"></div>
+                </div>
+            `;
+            ['general', 'walmart', 'target', 'amazon'].forEach((groupKey) => {
+                html += renderGroup(groupKey);
+            });
+            dashboardEl.innerHTML = html;
+        }
+
+        if (rafflePanel) {
+            rafflePanel.innerHTML = renderGroup('raffle');
+        }
+
         bindProfileDashboardControls();
         bindProfileImportControls();
         if (typeof bindRaffleBuilderControls === "function") {
@@ -422,7 +463,9 @@ async function loadProfiles() {
         }
     } catch (err) {
         console.error("Profile dashboard load failed:", err);
-        dashboardEl.innerHTML = `<p>${escapeHTML(err?.message || "Could not connect to the server.")}</p>`;
+        const msg = escapeHTML(err?.message || "Could not connect to the server.");
+        if (dashboardEl) dashboardEl.innerHTML = `<p>${msg}</p>`;
+        if (rafflePanel) rafflePanel.innerHTML = `<div class="empty-card"><p>${msg}</p></div>`;
     }
 }
 
