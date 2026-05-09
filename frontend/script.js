@@ -9,6 +9,7 @@ const PAGE_SIZE = 10;
 
 
 let profileImportBound = false;
+let raffleBuilderBound = false;
 let allDashboardProfiles = [];
 let profileGroupFilters = { general: '', walmart: '', target: '', amazon: '', raffle: '' };
 let selectedProfileIds = new Set();
@@ -416,9 +417,12 @@ async function loadProfiles() {
         dashboardEl.innerHTML = html;
         bindProfileDashboardControls();
         bindProfileImportControls();
-        bindRaffleBuilderControls();
-    } catch {
-        dashboardEl.innerHTML = `<p>Could not connect to the server.</p>`;
+        if (typeof bindRaffleBuilderControls === "function") {
+            bindRaffleBuilderControls();
+        }
+    } catch (err) {
+        console.error("Profile dashboard load failed:", err);
+        dashboardEl.innerHTML = `<p>${escapeHTML(err?.message || "Could not connect to the server.")}</p>`;
     }
 }
 
@@ -471,6 +475,80 @@ function bindProfileDashboardControls() {
         });
     });
 }
+
+
+function bindRaffleBuilderControls() {
+    if (raffleBuilderBound) return;
+
+    const button = document.getElementById("raffleBuilderButton");
+    const emailsInput = document.getElementById("raffleBuilderEmails");
+    const zipInput = document.getElementById("raffleBuilderZip");
+    const message = document.getElementById("raffleBuilderMessage");
+
+    if (!button || !emailsInput || !zipInput || !message) return;
+
+    raffleBuilderBound = true;
+
+    button.addEventListener("click", async () => {
+        message.textContent = "";
+        message.className = "form-help";
+
+        const emails = emailsInput.value.trim();
+        const zip = zipInput.value.trim();
+
+        if (!emails) {
+            message.textContent = "Add at least one email.";
+            return;
+        }
+
+        if (!/^\d{5}(-\d{4})?$/.test(zip)) {
+            message.textContent = "Enter a valid 5-digit ZIP code.";
+            return;
+        }
+
+        button.disabled = true;
+        const originalText = button.textContent;
+        button.textContent = "Building...";
+
+        try {
+            const res = await fetch(API + "/profiles/raffle-builder", {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    Authorization: "Bearer " + token()
+                },
+                body: JSON.stringify({ emails, zip })
+            });
+
+            let data = {};
+            try {
+                data = await res.json();
+            } catch (_) {
+                data = {};
+            }
+
+            if (!res.ok || data.error) {
+                throw new Error(data.error || "Could not build raffle profiles.");
+            }
+
+            const created = Number(data.created_count || data.created?.length || 0);
+            const skipped = Number(data.skipped_count || data.skipped?.length || 0);
+            const errors = Number(data.error_count || data.errors?.length || 0);
+
+            message.textContent = `Built ${created} raffle profile${created === 1 ? "" : "s"}. Skipped ${skipped}. Errors ${errors}.`;
+            emailsInput.value = "";
+
+            raffleBuilderBound = false;
+            await loadProfiles();
+        } catch (err) {
+            message.textContent = err.message || "Could not build raffle profiles.";
+        } finally {
+            button.disabled = false;
+            button.textContent = originalText || "Build Raffle Profiles";
+        }
+    });
+}
+
 
 function bindProfileImportControls() {
     if (profileImportBound) return;
