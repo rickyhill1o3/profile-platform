@@ -1,58 +1,58 @@
 
 // ===== BOXLUNCH URL HELPERS =====
 function slugifyBoxLunchTitle(title = "") {
-    return String(title)
-        .trim()
-        .toLowerCase()
-        .replace(/&/g, "and")
-        .replace(/[^a-z0-9]+/g, "-")
-        .replace(/^-+|-+$/g, "")
-        .replace(/-boxlunch-exclusive$/, "---boxlunch-exclusive");
+  return String(title)
+    .trim()
+    .toLowerCase()
+    .replace(/&/g, "and")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .replace(/-boxlunch-exclusive$/, "---boxlunch-exclusive");
 }
 
 function extractBoxLunchProductIdFromImage(imageUrl = "") {
-    const match = String(imageUrl).match(/\/(\d{6,})_hi\b/i);
-    return match ? match[1] : "";
+  const match = String(imageUrl).match(/\/(\d{6,})_hi\b/i);
+  return match ? match[1] : "";
 }
 
 function buildBoxLunchUrl({ title = "", image = "", url = "" }) {
-    if (url) return url;
+  if (url) return url;
 
-    const productId = extractBoxLunchProductIdFromImage(image);
-    if (productId && title) {
-        const slug = slugifyBoxLunchTitle(title);
-        return `https://www.boxlunch.com/product/${slug}/${productId}.html`;
-    }
+  const productId = extractBoxLunchProductIdFromImage(image);
+  if (productId && title) {
+    const slug = slugifyBoxLunchTitle(title);
+    return `https://www.boxlunch.com/product/${slug}/${productId}.html`;
+  }
 
-    if (title) {
-        return `https://www.boxlunch.com/search?q=${encodeURIComponent(title)}`;
-    }
+  if (title) {
+    return `https://www.boxlunch.com/search?q=${encodeURIComponent(title)}`;
+  }
 
-    return "";
+  return "";
 }
 
 
 
 function slugifyProductTitle(title = "") {
-    return String(title)
-        .trim()
-        .toLowerCase()
-        .replace(/&/g, "and")
-        .replace(/[^a-z0-9]+/g, "-")
-        .replace(/^-+|-+$/g, "");
+  return String(title)
+    .trim()
+    .toLowerCase()
+    .replace(/&/g, "and")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
 }
 
 function buildHotTopicUrl({ title = "", image = "", url = "" }) {
-    if (url) return url;
-    const productId = extractBoxLunchProductIdFromImage(image);
-    if (productId && title) {
-        const slug = slugifyProductTitle(title);
-        return `https://www.hottopic.com/product/${slug}/${productId}.html`;
-    }
-    if (title) {
-        return `https://www.hottopic.com/search?q=${encodeURIComponent(title)}`;
-    }
-    return "";
+  if (url) return url;
+  const productId = extractBoxLunchProductIdFromImage(image);
+  if (productId && title) {
+    const slug = slugifyProductTitle(title);
+    return `https://www.hottopic.com/product/${slug}/${productId}.html`;
+  }
+  if (title) {
+    return `https://www.hottopic.com/search?q=${encodeURIComponent(title)}`;
+  }
+  return "";
 }
 
 const express = require("express");
@@ -1294,7 +1294,7 @@ async function migrateWebhookSettingsToSupabase({ currentUser, globalSettings = 
             await upsertDiscordWebhookRoute({ scope: 'super_admin', webhookType: 'checkout_error', category: 'all', webhookUrl: globalSettings.checkout_error_webhook_url });
         }
         const monitorGroups = globalSettings?.monitor_groups || {};
-        for (const category of ['pokemon', 'onepiece', 'sports', 'othertcg', 'lowkey']) {
+        for (const category of ['pokemon','onepiece','sports','othertcg','lowkey']) {
             const cfg = normalizeMonitorGroupConfig(monitorGroups?.[category]);
             const existing = await getWebhookRouteFromDb({ scope: 'super_admin', webhookType: 'monitor', category }).catch(() => null);
             if (!existing && String(cfg.webhook_url || '').trim()) {
@@ -1313,7 +1313,7 @@ async function migrateWebhookSettingsToSupabase({ currentUser, globalSettings = 
             await upsertDiscordWebhookRoute({ scope: 'admin', userId: currentUser.id, webhookType: 'checkout_error', category: 'all', webhookUrl: adminSettings.checkout_error_webhook_url });
         }
         const adminGroups = adminSettings?.monitor_groups || {};
-        for (const category of ['pokemon', 'onepiece', 'sports', 'othertcg', 'lowkey']) {
+        for (const category of ['pokemon','onepiece','sports','othertcg','lowkey']) {
             const cfg = normalizeMonitorGroupConfig(adminGroups?.[category]);
             const existing = await getWebhookRouteFromDb({ scope: 'admin', userId: currentUser.id, webhookType: 'monitor', category }).catch(() => null);
             if (!existing && String(cfg.webhook_url || '').trim()) {
@@ -2107,11 +2107,11 @@ function decodeHtmlEntities(value = '') {
 
 function normalizeMonitorType(value = '') {
     const t = String(value || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '');
-    if (['pokemon', 'pokmon'].includes(t)) return 'pokemon';
+    if (['pokemon','pokmon'].includes(t)) return 'pokemon';
     if (['onepiece'].includes(t)) return 'onepiece';
-    if (['sport', 'sports', 'sportscards', 'sportscard'].includes(t)) return 'sports';
-    if (['othertcg', 'mtg', 'magic', 'lorcana', 'yugioh', 'yugio', 'digimon', 'dragonball', 'unionarena', 'weiss'].includes(t)) return 'othertcg';
-    if (['lowkey', 'other', 'lowkeyflips', 'flips'].includes(t)) return 'lowkey';
+    if (['sport','sports','sportscards','sportscard'].includes(t)) return 'sports';
+    if (['othertcg','mtg','magic','lorcana','yugioh','yugio','digimon','dragonball','unionarena','weiss'].includes(t)) return 'othertcg';
+    if (['lowkey','other','lowkeyflips','flips'].includes(t)) return 'lowkey';
     return '';
 }
 
@@ -2418,10 +2418,10 @@ function extractMonitorItems(payload = {}) {
     return deduped;
 }
 
-function buildProductUrl(site, sku, fallbackUrl = '', title = '', image = '') {
+function buildProductUrl(site, sku, fallbackUrl='', title = '', image = '') {
     if (fallbackUrl) return fallbackUrl;
-    const s = String(site || '').toLowerCase();
-    const clean = String(sku || '').trim();
+    const s = String(site||'').toLowerCase();
+    const clean = String(sku||'').trim();
     if (s.includes('boxlunch')) {
         return buildBoxLunchUrl({ title, image, url: fallbackUrl });
     }
@@ -2520,7 +2520,7 @@ async function sendMonitorDiscordWebhook(routeConfigOrUrl, item) {
                 try {
                     const parsed = JSON.parse(text || '{}');
                     if (parsed?.retry_after != null) retryMs = Math.ceil(Number(parsed.retry_after) * 1000);
-                } catch { }
+                } catch {}
                 await new Promise((resolve) => setTimeout(resolve, retryMs));
                 continue;
             }
@@ -3605,7 +3605,8 @@ function parseTargetCheckoutSkuLines(rawValue = "") {
         }
 
         const [sku, name, priceRaw] = parts;
-        const price = Number(String(priceRaw || "").replace(/[^0-9.]/g, ""));
+        const cleanPrice = String(priceRaw || "").replace(/[^0-9.]/g, "");
+        const price = cleanPrice === "" ? null : Number(cleanPrice);
 
         if (!sku) {
             errors.push(`Line ${index + 1}: SKU is required`);
@@ -3615,68 +3616,157 @@ function parseTargetCheckoutSkuLines(rawValue = "") {
             errors.push(`Line ${index + 1}: name is required`);
             return;
         }
-        if (!Number.isFinite(price) || price < 0) {
-            errors.push(`Line ${index + 1}: price must be a valid number`);
+        if (price !== null && (!Number.isFinite(price) || price < 0)) {
+            errors.push(`Line ${index + 1}: price must be blank or a valid number`);
             return;
         }
 
         items.push({
             sku,
             name,
-            price: Number(price.toFixed(2))
+            price: price === null ? null : Number(price.toFixed(2)),
+            price_source: price === null ? "blank" : "input"
         });
     });
 
     return { items, errors };
 }
 
+async function ensureTargetCatalogForCheckoutLists() {
+    let { data: activeCatalog, error: catalogError } = await supabase
+        .from("product_catalogs")
+        .select("id, site, name, export_date")
+        .eq("site", "target")
+        .eq("is_active", true)
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+    if (catalogError) throw new Error(catalogError.message);
+
+    if (!activeCatalog?.id) {
+        const { data: createdCatalog, error: createCatalogError } = await supabase
+            .from("product_catalogs")
+            .insert({
+                site: "target",
+                name: "Target checkout list products",
+                is_active: true,
+                export_date: new Date().toISOString()
+            })
+            .select("id, site, name, export_date")
+            .single();
+
+        if (createCatalogError) throw new Error(createCatalogError.message);
+        activeCatalog = createdCatalog;
+    }
+
+    return activeCatalog;
+}
 
 async function applyCatalogNamesToTargetCheckoutItems(items = []) {
     const normalizedItems = Array.isArray(items) ? items : [];
     const skus = [...new Set(normalizedItems.map((item) => String(item.sku || "").trim()).filter(Boolean))];
 
-    if (!skus.length) return normalizedItems;
+    if (!skus.length) return { items: normalizedItems, missing_skus: [], created_products: [] };
 
     try {
         const { data, error } = await supabase
             .from("catalog_products")
-            .select("sku, product_name, site, created_at")
+            .select("id, sku, product_name, site, default_max_price, credit_cost, created_at")
             .eq("site", "target")
             .in("sku", skus)
             .order("created_at", { ascending: false });
 
         if (error) throw new Error(error.message);
 
-        const catalogNameBySku = new Map();
+        const catalogBySku = new Map();
         (data || []).forEach((row) => {
             const key = String(row.sku || "").trim();
-            if (key && !catalogNameBySku.has(key) && String(row.product_name || "").trim()) {
-                catalogNameBySku.set(key, String(row.product_name || "").trim());
-            }
+            if (key && !catalogBySku.has(key)) catalogBySku.set(key, row);
         });
 
-        return normalizedItems.map((item) => ({
-            ...item,
-            // Keep the admin-pasted price, but use the website catalog name when the SKU exists.
-            name: catalogNameBySku.get(String(item.sku || "").trim()) || item.name
-        }));
+        const missingItems = normalizedItems.filter((item) => !catalogBySku.has(String(item.sku || "").trim()));
+        const missing_skus = missingItems.map((item) => String(item.sku || "").trim()).filter(Boolean);
+        const created_products = [];
+
+        if (missingItems.length) {
+            const activeCatalog = await ensureTargetCatalogForCheckoutLists();
+            const insertPayload = missingItems.map((item) => ({
+                catalog_id: activeCatalog.id,
+                site: "target",
+                sku: String(item.sku || "").trim(),
+                product_name: String(item.name || item.sku || "").trim(),
+                brand: "Target",
+                default_max_price: item.price === null || item.price === undefined ? null : Number(item.price),
+                credit_cost: 0,
+                release_mode_default: "current",
+                is_enabled: true,
+                metadata: {
+                    source: "target_checkout_list",
+                    needs_details: true,
+                    note: "Created automatically from Target checkout list input. Please review product name, price, credits, image, and URL."
+                }
+            })).filter((row) => row.sku && row.product_name);
+
+            if (insertPayload.length) {
+                const { data: inserted, error: insertError } = await supabase
+                    .from("catalog_products")
+                    .insert(insertPayload)
+                    .select("id, sku, product_name, site, default_max_price, credit_cost, created_at");
+
+                if (insertError) throw new Error(insertError.message);
+
+                (inserted || []).forEach((row) => {
+                    created_products.push(row);
+                    const key = String(row.sku || "").trim();
+                    if (key && !catalogBySku.has(key)) catalogBySku.set(key, row);
+                });
+            }
+        }
+
+        const itemsWithCatalogData = normalizedItems.map((item) => {
+            const sku = String(item.sku || "").trim();
+            const catalog = catalogBySku.get(sku);
+            const catalogPrice =
+                catalog?.default_max_price === null || catalog?.default_max_price === undefined || catalog?.default_max_price === ""
+                    ? null
+                    : Number(catalog.default_max_price);
+            const hasInputPrice = item.price !== null && item.price !== undefined && Number.isFinite(Number(item.price));
+            const hasCatalogPrice = Number.isFinite(catalogPrice);
+
+            return {
+                ...item,
+                name: String(catalog?.product_name || "").trim() || item.name,
+                price: hasInputPrice ? Number(Number(item.price).toFixed(2)) : (hasCatalogPrice ? Number(catalogPrice.toFixed(2)) : null),
+                price_source: hasInputPrice ? "input" : (hasCatalogPrice ? "catalog" : "none"),
+                catalog_product_id: catalog?.id || null,
+                needs_catalog_details: !catalog || !!(catalog.metadata && catalog.metadata.needs_details)
+            };
+        });
+
+        return { items: itemsWithCatalogData, missing_skus, created_products };
     } catch (err) {
-        console.warn("Could not apply Target catalog names to checkout list:", err.message);
-        return normalizedItems;
+        console.warn("Could not apply Target catalog data to checkout list:", err.message);
+        return { items: normalizedItems, missing_skus: [], created_products: [], warning: err.message };
     }
 }
-
 
 function normalizeTargetCheckoutLists(value) {
     const rawLists = Array.isArray(value) ? value : [];
     return rawLists.map((list) => ({
         id: String(list.id || `target-list-${Date.now()}-${Math.random().toString(16).slice(2)}`),
         title: String(list.title || "Untitled List").trim() || "Untitled List",
-        items: Array.isArray(list.items) ? list.items.slice(0, 29).map((item) => ({
-            sku: String(item.sku || "").trim(),
-            name: String(item.name || "").trim(),
-            price: Number(Number(item.price || 0).toFixed(2))
-        })).filter((item) => item.sku && item.name) : [],
+        items: Array.isArray(list.items) ? list.items.slice(0, 29).map((item) => {
+            const numericPrice = item.price === null || item.price === undefined || item.price === "" ? null : Number(item.price);
+            return {
+                sku: String(item.sku || "").trim(),
+                name: String(item.name || "").trim(),
+                price: Number.isFinite(numericPrice) ? Number(numericPrice.toFixed(2)) : null,
+                price_source: item.price_source || (Number.isFinite(numericPrice) ? "input" : "none"),
+                catalog_product_id: item.catalog_product_id || null,
+                needs_catalog_details: !!item.needs_catalog_details
+            };
+        }).filter((item) => item.sku && item.name) : [],
         created_at: list.created_at || new Date().toISOString(),
         updated_at: list.updated_at || list.created_at || new Date().toISOString()
     })).filter((list) => list.items.length);
@@ -3735,7 +3825,8 @@ app.post('/admin/target-checkout-lists', auth, admin, async (req, res) => {
         if (parsed.items.length > 29) return res.status(400).json({ error: 'Target checkout lists can only contain up to 29 SKUs.' });
 
         const current = normalizeTargetCheckoutLists(await getAppSetting('target_checkout_lists', []));
-        const catalogNamedItems = await applyCatalogNamesToTargetCheckoutItems(parsed.items);
+        const catalogResult = await applyCatalogNamesToTargetCheckoutItems(parsed.items);
+        const catalogNamedItems = catalogResult.items || parsed.items;
         const now = new Date().toISOString();
         const id = String(req.body?.id || `target-list-${Date.now()}-${Math.random().toString(16).slice(2)}`);
         const existing = current.find((list) => list.id === id);
@@ -3748,7 +3839,14 @@ app.post('/admin/target-checkout-lists', auth, admin, async (req, res) => {
         };
         const next = [nextList, ...current.filter((list) => list.id !== id)];
         await setAppSetting('target_checkout_lists', next);
-        res.json({ success: true, list: nextList, lists: next });
+        res.json({
+            success: true,
+            list: nextList,
+            lists: next,
+            missing_skus: catalogResult.missing_skus || [],
+            created_products: catalogResult.created_products || [],
+            warning: catalogResult.warning || null
+        });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
@@ -3849,7 +3947,7 @@ app.post('/admin/webhooks/settings', auth, admin, async (req, res) => {
             });
             await upsertDiscordWebhookRoute({ scope: 'admin', userId: currentUser.id, webhookType: 'checkout_success', category: 'all', webhookUrl: adminDiscordWebhookUrl, isActive: !!adminDiscordWebhookUrl });
             await upsertDiscordWebhookRoute({ scope: 'admin', userId: currentUser.id, webhookType: 'checkout_error', category: 'all', webhookUrl: adminErrorDiscordWebhookUrl, isActive: !!adminErrorDiscordWebhookUrl });
-            for (const category of ['pokemon', 'onepiece', 'sports', 'othertcg', 'lowkey']) {
+            for (const category of ['pokemon','onepiece','sports','othertcg','lowkey']) {
                 const cfg = normalizeMonitorGroupConfig(req.body?.admin_monitor_groups?.[category]);
                 await upsertDiscordWebhookRoute({ scope: 'admin', userId: currentUser.id, webhookType: 'monitor', category, webhookUrl: cfg.webhook_url, pingMode: cfg.ping_mode, roleMention: cfg.role_mention, isActive: !!cfg.webhook_url });
             }
@@ -3876,7 +3974,7 @@ app.post('/admin/webhooks/settings', auth, admin, async (req, res) => {
             });
             await upsertDiscordWebhookRoute({ scope: 'super_admin', webhookType: 'checkout_success', category: 'all', webhookUrl: discordWebhookUrl, isActive: !!discordWebhookUrl });
             await upsertDiscordWebhookRoute({ scope: 'super_admin', webhookType: 'checkout_error', category: 'all', webhookUrl: checkoutErrorWebhookUrl, isActive: !!checkoutErrorWebhookUrl });
-            for (const category of ['pokemon', 'onepiece', 'sports', 'othertcg', 'lowkey']) {
+            for (const category of ['pokemon','onepiece','sports','othertcg','lowkey']) {
                 const cfg = normalizeMonitorGroupConfig(req.body?.monitor_groups?.[category]);
                 await upsertDiscordWebhookRoute({ scope: 'super_admin', webhookType: 'monitor', category, webhookUrl: cfg.webhook_url, pingMode: cfg.ping_mode, roleMention: cfg.role_mention, isActive: !!cfg.webhook_url });
             }

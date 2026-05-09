@@ -2541,7 +2541,7 @@ function renderTargetCheckoutListCard(list, options = {}) {
                             <tr>
                                 <td>${escapeHTML(item.sku || "-")}</td>
                                 <td>${escapeHTML(item.name || "-")}</td>
-                                <td>${escapeHTML(formatMoney(item.price || 0))}</td>
+                                <td>${item.price === null || item.price === undefined || item.price === "" ? '<span class="subtle-text">No limit</span>' : escapeHTML(formatMoney(item.price))}</td>
                             </tr>
                         `).join("")}
                     </tbody>
@@ -2704,11 +2704,16 @@ function initTargetCheckoutListAdmin() {
         if (message) message.textContent = "Saving Target checkout list...";
 
         try {
-            await authJSON(API + "/admin/target-checkout-lists", {
+            const data = await authJSON(API + "/admin/target-checkout-lists", {
                 method: "POST",
                 body: JSON.stringify({ id: id || undefined, title, sku_list: skuList })
             });
-            if (message) message.textContent = "Target checkout list saved.";
+            const missing = Array.isArray(data.missing_skus) ? data.missing_skus : [];
+            if (message) {
+                message.textContent = missing.length
+                    ? `Target checkout list saved. Added missing SKU${missing.length === 1 ? "" : "s"} to catalog as placeholder${missing.length === 1 ? "" : "s"}: ${missing.join(", ")}. Go to Countdowns + Catalog, search the SKU, then fill product name/credits if needed.`
+                    : "Target checkout list saved.";
+            }
             clearTargetCheckoutListAdminForm();
             await loadTargetCheckoutListsAdmin();
         } catch (err) {

@@ -308,7 +308,7 @@
             <div class="panel-header">
               <div>
                 <h2>Target Checkout Lists</h2>
-                <p class="subtle-text">Create active Target checkout lists that users can choose from. Each list supports up to 29 SKUs in <code>sku;name;price</code> format. The SKU is matched to the website catalog name; your pasted price is used.</p>
+                <p class="subtle-text">Create active Target checkout lists that users can choose from. Each list supports up to 29 SKUs in <code>sku;name;price</code> format. The SKU is matched to the website catalog name. If your price is blank, the website catalog price is used when available; otherwise it stays blank/no limit.</p>
               </div>
             </div>
             <form id="targetCheckoutListForm" class="form-grid">
@@ -320,7 +320,7 @@
               <div class="field field--full">
                 <label for="targetCheckoutSkuList">SKU List</label>
                 <textarea class="input" id="targetCheckoutSkuList" rows="10" placeholder="94619824;NeeDoh Nice Cube Glitter and Glow;$5.99&#10;94856729;NeeDoh Teenie Funky Pups - 3pk;$5.99"></textarea>
-                <div class="subtle-text">One item per line. Maximum 29 lines per checkout list. Product names are corrected from the website catalog by SKU when available.</div>
+                <div class="subtle-text">One item per line. Maximum 29 lines per checkout list. Product names are corrected from the website catalog by SKU when available. Missing SKUs are automatically added as catalog placeholders so you can finish the product name/credits.</div>
               </div>
               <div class="field field--full panel-actions">
                 <button class="btn btn-primary" type="submit">Save Checkout List</button>
