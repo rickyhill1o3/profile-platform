@@ -10,7 +10,7 @@ const PAGE_SIZE = 10;
 
 let profileImportBound = false;
 let allDashboardProfiles = [];
-let profileGroupFilters = { general: '', walmart: '', target: '', amazon: '' };
+let profileGroupFilters = { general: '', walmart: '', target: '', amazon: '', raffle: '' };
 let selectedProfileIds = new Set();
 
 
@@ -303,7 +303,7 @@ async function loadProfiles() {
         }
 
         allDashboardProfiles = profiles;
-        const groups = { general: [], walmart: [], target: [], amazon: [] };
+        const groups = { general: [], walmart: [], target: [], amazon: [], raffle: [] };
         profiles.forEach((p) => {
             if (groups[p.account_type]) groups[p.account_type].push(p);
         });
@@ -316,20 +316,23 @@ async function loadProfiles() {
         setStat("profileCountStat", profiles.length);
         setStat("amazonProfileCountStat", groups.amazon.length);
         setStat("retailProfileCountStat", groups.target.length + groups.walmart.length);
+        setStat("raffleProfileCountStat", groups.raffle.length);
         setStat("generalProfileCountStat", groups.general.length);
 
         const labels = {
             general: "General Profiles",
             walmart: "Walmart Profiles",
             target: "Target Profiles",
-            amazon: "Amazon Profiles"
+            amazon: "Amazon Profiles",
+            raffle: "Raffle Profiles"
         };
 
         const descriptions = {
             general: "Flexible profiles for general checkouts.",
             walmart: "Profiles configured for Walmart accounts.",
             target: "Profiles configured for Target accounts.",
-            amazon: "Profiles configured for Amazon accounts."
+            amazon: "Profiles configured for Amazon accounts.",
+            raffle: "Bulk-built raffle entries. Payment fields use invalid placeholder card-style numbers unless edited manually."
         };
 
         let html = "";
@@ -413,6 +416,7 @@ async function loadProfiles() {
         dashboardEl.innerHTML = html;
         bindProfileDashboardControls();
         bindProfileImportControls();
+        bindRaffleBuilderControls();
     } catch {
         dashboardEl.innerHTML = `<p>Could not connect to the server.</p>`;
     }

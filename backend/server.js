@@ -421,7 +421,7 @@ function findDuplicateInSameGroup(
             return "Phone is already used in this group";
         }
 
-        if (cardLast4 && existingCardLast4 === cardLast4) {
+        if (group !== "raffle" && cardLast4 && existingCardLast4 === cardLast4) {
             return "Card is already used in this group";
         }
     }
@@ -4054,6 +4054,134 @@ function normalizeImportedProfilePayload(entry = {}, accountType = "walmart") {
     };
 }
 
+
+const PROFILE_ACCOUNT_TYPES = new Set(["general", "walmart", "target", "amazon", "raffle"]);
+
+function normalizeProfileAccountType(value = "general") {
+    const type = String(value || "general").trim().toLowerCase();
+    return PROFILE_ACCOUNT_TYPES.has(type) ? type : "general";
+}
+
+function getProfileLimitForRole(role = "user", accountType = "general") {
+    const type = normalizeProfileAccountType(accountType);
+    if (role === "super_admin") return Infinity;
+    if (type === "raffle") return Infinity;
+
+    const adminLimits = { target: 6, amazon: 2, general: 5, walmart: 100 };
+    const userLimits = { target: 2, amazon: 1, general: 3, walmart: 100 };
+
+    const source = role === "admin" ? adminLimits : userLimits;
+    return source[type] ?? 0;
+}
+
+async function enforceProfileLimit({ userId, role, accountType, excludeProfileId = null, addCount = 1 }) {
+    const type = normalizeProfileAccountType(accountType);
+    const limit = getProfileLimitForRole(role, type);
+    if (!Number.isFinite(limit)) return;
+
+    let query = supabase
+        .from("profiles")
+        .select("id", { count: "exact", head: true })
+        .eq("user_id", userId)
+        .eq("account_type", type);
+
+    if (excludeProfileId) {
+        query = query.neq("id", excludeProfileId);
+    }
+
+    const { count, error } = await query;
+    if (error) throw new Error(error.message);
+
+    const currentCount = Number(count || 0);
+    const requested = Math.max(1, Number(addCount || 1));
+    if (currentCount + requested > limit) {
+        throw new Error(`Profile limit reached for ${type}. Your account can have up to ${limit} ${type} profile${limit === 1 ? "" : "s"}.`);
+    }
+}
+
+function parseRaffleEmails(value = "") {
+    return String(value || "")
+        .split(/[;\n,\s]+/)
+        .map((email) => String(email || "").trim().toLowerCase())
+        .filter(Boolean)
+        .filter((email, index, arr) => arr.indexOf(email) === index);
+}
+
+function isValidEmailForRaffle(value = "") {
+    return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(value || "").trim());
+}
+
+function inferStateFromZip(zip = "") {
+    const first = String(zip || "").trim()[0] || "";
+    const map = {
+        "0": "Massachusetts",
+        "1": "New York",
+        "2": "North Carolina",
+        "3": "Georgia",
+        "4": "Ohio",
+        "5": "Minnesota",
+        "6": "Illinois",
+        "7": "Texas",
+        "8": "Colorado",
+        "9": "California"
+    };
+    return map[first] || "North Carolina";
+}
+
+function generateRafflePhone(index = 0) {
+    const suffix = String(1000000 + (Number(index || 0) % 8999999)).slice(-7);
+    return `555${suffix}`;
+}
+
+function generateInvalidPlaceholderCard(index = 0) {
+    // Looks like a 16-digit card number, but intentionally fails the Luhn checksum.
+    // Do not use for real payments.
+    const base = `411111111111${String(Number(index || 0) % 1000).padStart(3, '0')}`;
+    const digits = base.slice(0, 15);
+    let sum = 0;
+    for (let i = 0; i < digits.length; i += 1) {
+        let n = Number(digits[digits.length - 1 - i]);
+        if (i % 2 === 0) {
+            n *= 2;
+            if (n > 9) n -= 9;
+        }
+        sum += n;
+    }
+    const validCheckDigit = (10 - (sum % 10)) % 10;
+    const invalidCheckDigit = (validCheckDigit + 1) % 10;
+    return `${digits}${invalidCheckDigit}`;
+}
+
+function buildRafflePayload(email, zip, index = 0) {
+    const localPart = String(email || "").split("@")[0] || `raffle${index + 1}`;
+    const cleanName = localPart.replace(/[^a-z0-9]+/gi, " ").trim();
+    const parts = cleanName.split(/\s+/).filter(Boolean);
+    const firstName = (parts[0] || "Raffle").replace(/^\w/, (c) => c.toUpperCase());
+    const lastName = (parts[1] || `Entry${index + 1}`).replace(/^\w/, (c) => c.toUpperCase());
+
+    return {
+        profile_name: `Raffle ${index + 1} - ${email}`,
+        account_type: "raffle",
+        first_name: firstName,
+        last_name: lastName,
+        email,
+        phone: generateRafflePhone(index),
+        address1: `${100 + index} Raffle Entry Lane`,
+        city: "Raffle City",
+        state: inferStateFromZip(zip),
+        zip: String(zip || "").trim(),
+        card: generateInvalidPlaceholderCard(index),
+        exp_month: "01",
+        exp_year: "2099",
+        cvv: "000",
+        account_login_email: "",
+        account_login_password: "",
+        gmail_app_password: "",
+        amazon_2fa_secret: ""
+    };
+}
+
+
 app.get("/profiles", auth, async (req, res) => {
     try {
         await ensureUserNotRevoked(req.user_id);
@@ -4096,10 +4224,15 @@ app.get("/profiles", auth, async (req, res) => {
 app.post("/profiles/import", auth, async (req, res) => {
     try {
         await ensureUserNotRevoked(req.user_id);
-        const accountType = String(req.body?.account_type || 'walmart').trim().toLowerCase();
+        const accountType = normalizeProfileAccountType(req.body?.account_type || 'walmart');
         const rawProfiles = Array.isArray(req.body?.profiles) ? req.body.profiles : [];
         if (!rawProfiles.length) {
             return res.status(400).json({ error: "No profiles were provided" });
+        }
+
+        const currentUser = await getCurrentUser(req);
+        if (accountType !== "raffle") {
+            await enforceProfileLimit({ userId: req.user_id, role: currentUser.role, accountType, addCount: rawProfiles.length });
         }
 
         const existingProfiles = await getUserProfilesWithRelations(req.user_id);
@@ -4187,6 +4320,96 @@ app.post("/profiles/import", auth, async (req, res) => {
     }
 });
 
+
+app.post("/profiles/raffle-builder", auth, async (req, res) => {
+    try {
+        const currentUser = await ensureUserNotRevoked(req.user_id);
+        const emails = parseRaffleEmails(req.body?.emails || "");
+        const zip = String(req.body?.zip || "").trim();
+
+        if (!emails.length) {
+            return res.status(400).json({ error: "Add at least one raffle email." });
+        }
+
+        if (!/^\d{5}(-\d{4})?$/.test(zip)) {
+            return res.status(400).json({ error: "ZIP code must be 5 digits or ZIP+4." });
+        }
+
+        const invalidEmails = emails.filter((email) => !isValidEmailForRaffle(email));
+        if (invalidEmails.length) {
+            return res.status(400).json({ error: `Invalid email(s): ${invalidEmails.slice(0, 5).join(", ")}${invalidEmails.length > 5 ? "..." : ""}` });
+        }
+
+        const existingProfiles = await getUserProfilesWithRelations(req.user_id);
+        const created = [];
+        const skipped = [];
+        const errors = [];
+
+        for (let i = 0; i < emails.length; i += 1) {
+            const email = emails[i];
+            const payload = buildRafflePayload(email, zip, i);
+            const duplicateError = findDuplicateInSameGroup(
+                existingProfiles,
+                null,
+                payload.account_type,
+                payload.profile_name,
+                payload.email,
+                payload.phone,
+                (payload.card || "").slice(-4)
+            );
+
+            if (duplicateError) {
+                skipped.push({ email, reason: duplicateError });
+                continue;
+            }
+
+            const { data: createdProfile, error: profileError } = await supabase
+                .from("profiles")
+                .insert({
+                    user_id: req.user_id,
+                    profile_name: payload.profile_name,
+                    account_type: "raffle"
+                })
+                .select()
+                .single();
+
+            if (profileError || !createdProfile) {
+                errors.push({ email, reason: profileError?.message || "Profile creation failed" });
+                continue;
+            }
+
+            try {
+                await upsertProfileRelations(createdProfile.id, payload);
+                created.push({ id: createdProfile.id, profile_name: payload.profile_name, email });
+                existingProfiles.push({
+                    id: createdProfile.id,
+                    profile_name: payload.profile_name,
+                    account_type: "raffle",
+                    addresses: [{ email: payload.email, phone: payload.phone }],
+                    payments: [{ card_last4: "" }]
+                });
+            } catch (err) {
+                errors.push({ email, reason: err.message || "Could not save raffle profile" });
+            }
+        }
+
+        res.json({
+            success: true,
+            created_count: created.length,
+            skipped_count: skipped.length,
+            error_count: errors.length,
+            created,
+            skipped,
+            errors,
+            note: "Raffle profiles use invalid placeholder card-style numbers that are not usable for real payments. Add real authorized payment details manually if a flow requires payment."
+        });
+    } catch (err) {
+        const status = err.message === "This account has been revoked" ? 403 : 500;
+        res.status(status).json({ error: err.message || "Raffle profile creation failed" });
+    }
+});
+
+
 app.delete("/profiles/bulk", auth, async (req, res) => {
     try {
         await ensureUserNotRevoked(req.user_id);
@@ -4224,10 +4447,11 @@ app.delete("/profiles/bulk", auth, async (req, res) => {
 
 app.post("/profiles", auth, async (req, res) => {
     try {
-        const data = req.body;
+        const data = { ...req.body, account_type: normalizeProfileAccountType(req.body?.account_type) };
         const cardLast4 = (data.card || "").slice(-4);
 
-        await ensureUserNotRevoked(req.user_id);
+        const currentUser = await ensureUserNotRevoked(req.user_id);
+        await enforceProfileLimit({ userId: req.user_id, role: currentUser.role, accountType: data.account_type });
 
         if (!phoneRegex.test(data.phone || "")) {
             return res.status(400).json({ error: "Phone must be xxxxxxxxxx" });
@@ -4273,10 +4497,11 @@ app.post("/profiles", auth, async (req, res) => {
 app.put("/profiles/:id", auth, async (req, res) => {
     try {
         const id = req.params.id;
-        const data = req.body;
+        const data = { ...req.body, account_type: normalizeProfileAccountType(req.body?.account_type) };
         const cardLast4 = (data.card || "").slice(-4);
 
-        await ensureUserNotRevoked(req.user_id);
+        const currentUser = await ensureUserNotRevoked(req.user_id);
+        await enforceProfileLimit({ userId: req.user_id, role: currentUser.role, accountType: data.account_type });
 
         if (!phoneRegex.test(data.phone || "")) {
             return res.status(400).json({ error: "Phone must be xxxxxxxxxx" });

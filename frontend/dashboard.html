@@ -29,6 +29,7 @@
       <div class="stat-card"><span class="stat-label">Amazon</span><strong class="stat-value" id="amazonProfileCountStat">0</strong><span class="stat-help">Amazon-ready profiles</span></div>
       <div class="stat-card"><span class="stat-label">Retail</span><strong class="stat-value" id="retailProfileCountStat">0</strong><span class="stat-help">Target + Walmart profiles</span></div>
       <div class="stat-card"><span class="stat-label">General</span><strong class="stat-value" id="generalProfileCountStat">0</strong><span class="stat-help">Supreme or custom releases</span></div>
+      <div class="stat-card"><span class="stat-label">Raffle</span><strong class="stat-value" id="raffleProfileCountStat">0</strong><span class="stat-help">Bulk raffle entries</span></div>
       <div class="stat-card"><span class="stat-label">Credits</span><strong class="stat-value" id="creditsBalanceStat">0</strong><span class="stat-help" id="creditsBalanceHelp">Available to spend</span></div>
     </section>
 
@@ -70,11 +71,32 @@
                   <option value="target">Target</option>
                   <option value="amazon">Amazon</option>
                   <option value="general">General</option>
+                  <option value="raffle">Raffle</option>
                 </select>
                 <input id="profileImportFile" class="input" type="file" accept="application/json,.json" />
                 <button class="btn btn-primary" id="profileImportButton" type="button">Import Profiles</button>
               </div>
               <div id="profileImportMessage" class="subtle-text"></div>
+            </div>
+
+            <div class="banner banner-soft" style="margin-top:16px;">
+              <strong>Raffle profile builder</strong>
+              <p class="subtle-text">Paste emails separated by semicolons, commas, spaces, or new lines. The builder creates raffle profiles with the ZIP you provide and generated profile details. Payment fields use invalid placeholder card-style numbers.</p>
+              <div class="form-grid">
+                <div class="field field--full">
+                  <label for="raffleBuilderEmails">Raffle Emails</label>
+                  <textarea id="raffleBuilderEmails" class="input" rows="4" placeholder="email1@example.com;email2@example.com;email3@example.com"></textarea>
+                </div>
+                <div class="field">
+                  <label for="raffleBuilderZip">ZIP Code</label>
+                  <input id="raffleBuilderZip" class="input" placeholder="27909" />
+                </div>
+                <div class="field field-actions">
+                  <label>&nbsp;</label>
+                  <button class="btn btn-primary" id="raffleBuilderButton" type="button">Build Raffle Profiles</button>
+                </div>
+              </div>
+              <div id="raffleBuilderMessage" class="subtle-text"></div>
             </div>
           </section>
         </section>
@@ -131,6 +153,7 @@
                     <option value="supreme">Supreme</option>
                     <option value="pokemon">Pokémon Center</option>
                     <option value="general">General</option>
+                  <option value="raffle">Raffle</option>
                   </select>
                   <input class="input" id="skuRequestValue" type="text" placeholder="Enter SKU / ASIN / DPCI / release label" />
                   <button class="btn btn-primary" type="submit">Request SKU</button>
