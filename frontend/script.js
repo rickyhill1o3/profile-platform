@@ -2508,20 +2508,26 @@ function initUserDashboardNavigation() {
     if (!buttons.length || !panes.length) return;
 
     const activate = (key) => {
+        const targetKey = panes.some((pane) => pane.dataset.userPane === key) ? key : buttons[0]?.dataset.userNav;
         buttons.forEach((button) => {
-            button.classList.toggle('is-active', button.dataset.userNav === key);
+            button.classList.toggle('is-active', button.dataset.userNav === targetKey);
         });
         panes.forEach((pane) => {
-            pane.classList.toggle('is-active', pane.dataset.userPane === key);
+            pane.classList.toggle('is-active', pane.dataset.userPane === targetKey);
         });
+        try { localStorage.setItem("dashboardActiveTab", targetKey); } catch (_) { }
     };
 
     buttons.forEach((button) => {
         button.addEventListener('click', () => activate(button.dataset.userNav));
     });
 
+    let preferredTab = null;
+    try { preferredTab = localStorage.getItem("dashboardActiveTab"); } catch (_) { }
     const activeButton =
-        buttons.find((button) => button.classList.contains('is-active')) || buttons[0];
+        (preferredTab && buttons.find((button) => button.dataset.userNav === preferredTab)) ||
+        buttons.find((button) => button.classList.contains('is-active')) ||
+        buttons[0];
 
     if (activeButton) {
         activate(activeButton.dataset.userNav);
@@ -2691,10 +2697,17 @@ document.addEventListener("DOMContentLoaded", async () => {
     try { syncSuperAdminStorefrontLink(); } catch (_) { }
     try { await loadPublicCountdowns(); } catch (_) { }
 
-    if (document.getElementById("dashboard")) {
+    if (
+        document.getElementById("dashboard") ||
+        document.getElementById("targetProfilesPanel") ||
+        document.getElementById("walmartProfilesPanel") ||
+        document.getElementById("amazonProfilesPanel") ||
+        document.getElementById("generalProfilesPanel") ||
+        document.getElementById("raffleProfilesPanel")
+    ) {
         initUserDashboardNavigation();
         await loadProfiles();
-        try { await loadStoreProductPanels(); } catch (_) { }
+        try { await loadStoreProductPanels(); } catch (err) { console.error("Store products failed:", err); }
         try { await loadCreditsBalance(); } catch (_) { }
         try { await loadUserActivity(); } catch (_) { }
     }
