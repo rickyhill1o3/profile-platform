@@ -36,57 +36,102 @@
     <div class="admin-layout-shell">
       <aside class="admin-sidebar panel">
         <p class="eyebrow">Dashboard Navigation</p>
-        <button class="admin-nav-button is-active" type="button" data-user-nav="profiles">Profiles</button>
+        <button class="admin-nav-button is-active" type="button" data-user-nav="target">Target</button>
+        <button class="admin-nav-button" type="button" data-user-nav="walmart">Walmart</button>
+        <button class="admin-nav-button" type="button" data-user-nav="amazon">Amazon</button>
+        <button class="admin-nav-button" type="button" data-user-nav="general">General</button>
         <button class="admin-nav-button" type="button" data-user-nav="raffle">Raffle Builder</button>
-        <button class="admin-nav-button" type="button" data-user-nav="selections">Products + Countdowns</button>
+        <button class="admin-nav-button" type="button" data-user-nav="selections">Countdowns</button>
         <button class="admin-nav-button" type="button" data-user-nav="credits">Buy Credits</button>
         <button class="admin-nav-button" type="button" data-user-nav="history">Order History</button>
         <button class="admin-nav-button" type="button" data-user-nav="discord">Discord Settings</button>
       </aside>
 
       <div class="admin-content-stack">
-        <section class="admin-pane is-active" data-user-pane="profiles">
+        <section class="admin-pane is-active" data-user-pane="target">
           <section class="panel banner banner-soft">
-            <strong>Profile generator</strong>
-            <p class="subtle-text">Create or edit the checkout profiles your bot uses for Walmart, Target, Amazon, Supreme, and general releases.</p>
+            <strong>Target hub</strong>
+            <p class="subtle-text">Target profiles and available Target products are shown together. Product selection is informational only; active SKUs are controlled by admin runs.</p>
             <div class="panel-actions">
-              <button class="btn btn-primary" onclick="location='profile.html'">Create / Edit Profiles</button>
+              <button class="btn btn-primary" onclick="location='profile.html'">Add Target Profile</button>
             </div>
           </section>
-          <section class="panel" id="dashboard">
+          <section class="panel" id="targetProfilesPanel"></section>
+          <section class="panel">
             <div class="panel-header">
               <div>
-                <h2>Your Profiles</h2>
-                <p class="subtle-text">Profiles are grouped by store. These saved checkout details are what the software will use when it runs for your selected products.</p>
-              </div>
-              <div class="panel-actions">
-                <button class="btn btn-primary" onclick="location='profile.html'">Add Profile</button>
+                <h2>Target Products</h2>
+                <p class="subtle-text">Products loaded from the website catalog. Admins can manage the active SKU list from the admin/product tools.</p>
               </div>
             </div>
-            <div class="banner banner-soft" style="margin-top:16px;">
-              <strong>Import checkout profiles</strong>
-              <p class="subtle-text">Upload a Refract / Prism JSON export to add multiple profiles at once.</p>
-              <div class="toolbar-row">
-                <select id="profileImportType" class="input">
-                  <option value="walmart">Walmart</option>
-                  <option value="target">Target</option>
-                  <option value="amazon">Amazon</option>
-                  <option value="general">General</option>
-                  <option value="raffle">Raffle</option>
-                </select>
-                <input id="profileImportFile" class="input" type="file" accept="application/json,.json" />
-                <button class="btn btn-primary" id="profileImportButton" type="button">Import Profiles</button>
-              </div>
-              <div id="profileImportMessage" class="subtle-text"></div>
-            </div>
+            <div id="targetProductsPanel" class="store-products-panel"></div>
           </section>
         </section>
 
+        <section class="admin-pane" data-user-pane="walmart">
+          <section class="panel banner banner-soft">
+            <strong>Walmart hub</strong>
+            <p class="subtle-text">Walmart profiles and current Walmart release information.</p>
+            <div class="panel-actions">
+              <button class="btn btn-primary" onclick="location='profile.html'">Add Walmart Profile</button>
+            </div>
+          </section>
+          <section class="panel" id="walmartProfilesPanel"></section>
+          <section class="panel">
+            <div class="panel-header">
+              <div>
+                <h2>Walmart Products</h2>
+                <p class="subtle-text">Release products will appear here when added to the catalog.</p>
+              </div>
+            </div>
+            <div id="walmartProductsPanel" class="store-products-panel"></div>
+          </section>
+        </section>
+
+        <section class="admin-pane" data-user-pane="amazon">
+          <section class="panel banner banner-soft">
+            <strong>Amazon hub</strong>
+            <p class="subtle-text">Amazon profiles and Amazon release products. Amazon runs are typically one account on one item.</p>
+            <div class="panel-actions">
+              <button class="btn btn-primary" onclick="location='profile.html'">Add Amazon Profile</button>
+            </div>
+          </section>
+          <section class="panel" id="amazonProfilesPanel"></section>
+          <section class="panel">
+            <div class="panel-header">
+              <div>
+                <h2>Amazon Products</h2>
+                <p class="subtle-text">Products loaded from the website catalog. This is view-only for users.</p>
+              </div>
+            </div>
+            <div id="amazonProductsPanel" class="store-products-panel"></div>
+          </section>
+        </section>
+
+        <section class="admin-pane" data-user-pane="general">
+          <section class="panel banner banner-soft">
+            <strong>General hub</strong>
+            <p class="subtle-text">General profiles and manual release information for custom drops.</p>
+            <div class="panel-actions">
+              <button class="btn btn-primary" onclick="location='profile.html'">Add General Profile</button>
+            </div>
+          </section>
+          <section class="panel" id="generalProfilesPanel"></section>
+          <section class="panel">
+            <div class="panel-header">
+              <div>
+                <h2>General Products</h2>
+                <p class="subtle-text">Products loaded from the website catalog when available.</p>
+              </div>
+            </div>
+            <div id="generalProductsPanel" class="store-products-panel"></div>
+          </section>
+        </section>
 
         <section class="admin-pane" data-user-pane="raffle">
           <section class="panel banner banner-soft">
             <strong>Raffle profile builder</strong>
-            <p class="subtle-text">Paste emails separated by semicolons, commas, spaces, or new lines. The builder creates unlimited raffle profiles with the ZIP you provide and generated profile details. Payment fields use invalid placeholder card-style numbers.</p>
+            <p class="subtle-text">Paste emails separated by semicolons, commas, spaces, or new lines. The builder creates unlimited raffle profiles with the ZIP you provide and generated profile details.</p>
             <div class="form-grid">
               <div class="field field--full">
                 <label for="raffleBuilderEmails">Raffle Emails</label>

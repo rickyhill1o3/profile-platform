@@ -4111,6 +4111,32 @@ function isValidEmailForRaffle(value = "") {
     return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(value || "").trim());
 }
 
+const RAFFLE_FIRST_NAMES = [
+    "Avery", "Blake", "Cameron", "Drew", "Elliot", "Finley", "Harper", "Jordan",
+    "Kennedy", "Logan", "Morgan", "Parker", "Quinn", "Reese", "Riley", "Rowan",
+    "Sawyer", "Taylor", "Tatum", "Wesley", "Casey", "Dakota", "Emerson", "Skyler"
+];
+
+const RAFFLE_LAST_NAMES = [
+    "Adams", "Bennett", "Brooks", "Carter", "Coleman", "Davis", "Edwards", "Foster",
+    "Grayson", "Hayes", "Howard", "Jenkins", "Kelly", "Lawson", "Miller", "Morgan",
+    "Nelson", "Parker", "Reed", "Sanders", "Thompson", "Walker", "Wilson", "Young"
+];
+
+const ZIP_LOCATION_OVERRIDES = {
+    "27909": { city: "Elizabeth City", state: "North Carolina" },
+    "27916": { city: "Aydlett", state: "North Carolina" },
+    "27917": { city: "Barco", state: "North Carolina" },
+    "27921": { city: "Camden", state: "North Carolina" },
+    "27929": { city: "Currituck", state: "North Carolina" },
+    "27939": { city: "Grandy", state: "North Carolina" },
+    "27947": { city: "Jarvisburg", state: "North Carolina" },
+    "27950": { city: "Knotts Island", state: "North Carolina" },
+    "27958": { city: "Moyock", state: "North Carolina" },
+    "27966": { city: "Powells Point", state: "North Carolina" },
+    "27973": { city: "Shawboro", state: "North Carolina" }
+};
+
 function inferStateFromZip(zip = "") {
     const first = String(zip || "").trim()[0] || "";
     const map = {
@@ -4126,6 +4152,39 @@ function inferStateFromZip(zip = "") {
         "9": "California"
     };
     return map[first] || "North Carolina";
+}
+
+async function resolveZipLocation(zip = "") {
+    const cleanZip = String(zip || "").trim().slice(0, 5);
+    if (ZIP_LOCATION_OVERRIDES[cleanZip]) return ZIP_LOCATION_OVERRIDES[cleanZip];
+
+    try {
+        if (typeof fetch === "function" && /^\d{5}$/.test(cleanZip)) {
+            const response = await fetch(`https://api.zippopotam.us/us/${encodeURIComponent(cleanZip)}`, {
+                signal: AbortSignal.timeout ? AbortSignal.timeout(2500) : undefined
+            });
+            if (response.ok) {
+                const data = await response.json();
+                const place = Array.isArray(data.places) ? data.places[0] : null;
+                if (place) {
+                    return {
+                        city: place["place name"] || "Raffle City",
+                        state: place["state"] || inferStateFromZip(cleanZip)
+                    };
+                }
+            }
+        }
+    } catch (_) { }
+
+    return { city: "Raffle City", state: inferStateFromZip(cleanZip) };
+}
+
+function randomRaffleName(index = 0) {
+    const i = Math.abs(Number(index || 0));
+    return {
+        firstName: RAFFLE_FIRST_NAMES[i % RAFFLE_FIRST_NAMES.length],
+        lastName: RAFFLE_LAST_NAMES[(i * 7 + 3) % RAFFLE_LAST_NAMES.length]
+    };
 }
 
 function generateRafflePhone(index = 0) {
@@ -4152,12 +4211,8 @@ function generateInvalidPlaceholderCard(index = 0) {
     return `${digits}${invalidCheckDigit}`;
 }
 
-function buildRafflePayload(email, zip, index = 0) {
-    const localPart = String(email || "").split("@")[0] || `raffle${index + 1}`;
-    const cleanName = localPart.replace(/[^a-z0-9]+/gi, " ").trim();
-    const parts = cleanName.split(/\s+/).filter(Boolean);
-    const firstName = (parts[0] || "Raffle").replace(/^\w/, (c) => c.toUpperCase());
-    const lastName = (parts[1] || `Entry${index + 1}`).replace(/^\w/, (c) => c.toUpperCase());
+function buildRafflePayload(email, zip, index = 0, zipLocation = {}) {
+    const { firstName, lastName } = randomRaffleName(index);
 
     return {
         profile_name: `Raffle ${index + 1} - ${email}`,
@@ -4166,9 +4221,9 @@ function buildRafflePayload(email, zip, index = 0) {
         last_name: lastName,
         email,
         phone: generateRafflePhone(index),
-        address1: `${100 + index} Raffle Entry Lane`,
-        city: "Raffle City",
-        state: inferStateFromZip(zip),
+        address1: `${100 + index} ${lastName} Street`,
+        city: zipLocation.city || "Raffle City",
+        state: zipLocation.state || inferStateFromZip(zip),
         zip: String(zip || "").trim(),
         card: generateInvalidPlaceholderCard(index),
         exp_month: "01",
@@ -4180,7 +4235,6 @@ function buildRafflePayload(email, zip, index = 0) {
         amazon_2fa_secret: ""
     };
 }
-
 
 app.get("/profiles", auth, async (req, res) => {
     try {
@@ -4341,13 +4395,14 @@ app.post("/profiles/raffle-builder", auth, async (req, res) => {
         }
 
         const existingProfiles = await getUserProfilesWithRelations(req.user_id);
+        const zipLocation = await resolveZipLocation(zip);
         const created = [];
         const skipped = [];
         const errors = [];
 
         for (let i = 0; i < emails.length; i += 1) {
             const email = emails[i];
-            const payload = buildRafflePayload(email, zip, i);
+            const payload = buildRafflePayload(email, zip, i, zipLocation);
             const duplicateError = findDuplicateInSameGroup(
                 existingProfiles,
                 null,

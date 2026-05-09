@@ -272,9 +272,15 @@ if (signupForm) {
 /* ================= DASHBOARD ================= */
 
 async function loadProfiles() {
-    const dashboardEl = document.getElementById("dashboard");
-    const rafflePanel = document.getElementById("raffleProfilesPanel");
-    if (!dashboardEl && !rafflePanel) return;
+    const profilePanels = {
+        general: document.getElementById("generalProfilesPanel"),
+        walmart: document.getElementById("walmartProfilesPanel"),
+        target: document.getElementById("targetProfilesPanel"),
+        amazon: document.getElementById("amazonProfilesPanel"),
+        raffle: document.getElementById("raffleProfilesPanel")
+    };
+
+    if (!Object.values(profilePanels).some(Boolean)) return;
 
     let user = currentUser();
     const adminButton = document.getElementById("adminPanelButton");
@@ -301,8 +307,9 @@ async function loadProfiles() {
 
         if (!Array.isArray(profiles)) {
             const msg = `${profiles.error || "Could not load profiles."}`;
-            if (dashboardEl) dashboardEl.innerHTML = msg;
-            if (rafflePanel) rafflePanel.innerHTML = `<div class="empty-card"><p>${escapeHTML(msg)}</p></div>`;
+            Object.values(profilePanels).forEach((panel) => {
+                if (panel) panel.innerHTML = `<div class="empty-card"><p>${escapeHTML(msg)}</p></div>`;
+            });
             return;
         }
 
@@ -418,54 +425,20 @@ async function loadProfiles() {
             return html;
         };
 
-        if (dashboardEl) {
-            let html = `
-                <div class="panel-header">
-                  <div>
-                    <h2>Your Profiles</h2>
-                    <p class="subtle-text">Profiles are grouped by store. Each group is compact and scrollable so large account lists do not take over the dashboard.</p>
-                  </div>
-                  <div class="panel-actions">
-                    <button class="btn btn-primary" onclick="location='profile.html'">Add Profile</button>
-                  </div>
-                </div>
-                <div class="banner banner-soft" style="margin-top:16px;">
-                  <strong>Import checkout profiles</strong>
-                  <p class="subtle-text">Upload a Refract / Prism JSON export to add multiple profiles at once.</p>
-                  <div class="toolbar-row">
-                    <select id="profileImportType" class="input">
-                      <option value="walmart">Walmart</option>
-                      <option value="target">Target</option>
-                      <option value="amazon">Amazon</option>
-                      <option value="general">General</option>
-                      <option value="raffle">Raffle</option>
-                    </select>
-                    <input id="profileImportFile" class="input" type="file" accept="application/json,.json" />
-                    <button class="btn btn-primary" id="profileImportButton" type="button">Import Profiles</button>
-                  </div>
-                  <div id="profileImportMessage" class="subtle-text"></div>
-                </div>
-            `;
-            ['general', 'walmart', 'target', 'amazon'].forEach((groupKey) => {
-                html += renderGroup(groupKey);
-            });
-            dashboardEl.innerHTML = html;
-        }
-
-        if (rafflePanel) {
-            rafflePanel.innerHTML = renderGroup('raffle');
-        }
+        Object.entries(profilePanels).forEach(([groupKey, panel]) => {
+            if (panel) panel.innerHTML = renderGroup(groupKey);
+        });
 
         bindProfileDashboardControls();
-        bindProfileImportControls();
         if (typeof bindRaffleBuilderControls === "function") {
             bindRaffleBuilderControls();
         }
     } catch (err) {
         console.error("Profile dashboard load failed:", err);
         const msg = escapeHTML(err?.message || "Could not connect to the server.");
-        if (dashboardEl) dashboardEl.innerHTML = `<p>${msg}</p>`;
-        if (rafflePanel) rafflePanel.innerHTML = `<div class="empty-card"><p>${msg}</p></div>`;
+        Object.values(profilePanels).forEach((panel) => {
+            if (panel) panel.innerHTML = `<div class="empty-card"><p>${msg}</p></div>`;
+        });
     }
 }
 
@@ -2476,6 +2449,59 @@ async function saveUserSettings() {
 }
 
 
+
+function renderStoreProductCard(product) {
+    const title = product.product_name || product.sku || 'Product';
+    const sku = product.sku || '-';
+    const price = product.default_max_price !== null && product.default_max_price !== undefined ? formatMoney(product.default_max_price) : '—';
+    const credits = formatCredits(product.credit_cost || 0);
+    const link = product.product_url ? `<a href="${escapeHTML(product.product_url)}" target="_blank" rel="noopener">Open</a>` : '';
+    return `
+        <article class="store-product-card">
+            ${product.image_url ? `<img src="${escapeHTML(product.image_url)}" alt="" />` : ''}
+            <div>
+                <strong>${escapeHTML(title)}</strong>
+                <span>SKU: ${escapeHTML(sku)}</span>
+                <span>${escapeHTML(price)} • ${escapeHTML(credits)}</span>
+                ${link}
+            </div>
+        </article>
+    `;
+}
+
+async function loadStoreProductsForSite(site) {
+    const panel = document.getElementById(site + "ProductsPanel");
+    if (!panel) return;
+
+    panel.innerHTML = '<div class="subtle-text">Loading products...</div>';
+
+    try {
+        const qs = new URLSearchParams({ site });
+        const data = await authJSON(API + '/product-catalog?' + qs.toString());
+        const products = Array.isArray(data.products) ? data.products : [];
+        if (!products.length) {
+            panel.innerHTML = '<div class="empty-card"><p>No products are currently listed for this store.</p></div>';
+            return;
+        }
+
+        panel.innerHTML = `
+            <div class="store-product-summary">${products.length} product${products.length === 1 ? '' : 's'} available</div>
+            <div class="store-product-scroll">
+                <div class="store-product-grid">
+                    ${products.map(renderStoreProductCard).join('')}
+                </div>
+            </div>
+        `;
+    } catch (err) {
+        panel.innerHTML = `<div class="empty-card"><p>${escapeHTML(err.message || 'Could not load products.')}</p></div>`;
+    }
+}
+
+async function loadStoreProductPanels() {
+    await Promise.all(['target', 'walmart', 'amazon', 'general'].map(loadStoreProductsForSite));
+}
+
+
 function initUserDashboardNavigation() {
     const buttons = Array.from(document.querySelectorAll('[data-user-nav]'));
     const panes = Array.from(document.querySelectorAll('[data-user-pane]'));
@@ -2668,6 +2694,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (document.getElementById("dashboard")) {
         initUserDashboardNavigation();
         await loadProfiles();
+        try { await loadStoreProductPanels(); } catch (_) { }
         try { await loadCreditsBalance(); } catch (_) { }
         try { await loadUserActivity(); } catch (_) { }
     }
