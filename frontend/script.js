@@ -2587,6 +2587,133 @@ function bindStoreProductSelectionControls(site) {
     }
 }
 
+
+const PRODUCT_CATEGORY_ORDER = [
+    "pokemon",
+    "onepiece",
+    "electronics",
+    "needoh",
+    "sports",
+    "othertcg",
+    "lowkey",
+    "other"
+];
+
+const PRODUCT_CATEGORY_LABELS = {
+    pokemon: "Pokémon",
+    onepiece: "One Piece",
+    electronics: "Electronics",
+    needoh: "Needoh",
+    sports: "Sports Cards",
+    othertcg: "Other TCG",
+    lowkey: "Other Lowkey Flips",
+    other: "Other"
+};
+
+function normalizeProductCategory(value = "") {
+    const raw = String(value || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+    if (["pokemon", "pokémon", "poke", "pkmn"].includes(raw)) return "pokemon";
+    if (["onepiece", "onepiecetcg", "op"].includes(raw)) return "onepiece";
+    if (["electronics", "electronic", "tech"].includes(raw)) return "electronics";
+    if (["needoh", "neeDoh".toLowerCase()].includes(raw)) return "needoh";
+    if (["sports", "sportscards", "sportsCard".toLowerCase(), "card"].includes(raw)) return "sports";
+    if (["othertcg", "othercards", "tcg", "tradingcards"].includes(raw)) return "othertcg";
+    if (["lowkey", "otherlowkey", "flips", "otherlowkeyflips"].includes(raw)) return "lowkey";
+    return raw || "other";
+}
+
+function inferProductCategory(product = {}) {
+    const metadata = product.metadata || {};
+    const direct = metadata.category || metadata.product_type || metadata.type || product.category || product.product_type;
+    const normalizedDirect = normalizeProductCategory(direct);
+    if (normalizedDirect && normalizedDirect !== "other") return normalizedDirect;
+
+    const text = `${product.product_name || ""} ${product.brand || ""} ${product.sku || ""}`.toLowerCase();
+
+    if (text.includes("pokémon") || text.includes("pokemon") || text.includes("scarlet") || text.includes("violet") || text.includes("prismatic") || text.includes("mega evolution") || text.includes("etb") || text.includes("elite trainer")) return "pokemon";
+    if (text.includes("one piece")) return "onepiece";
+    if (text.includes("needoh") || text.includes("nee doh") || text.includes("nice cube") || text.includes("teenie")) return "needoh";
+    if (text.includes("panini") || text.includes("topps") || text.includes("chrome") || text.includes("nba") || text.includes("nfl") || text.includes("football") || text.includes("basketball") || text.includes("baseball")) return "sports";
+    if (text.includes("camera") || text.includes("canon") || text.includes("sony") || text.includes("nintendo") || text.includes("xbox") || text.includes("playstation") || text.includes("apple") || text.includes("ipad") || text.includes("console")) return "electronics";
+    if (text.includes("trading card") || text.includes("booster") || text.includes("deck") || text.includes("tcg")) return "othertcg";
+    return "lowkey";
+}
+
+function getProductCategoryRank(product = {}) {
+    const category = inferProductCategory(product);
+    const index = PRODUCT_CATEGORY_ORDER.indexOf(category);
+    return index === -1 ? PRODUCT_CATEGORY_ORDER.length : index;
+}
+
+function sortStoreProducts(products = []) {
+    return [...products].sort((a, b) => {
+        const ca = getProductCategoryRank(a);
+        const cb = getProductCategoryRank(b);
+        if (ca !== cb) return ca - cb;
+        const selectedDiff = Number(!!b.selected) - Number(!!a.selected);
+        if (selectedDiff) return selectedDiff;
+        return String(a.product_name || a.sku || "").localeCompare(String(b.product_name || b.sku || ""));
+    });
+}
+
+function filterStoreProducts(site, products = []) {
+    const search = String(document.getElementById(site + "ProductSearch")?.value || "").trim().toLowerCase();
+    if (!search) return products;
+    return products.filter((product) => {
+        const haystack = [
+            product.product_name,
+            product.sku,
+            product.brand,
+            inferProductCategory(product),
+            PRODUCT_CATEGORY_LABELS[inferProductCategory(product)]
+        ].join(" ").toLowerCase();
+        return haystack.includes(search);
+    });
+}
+
+function renderStoreProductGroups(site, products = []) {
+    const sorted = sortStoreProducts(filterStoreProducts(site, products));
+    if (!sorted.length) {
+        return '<div class="empty-card"><p>No products match your search.</p></div>';
+    }
+
+    const groups = new Map();
+    sorted.forEach((product) => {
+        const category = inferProductCategory(product);
+        if (!groups.has(category)) groups.set(category, []);
+        groups.get(category).push(product);
+    });
+
+    return PRODUCT_CATEGORY_ORDER.concat([...groups.keys()].filter((key) => !PRODUCT_CATEGORY_ORDER.includes(key))).map((category) => {
+        const items = groups.get(category) || [];
+        if (!items.length) return "";
+        return `
+            <section class="store-product-category">
+                <div class="store-product-category-header">
+                    <h3>${escapeHTML(PRODUCT_CATEGORY_LABELS[category] || category)}</h3>
+                    <span class="badge">${items.length}</span>
+                </div>
+                <div class="store-product-grid">
+                    ${items.map((product) => renderStoreProductCard(product, site)).join('')}
+                </div>
+            </section>
+        `;
+    }).join("");
+}
+
+function bindStoreProductSearch(site) {
+    const input = document.getElementById(site + "ProductSearch");
+    const grid = document.getElementById(site + "ProductGridWrap");
+    if (!input || !grid || input.dataset.bound) return;
+    input.dataset.bound = "1";
+    input.addEventListener("input", () => {
+        grid.innerHTML = renderStoreProductGroups(site, storeProductCache[site] || []);
+        bindStoreProductSelectionControls(site);
+        updateStoreSelectionSummary(site);
+    });
+}
+
+
 async function loadStoreProductsForSite(site) {
     const panel = document.getElementById(site + "ProductsPanel");
     if (!panel) return;
@@ -2620,14 +2747,18 @@ async function loadStoreProductsForSite(site) {
                 </div>
                 ${selectable ? `<div class="panel-actions"><button class="btn btn-primary" type="button" id="${site}ProductSelectionSave">Save ${site === 'target' ? 'Target' : 'Amazon'} Selections</button></div>` : ''}
             </div>
+            <div class="toolbar-row store-product-search-row">
+                <input id="${site}ProductSearch" class="input" type="search" placeholder="Search ${site} products by name, SKU, brand, or category" />
+            </div>
             ${selectable ? `<div class="banner banner-soft"><strong>${escapeHTML(limitText)}</strong><p class="subtle-text">You can pick your own products even if they are not currently recommended.</p><div id="${site}ProductSelectionMessage" class="subtle-text"></div></div>` : ''}
             <div class="store-product-scroll">
-                <div class="store-product-grid">
-                    ${products.map((product) => renderStoreProductCard(product, site)).join('')}
+                <div id="${site}ProductGridWrap">
+                    ${renderStoreProductGroups(site, products)}
                 </div>
             </div>
         `;
         updateStoreSelectionSummary(site);
+        bindStoreProductSearch(site);
         bindStoreProductSelectionControls(site);
     } catch (err) {
         panel.innerHTML = `<div class="empty-card"><p>${escapeHTML(err.message || 'Could not load products.')}</p></div>`;

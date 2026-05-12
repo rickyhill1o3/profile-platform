@@ -641,3 +641,25 @@ h1,h2,h3,h4,p{margin:0}
 .store-product-card--clickable label{
   cursor:auto;
 }
+
+/* Store product category grouping and search */
+.store-product-search-row{
+  margin:12px 0;
+}
+.store-product-category{
+  margin-bottom:20px;
+}
+.store-product-category-header{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:12px;
+  margin:0 0 10px;
+  padding:8px 4px;
+  border-bottom:1px solid var(--line);
+}
+.store-product-category-header h3{
+  margin:0;
+  font-size:15px;
+  letter-spacing:.02em;
+}
