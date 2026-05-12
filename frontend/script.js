@@ -2473,7 +2473,7 @@ function renderStoreProductCard(product, site) {
         : '';
 
     return `
-        <article class="store-product-card ${selected ? 'store-product-card--selected' : ''}">
+        <article class="store-product-card ${selectable ? 'store-product-card--clickable' : ''} ${selected ? 'store-product-card--selected' : ''}" data-store-product-card="${escapeHTML(site)}" data-product-id="${escapeHTML(product.id)}">
             ${product.image_url ? `<img src="${escapeHTML(product.image_url)}" alt="" />` : ''}
             <div>
                 <strong>${escapeHTML(title)}</strong>
@@ -2499,37 +2499,64 @@ function updateStoreSelectionSummary(site) {
     }
 }
 
+function applyStoreProductSelection(site, input) {
+    const panel = document.getElementById(site + "ProductsPanel");
+    if (!panel || !input) return;
+
+    const selected = storeSelectedProductIds[site] || new Set();
+    const productId = String(input.dataset.productId || "");
+    const limit = getStoreSelectionLimit(site);
+
+    if (site === "amazon") {
+        selected.clear();
+        if (input.checked) selected.add(productId);
+        panel.querySelectorAll("[data-store-product-select]").forEach((other) => {
+            if (other !== input) other.checked = false;
+            const card = other.closest("[data-store-product-card]");
+            if (card) card.classList.toggle("store-product-card--selected", other.checked);
+            const labelSpan = other.closest("label")?.querySelector("span");
+            if (labelSpan) labelSpan.textContent = other.checked ? "Selected" : "Select";
+        });
+    } else {
+        if (input.checked) {
+            if (selected.size >= limit && !selected.has(productId)) {
+                input.checked = false;
+                alert(`You can select up to ${limit} Target SKUs.`);
+                return;
+            }
+            selected.add(productId);
+        } else {
+            selected.delete(productId);
+        }
+    }
+
+    storeSelectedProductIds[site] = selected;
+
+    const card = input.closest("[data-store-product-card]");
+    if (card) card.classList.toggle("store-product-card--selected", input.checked);
+    const labelSpan = input.closest("label")?.querySelector("span");
+    if (labelSpan) labelSpan.textContent = input.checked ? "Selected" : "Select";
+
+    updateStoreSelectionSummary(site);
+}
+
 function bindStoreProductSelectionControls(site) {
     const panel = document.getElementById(site + "ProductsPanel");
     if (!panel) return;
 
     panel.querySelectorAll("[data-store-product-select]").forEach((input) => {
-        input.addEventListener("change", () => {
-            const selected = storeSelectedProductIds[site] || new Set();
-            const productId = String(input.dataset.productId || "");
-            const limit = getStoreSelectionLimit(site);
+        input.addEventListener("change", () => applyStoreProductSelection(site, input));
+    });
 
-            if (site === "amazon") {
-                selected.clear();
-                if (input.checked) selected.add(productId);
-                panel.querySelectorAll("[data-store-product-select]").forEach((other) => {
-                    if (other !== input) other.checked = false;
-                });
-            } else {
-                if (input.checked) {
-                    if (selected.size >= limit && !selected.has(productId)) {
-                        input.checked = false;
-                        alert(`You can select up to ${limit} Target SKUs.`);
-                        return;
-                    }
-                    selected.add(productId);
-                } else {
-                    selected.delete(productId);
-                }
-            }
-
-            storeSelectedProductIds[site] = selected;
-            updateStoreSelectionSummary(site);
+    panel.querySelectorAll("[data-store-product-card]").forEach((card) => {
+        if (card.dataset.cardClickBound) return;
+        card.dataset.cardClickBound = "1";
+        card.addEventListener("click", (event) => {
+            if (event.target.closest("a, button, input, label, select, textarea")) return;
+            const input = card.querySelector("[data-store-product-select]");
+            if (!input) return;
+            input.checked = !input.checked;
+            applyStoreProductSelection(site, input);
         });
     });
 
@@ -3028,6 +3055,28 @@ async function loadCreditsAdminPane() {
 }
 
 
+
+async function clearProductSelectionsForSelectedStore() {
+    const site = document.getElementById("productSelectionExportSite")?.value || "target";
+    const message = document.getElementById("productSelectionExportMessage");
+    if (!["target", "amazon"].includes(site)) {
+        if (message) message.textContent = "Only Target or Amazon selections can be cleared.";
+        return;
+    }
+    if (!confirm(`Clear all saved ${site} product selections for users you manage? Users will need to reselect with the new limits.`)) return;
+
+    try {
+        if (message) message.textContent = `Clearing ${site} selections...`;
+        await authJSON(API + "/admin/product-selections/clear?site=" + encodeURIComponent(site), { method: "DELETE" });
+        if (message) message.textContent = `Cleared all ${site} selections.`;
+        const output = document.getElementById("productSelectionExportText");
+        if (output) output.value = "";
+        await loadProductSelectionChanges();
+    } catch (err) {
+        if (message) message.textContent = err.message || "Could not clear selections.";
+    }
+}
+
 async function loadProductSelectionChanges() {
     const body = document.getElementById("productSelectionChangesBody");
     if (!body) return;
@@ -3095,6 +3144,11 @@ function initProductSelectionAdminTools() {
     if (copyExport && !copyExport.dataset.bound) {
         copyExport.dataset.bound = "1";
         copyExport.addEventListener("click", copyProductSelectionExport);
+    }
+    const clearButton = document.getElementById("clearProductSelectionsButton");
+    if (clearButton && !clearButton.dataset.bound) {
+        clearButton.dataset.bound = "1";
+        clearButton.addEventListener("click", clearProductSelectionsForSelectedStore);
     }
     loadProductSelectionChanges().catch(() => {});
 }

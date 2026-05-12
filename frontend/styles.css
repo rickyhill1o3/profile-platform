@@ -631,3 +631,13 @@ h1,h2,h3,h4,p{margin:0}
 @media(max-width:760px){
   .store-product-summary-row{display:grid;}
 }
+
+.store-product-card--clickable{
+  cursor:pointer;
+}
+.store-product-card--clickable a,
+.store-product-card--clickable button,
+.store-product-card--clickable input,
+.store-product-card--clickable label{
+  cursor:auto;
+}

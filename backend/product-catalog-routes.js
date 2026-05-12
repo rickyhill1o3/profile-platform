@@ -1209,6 +1209,60 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
         }
     });
 
+
+    app.delete('/admin/product-selections/clear', auth, admin, async (req, res) => {
+        try {
+            const currentUser = await getCurrentUser(req);
+            const site = req.query.site ? normalizeSite(req.query.site) : '';
+            const scopedUserIds = await getScopedUserIds(supabase, currentUser);
+
+            if (!site || !['target', 'amazon'].includes(site)) {
+                return res.status(400).json({ error: 'Choose target or amazon.' });
+            }
+
+            let productQuery = supabase
+                .from('catalog_products')
+                .select('id')
+                .eq('site', site);
+
+            const { data: products, error: productError } = await productQuery;
+            if (productError) return res.status(500).json({ error: productError.message });
+
+            const productIds = (products || []).map((row) => row.id).filter(Boolean);
+            if (!productIds.length) return res.json({ success: true, deleted: 0 });
+
+            let query = supabase
+                .from('user_product_preferences')
+                .delete()
+                .in('catalog_product_id', productIds);
+
+            if (scopedUserIds && scopedUserIds.length) {
+                query = query.in('user_id', scopedUserIds);
+            }
+
+            const { error } = await query;
+            if (error) return res.status(500).json({ error: error.message });
+
+            try {
+                const currentEvents = await getCatalogAppSetting(supabase, 'product_selection_events', []);
+                const rows = Array.isArray(currentEvents) ? currentEvents : [];
+                const now = new Date().toISOString();
+                await setCatalogAppSetting(supabase, 'product_selection_events', [{
+                    id: crypto.randomUUID(),
+                    created_at: now,
+                    user_id: currentUser.id,
+                    site,
+                    action: 'admin_cleared_all',
+                    product: { sku: '*', product_name: `Admin cleared all ${site} selections` }
+                }, ...rows].slice(0, 500));
+            } catch (_) {}
+
+            res.json({ success: true, deleted: null, message: `Cleared ${site} product selections.` });
+        } catch (err) {
+            res.status(500).json({ error: err.message });
+        }
+    });
+
     app.get('/admin/product-selections/export', auth, admin, async (req, res) => {
         try {
             const currentUser = await getCurrentUser(req);
