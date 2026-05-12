@@ -1,4 +1,5 @@
 const cheerio = require("cheerio");
+const crypto = require("crypto");
 
 const SUPPORTED_SITES = new Set(["amazon", "target", "walmart", "general", "supreme", "pokemon"]);
 const REQUESTABLE_SITES = new Set(["amazon", "target", "walmart", "general", "supreme", "pokemon"]);
@@ -587,6 +588,26 @@ async function getCountdownProducts(supabase, countdownId) {
         throw err;
     }
 }
+
+async function getCatalogAppSetting(supabase, key, fallback = null) {
+    const { data, error } = await supabase
+        .from('app_settings')
+        .select('value_json')
+        .eq('key', key)
+        .maybeSingle();
+    if (error) throw new Error(error.message);
+    return data?.value_json ?? fallback;
+}
+
+async function setCatalogAppSetting(supabase, key, value) {
+    const { error } = await supabase
+        .from('app_settings')
+        .upsert({ key, value_json: value, updated_at: new Date().toISOString() }, { onConflict: 'key' });
+    if (error) throw new Error(error.message);
+    return value;
+}
+
+
 module.exports = function registerProductCatalogRoutes({ app, supabase, auth, admin, getCurrentUser, ensureUserNotRevoked }) {
     app.get('/public/countdowns', async (req, res) => {
         try {
@@ -809,24 +830,134 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
         try {
             await ensureUserNotRevoked(req.user_id);
             const site = normalizeSite(req.body.site);
+            const limit = site === 'target' ? 29 : (site === 'amazon' ? 1 : 9999);
+
+            const selectedIdsFromBody = Array.isArray(req.body.selected_product_ids)
+                ? req.body.selected_product_ids.map(String).filter(Boolean)
+                : null;
+
             const preferences = Array.isArray(req.body.preferences) ? req.body.preferences : [];
-            const payload = preferences.map((row) => ({
-                user_id: req.user_id,
-                catalog_product_id: row.catalog_product_id,
-                selected: !!row.selected,
-                run_mode: normalizeRunMode(row.run_mode, 'current'),
-                max_price: normalizeMaxPrice(row.max_price)
-            }));
-            if (!payload.length) return res.json({ success: true, updated: 0 });
-            const productIds = [...new Set(payload.map((row) => row.catalog_product_id).filter(Boolean))];
-            const { data: allowedProducts, error: allowedProductsError } = await supabase.from('catalog_products').select('id, site').in('id', productIds).eq('site', site);
+
+            const incomingSelectedIds = selectedIdsFromBody
+                ? [...new Set(selectedIdsFromBody)]
+                : [...new Set(preferences.filter((row) => !!row.selected).map((row) => String(row.catalog_product_id || '')).filter(Boolean))];
+
+            if (incomingSelectedIds.length > limit) {
+                return res.status(400).json({
+                    error: site === 'target'
+                        ? 'Target allows a maximum of 29 selected SKUs.'
+                        : site === 'amazon'
+                            ? 'Amazon allows only 1 selected item right now.'
+                            : `Maximum ${limit} products allowed.`
+                });
+            }
+
+            const activeCatalog = await getActiveCatalog(supabase, site);
+            if (!activeCatalog?.id) return res.status(400).json({ error: `No active ${site} catalog found.` });
+
+            let allowedQuery = supabase
+                .from('catalog_products')
+                .select('id, site, sku, product_name, default_max_price')
+                .eq('site', site)
+                .eq('is_enabled', true);
+
+            if (incomingSelectedIds.length) allowedQuery = allowedQuery.in('id', incomingSelectedIds);
+
+            const { data: allowedProducts, error: allowedProductsError } = await allowedQuery;
             if (allowedProductsError) return res.status(500).json({ error: allowedProductsError.message });
-            const allowedSet = new Set((allowedProducts || []).map((row) => row.id));
-            const filteredPayload = payload.filter((row) => allowedSet.has(row.catalog_product_id));
-            if (!filteredPayload.length) return res.status(400).json({ error: 'No valid catalog products provided.' });
-            const { error } = await supabase.from('user_product_preferences').upsert(filteredPayload, { onConflict: 'user_id,catalog_product_id' });
-            if (error) return res.status(500).json({ error: error.message });
-            res.json({ success: true, updated: filteredPayload.length });
+
+            const allowedMap = new Map((allowedProducts || []).map((row) => [String(row.id), row]));
+            const filteredSelectedIds = incomingSelectedIds.filter((id) => allowedMap.has(String(id)));
+
+            if (filteredSelectedIds.length !== incomingSelectedIds.length) {
+                return res.status(400).json({ error: 'One or more selected products are not valid for this site.' });
+            }
+
+            const { data: previousRows, error: previousError } = await supabase
+                .from('user_product_preferences')
+                .select('catalog_product_id, selected, catalog_products!inner(id, site, sku, product_name, default_max_price)')
+                .eq('user_id', req.user_id)
+                .eq('selected', true)
+                .eq('catalog_products.site', site);
+            if (previousError) return res.status(500).json({ error: previousError.message });
+
+            const previousSelectedIds = new Set((previousRows || []).map((row) => String(row.catalog_product_id)));
+            const nextSelectedIds = new Set(filteredSelectedIds.map(String));
+
+            const addedIds = [...nextSelectedIds].filter((id) => !previousSelectedIds.has(id));
+            const removedIds = [...previousSelectedIds].filter((id) => !nextSelectedIds.has(id));
+
+            if (site === 'amazon' && filteredSelectedIds.length > 1) {
+                return res.status(400).json({ error: 'Amazon allows only 1 selected item right now.' });
+            }
+
+            if (site === 'target' && filteredSelectedIds.length > 29) {
+                return res.status(400).json({ error: 'Target allows a maximum of 29 selected SKUs.' });
+            }
+
+            const { data: siteProducts, error: siteProductsError } = await supabase
+                .from('catalog_products')
+                .select('id')
+                .eq('site', site);
+            if (siteProductsError) return res.status(500).json({ error: siteProductsError.message });
+
+            const siteProductIds = (siteProducts || []).map((row) => row.id);
+            if (siteProductIds.length) {
+                const { error: clearError } = await supabase
+                    .from('user_product_preferences')
+                    .delete()
+                    .eq('user_id', req.user_id)
+                    .in('catalog_product_id', siteProductIds);
+                if (clearError) return res.status(500).json({ error: clearError.message });
+            }
+
+            if (filteredSelectedIds.length) {
+                const payload = filteredSelectedIds.map((productId) => {
+                    const originalPref = preferences.find((row) => String(row.catalog_product_id) === String(productId)) || {};
+                    const product = allowedMap.get(String(productId));
+                    return {
+                        user_id: req.user_id,
+                        catalog_product_id: productId,
+                        selected: true,
+                        run_mode: normalizeRunMode(originalPref.run_mode, 'current'),
+                        max_price: normalizeMaxPrice(originalPref.max_price ?? product?.default_max_price ?? null)
+                    };
+                });
+
+                const { error } = await supabase
+                    .from('user_product_preferences')
+                    .insert(payload);
+                if (error) return res.status(500).json({ error: error.message });
+            }
+
+            if (addedIds.length || removedIds.length) {
+                try {
+                    const currentEvents = await getCatalogAppSetting(supabase, 'product_selection_events', []);
+                    const rows = Array.isArray(currentEvents) ? currentEvents : [];
+                    const productInfo = new Map();
+                    (allowedProducts || []).forEach((row) => productInfo.set(String(row.id), row));
+                    (previousRows || []).forEach((row) => {
+                        if (row.catalog_products?.id) productInfo.set(String(row.catalog_products.id), row.catalog_products);
+                    });
+                    const now = new Date().toISOString();
+                    const events = [
+                        ...addedIds.map((id) => ({ id: crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`, created_at: now, user_id: req.user_id, site, action: 'added', product: productInfo.get(String(id)) || { id } })),
+                        ...removedIds.map((id) => ({ id: crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`, created_at: now, user_id: req.user_id, site, action: 'removed', product: productInfo.get(String(id)) || { id } }))
+                    ];
+                    await setCatalogAppSetting(supabase, 'product_selection_events', [...events, ...rows].slice(0, 500));
+                } catch (eventErr) {
+                    console.warn('Could not record product selection event:', eventErr.message);
+                }
+            }
+
+            res.json({
+                success: true,
+                updated: filteredSelectedIds.length,
+                selected_product_ids: filteredSelectedIds,
+                added: addedIds.length,
+                removed: removedIds.length,
+                limit
+            });
         } catch (err) {
             const status = err.message === 'This account has been revoked' ? 403 : 500;
             res.status(status).json({ error: err.message });
@@ -1048,7 +1179,81 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
         }
     });
 
-    app.get('/admin/product-preferences', auth, admin, async (req, res) => {
+    
+    app.get('/admin/product-selection-changes', auth, admin, async (req, res) => {
+        try {
+            const currentUser = await getCurrentUser(req);
+            const scopedUserIds = await getScopedUserIds(supabase, currentUser);
+            const events = await getCatalogAppSetting(supabase, 'product_selection_events', []);
+            const rows = Array.isArray(events) ? events : [];
+            const filtered = scopedUserIds && scopedUserIds.length
+                ? rows.filter((row) => scopedUserIds.includes(row.user_id))
+                : rows;
+
+            const userIds = [...new Set(filtered.map((row) => row.user_id).filter(Boolean))];
+            let userMap = new Map();
+            if (userIds.length) {
+                const { data: users, error: usersError } = await supabase.from('users').select('id, email, owner_admin_id').in('id', userIds);
+                if (usersError) return res.status(500).json({ error: usersError.message });
+                userMap = new Map((users || []).map((user) => [user.id, user]));
+            }
+
+            res.json({
+                items: filtered.slice(0, 150).map((row) => ({
+                    ...row,
+                    user_email: userMap.get(row.user_id)?.email || row.user_id || ''
+                }))
+            });
+        } catch (err) {
+            res.status(500).json({ error: err.message });
+        }
+    });
+
+    app.get('/admin/product-selections/export', auth, admin, async (req, res) => {
+        try {
+            const currentUser = await getCurrentUser(req);
+            const site = req.query.site ? normalizeSite(req.query.site) : 'target';
+            const scopedUserIds = await getScopedUserIds(supabase, currentUser);
+
+            let query = supabase
+                .from('user_product_preferences')
+                .select(`user_id, selected, max_price, updated_at, catalog_products!inner ( id, site, sku, product_name, default_max_price )`)
+                .eq('selected', true)
+                .eq('catalog_products.site', site);
+
+            if (scopedUserIds && scopedUserIds.length) query = query.in('user_id', scopedUserIds);
+
+            const { data, error } = await query;
+            if (error) return res.status(500).json({ error: error.message });
+
+            const userIds = [...new Set((data || []).map((row) => row.user_id).filter(Boolean))];
+            let userMap = new Map();
+            if (userIds.length) {
+                const { data: users, error: usersError } = await supabase.from('users').select('id, email, owner_admin_id').in('id', userIds);
+                if (usersError) return res.status(500).json({ error: usersError.message });
+                userMap = new Map((users || []).map((user) => [user.id, user]));
+            }
+
+            const byUser = new Map();
+            (data || []).forEach((row) => {
+                const user = userMap.get(row.user_id);
+                if (!user) return;
+                const product = row.catalog_products || {};
+                const price = row.max_price ?? product.default_max_price;
+                const line = `${product.sku || ''};${product.product_name || product.sku || ''};${price === null || price === undefined ? '' : price}`;
+                if (!byUser.has(row.user_id)) byUser.set(row.user_id, { user_id: row.user_id, user_email: user.email || row.user_id, lines: [] });
+                byUser.get(row.user_id).lines.push(line);
+            });
+
+            const users = [...byUser.values()].sort((a, b) => (a.user_email || '').localeCompare(b.user_email || ''));
+            const text = users.map((user) => `${user.user_email}\n${user.lines.join('\n')}`).join('\n\n');
+            res.json({ site, users, text });
+        } catch (err) {
+            res.status(500).json({ error: err.message });
+        }
+    });
+
+app.get('/admin/product-preferences', auth, admin, async (req, res) => {
         try {
             const currentUser = await getCurrentUser(req);
             const site = req.query.site ? normalizeSite(req.query.site) : '';

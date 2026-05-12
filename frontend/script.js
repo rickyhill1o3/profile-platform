@@ -2450,23 +2450,114 @@ async function saveUserSettings() {
 
 
 
-function renderStoreProductCard(product) {
+const storeProductCache = {};
+const storeSelectedProductIds = {};
+
+function getStoreSelectionLimit(site) {
+    if (site === "target") return 29;
+    if (site === "amazon") return 1;
+    return 9999;
+}
+
+function renderStoreProductCard(product, site) {
     const title = product.product_name || product.sku || 'Product';
     const sku = product.sku || '-';
-    const price = product.default_max_price !== null && product.default_max_price !== undefined ? formatMoney(product.default_max_price) : '—';
+    const price = product.default_max_price !== null && product.default_max_price !== undefined ? formatMoney(product.default_max_price) : 'No limit';
     const credits = formatCredits(product.credit_cost || 0);
     const link = product.product_url ? `<a href="${escapeHTML(product.product_url)}" target="_blank" rel="noopener">Open</a>` : '';
+    const selectable = site === 'target' || site === 'amazon';
+    const inputType = site === 'amazon' ? 'radio' : 'checkbox';
+    const selected = !!product.selected;
+    const control = selectable
+        ? `<label class="checkbox-inline store-product-select"><input type="${inputType}" name="${site}ProductSelection" data-store-product-select="${escapeHTML(site)}" data-product-id="${escapeHTML(product.id)}" ${selected ? 'checked' : ''} /><span>${selected ? 'Selected' : 'Select'}</span></label>`
+        : '';
+
     return `
-        <article class="store-product-card">
+        <article class="store-product-card ${selected ? 'store-product-card--selected' : ''}">
             ${product.image_url ? `<img src="${escapeHTML(product.image_url)}" alt="" />` : ''}
             <div>
                 <strong>${escapeHTML(title)}</strong>
                 <span>SKU: ${escapeHTML(sku)}</span>
                 <span>${escapeHTML(price)} • ${escapeHTML(credits)}</span>
                 ${link}
+                ${control}
             </div>
         </article>
     `;
+}
+
+function updateStoreSelectionSummary(site) {
+    const summary = document.getElementById(site + "SelectionSummary");
+    const selected = storeSelectedProductIds[site] || new Set();
+    const limit = getStoreSelectionLimit(site);
+    if (summary) {
+        summary.textContent = site === "target"
+            ? `${selected.size} / 29 Target SKUs selected`
+            : site === "amazon"
+                ? `${selected.size} / 1 Amazon item selected`
+                : `${selected.size} selected`;
+    }
+}
+
+function bindStoreProductSelectionControls(site) {
+    const panel = document.getElementById(site + "ProductsPanel");
+    if (!panel) return;
+
+    panel.querySelectorAll("[data-store-product-select]").forEach((input) => {
+        input.addEventListener("change", () => {
+            const selected = storeSelectedProductIds[site] || new Set();
+            const productId = String(input.dataset.productId || "");
+            const limit = getStoreSelectionLimit(site);
+
+            if (site === "amazon") {
+                selected.clear();
+                if (input.checked) selected.add(productId);
+                panel.querySelectorAll("[data-store-product-select]").forEach((other) => {
+                    if (other !== input) other.checked = false;
+                });
+            } else {
+                if (input.checked) {
+                    if (selected.size >= limit && !selected.has(productId)) {
+                        input.checked = false;
+                        alert(`You can select up to ${limit} Target SKUs.`);
+                        return;
+                    }
+                    selected.add(productId);
+                } else {
+                    selected.delete(productId);
+                }
+            }
+
+            storeSelectedProductIds[site] = selected;
+            updateStoreSelectionSummary(site);
+        });
+    });
+
+    const saveButton = document.getElementById(site + "ProductSelectionSave");
+    if (saveButton && !saveButton.dataset.bound) {
+        saveButton.dataset.bound = "1";
+        saveButton.addEventListener("click", async () => {
+            const selected = Array.from(storeSelectedProductIds[site] || new Set());
+            const msg = document.getElementById(site + "ProductSelectionMessage");
+            saveButton.disabled = true;
+            if (msg) msg.textContent = "Saving selections...";
+            try {
+                const data = await authJSON(API + "/product-preferences", {
+                    method: "PUT",
+                    body: JSON.stringify({
+                        site,
+                        selected_product_ids: selected
+                    })
+                });
+                if (msg) msg.textContent = `Saved ${selected.length} ${site === "target" ? "Target SKU" : "Amazon item"}${selected.length === 1 ? "" : "s"}.`;
+                await loadStoreProductsForSite(site);
+            } catch (err) {
+                if (msg) msg.textContent = err.message || "Could not save selections.";
+            } finally {
+                saveButton.disabled = false;
+            }
+        });
+    }
 }
 
 async function loadStoreProductsForSite(site) {
@@ -2479,19 +2570,38 @@ async function loadStoreProductsForSite(site) {
         const qs = new URLSearchParams({ site });
         const data = await authJSON(API + '/product-catalog?' + qs.toString());
         const products = Array.isArray(data.products) ? data.products : [];
+        storeProductCache[site] = products;
+        storeSelectedProductIds[site] = new Set(products.filter((product) => !!product.selected).map((product) => String(product.id)));
+
         if (!products.length) {
             panel.innerHTML = '<div class="empty-card"><p>No products are currently listed for this store.</p></div>';
             return;
         }
 
+        const selectable = site === 'target' || site === 'amazon';
+        const limitText = site === 'target'
+            ? 'Select up to 29 Target SKUs.'
+            : site === 'amazon'
+                ? 'Select 1 Amazon item.'
+                : '';
+
         panel.innerHTML = `
-            <div class="store-product-summary">${products.length} product${products.length === 1 ? '' : 's'} available</div>
+            <div class="store-product-summary-row">
+                <div>
+                    <div class="store-product-summary">${products.length} product${products.length === 1 ? '' : 's'} available</div>
+                    ${selectable ? `<div class="subtle-text" id="${site}SelectionSummary"></div>` : ''}
+                </div>
+                ${selectable ? `<div class="panel-actions"><button class="btn btn-primary" type="button" id="${site}ProductSelectionSave">Save ${site === 'target' ? 'Target' : 'Amazon'} Selections</button></div>` : ''}
+            </div>
+            ${selectable ? `<div class="banner banner-soft"><strong>${escapeHTML(limitText)}</strong><p class="subtle-text">You can pick your own products even if they are not currently recommended.</p><div id="${site}ProductSelectionMessage" class="subtle-text"></div></div>` : ''}
             <div class="store-product-scroll">
                 <div class="store-product-grid">
-                    ${products.map(renderStoreProductCard).join('')}
+                    ${products.map((product) => renderStoreProductCard(product, site)).join('')}
                 </div>
             </div>
         `;
+        updateStoreSelectionSummary(site);
+        bindStoreProductSelectionControls(site);
     } catch (err) {
         panel.innerHTML = `<div class="empty-card"><p>${escapeHTML(err.message || 'Could not load products.')}</p></div>`;
     }
@@ -2500,7 +2610,6 @@ async function loadStoreProductsForSite(site) {
 async function loadStoreProductPanels() {
     await Promise.all(['target', 'walmart', 'amazon', 'general'].map(loadStoreProductsForSite));
 }
-
 
 
 function formatTargetCheckoutSkuList(items = []) {
@@ -2918,6 +3027,79 @@ async function loadCreditsAdminPane() {
     }
 }
 
+
+async function loadProductSelectionChanges() {
+    const body = document.getElementById("productSelectionChangesBody");
+    if (!body) return;
+    body.innerHTML = '<tr><td colspan="6">Loading changes...</td></tr>';
+    try {
+        const data = await authJSON(API + "/admin/product-selection-changes");
+        const items = Array.isArray(data.items) ? data.items : [];
+        body.innerHTML = items.length ? items.map((item) => {
+            const product = item.product || {};
+            return `<tr>
+                <td>${escapeHTML(formatDateTime(item.created_at))}</td>
+                <td>${escapeHTML(item.user_email || item.user_id || "-")}</td>
+                <td>${escapeHTML(item.site || "-")}</td>
+                <td>${escapeHTML(item.action || "-")}</td>
+                <td>${escapeHTML(product.sku || "-")}</td>
+                <td>${escapeHTML(product.product_name || product.sku || "-")}</td>
+            </tr>`;
+        }).join("") : '<tr><td colspan="6">No selection changes yet.</td></tr>';
+    } catch (err) {
+        body.innerHTML = `<tr><td colspan="6">${escapeHTML(err.message || "Could not load changes.")}</td></tr>`;
+    }
+}
+
+async function loadProductSelectionExport() {
+    const site = document.getElementById("productSelectionExportSite")?.value || "target";
+    const output = document.getElementById("productSelectionExportText");
+    const message = document.getElementById("productSelectionExportMessage");
+    if (!output) return;
+    if (message) message.textContent = "Loading export...";
+    try {
+        const data = await authJSON(API + "/admin/product-selections/export?site=" + encodeURIComponent(site));
+        output.value = data.text || "";
+        if (message) message.textContent = `Loaded ${Array.isArray(data.users) ? data.users.length : 0} user export${Array.isArray(data.users) && data.users.length === 1 ? "" : "s"}.`;
+    } catch (err) {
+        if (message) message.textContent = err.message || "Could not load export.";
+    }
+}
+
+async function copyProductSelectionExport() {
+    const output = document.getElementById("productSelectionExportText");
+    const message = document.getElementById("productSelectionExportMessage");
+    if (!output) return;
+    try {
+        await navigator.clipboard.writeText(output.value || "");
+        if (message) message.textContent = "Copied export to clipboard.";
+    } catch (_) {
+        output.select();
+        document.execCommand("copy");
+        if (message) message.textContent = "Copied export to clipboard.";
+    }
+}
+
+function initProductSelectionAdminTools() {
+    const refresh = document.getElementById("refreshProductSelectionChangesButton");
+    const loadExport = document.getElementById("loadProductSelectionExportButton");
+    const copyExport = document.getElementById("copyProductSelectionExportButton");
+    if (refresh && !refresh.dataset.bound) {
+        refresh.dataset.bound = "1";
+        refresh.addEventListener("click", loadProductSelectionChanges);
+    }
+    if (loadExport && !loadExport.dataset.bound) {
+        loadExport.dataset.bound = "1";
+        loadExport.addEventListener("click", loadProductSelectionExport);
+    }
+    if (copyExport && !copyExport.dataset.bound) {
+        copyExport.dataset.bound = "1";
+        copyExport.addEventListener("click", copyProductSelectionExport);
+    }
+    loadProductSelectionChanges().catch(() => {});
+}
+
+
 document.addEventListener("DOMContentLoaded", async () => {
     if (!requireAuthForPrivatePages()) return;
     try {
@@ -2959,6 +3141,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         try { updateExportCount(); } catch (_) { }
         try { await initCountdownManager(); } catch (_) { }
         try { await initCatalogTools(); } catch (_) { }
+        try { initProductSelectionAdminTools(); } catch (_) { }
         try { initTargetCheckoutListAdmin(); } catch (_) { }
         try { await loadCreditsAdminPane(); } catch (_) { }
         try { await loadWebhookSettings(); } catch (_) { }

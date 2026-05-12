@@ -410,6 +410,45 @@
                 </tbody>
               </table>
             </div>
+
+            <div class="panel-header panel-header--nested">
+              <div>
+                <h3>Target / Amazon Selection Tools</h3>
+                <p class="subtle-text">Track changes and export selected products in bot-ready sku;name;price format.</p>
+              </div>
+            </div>
+            <div class="toolbar-row toolbar-row--spread">
+              <div class="toolbar-row">
+                <select class="input input--sm" id="productSelectionExportSite">
+                  <option value="target">Target</option>
+                  <option value="amazon">Amazon</option>
+                </select>
+                <button class="btn btn-primary" type="button" id="loadProductSelectionExportButton">Load Export</button>
+                <button class="btn" type="button" id="copyProductSelectionExportButton">Copy Export</button>
+              </div>
+              <span id="productSelectionExportMessage" class="subtle-text"></span>
+            </div>
+            <textarea class="input" id="productSelectionExportText" rows="10" placeholder="Export will appear here..." readonly></textarea>
+            <div class="panel-header panel-header--nested">
+              <div>
+                <h3>Recent Product Selection Changes</h3>
+                <p class="subtle-text">Newest user changes are listed here so admins know when checkout lists changed.</p>
+              </div>
+              <div class="panel-actions">
+                <button class="btn" type="button" id="refreshProductSelectionChangesButton">Refresh Changes</button>
+              </div>
+            </div>
+            <div class="table-wrap table-wrap--admin-scroll">
+              <table class="admin-table">
+                <thead>
+                  <tr><th>When</th><th>User</th><th>Site</th><th>Action</th><th>SKU</th><th>Product</th></tr>
+                </thead>
+                <tbody id="productSelectionChangesBody">
+                  <tr><td colspan="6">Loading changes...</td></tr>
+                </tbody>
+              </table>
+            </div>
+
             <div class="panel-header panel-header--nested">
               <div>
                 <h3>Users by Countdown Release</h3>

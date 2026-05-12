@@ -605,3 +605,29 @@ h1,h2,h3,h4,p{margin:0}
   .target-checkout-list-grid{grid-template-columns:1fr;}
   .target-checkout-list-card__header{display:grid;}
 }
+
+
+/* Product selection controls */
+.store-product-summary-row{
+  display:flex;
+  justify-content:space-between;
+  gap:14px;
+  align-items:flex-start;
+  margin-bottom:12px;
+}
+.store-product-card--selected{
+  border-color:#60a5fa;
+  box-shadow:0 0 0 3px rgba(96,165,250,.15);
+  background:linear-gradient(180deg,#eff6ff 0%,#fff 100%);
+}
+.store-product-select{
+  margin-top:10px;
+  font-weight:700;
+}
+#productSelectionExportText{
+  margin-top:12px;
+  font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+}
+@media(max-width:760px){
+  .store-product-summary-row{display:grid;}
+}
