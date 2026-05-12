@@ -1180,6 +1180,195 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
     });
 
     
+
+    async function getSelectedProductsForUser(site, userId) {
+        if (!userId) return [];
+        const { data, error } = await supabase
+            .from('user_product_preferences')
+            .select(`catalog_product_id, selected, max_price, updated_at, catalog_products!inner ( id, site, sku, product_name, default_max_price, image_url, product_url, brand, credit_cost, metadata )`)
+            .eq('user_id', userId)
+            .eq('selected', true)
+            .eq('catalog_products.site', site)
+            .order('updated_at', { ascending: false });
+        if (error) throw new Error(error.message);
+        return (data || []).map((row) => ({
+            product_id: row.catalog_product_id,
+            max_price: row.max_price,
+            updated_at: row.updated_at,
+            product: row.catalog_products || {}
+        }));
+    }
+
+    async function getFirstSuperAdminUser() {
+        const { data, error } = await supabase
+            .from('users')
+            .select('id, email, role')
+            .eq('role', 'super_admin')
+            .order('created_at', { ascending: true })
+            .limit(1)
+            .maybeSingle();
+        if (error) throw new Error(error.message);
+        return data || null;
+    }
+
+    function productSelectionLine(row) {
+        const product = row.catalog_products || row.product || {};
+        const price = row.max_price ?? product.default_max_price;
+        return `${product.sku || ''};${product.product_name || product.sku || ''};${price === null || price === undefined ? '' : price}`;
+    }
+
+    app.get('/target-recommended-lists', auth, async (req, res) => {
+        try {
+            await ensureUserNotRevoked(req.user_id);
+            const currentUser = await getCurrentUser(req);
+            const lists = [];
+
+            const superAdmin = await getFirstSuperAdminUser();
+            if (superAdmin?.id) {
+                const products = await getSelectedProductsForUser('target', superAdmin.id);
+                if (products.length) {
+                    const name = await getCatalogAppSetting(supabase, `target_recommended_list_name:${superAdmin.id}`, 'The Shore Shack List');
+                    lists.push({
+                        scope: 'super_admin',
+                        owner_user_id: superAdmin.id,
+                        title: name || 'The Shore Shack List',
+                        subtitle: 'Super admin currently running list',
+                        products,
+                        product_ids: products.map((row) => row.product_id).filter(Boolean)
+                    });
+                }
+            }
+
+            const ownerAdminId = currentUser?.owner_admin_id || (['admin', 'super_admin'].includes(currentUser?.role) ? currentUser.id : null);
+            if (ownerAdminId && ownerAdminId !== superAdmin?.id) {
+                const { data: adminUser, error: adminUserError } = await supabase
+                    .from('users')
+                    .select('id, email, role')
+                    .eq('id', ownerAdminId)
+                    .maybeSingle();
+                if (adminUserError) throw new Error(adminUserError.message);
+                if (adminUser?.id) {
+                    const products = await getSelectedProductsForUser('target', adminUser.id);
+                    if (products.length) {
+                        const defaultName = adminUser.email ? `${adminUser.email} List` : 'Admin List';
+                        const name = await getCatalogAppSetting(supabase, `target_recommended_list_name:${adminUser.id}`, defaultName);
+                        lists.push({
+                            scope: 'owner_admin',
+                            owner_user_id: adminUser.id,
+                            title: name || defaultName,
+                            subtitle: 'Your admin currently running list',
+                            products,
+                            product_ids: products.map((row) => row.product_id).filter(Boolean)
+                        });
+                    }
+                }
+            }
+
+            res.json({ lists });
+        } catch (err) {
+            const status = err.message === 'This account has been revoked' ? 403 : 500;
+            res.status(status).json({ error: err.message });
+        }
+    });
+
+    app.get('/admin/target-recommended-list-name', auth, admin, async (req, res) => {
+        try {
+            const currentUser = await getCurrentUser(req);
+            const defaultName = currentUser?.role === 'super_admin' ? 'The Shore Shack List' : `${currentUser?.email || 'Admin'} List`;
+            const name = await getCatalogAppSetting(supabase, `target_recommended_list_name:${currentUser.id}`, defaultName);
+            res.json({ name, default_name: defaultName });
+        } catch (err) {
+            res.status(500).json({ error: err.message });
+        }
+    });
+
+    app.post('/admin/target-recommended-list-name', auth, admin, async (req, res) => {
+        try {
+            const currentUser = await getCurrentUser(req);
+            const name = String(req.body?.name || '').trim();
+            if (!name) return res.status(400).json({ error: 'List name is required.' });
+            await setCatalogAppSetting(supabase, `target_recommended_list_name:${currentUser.id}`, name);
+            res.json({ success: true, name });
+        } catch (err) {
+            res.status(500).json({ error: err.message });
+        }
+    });
+
+    app.get('/admin/product-selection-export-users', auth, admin, async (req, res) => {
+        try {
+            const currentUser = await getCurrentUser(req);
+            const site = req.query.site ? normalizeSite(req.query.site) : 'target';
+            const scopedUserIds = await getScopedUserIds(supabase, currentUser);
+
+            let query = supabase
+                .from('user_product_preferences')
+                .select(`user_id, selected, updated_at, catalog_products!inner ( site )`)
+                .eq('selected', true)
+                .eq('catalog_products.site', site);
+
+            if (scopedUserIds && scopedUserIds.length) query = query.in('user_id', scopedUserIds);
+
+            const { data, error } = await query;
+            if (error) return res.status(500).json({ error: error.message });
+
+            const grouped = new Map();
+            (data || []).forEach((row) => {
+                if (!row.user_id) return;
+                if (!grouped.has(row.user_id)) grouped.set(row.user_id, { user_id: row.user_id, selection_count: 0, latest_change_at: null });
+                const item = grouped.get(row.user_id);
+                item.selection_count += 1;
+                if (!item.latest_change_at || new Date(row.updated_at) > new Date(item.latest_change_at)) item.latest_change_at = row.updated_at;
+            });
+
+            const userIds = [...grouped.keys()];
+            let userMap = new Map();
+            if (userIds.length) {
+                const { data: users, error: usersError } = await supabase.from('users').select('id, email, owner_admin_id').in('id', userIds);
+                if (usersError) return res.status(500).json({ error: usersError.message });
+                userMap = new Map((users || []).map((user) => [user.id, user]));
+            }
+
+            const exportState = await getCatalogAppSetting(supabase, `product_selection_export_state:${site}:${currentUser.id}`, {});
+            const users = [...grouped.values()].map((row) => {
+                const lastExportedAt = exportState?.[row.user_id] || null;
+                const changedSinceExport = !lastExportedAt || (row.latest_change_at && new Date(row.latest_change_at) > new Date(lastExportedAt));
+                return {
+                    ...row,
+                    user_email: userMap.get(row.user_id)?.email || row.user_id,
+                    last_exported_at: lastExportedAt,
+                    changed_since_export: !!changedSinceExport
+                };
+            }).sort((a, b) => {
+                if (a.changed_since_export !== b.changed_since_export) return a.changed_since_export ? -1 : 1;
+                return String(a.user_email || '').localeCompare(String(b.user_email || ''));
+            });
+
+            res.json({ site, users });
+        } catch (err) {
+            res.status(500).json({ error: err.message });
+        }
+    });
+
+    app.post('/admin/product-selections/mark-exported', auth, admin, async (req, res) => {
+        try {
+            const currentUser = await getCurrentUser(req);
+            const site = req.body?.site ? normalizeSite(req.body.site) : 'target';
+            const userId = String(req.body?.user_id || '').trim();
+            if (!userId) return res.status(400).json({ error: 'User is required.' });
+            if (!(await canAdminAccessUser(supabase, currentUser, userId))) {
+                return res.status(403).json({ error: 'You do not have access to this user.' });
+            }
+            const key = `product_selection_export_state:${site}:${currentUser.id}`;
+            const exportState = await getCatalogAppSetting(supabase, key, {});
+            const next = { ...(exportState || {}), [userId]: new Date().toISOString() };
+            await setCatalogAppSetting(supabase, key, next);
+            res.json({ success: true, last_exported_at: next[userId] });
+        } catch (err) {
+            res.status(500).json({ error: err.message });
+        }
+    });
+
+
     app.get('/admin/product-selection-changes', auth, admin, async (req, res) => {
         try {
             const currentUser = await getCurrentUser(req);
@@ -1267,7 +1456,12 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
         try {
             const currentUser = await getCurrentUser(req);
             const site = req.query.site ? normalizeSite(req.query.site) : 'target';
+            const requestedUserId = String(req.query.user_id || '').trim();
             const scopedUserIds = await getScopedUserIds(supabase, currentUser);
+
+            if (requestedUserId && !(await canAdminAccessUser(supabase, currentUser, requestedUserId))) {
+                return res.status(403).json({ error: 'You do not have access to this user.' });
+            }
 
             let query = supabase
                 .from('user_product_preferences')
@@ -1275,7 +1469,8 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
                 .eq('selected', true)
                 .eq('catalog_products.site', site);
 
-            if (scopedUserIds && scopedUserIds.length) query = query.in('user_id', scopedUserIds);
+            if (requestedUserId) query = query.eq('user_id', requestedUserId);
+            else if (scopedUserIds && scopedUserIds.length) query = query.in('user_id', scopedUserIds);
 
             const { data, error } = await query;
             if (error) return res.status(500).json({ error: error.message });
@@ -1292,15 +1487,15 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
             (data || []).forEach((row) => {
                 const user = userMap.get(row.user_id);
                 if (!user) return;
-                const product = row.catalog_products || {};
-                const price = row.max_price ?? product.default_max_price;
-                const line = `${product.sku || ''};${product.product_name || product.sku || ''};${price === null || price === undefined ? '' : price}`;
+                const line = productSelectionLine(row);
                 if (!byUser.has(row.user_id)) byUser.set(row.user_id, { user_id: row.user_id, user_email: user.email || row.user_id, lines: [] });
                 byUser.get(row.user_id).lines.push(line);
             });
 
             const users = [...byUser.values()].sort((a, b) => (a.user_email || '').localeCompare(b.user_email || ''));
-            const text = users.map((user) => `${user.user_email}\n${user.lines.join('\n')}`).join('\n\n');
+            const text = requestedUserId
+                ? (users[0]?.lines || []).join('\n')
+                : users.map((user) => `${user.user_email}\n${user.lines.join('\n')}`).join('\n\n');
             res.json({ site, users, text });
         } catch (err) {
             res.status(500).json({ error: err.message });

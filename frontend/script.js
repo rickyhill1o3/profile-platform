@@ -2714,6 +2714,91 @@ function bindStoreProductSearch(site) {
 }
 
 
+
+async function loadTargetRecommendedLists() {
+    const panel = document.getElementById("targetRecommendedListsPanel");
+    if (!panel) return;
+
+    panel.innerHTML = '<div class="subtle-text">Loading running lists...</div>';
+
+    try {
+        const data = await authJSON(API + "/target-recommended-lists");
+        const lists = Array.isArray(data.lists) ? data.lists : [];
+
+        if (!lists.length) {
+            panel.innerHTML = '<div class="empty-card"><p>No super admin/admin Target running lists are posted yet.</p></div>';
+            return;
+        }
+
+        panel.innerHTML = lists.map((list) => `
+            <article class="recommended-list-card">
+                <div class="recommended-list-card__header">
+                    <div>
+                        <h3>${escapeHTML(list.title || "Running List")}</h3>
+                        <p class="subtle-text">${escapeHTML(list.subtitle || "")} • ${(list.product_ids || []).length} SKU${(list.product_ids || []).length === 1 ? "" : "s"}</p>
+                    </div>
+                    <button class="btn btn-primary" type="button" data-apply-recommended-target-list="${escapeHTML((list.product_ids || []).join(","))}">Apply List</button>
+                </div>
+                <div class="target-checkout-sku-scroll">
+                    <table class="mini-table">
+                        <thead><tr><th>SKU</th><th>Product</th><th>Price</th></tr></thead>
+                        <tbody>
+                            ${(list.products || []).map((row) => {
+                                const product = row.product || {};
+                                const price = row.max_price ?? product.default_max_price;
+                                return `<tr><td>${escapeHTML(product.sku || "-")}</td><td>${escapeHTML(product.product_name || product.sku || "-")}</td><td>${price === null || price === undefined ? '<span class="subtle-text">No limit</span>' : escapeHTML(formatMoney(price))}</td></tr>`;
+                            }).join("")}
+                        </tbody>
+                    </table>
+                </div>
+            </article>
+        `).join("");
+
+        panel.querySelectorAll("[data-apply-recommended-target-list]").forEach((button) => {
+            button.addEventListener("click", () => {
+                const ids = String(button.dataset.applyRecommendedTargetList || "").split(",").filter(Boolean);
+                applyRecommendedTargetProductIds(ids);
+            });
+        });
+    } catch (err) {
+        panel.innerHTML = `<div class="empty-card"><p>${escapeHTML(err.message || "Could not load running lists.")}</p></div>`;
+    }
+}
+
+function applyRecommendedTargetProductIds(productIds = []) {
+    const site = "target";
+    const available = new Set((storeProductCache[site] || []).map((product) => String(product.id)));
+    const selected = storeSelectedProductIds[site] || new Set();
+
+    let added = 0;
+    for (const id of productIds.map(String)) {
+        if (!available.has(id) || selected.has(id)) continue;
+        if (selected.size >= 29) break;
+        selected.add(id);
+        added += 1;
+    }
+
+    storeSelectedProductIds[site] = selected;
+
+    document.querySelectorAll(`#${site}ProductsPanel [data-store-product-select]`).forEach((input) => {
+        const isSelected = selected.has(String(input.dataset.productId || ""));
+        input.checked = isSelected;
+        const card = input.closest("[data-store-product-card]");
+        if (card) card.classList.toggle("store-product-card--selected", isSelected);
+        const labelSpan = input.closest("label")?.querySelector("span");
+        if (labelSpan) labelSpan.textContent = isSelected ? "Selected" : "Select";
+    });
+
+    updateStoreSelectionSummary(site);
+    const msg = document.getElementById("targetProductSelectionMessage");
+    if (msg) {
+        msg.textContent = added
+            ? `Applied ${added} product${added === 1 ? "" : "s"} from that list. Save Target Selections to lock them in.`
+            : "No products were added. You may already have them selected or you may be at the 29 SKU limit.";
+    }
+}
+
+
 async function loadStoreProductsForSite(site) {
     const panel = document.getElementById(site + "ProductsPanel");
     if (!panel) return;
@@ -2750,6 +2835,7 @@ async function loadStoreProductsForSite(site) {
             <div class="toolbar-row store-product-search-row">
                 <input id="${site}ProductSearch" class="input" type="search" placeholder="Search ${site} products by name, SKU, brand, or category" />
             </div>
+            ${site === 'target' ? `<section class="recommended-lists-section"><div class="panel-header panel-header--compact"><div><h3>Current Running Lists</h3><p class="subtle-text">Apply The Shore Shack list or your admin’s list. List products count toward your 29 Target SKU limit.</p></div></div><div id="targetRecommendedListsPanel" class="recommended-list-grid"></div></section>` : ''}
             ${selectable ? `<div class="banner banner-soft"><strong>${escapeHTML(limitText)}</strong><p class="subtle-text">You can pick your own products even if they are not currently recommended.</p><div id="${site}ProductSelectionMessage" class="subtle-text"></div></div>` : ''}
             <div class="store-product-scroll">
                 <div id="${site}ProductGridWrap">
@@ -2760,6 +2846,9 @@ async function loadStoreProductsForSite(site) {
         updateStoreSelectionSummary(site);
         bindStoreProductSearch(site);
         bindStoreProductSelectionControls(site);
+        if (site === 'target') {
+            try { await loadTargetRecommendedLists(); } catch (_) { }
+        }
     } catch (err) {
         panel.innerHTML = `<div class="empty-card"><p>${escapeHTML(err.message || 'Could not load products.')}</p></div>`;
     }
@@ -3231,16 +3320,42 @@ async function loadProductSelectionChanges() {
     }
 }
 
+async function loadProductSelectionExportUsers() {
+    const select = document.getElementById("productSelectionExportUser");
+    const site = document.getElementById("productSelectionExportSite")?.value || "target";
+    if (!select) return;
+    const currentValue = select.value;
+    select.innerHTML = '<option value="">All users</option>';
+    try {
+        const data = await authJSON(API + "/admin/product-selection-export-users?site=" + encodeURIComponent(site));
+        const users = Array.isArray(data.users) ? data.users : [];
+        users.forEach((user) => {
+            const option = document.createElement("option");
+            option.value = user.user_id;
+            option.textContent = `${user.changed_since_export ? "● " : ""}${user.user_email} (${user.selection_count})${user.changed_since_export ? " - changed" : ""}`;
+            option.dataset.changed = user.changed_since_export ? "1" : "0";
+            select.appendChild(option);
+        });
+        if (currentValue && users.some((user) => user.user_id === currentValue)) select.value = currentValue;
+    } catch (_) { }
+}
+
 async function loadProductSelectionExport() {
     const site = document.getElementById("productSelectionExportSite")?.value || "target";
+    const userId = document.getElementById("productSelectionExportUser")?.value || "";
     const output = document.getElementById("productSelectionExportText");
     const message = document.getElementById("productSelectionExportMessage");
     if (!output) return;
     if (message) message.textContent = "Loading export...";
     try {
-        const data = await authJSON(API + "/admin/product-selections/export?site=" + encodeURIComponent(site));
+        const qs = new URLSearchParams({ site });
+        if (userId) qs.set("user_id", userId);
+        const data = await authJSON(API + "/admin/product-selections/export?" + qs.toString());
         output.value = data.text || "";
-        if (message) message.textContent = `Loaded ${Array.isArray(data.users) ? data.users.length : 0} user export${Array.isArray(data.users) && data.users.length === 1 ? "" : "s"}.`;
+        const count = userId ? (data.users?.[0]?.lines?.length || 0) : (Array.isArray(data.users) ? data.users.length : 0);
+        if (message) message.textContent = userId
+            ? `Loaded ${count} selected product${count === 1 ? "" : "s"} for this user.`
+            : `Loaded ${Array.isArray(data.users) ? data.users.length : 0} user export${Array.isArray(data.users) && data.users.length === 1 ? "" : "s"}.`;
     } catch (err) {
         if (message) message.textContent = err.message || "Could not load export.";
     }
@@ -3260,10 +3375,58 @@ async function copyProductSelectionExport() {
     }
 }
 
+async function markProductSelectionExported() {
+    const site = document.getElementById("productSelectionExportSite")?.value || "target";
+    const userId = document.getElementById("productSelectionExportUser")?.value || "";
+    const message = document.getElementById("productSelectionExportMessage");
+    if (!userId) {
+        if (message) message.textContent = "Choose one user before marking copied.";
+        return;
+    }
+    try {
+        await authJSON(API + "/admin/product-selections/mark-exported", {
+            method: "POST",
+            body: JSON.stringify({ site, user_id: userId })
+        });
+        if (message) message.textContent = "Marked this user's list as copied. Future user changes will show as changed.";
+        await loadProductSelectionExportUsers();
+    } catch (err) {
+        if (message) message.textContent = err.message || "Could not mark copied.";
+    }
+}
+
+async function loadTargetRecommendedListNameAdmin() {
+    const input = document.getElementById("targetRecommendedListNameInput");
+    if (!input) return;
+    try {
+        const data = await authJSON(API + "/admin/target-recommended-list-name");
+        input.value = data.name || data.default_name || "";
+    } catch (_) { }
+}
+
+async function saveTargetRecommendedListNameAdmin() {
+    const input = document.getElementById("targetRecommendedListNameInput");
+    const message = document.getElementById("targetRecommendedListNameMessage");
+    if (!input) return;
+    try {
+        const data = await authJSON(API + "/admin/target-recommended-list-name", {
+            method: "POST",
+            body: JSON.stringify({ name: input.value })
+        });
+        if (message) message.textContent = `Saved as ${data.name}.`;
+    } catch (err) {
+        if (message) message.textContent = err.message || "Could not save list name.";
+    }
+}
+
 function initProductSelectionAdminTools() {
     const refresh = document.getElementById("refreshProductSelectionChangesButton");
     const loadExport = document.getElementById("loadProductSelectionExportButton");
     const copyExport = document.getElementById("copyProductSelectionExportButton");
+    const markExported = document.getElementById("markProductSelectionExportedButton");
+    const siteSelect = document.getElementById("productSelectionExportSite");
+    const saveName = document.getElementById("saveTargetRecommendedListNameButton");
+
     if (refresh && !refresh.dataset.bound) {
         refresh.dataset.bound = "1";
         refresh.addEventListener("click", loadProductSelectionChanges);
@@ -3276,12 +3439,30 @@ function initProductSelectionAdminTools() {
         copyExport.dataset.bound = "1";
         copyExport.addEventListener("click", copyProductSelectionExport);
     }
+    if (markExported && !markExported.dataset.bound) {
+        markExported.dataset.bound = "1";
+        markExported.addEventListener("click", markProductSelectionExported);
+    }
+    if (siteSelect && !siteSelect.dataset.exportUsersBound) {
+        siteSelect.dataset.exportUsersBound = "1";
+        siteSelect.addEventListener("change", async () => {
+            await loadProductSelectionExportUsers();
+            const output = document.getElementById("productSelectionExportText");
+            if (output) output.value = "";
+        });
+    }
+    if (saveName && !saveName.dataset.bound) {
+        saveName.dataset.bound = "1";
+        saveName.addEventListener("click", saveTargetRecommendedListNameAdmin);
+    }
     const clearButton = document.getElementById("clearProductSelectionsButton");
     if (clearButton && !clearButton.dataset.bound) {
         clearButton.dataset.bound = "1";
         clearButton.addEventListener("click", clearProductSelectionsForSelectedStore);
     }
     loadProductSelectionChanges().catch(() => {});
+    loadProductSelectionExportUsers().catch(() => {});
+    loadTargetRecommendedListNameAdmin().catch(() => {});
 }
 
 

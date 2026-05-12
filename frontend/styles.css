@@ -663,3 +663,36 @@ h1,h2,h3,h4,p{margin:0}
   font-size:15px;
   letter-spacing:.02em;
 }
+
+/* Target recommended running lists */
+.recommended-lists-section{
+  margin:14px 0;
+  border:1px solid var(--line);
+  border-radius:18px;
+  background:#fff;
+  padding:14px;
+}
+.recommended-list-grid{
+  display:grid;
+  grid-template-columns:repeat(auto-fit,minmax(320px,1fr));
+  gap:14px;
+}
+.recommended-list-card{
+  border:1px solid var(--line);
+  border-radius:16px;
+  padding:14px;
+  background:#f8fafc;
+}
+.recommended-list-card__header{
+  display:flex;
+  align-items:flex-start;
+  justify-content:space-between;
+  gap:12px;
+  margin-bottom:10px;
+}
+.recommended-list-card__header h3{
+  margin:0 0 4px;
+}
+.panel-header--compact{
+  margin-bottom:10px;
+}

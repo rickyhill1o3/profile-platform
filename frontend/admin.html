@@ -413,6 +413,18 @@
 
             <div class="panel-header panel-header--nested">
               <div>
+                <h3>Target Running List Name</h3>
+                <p class="subtle-text">This is the name users see for your current Target selections. Super admin shows to everyone; admins show to their assigned users.</p>
+              </div>
+            </div>
+            <div class="toolbar-row">
+              <input class="input" id="targetRecommendedListNameInput" placeholder="The Shore Shack List" />
+              <button class="btn btn-primary" type="button" id="saveTargetRecommendedListNameButton">Save List Name</button>
+              <span id="targetRecommendedListNameMessage" class="subtle-text"></span>
+            </div>
+
+            <div class="panel-header panel-header--nested">
+              <div>
                 <h3>Target / Amazon Selection Tools</h3>
                 <p class="subtle-text">Track changes and export selected products in bot-ready sku;name;price format.</p>
               </div>
@@ -423,8 +435,12 @@
                   <option value="target">Target</option>
                   <option value="amazon">Amazon</option>
                 </select>
+                <select class="input input--sm" id="productSelectionExportUser">
+                  <option value="">All users</option>
+                </select>
                 <button class="btn btn-primary" type="button" id="loadProductSelectionExportButton">Load Export</button>
                 <button class="btn" type="button" id="copyProductSelectionExportButton">Copy Export</button>
+                <button class="btn" type="button" id="markProductSelectionExportedButton">Mark Copied</button>
                 <button class="btn btn-danger" type="button" id="clearProductSelectionsButton">Clear Selected Store</button>
               </div>
               <span id="productSelectionExportMessage" class="subtle-text"></span>
