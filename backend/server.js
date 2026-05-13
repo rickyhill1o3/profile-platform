@@ -83,7 +83,6 @@ app.use((req, res, next) => {
     }
     express.json()(req, res, next);
 });
-}
 
 const phoneRegex = /^[0-9]{10}$/;
 const SUPER_ADMIN_EMAIL = "theshoreshacktcg@gmail.com";
@@ -5842,6 +5841,7 @@ registerProductCatalogRoutes({
     getCurrentUser,
     ensureUserNotRevoked
 });
+}
 
 shopRoutes = registerShopRoutes({
     app,
