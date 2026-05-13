@@ -747,15 +747,3 @@ h1,h2,h3,h4,p{margin:0}
 .store-product-card {
   min-height: 150px;
 }
-
-
-.product-group-manager-panel{
-  margin-top:24px;
-}
-
-.product-group-manager-grid{
-  display:grid;
-  grid-template-columns:repeat(auto-fit,minmax(220px,1fr));
-  gap:14px;
-}
-
