@@ -40,6 +40,10 @@
         <p class="eyebrow">Admin Navigation</p>
         <button class="admin-nav-button is-active" type="button" data-admin-nav="invites">Invites</button>
         <button class="admin-nav-button" type="button" data-admin-nav="countdowns">Countdowns + Catalog</button>
+<button class="admin-nav-button" data-admin-panel="product-group-manager-panel">
+Product Group Manager
+</button>
+
         <button class="admin-nav-button" type="button" data-admin-nav="target-lists">Target Checkout Lists</button>
         <button class="admin-nav-button" type="button" data-admin-nav="running-list-name">Running List Name</button>
         <button class="admin-nav-button" type="button" data-admin-nav="exports">Exports</button>
@@ -994,6 +998,79 @@
   <script src="products.js?v=20260323b"></script>
 
 
+
+<section id="product-group-manager-panel" class="admin-panel-section" style="display:none;">
+<div class="admin-card">
+<h2>Product Group Manager</h2>
+<p>Group multiple SKUs into one storefront product.</p>
+
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;">
+<div>
+<label>Group Display Name</label>
+<input class="admin-input" id="product-group-name"/>
+</div>
+
+<div>
+<label>Category</label>
+<input class="admin-input" id="product-group-category"/>
+</div>
+
+<div>
+<label>Credits</label>
+<input class="admin-input" type="number" id="product-group-credits"/>
+</div>
+
+<div style="display:flex;align-items:end;">
+<button class="admin-button-primary" id="create-product-group-btn">
+Create Product Group
+</button>
+</div>
+
+<div>
+<label>SKU</label>
+<input class="admin-input" id="group-sku-search"/>
+</div>
+
+<div>
+<label>Group UUID</label>
+<input class="admin-input" id="group-uuid"/>
+</div>
+
+<div>
+<label><input type="checkbox" id="primary-group-sku"/> Primary SKU</label>
+</div>
+
+<div style="display:flex;align-items:end;">
+<button class="admin-button-primary" id="attach-sku-btn">
+Attach SKU To Group
+</button>
+</div>
+</div>
+</div>
+</section>
+
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+  const navButtons = document.querySelectorAll('[data-admin-panel]');
+  const sections = document.querySelectorAll('.admin-panel-section');
+
+  navButtons.forEach((btn) => {
+    btn.addEventListener('click', function () {
+      const panelId = btn.getAttribute('data-admin-panel');
+
+      sections.forEach((sec) => {
+        sec.style.display = 'none';
+      });
+
+      const target = document.getElementById(panelId);
+
+      if (target) {
+        target.style.display = 'block';
+      }
+    });
+  });
+});
+</script>
 </body>
 
 </html>
