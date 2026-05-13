@@ -5868,3 +5868,14 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
 });
+
+
+try {
+    const productGroupRoutes = require('./product-catalog-routes');
+    if (productGroupRoutes.registerProductGroupRoutes) {
+        productGroupRoutes.registerProductGroupRoutes(app, supabase, auth, normalizeSite);
+    }
+} catch (err) {
+    console.error('Product group route registration failed', err.message);
+}
+
