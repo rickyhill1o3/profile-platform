@@ -1,58 +1,58 @@
 
 // ===== BOXLUNCH URL HELPERS =====
 function slugifyBoxLunchTitle(title = "") {
-  return String(title)
-    .trim()
-    .toLowerCase()
-    .replace(/&/g, "and")
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .replace(/-boxlunch-exclusive$/, "---boxlunch-exclusive");
+    return String(title)
+        .trim()
+        .toLowerCase()
+        .replace(/&/g, "and")
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/^-+|-+$/g, "")
+        .replace(/-boxlunch-exclusive$/, "---boxlunch-exclusive");
 }
 
 function extractBoxLunchProductIdFromImage(imageUrl = "") {
-  const match = String(imageUrl).match(/\/(\d{6,})_hi\b/i);
-  return match ? match[1] : "";
+    const match = String(imageUrl).match(/\/(\d{6,})_hi\b/i);
+    return match ? match[1] : "";
 }
 
 function buildBoxLunchUrl({ title = "", image = "", url = "" }) {
-  if (url) return url;
+    if (url) return url;
 
-  const productId = extractBoxLunchProductIdFromImage(image);
-  if (productId && title) {
-    const slug = slugifyBoxLunchTitle(title);
-    return `https://www.boxlunch.com/product/${slug}/${productId}.html`;
-  }
+    const productId = extractBoxLunchProductIdFromImage(image);
+    if (productId && title) {
+        const slug = slugifyBoxLunchTitle(title);
+        return `https://www.boxlunch.com/product/${slug}/${productId}.html`;
+    }
 
-  if (title) {
-    return `https://www.boxlunch.com/search?q=${encodeURIComponent(title)}`;
-  }
+    if (title) {
+        return `https://www.boxlunch.com/search?q=${encodeURIComponent(title)}`;
+    }
 
-  return "";
+    return "";
 }
 
 
 
 function slugifyProductTitle(title = "") {
-  return String(title)
-    .trim()
-    .toLowerCase()
-    .replace(/&/g, "and")
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
+    return String(title)
+        .trim()
+        .toLowerCase()
+        .replace(/&/g, "and")
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/^-+|-+$/g, "");
 }
 
 function buildHotTopicUrl({ title = "", image = "", url = "" }) {
-  if (url) return url;
-  const productId = extractBoxLunchProductIdFromImage(image);
-  if (productId && title) {
-    const slug = slugifyProductTitle(title);
-    return `https://www.hottopic.com/product/${slug}/${productId}.html`;
-  }
-  if (title) {
-    return `https://www.hottopic.com/search?q=${encodeURIComponent(title)}`;
-  }
-  return "";
+    if (url) return url;
+    const productId = extractBoxLunchProductIdFromImage(image);
+    if (productId && title) {
+        const slug = slugifyProductTitle(title);
+        return `https://www.hottopic.com/product/${slug}/${productId}.html`;
+    }
+    if (title) {
+        return `https://www.hottopic.com/search?q=${encodeURIComponent(title)}`;
+    }
+    return "";
 }
 
 const express = require("express");
@@ -1294,7 +1294,7 @@ async function migrateWebhookSettingsToSupabase({ currentUser, globalSettings = 
             await upsertDiscordWebhookRoute({ scope: 'super_admin', webhookType: 'checkout_error', category: 'all', webhookUrl: globalSettings.checkout_error_webhook_url });
         }
         const monitorGroups = globalSettings?.monitor_groups || {};
-        for (const category of ['pokemon','onepiece','sports','othertcg','lowkey']) {
+        for (const category of ['pokemon', 'onepiece', 'sports', 'othertcg', 'lowkey']) {
             const cfg = normalizeMonitorGroupConfig(monitorGroups?.[category]);
             const existing = await getWebhookRouteFromDb({ scope: 'super_admin', webhookType: 'monitor', category }).catch(() => null);
             if (!existing && String(cfg.webhook_url || '').trim()) {
@@ -1313,7 +1313,7 @@ async function migrateWebhookSettingsToSupabase({ currentUser, globalSettings = 
             await upsertDiscordWebhookRoute({ scope: 'admin', userId: currentUser.id, webhookType: 'checkout_error', category: 'all', webhookUrl: adminSettings.checkout_error_webhook_url });
         }
         const adminGroups = adminSettings?.monitor_groups || {};
-        for (const category of ['pokemon','onepiece','sports','othertcg','lowkey']) {
+        for (const category of ['pokemon', 'onepiece', 'sports', 'othertcg', 'lowkey']) {
             const cfg = normalizeMonitorGroupConfig(adminGroups?.[category]);
             const existing = await getWebhookRouteFromDb({ scope: 'admin', userId: currentUser.id, webhookType: 'monitor', category }).catch(() => null);
             if (!existing && String(cfg.webhook_url || '').trim()) {
@@ -2107,11 +2107,11 @@ function decodeHtmlEntities(value = '') {
 
 function normalizeMonitorType(value = '') {
     const t = String(value || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '');
-    if (['pokemon','pokmon'].includes(t)) return 'pokemon';
+    if (['pokemon', 'pokmon'].includes(t)) return 'pokemon';
     if (['onepiece'].includes(t)) return 'onepiece';
-    if (['sport','sports','sportscards','sportscard'].includes(t)) return 'sports';
-    if (['othertcg','mtg','magic','lorcana','yugioh','yugio','digimon','dragonball','unionarena','weiss'].includes(t)) return 'othertcg';
-    if (['lowkey','other','lowkeyflips','flips'].includes(t)) return 'lowkey';
+    if (['sport', 'sports', 'sportscards', 'sportscard'].includes(t)) return 'sports';
+    if (['othertcg', 'mtg', 'magic', 'lorcana', 'yugioh', 'yugio', 'digimon', 'dragonball', 'unionarena', 'weiss'].includes(t)) return 'othertcg';
+    if (['lowkey', 'other', 'lowkeyflips', 'flips'].includes(t)) return 'lowkey';
     return '';
 }
 
@@ -2418,10 +2418,10 @@ function extractMonitorItems(payload = {}) {
     return deduped;
 }
 
-function buildProductUrl(site, sku, fallbackUrl='', title = '', image = '') {
+function buildProductUrl(site, sku, fallbackUrl = '', title = '', image = '') {
     if (fallbackUrl) return fallbackUrl;
-    const s = String(site||'').toLowerCase();
-    const clean = String(sku||'').trim();
+    const s = String(site || '').toLowerCase();
+    const clean = String(sku || '').trim();
     if (s.includes('boxlunch')) {
         return buildBoxLunchUrl({ title, image, url: fallbackUrl });
     }
@@ -2520,7 +2520,7 @@ async function sendMonitorDiscordWebhook(routeConfigOrUrl, item) {
                 try {
                     const parsed = JSON.parse(text || '{}');
                     if (parsed?.retry_after != null) retryMs = Math.ceil(Number(parsed.retry_after) * 1000);
-                } catch {}
+                } catch { }
                 await new Promise((resolve) => setTimeout(resolve, retryMs));
                 continue;
             }
@@ -3947,7 +3947,7 @@ app.post('/admin/webhooks/settings', auth, admin, async (req, res) => {
             });
             await upsertDiscordWebhookRoute({ scope: 'admin', userId: currentUser.id, webhookType: 'checkout_success', category: 'all', webhookUrl: adminDiscordWebhookUrl, isActive: !!adminDiscordWebhookUrl });
             await upsertDiscordWebhookRoute({ scope: 'admin', userId: currentUser.id, webhookType: 'checkout_error', category: 'all', webhookUrl: adminErrorDiscordWebhookUrl, isActive: !!adminErrorDiscordWebhookUrl });
-            for (const category of ['pokemon','onepiece','sports','othertcg','lowkey']) {
+            for (const category of ['pokemon', 'onepiece', 'sports', 'othertcg', 'lowkey']) {
                 const cfg = normalizeMonitorGroupConfig(req.body?.admin_monitor_groups?.[category]);
                 await upsertDiscordWebhookRoute({ scope: 'admin', userId: currentUser.id, webhookType: 'monitor', category, webhookUrl: cfg.webhook_url, pingMode: cfg.ping_mode, roleMention: cfg.role_mention, isActive: !!cfg.webhook_url });
             }
@@ -3974,7 +3974,7 @@ app.post('/admin/webhooks/settings', auth, admin, async (req, res) => {
             });
             await upsertDiscordWebhookRoute({ scope: 'super_admin', webhookType: 'checkout_success', category: 'all', webhookUrl: discordWebhookUrl, isActive: !!discordWebhookUrl });
             await upsertDiscordWebhookRoute({ scope: 'super_admin', webhookType: 'checkout_error', category: 'all', webhookUrl: checkoutErrorWebhookUrl, isActive: !!checkoutErrorWebhookUrl });
-            for (const category of ['pokemon','onepiece','sports','othertcg','lowkey']) {
+            for (const category of ['pokemon', 'onepiece', 'sports', 'othertcg', 'lowkey']) {
                 const cfg = normalizeMonitorGroupConfig(req.body?.monitor_groups?.[category]);
                 await upsertDiscordWebhookRoute({ scope: 'super_admin', webhookType: 'monitor', category, webhookUrl: cfg.webhook_url, pingMode: cfg.ping_mode, roleMention: cfg.role_mention, isActive: !!cfg.webhook_url });
             }
@@ -5832,14 +5832,16 @@ async function ensureSuperAdmin() {
     console.log("Super admin account ensured");
 }
 
-registerProductCatalogRoutes({
-    app,
-    supabase,
-    auth,
-    admin,
-    getCurrentUser,
-    ensureUserNotRevoked
-});
+if (typeof registerProductCatalogRoutes === 'function') {
+    registerProductCatalogRoutes({
+        app,
+        supabase,
+        auth,
+        admin,
+        getCurrentUser,
+        ensureUserNotRevoked
+    });
+}
 
 shopRoutes = registerShopRoutes({
     app,
@@ -5862,6 +5864,30 @@ setInterval(() => {
 setTimeout(() => {
     replayWebhookFailoverQueue().catch((err) => console.error('Initial failover queue replay failed:', err));
 }, 15000);
+
+registerProductCatalogRoutes({
+    app,
+    supabase,
+    auth
+});
+
+try {
+    const productGroupRoutes = require('./product-catalog-routes');
+
+    if (productGroupRoutes.registerProductGroupRoutes) {
+        productGroupRoutes.registerProductGroupRoutes(
+            app,
+            supabase,
+            auth,
+            normalizeSite
+        );
+    }
+} catch (err) {
+    console.error(
+        'Product group route registration failed',
+        err.message
+    );
+}
 
 const PORT = process.env.PORT || 3000;
 
