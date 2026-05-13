@@ -722,3 +722,10 @@ module.exports.registerProductGroupRoutes = function(app, supabase, auth, normal
     });
 
 };
+
+
+
+if (typeof registerProductCatalogRoutes === 'function') {
+    module.exports = registerProductCatalogRoutes;
+    module.exports.registerProductCatalogRoutes = registerProductCatalogRoutes;
+}

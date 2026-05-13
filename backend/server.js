@@ -83,6 +83,7 @@ app.use((req, res, next) => {
     }
     express.json()(req, res, next);
 });
+}
 
 const phoneRegex = /^[0-9]{10}$/;
 const SUPER_ADMIN_EMAIL = "theshoreshacktcg@gmail.com";
@@ -5832,6 +5833,7 @@ async function ensureSuperAdmin() {
     console.log("Super admin account ensured");
 }
 
+if (typeof registerProductCatalogRoutes === 'function') {
 registerProductCatalogRoutes({
     app,
     supabase,
