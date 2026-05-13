@@ -105,6 +105,9 @@ function registerProductCatalogRoutes({ app, supabase, auth }) {
       return res.status(500).json({ error: err.message });
     }
   });
+  app.get('/admin/countdowns/selection-summary', auth, async (req, res) => {
+    return res.json({ items: [] });
+  });
 
   app.get('/product-groups', auth, async (req, res) => {
     try {
