@@ -17,8 +17,141 @@ function registerProductCatalogRoutes({ app, supabase, auth }) {
     }
   });
 
+  app.put('/product-preferences', auth, async (req, res) => {
+    try {
+      const {
+        site,
+        selections
+      } = req.body || {};
+
+      if (!site) {
+        return res.status(400).json({ error: 'Missing site' });
+      }
+
+      const selectedRows = Array.isArray(selections)
+        ? selections
+        : [];
+
+      await supabase
+        .from('user_product_selections')
+        .delete()
+        .eq('user_id', req.user_id)
+        .eq('site', site);
+
+      if (selectedRows.length > 0) {
+        const insertRows = selectedRows.map((row) => ({
+          user_id: req.user_id,
+          site,
+          product_id: row.product_id,
+          selected: true,
+          mode: row.mode || 'normal',
+          max_price: row.max_price || null
+        }));
+
+        const { error } = await supabase
+          .from('user_product_selections')
+          .insert(insertRows);
+
+        if (error) {
+          return res.status(500).json({ error: error.message });
+        }
+      }
+
+      return res.json({ success: true });
+
+    } catch (err) {
+      return res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.get('/product-preferences', auth, async (req, res) => {
+    try {
+      const site = String(req.query.site || '').trim();
+
+      let query = supabase
+        .from('user_product_selections')
+        .select('*')
+        .eq('user_id', req.user_id)
+        .eq('selected', true);
+
+      if (site) {
+        query = query.eq('site', site);
+      }
+
+      const { data, error } = await query;
+
+      if (error) {
+        return res.status(500).json({ error: error.message });
+      }
+
+      return res.json({
+        items: data || []
+      });
+
+    } catch (err) {
+      return res.status(500).json({ error: err.message });
+    }
+  });
+
   app.get('/admin/product-preferences', auth, async (req, res) => {
-    return res.json({ items: [] });
+    try {
+      const { data, error } = await supabase
+        .from('user_product_selections')
+        .select(`
+        *,
+        users:user_id (
+          id,
+          email
+        ),
+        catalog_products:product_id (
+          id,
+          site,
+          sku,
+          product_name,
+          image_url,
+          credit_cost
+        )
+      `)
+        .eq('selected', true)
+        .order('updated_at', { ascending: false });
+
+      if (error) {
+        return res.status(500).json({ error: error.message });
+      }
+
+      const grouped = {};
+
+      for (const row of data || []) {
+        const userId = row.user_id;
+
+        if (!grouped[userId]) {
+          grouped[userId] = {
+            user_id: userId,
+            user_email: row.users?.email || 'Unknown',
+            selection_count: 0,
+            products: []
+          };
+        }
+
+        grouped[userId].selection_count++;
+
+        grouped[userId].products.push({
+          site: row.catalog_products?.site || '',
+          sku: row.catalog_products?.sku || '',
+          product_name: row.catalog_products?.product_name || '',
+          mode: row.mode || '',
+          max_price: row.max_price || '',
+          product_id: row.product_id
+        });
+      }
+
+      return res.json({
+        items: Object.values(grouped)
+      });
+
+    } catch (err) {
+      return res.status(500).json({ error: err.message });
+    }
   });
 
   app.get('/admin/product-selection-export-users', auth, async (req, res) => {
@@ -32,7 +165,34 @@ function registerProductCatalogRoutes({ app, supabase, auth }) {
   });
 
   app.get('/admin/product-selection-changes', auth, async (req, res) => {
-    return res.json({ items: [] });
+    try {
+      const { data, error } = await supabase
+        .from('user_product_selections')
+        .select(`
+        *,
+        users:user_id (
+          email
+        ),
+        catalog_products:product_id (
+          product_name,
+          sku,
+          site
+        )
+      `)
+        .order('updated_at', { ascending: false })
+        .limit(100);
+
+      if (error) {
+        return res.status(500).json({ error: error.message });
+      }
+
+      return res.json({
+        items: data || []
+      });
+
+    } catch (err) {
+      return res.status(500).json({ error: err.message });
+    }
   });
 
   app.get('/public/countdowns', async (req, res) => {
@@ -47,8 +207,10 @@ function registerProductCatalogRoutes({ app, supabase, auth }) {
     return res.json({ items: [] });
   });
 
-  app.get('/admin/target-recommended-list-name', auth, async (req, res) => {
-    return res.json({ name: '' });
+  app.get('/target-recommended-lists', auth, async (req, res) => {
+    return res.json({
+      items: []
+    });
   });
 
 
