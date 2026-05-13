@@ -144,6 +144,10 @@
               <div class="field field--full"><label for="countdownProductCredits">Countdown Product
                   Credits</label><textarea class="input" id="countdownProductCredits" rows="4"
                   placeholder="One per line: catalogProductId|creditCost"></textarea>
+<div style="margin-top:8px;margin-bottom:14px;color:#666;font-size:13px;">
+You can now attach multiple SKUs to the same product. Enter one SKU per line.
+</div>
+
                 <div class="subtle-text">Use this when you already know the products in a countdown. Example: uuid-1|2
                 </div>
               </div>
@@ -174,8 +178,12 @@
                     <option value="pokemon">Pokémon Center</option>
                     <option value="general">General</option>
                   </select></div>
-                <div class="field"><label for="adminSkuValue">SKU / ASIN / DPCI</label><input class="input"
-                    id="adminSkuValue" placeholder="Enter SKU" /></div>
+                <div class="field"><label for="adminSkuValue">SKU / ASIN / DPCI (multiple allowed)</label>
+<textarea id="multi-sku-input"
+class="admin-input"
+style="min-height:110px;"
+placeholder="Enter one SKU per line&#10;12345678&#10;87654321"></textarea>
+</div>
                 <div class="field field--full panel-actions"><button class="btn btn-primary" type="submit">Add / Update
                     Catalog Product</button><button class="btn" type="button" id="syncTargetPricingButton">Sync Target
                     Prices From Amazon</button></div>
@@ -194,7 +202,7 @@
                     <option value="pokemon">Pokémon Center</option>
                     <option value="general">General</option>
                   </select></div>
-                <div class="field"><label for="manualProductSku">SKU / ASIN / DPCI</label><input class="input"
+                <div class="field"><label for="manualProductSku">SKU / ASIN / DPCI (multiple allowed)</label><input class="input"
                     id="manualProductSku" placeholder="AMAZON-NEXT-DROP" /></div>
                 <div class="field field--full"><label for="manualProductName">Product Name</label><input class="input"
                     id="manualProductName" placeholder="Run Next Amazon Release" /></div>
@@ -927,6 +935,31 @@ window.addEventListener('DOMContentLoaded', function(){
     }
 
     renderGroups();
+
+});
+</script>
+
+
+<script>
+window.addEventListener('DOMContentLoaded', function(){
+
+    const skuInput = document.getElementById('multi-sku-input');
+
+    if(!skuInput){
+        return;
+    }
+
+    skuInput.addEventListener('blur', function(){
+
+        const cleaned = skuInput.value
+            .split('\n')
+            .map(v => v.trim())
+            .filter(Boolean);
+
+        skuInput.value = cleaned.join('\n');
+    });
+
+    console.log('Multi-SKU product support enabled');
 
 });
 </script>
