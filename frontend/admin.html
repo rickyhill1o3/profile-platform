@@ -40,7 +40,7 @@
         <p class="eyebrow">Admin Navigation</p>
         <button class="admin-nav-button is-active" type="button" data-admin-nav="invites">Invites</button>
         <button class="admin-nav-button" type="button" data-admin-nav="countdowns">Countdowns + Catalog</button>
-        <button class="admin-nav-button" type="button" data-admin-nav="product-group-manager">
+        <button class="admin-nav-button" type="button" data-admin-panel="product-group-manager-panel">
           Product Group Manager
         </button>
         <button class="admin-nav-button" type="button" data-admin-nav="target-lists">Target Checkout Lists</button>
@@ -159,7 +159,7 @@
             <div id="countdownAdminList" class="stack-list"></div>
           </section>
 
-        <section class="admin-pane" data-admin-pane="product-group-manager">
+        <section id="product-group-manager-panel" class="admin-panel-section hidden">
           <section class="panel">
             <div class="panel-header">
               <div>
@@ -1096,6 +1096,62 @@
   <script src="script.js?v=20260325c"></script>
   <script src="products.js?v=20260323b"></script>
 
+
+
+<section id="product-group-manager-panel" class="admin-panel-section hidden">
+  <div class="admin-card">
+    <div class="admin-card-header">
+      <h2>Product Group Manager Tools</h2>
+      <p>Merge multiple SKUs into one visible product.</p>
+    </div>
+
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;">
+      <div>
+        <label>Group Display Name</label>
+        <input type="text" id="pgm-display-name" class="admin-input">
+      </div>
+
+      <div>
+        <label>Category</label>
+        <input type="text" id="pgm-category" class="admin-input">
+      </div>
+
+      <div>
+        <label>Credits</label>
+        <input type="number" id="pgm-credits" class="admin-input">
+      </div>
+
+      <div style="display:flex;align-items:flex-end;">
+        <button id="create-product-group-btn" class="admin-button-primary">
+          Create Product Group
+        </button>
+      </div>
+
+      <div>
+        <label>Search SKU To Attach</label>
+        <input type="text" id="pgm-search-sku" class="admin-input">
+      </div>
+
+      <div>
+        <label>Product Group UUID</label>
+        <input type="text" id="pgm-group-uuid" class="admin-input">
+      </div>
+
+      <div>
+        <label>
+          <input type="checkbox" id="pgm-primary-sku">
+          Primary SKU
+        </label>
+      </div>
+
+      <div style="display:flex;align-items:flex-end;">
+        <button id="attach-sku-group-btn" class="admin-button-primary">
+          Attach SKU To Group
+        </button>
+      </div>
+    </div>
+  </div>
+</section>
 
 </body>
 
