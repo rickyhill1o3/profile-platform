@@ -1044,21 +1044,30 @@
 </section>
 
 
+
+
+
 <script>
-document.addEventListener('DOMContentLoaded', () => {
+document.addEventListener('DOMContentLoaded', function () {
   const buttons = document.querySelectorAll('[data-admin-panel]');
   const sections = document.querySelectorAll('.admin-panel-section');
 
-  buttons.forEach(btn => {
-    btn.addEventListener('click', () => {
-      const panel = btn.getAttribute('data-admin-panel');
+  buttons.forEach((btn) => {
+    btn.addEventListener('click', function () {
+      const panelId = btn.getAttribute('data-admin-panel');
 
-      sections.forEach(sec => sec.classList.add('hidden'));
-      buttons.forEach(b => b.classList.remove('active'));
+      sections.forEach((section) => {
+        section.style.display = 'none';
+      });
 
-      const target = document.getElementById(panel);
-      if (target) {
-        target.classList.remove('hidden');
+      buttons.forEach((b) => {
+        b.classList.remove('active');
+      });
+
+      const panel = document.getElementById(panelId);
+
+      if (panel) {
+        panel.style.display = 'block';
       }
 
       btn.classList.add('active');
