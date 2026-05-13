@@ -5868,7 +5868,10 @@ setTimeout(() => {
 registerProductCatalogRoutes({
     app,
     supabase,
-    auth
+    auth,
+    admin,
+    getCurrentUser,
+    ensureUserNotRevoked
 });
 
 try {
