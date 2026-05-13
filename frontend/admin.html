@@ -40,7 +40,7 @@
         <p class="eyebrow">Admin Navigation</p>
         <button class="admin-nav-button is-active" type="button" data-admin-nav="invites">Invites</button>
         <button class="admin-nav-button" type="button" data-admin-nav="countdowns">Countdowns + Catalog</button>
-        <button class="admin-nav-btn" data-admin-panel="product-group-manager-panel">
+        <button class="admin-nav-button" type="button" data-admin-nav="product-group-manager">
           Product Group Manager
         </button>
         <button class="admin-nav-button" type="button" data-admin-nav="target-lists">Target Checkout Lists</button>
@@ -158,6 +158,87 @@
             <div id="countdownManagerMessage" class="subtle-text"></div>
             <div id="countdownAdminList" class="stack-list"></div>
           </section>
+
+        <section class="admin-pane" data-admin-pane="product-group-manager">
+          <section class="panel">
+            <div class="panel-header">
+              <div>
+                <h2>Product Group Manager</h2>
+                <p class="subtle-text">
+                  Merge multiple SKUs into one user-facing product listing.
+                </p>
+              </div>
+            </div>
+
+            <div class="form-grid">
+              <div class="field">
+                <label>Group Display Name</label>
+                <input class="input" type="text" id="pgm-display-name" placeholder="Pokemon Crown Zenith Bundle">
+              </div>
+
+              <div class="field">
+                <label>Category</label>
+                <input class="input" type="text" id="pgm-category" placeholder="pokemon">
+              </div>
+
+              <div class="field">
+                <label>Credits</label>
+                <input class="input" type="number" id="pgm-credits" placeholder="3">
+              </div>
+
+              <div class="field">
+                <button class="primary-button" id="create-product-group-btn" type="button">
+                  Create Product Group
+                </button>
+              </div>
+
+              <div class="field">
+                <label>Search SKU To Attach</label>
+                <input class="input" type="text" id="pgm-search-sku" placeholder="94681703">
+              </div>
+
+              <div class="field">
+                <label>Product Group UUID</label>
+                <input class="input" type="text" id="pgm-group-uuid">
+              </div>
+
+              <div class="field">
+                <label>
+                  <input type="checkbox" id="pgm-primary-sku">
+                  Primary SKU
+                </label>
+              </div>
+
+              <div class="field">
+                <button class="primary-button" id="attach-sku-group-btn" type="button">
+                  Attach SKU To Group
+                </button>
+              </div>
+
+              <div class="field">
+                <label>Update Group UUID</label>
+                <input class="input" type="text" id="pgm-update-group-uuid">
+              </div>
+
+              <div class="field">
+                <label>Update Category</label>
+                <input class="input" type="text" id="pgm-update-category">
+              </div>
+
+              <div class="field">
+                <label>Update Credits</label>
+                <input class="input" type="number" id="pgm-update-credits">
+              </div>
+
+              <div class="field">
+                <button class="primary-button" id="update-product-group-btn" type="button">
+                  Update Product Group
+                </button>
+              </div>
+            </div>
+          </section>
+        </section>
+        
 
           <section id="product-group-manager-panel" class="admin-panel-section hidden">
             <div class="admin-card">
