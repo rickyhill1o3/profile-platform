@@ -728,3 +728,22 @@ h1,h2,h3,h4,p{margin:0}
 .selection-product-card .product-meta {
   white-space: normal !important;
 }
+
+
+/* force full names for store product selection titles */
+.store-product-card strong {
+  white-space: normal !important;
+  overflow: visible !important;
+  text-overflow: clip !important;
+  display: block !important;
+  -webkit-line-clamp: unset !important;
+  -webkit-box-orient: initial !important;
+  line-clamp: unset !important;
+  max-height: none !important;
+  word-break: normal !important;
+  overflow-wrap: anywhere !important;
+}
+
+.store-product-card {
+  min-height: 150px;
+}
