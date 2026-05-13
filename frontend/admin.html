@@ -40,6 +40,9 @@
         <p class="eyebrow">Admin Navigation</p>
         <button class="admin-nav-button is-active" type="button" data-admin-nav="invites">Invites</button>
         <button class="admin-nav-button" type="button" data-admin-nav="countdowns">Countdowns + Catalog</button>
+        <button class="admin-nav-btn" data-admin-panel="product-group-manager-panel">
+          Product Group Manager
+        </button>
         <button class="admin-nav-button" type="button" data-admin-nav="target-lists">Target Checkout Lists</button>
         <button class="admin-nav-button" type="button" data-admin-nav="running-list-name">Running List Name</button>
         <button class="admin-nav-button" type="button" data-admin-nav="exports">Exports</button>
@@ -156,836 +159,855 @@
             <div id="countdownAdminList" class="stack-list"></div>
           </section>
 
-          <section class="panel" id="catalogToolsPanel">
-            <div class="panel-header">
-              <div>
-                <h2>Catalog Tools</h2>
-                <p class="subtle-text">Only the super admin can approve requests, add products, placeholders, or delete
-                  catalog entries. Admins can review requests and view the catalog.</p>
+          <section id="product-group-manager-panel" class="admin-panel-section hidden">
+            <div class="admin-card">
+              <div class="admin-card-header">
+                <h2>Product Group Manager</h2>
+                <p>
+                  Combine multiple SKUs into a single user-facing product.
+                </p>
               </div>
-            </div>
-            <div id="superAdminCatalogControls">
-              <form id="adminSkuUpsertForm" class="form-grid">
-                <div class="field"><label for="adminSkuSite">Site</label><select class="input" id="adminSkuSite">
-                    <option value="amazon">Amazon</option>
-                    <option value="target">Target</option>
-                    <option value="walmart">Walmart</option>
-                    <option value="supreme">Supreme</option>
-                    <option value="pokemon">Pokémon Center</option>
+
+              <div class="product-group-manager-grid">
+
+                <div class="form-row">
+                  <label>Group Display Name</label>
+                  <input type="text" id="pgm-display-name" placeholder="Pokemon Crown Zenith Bundle" />
+                </div>
+
+                <div class="form-row">
+                  <label>Category</label>
+                  <input type="text" id="pgm-category" placeholder="pokemon" />
+                </div>
+
+                <div class="form-row">
+                  <label>Credits</label>
+                  <input type="number" id="pgm-credits" placeholder="3" />
+                </div>
+
+                <div class="form-actions">
+                  <button id="create-product-group-btn" class="primary-btn">
+                    Create Product Group
+                  </button>
+                </div>
+
+                <hr class="admin-divider" />
+
+                <div class="form-row">
+                  <label>Search SKU To Attach</label>
+                  <input type="text" id="pgm-search-sku" placeholder="94681703" </section>
+
+                  <section class="panel" id="catalogToolsPanel">
+                    <div class="panel-header">
+                      <div>
+                        <h2>Catalog Tools</h2>
+                        <p class="subtle-text">Only the super admin can approve requests, add products, placeholders, or
+                          delete
+                          catalog entries. Admins can review requests and view the catalog.</p>
+                      </div>
+                    </div>
+                    <div id="superAdminCatalogControls">
+                      <form id="adminSkuUpsertForm" class="form-grid">
+                        <div class="field"><label for="adminSkuSite">Site</label><select class="input"
+                            id="adminSkuSite">
+                            <option value="amazon">Amazon</option>
+                            <option value="target">Target</option>
+                            <option value="walmart">Walmart</option>
+                            <option value="supreme">Supreme</option>
+                            <option value="pokemon">Pokémon Center</option>
+                            <option value="general">General</option>
+                          </select></div>
+                        <div class="field"><label for="adminSkuValue">SKU / ASIN / DPCI</label><input class="input"
+                            id="adminSkuValue" placeholder="Enter SKU" /></div>
+                        <div class="field field--full panel-actions"><button class="btn btn-primary" type="submit">Add /
+                            Update
+                            Catalog Product</button><button class="btn" type="button" id="syncTargetPricingButton">Sync
+                            Target
+                            Prices From Amazon</button></div>
+                      </form>
+                      <div class="banner banner-soft"><strong>Manual product add</strong>
+                        <p class="subtle-text">Create products manually when a scrape fails, or create a blank
+                          placeholder card
+                          for future drops.</p>
+                      </div>
+                      <form id="adminManualProductForm" class="form-grid">
+                        <div class="field"><label for="manualProductSite">Site</label><select class="input"
+                            id="manualProductSite">
+                            <option value="amazon">Amazon</option>
+                            <option value="target">Target</option>
+                            <option value="walmart">Walmart</option>
+                            <option value="supreme">Supreme</option>
+                            <option value="pokemon">Pokémon Center</option>
+                            <option value="general">General</option>
+                          </select></div>
+                        <div class="field"><label for="manualProductSku">SKU / ASIN / DPCI</label><input class="input"
+                            id="manualProductSku" placeholder="AMAZON-NEXT-DROP" /></div>
+                        <div class="field field--full"><label for="manualProductName">Product Name</label><input
+                            class="input" id="manualProductName" placeholder="Run Next Amazon Release" /></div>
+                        <div class="field"><label for="manualProductPrice">Price</label><input class="input"
+                            id="manualProductPrice" type="number" min="0" step="0.01" placeholder="0.00" /></div>
+                        <div class="field"><label for="manualProductBrand">Brand</label><input class="input"
+                            id="manualProductBrand" placeholder="Amazon" /></div>
+                        <div class="field"><label for="manualProductCreditCost">Credit Cost</label><input class="input"
+                            id="manualProductCreditCost" type="number" min="0" step="1" placeholder="2" /></div>
+                        <div class="field"><label for="manualProductImage">Image URL</label><input class="input"
+                            id="manualProductImage" placeholder="https://..." /></div>
+                        <div class="field"><label for="manualProductUrl">Product URL</label><input class="input"
+                            id="manualProductUrl" placeholder="https://..." /></div>
+                        <div class="field"><label class="checkbox-inline"><input type="checkbox"
+                              id="manualProductPlaceholder" /><span>Create as placeholder / next release
+                              card</span></label>
+                        </div>
+                        <div class="field field--full panel-actions"><button class="btn btn-primary" type="submit">Save
+                            Manual
+                            Product</button></div>
+                      </form>
+
+                      <div class="banner banner-soft"><strong>Bulk import lists</strong>
+                        <p class="subtle-text">Import Amazon or Target JSON exports into the live catalog. Target items
+                          will try
+                          to pull live retail price before saving.</p>
+                      </div>
+                      <form id="catalogBulkImportForm" class="form-grid">
+                        <div class="field"><label for="catalogBulkImportSite">Import Site</label><select class="input"
+                            id="catalogBulkImportSite">
+                            <option value="amazon">Amazon</option>
+                            <option value="target">Target</option>
+                          </select></div>
+                        <div class="field"><label for="catalogBulkImportFile">JSON File</label><input class="input"
+                            id="catalogBulkImportFile" type="file" accept="application/json,.json" /></div>
+                        <div class="field field--full panel-actions"><button class="btn btn-primary"
+                            type="submit">Import
+                            Product List</button></div>
+                      </form>
+                      <div class="banner banner-soft"><strong>Export for Stellar</strong>
+                        <p class="subtle-text">Export Amazon or Target products in batches of 29 using
+                          <code>sku;title;price</code>.
+                        </p>
+                      </div>
+                      <form id="catalogExportForm" class="form-grid">
+                        <div class="field"><label for="catalogExportSite">Export Site</label><select class="input"
+                            id="catalogExportSite">
+                            <option value="amazon">Amazon</option>
+                            <option value="target">Target</option>
+                          </select></div>
+                        <div class="field"><label for="catalogExportBatchSize">Batch Size</label><input class="input"
+                            id="catalogExportBatchSize" type="number" min="1" max="200" step="1" value="29" /></div>
+                        <div class="field field--full panel-actions"><button class="btn" type="submit">Build Export
+                            Batches</button></div>
+                      </form>
+                      <div id="catalogExportResults" class="stack-list"></div>
+                    </div>
+                    <div id="superAdminCatalogNotice" class="banner banner-soft" style="display:none;">You can review
+                      the
+                      catalog and requests, but only the super admin can change live catalog entries.</div>
+                    <div class="toolbar-row toolbar-row--spread">
+                      <div class="toolbar-row">
+                        <select class="input input--sm" id="catalogFilterSite">
+                          <option value="">All sites</option>
+                          <option value="amazon">Amazon</option>
+                          <option value="target">Target</option>
+                          <option value="walmart">Walmart</option>
+                          <option value="supreme">Supreme</option>
+                          <option value="pokemon">Pokémon Center</option>
+                          <option value="general">General</option>
+                        </select>
+                        <input class="input input--sm" id="catalogFilterSearch" placeholder="Search SKU or product" />
+                        <button class="btn" type="button" id="catalogFilterButton">Refresh</button>
+                      </div>
+                      <div id="adminSkuMessage" class="subtle-text"></div>
+                    </div>
+                    <div class="table-wrap table-wrap--admin-scroll">
+                      <table class="admin-table">
+                        <thead>
+                          <tr>
+                            <th>Site</th>
+                            <th>SKU</th>
+                            <th>Product</th>
+                            <th>Price</th>
+                            <th>Mode</th>
+                            <th>Actions</th>
+                          </tr>
+                        </thead>
+                        <tbody id="catalogProductsBody">
+                          <tr>
+                            <td colspan="6">Loading catalog...</td>
+                          </tr>
+                        </tbody>
+                      </table>
+                    </div>
+                    <div class="panel-header">
+                      <div>
+                        <h3>Pending SKU Requests</h3>
+                        <p class="subtle-text">User requests wait here until the super admin approves or removes them.
+                        </p>
+                      </div>
+                    </div>
+                    <div class="table-wrap table-wrap--admin-scroll">
+                      <table class="admin-table">
+                        <thead>
+                          <tr>
+                            <th>Requested</th>
+                            <th>User</th>
+                            <th>Site</th>
+                            <th>SKU</th>
+                            <th>Actions</th>
+                          </tr>
+                        </thead>
+                        <tbody id="skuRequestTableBody">
+                          <tr>
+                            <td colspan="5">Loading requests...</td>
+                          </tr>
+                        </tbody>
+                      </table>
+                    </div>
+                  </section>
+          </section>
+
+
+          <section class="admin-pane" data-admin-pane="target-lists">
+            <section class="panel">
+              <div class="panel-header">
+                <div>
+                  <h2>Target Checkout Lists</h2>
+                  <p class="subtle-text">Create active Target checkout lists that users can choose from. Each list
+                    supports up to 29 SKUs in <code>sku;name;price</code> format. The SKU is matched to the website
+                    catalog name. If your price is blank, the website catalog price is used when available; otherwise it
+                    stays blank/no limit.</p>
+                </div>
+              </div>
+              <form id="targetCheckoutListForm" class="form-grid">
+                <input type="hidden" id="targetCheckoutListId" />
+                <div class="field field--full">
+                  <label for="targetCheckoutListTitle">List Title</label>
+                  <input class="input" id="targetCheckoutListTitle" placeholder="Needoh, Checkout, Electronics..." />
+                </div>
+                <div class="field field--full">
+                  <label for="targetCheckoutSkuList">SKU List</label>
+                  <textarea class="input" id="targetCheckoutSkuList" rows="10"
+                    placeholder="94619824;NeeDoh Nice Cube Glitter and Glow;$5.99&#10;94856729;NeeDoh Teenie Funky Pups - 3pk;$5.99"></textarea>
+                  <div class="subtle-text">One item per line. Maximum 29 lines per checkout list. Product names are
+                    corrected from the website catalog by SKU when available. Missing SKUs are automatically added as
+                    catalog placeholders so you can finish the product name/credits.</div>
+                </div>
+                <div class="field field--full panel-actions">
+                  <button class="btn btn-primary" type="submit">Save Checkout List</button>
+                  <button class="btn" type="button" id="clearTargetCheckoutListForm">Clear Form</button>
+                </div>
+              </form>
+              <div id="targetCheckoutListMessage" class="subtle-text"></div>
+            </section>
+
+            <section class="panel">
+              <div class="panel-header">
+                <div>
+                  <h2>Current Target Lists</h2>
+                  <p class="subtle-text">Users can select one or more of these lists from the Target tab.</p>
+                </div>
+              </div>
+              <div id="targetCheckoutListsAdminList" class="stack-list"></div>
+            </section>
+          </section>
+
+
+
+          <section class="admin-pane" data-admin-pane="running-list-name">
+            <section class="panel">
+              <div class="panel-header">
+                <div>
+                  <h2>Target Running List Display Name</h2>
+                  <p class="subtle-text">This is the name users see above your currently selected Target products. Super
+                    admin list shows to every user. Admin lists show only to users assigned to that admin.</p>
+                </div>
+              </div>
+              <div class="banner banner-soft">
+                <strong>How this works</strong>
+                <p class="subtle-text">Select your Target products from your own Target tab, then set the display name
+                  here. Users can apply your list, and those SKUs count toward their 29 Target SKU limit.</p>
+              </div>
+              <div class="form-grid">
+                <div class="field field--full">
+                  <label for="targetRecommendedListNameInput">Display Name</label>
+                  <input class="input" id="targetRecommendedListNameInput"
+                    placeholder="The Shore Shack List, HypeEast List, Apex Collector List..." />
+                </div>
+                <div class="field field--full panel-actions">
+                  <button class="btn btn-primary" type="button" id="saveTargetRecommendedListNameButton">Save Display
+                    Name</button>
+                </div>
+              </div>
+              <div id="targetRecommendedListNameMessage" class="subtle-text"></div>
+            </section>
+          </section>
+
+          <section class="admin-pane" data-admin-pane="exports">
+            <section class="panel">
+              <div class="panel-header">
+                <div>
+                  <h2>Export Profiles / Accounts</h2>
+                  <p class="subtle-text">Export saved profiles as JSON or account logins as TXT.</p>
+                </div>
+              </div>
+              <div class="form-grid">
+                <div class="field"><label for="exportUserFilter">Account</label><select class="input"
+                    id="exportUserFilter" onchange="updateExportCount()">
+                    <option value="">All Accounts</option>
+                  </select></div>
+                <div class="field"><label for="exportGroupFilter">Group</label><select class="input"
+                    id="exportGroupFilter" onchange="updateExportCount()">
+                    <option value="">All Groups</option>
                     <option value="general">General</option>
-                  </select></div>
-                <div class="field"><label for="adminSkuValue">SKU / ASIN / DPCI</label><input class="input"
-                    id="adminSkuValue" placeholder="Enter SKU" /></div>
-                <div class="field field--full panel-actions"><button class="btn btn-primary" type="submit">Add / Update
-                    Catalog Product</button><button class="btn" type="button" id="syncTargetPricingButton">Sync Target
-                    Prices From Amazon</button></div>
-              </form>
-              <div class="banner banner-soft"><strong>Manual product add</strong>
-                <p class="subtle-text">Create products manually when a scrape fails, or create a blank placeholder card
-                  for future drops.</p>
-              </div>
-              <form id="adminManualProductForm" class="form-grid">
-                <div class="field"><label for="manualProductSite">Site</label><select class="input"
-                    id="manualProductSite">
-                    <option value="amazon">Amazon</option>
-                    <option value="target">Target</option>
                     <option value="walmart">Walmart</option>
-                    <option value="supreme">Supreme</option>
-                    <option value="pokemon">Pokémon Center</option>
-                    <option value="general">General</option>
-                  </select></div>
-                <div class="field"><label for="manualProductSku">SKU / ASIN / DPCI</label><input class="input"
-                    id="manualProductSku" placeholder="AMAZON-NEXT-DROP" /></div>
-                <div class="field field--full"><label for="manualProductName">Product Name</label><input class="input"
-                    id="manualProductName" placeholder="Run Next Amazon Release" /></div>
-                <div class="field"><label for="manualProductPrice">Price</label><input class="input"
-                    id="manualProductPrice" type="number" min="0" step="0.01" placeholder="0.00" /></div>
-                <div class="field"><label for="manualProductBrand">Brand</label><input class="input"
-                    id="manualProductBrand" placeholder="Amazon" /></div>
-                <div class="field"><label for="manualProductCreditCost">Credit Cost</label><input class="input"
-                    id="manualProductCreditCost" type="number" min="0" step="1" placeholder="2" /></div>
-                <div class="field"><label for="manualProductImage">Image URL</label><input class="input"
-                    id="manualProductImage" placeholder="https://..." /></div>
-                <div class="field"><label for="manualProductUrl">Product URL</label><input class="input"
-                    id="manualProductUrl" placeholder="https://..." /></div>
-                <div class="field"><label class="checkbox-inline"><input type="checkbox"
-                      id="manualProductPlaceholder" /><span>Create as placeholder / next release card</span></label>
-                </div>
-                <div class="field field--full panel-actions"><button class="btn btn-primary" type="submit">Save Manual
-                    Product</button></div>
-              </form>
-
-              <div class="banner banner-soft"><strong>Bulk import lists</strong>
-                <p class="subtle-text">Import Amazon or Target JSON exports into the live catalog. Target items will try
-                  to pull live retail price before saving.</p>
-              </div>
-              <form id="catalogBulkImportForm" class="form-grid">
-                <div class="field"><label for="catalogBulkImportSite">Import Site</label><select class="input"
-                    id="catalogBulkImportSite">
-                    <option value="amazon">Amazon</option>
                     <option value="target">Target</option>
-                  </select></div>
-                <div class="field"><label for="catalogBulkImportFile">JSON File</label><input class="input"
-                    id="catalogBulkImportFile" type="file" accept="application/json,.json" /></div>
-                <div class="field field--full panel-actions"><button class="btn btn-primary" type="submit">Import
-                    Product List</button></div>
-              </form>
-              <div class="banner banner-soft"><strong>Export for Stellar</strong>
-                <p class="subtle-text">Export Amazon or Target products in batches of 29 using
-                  <code>sku;title;price</code>.
-                </p>
-              </div>
-              <form id="catalogExportForm" class="form-grid">
-                <div class="field"><label for="catalogExportSite">Export Site</label><select class="input"
-                    id="catalogExportSite">
                     <option value="amazon">Amazon</option>
-                    <option value="target">Target</option>
                   </select></div>
-                <div class="field"><label for="catalogExportBatchSize">Batch Size</label><input class="input"
-                    id="catalogExportBatchSize" type="number" min="1" max="200" step="1" value="29" /></div>
-                <div class="field field--full panel-actions"><button class="btn" type="submit">Build Export
-                    Batches</button></div>
-              </form>
-              <div id="catalogExportResults" class="stack-list"></div>
-            </div>
-            <div id="superAdminCatalogNotice" class="banner banner-soft" style="display:none;">You can review the
-              catalog and requests, but only the super admin can change live catalog entries.</div>
-            <div class="toolbar-row toolbar-row--spread">
-              <div class="toolbar-row">
-                <select class="input input--sm" id="catalogFilterSite">
-                  <option value="">All sites</option>
-                  <option value="amazon">Amazon</option>
-                  <option value="target">Target</option>
-                  <option value="walmart">Walmart</option>
-                  <option value="supreme">Supreme</option>
-                  <option value="pokemon">Pokémon Center</option>
-                  <option value="general">General</option>
-                </select>
-                <input class="input input--sm" id="catalogFilterSearch" placeholder="Search SKU or product" />
-                <button class="btn" type="button" id="catalogFilterButton">Refresh</button>
               </div>
-              <div id="adminSkuMessage" class="subtle-text"></div>
-            </div>
-            <div class="table-wrap table-wrap--admin-scroll">
-              <table class="admin-table">
-                <thead>
-                  <tr>
-                    <th>Site</th>
-                    <th>SKU</th>
-                    <th>Product</th>
-                    <th>Price</th>
-                    <th>Mode</th>
-                    <th>Actions</th>
-                  </tr>
-                </thead>
-                <tbody id="catalogProductsBody">
-                  <tr>
-                    <td colspan="6">Loading catalog...</td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-            <div class="panel-header">
-              <div>
-                <h3>Pending SKU Requests</h3>
-                <p class="subtle-text">User requests wait here until the super admin approves or removes them.</p>
-              </div>
-            </div>
-            <div class="table-wrap table-wrap--admin-scroll">
-              <table class="admin-table">
-                <thead>
-                  <tr>
-                    <th>Requested</th>
-                    <th>User</th>
-                    <th>Site</th>
-                    <th>SKU</th>
-                    <th>Actions</th>
-                  </tr>
-                </thead>
-                <tbody id="skuRequestTableBody">
-                  <tr>
-                    <td colspan="5">Loading requests...</td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-          </section>
-        </section>
-
-
-        <section class="admin-pane" data-admin-pane="target-lists">
-          <section class="panel">
-            <div class="panel-header">
-              <div>
-                <h2>Target Checkout Lists</h2>
-                <p class="subtle-text">Create active Target checkout lists that users can choose from. Each list
-                  supports up to 29 SKUs in <code>sku;name;price</code> format. The SKU is matched to the website
-                  catalog name. If your price is blank, the website catalog price is used when available; otherwise it
-                  stays blank/no limit.</p>
-              </div>
-            </div>
-            <form id="targetCheckoutListForm" class="form-grid">
-              <input type="hidden" id="targetCheckoutListId" />
-              <div class="field field--full">
-                <label for="targetCheckoutListTitle">List Title</label>
-                <input class="input" id="targetCheckoutListTitle" placeholder="Needoh, Checkout, Electronics..." />
-              </div>
-              <div class="field field--full">
-                <label for="targetCheckoutSkuList">SKU List</label>
-                <textarea class="input" id="targetCheckoutSkuList" rows="10"
-                  placeholder="94619824;NeeDoh Nice Cube Glitter and Glow;$5.99&#10;94856729;NeeDoh Teenie Funky Pups - 3pk;$5.99"></textarea>
-                <div class="subtle-text">One item per line. Maximum 29 lines per checkout list. Product names are
-                  corrected from the website catalog by SKU when available. Missing SKUs are automatically added as
-                  catalog placeholders so you can finish the product name/credits.</div>
-              </div>
-              <div class="field field--full panel-actions">
-                <button class="btn btn-primary" type="submit">Save Checkout List</button>
-                <button class="btn" type="button" id="clearTargetCheckoutListForm">Clear Form</button>
-              </div>
-            </form>
-            <div id="targetCheckoutListMessage" class="subtle-text"></div>
+              <div class="toolbar-row toolbar-row--spread"><span id="exportCountBanner" class="subtle-text">Checking
+                  export count...</span><span class="subtle-text">Account export format:
+                  username:::password:::proxie</span></div>
+              <div class="panel-actions"><button class="btn" onclick="exportProfilesJson()">Export Profiles
+                  JSON</button><button class="btn btn-primary" onclick="exportAccountsTxt()">Export Account
+                  Logins</button><button class="btn btn-primary" onclick="exportGmailImapTxt()">Export Gmail /
+                  2FA</button></div>
+            </section>
           </section>
 
-          <section class="panel">
-            <div class="panel-header">
-              <div>
-                <h2>Current Target Lists</h2>
-                <p class="subtle-text">Users can select one or more of these lists from the Target tab.</p>
-              </div>
-            </div>
-            <div id="targetCheckoutListsAdminList" class="stack-list"></div>
-          </section>
-        </section>
-
-
-
-        <section class="admin-pane" data-admin-pane="running-list-name">
-          <section class="panel">
-            <div class="panel-header">
-              <div>
-                <h2>Target Running List Display Name</h2>
-                <p class="subtle-text">This is the name users see above your currently selected Target products. Super
-                  admin list shows to every user. Admin lists show only to users assigned to that admin.</p>
-              </div>
-            </div>
-            <div class="banner banner-soft">
-              <strong>How this works</strong>
-              <p class="subtle-text">Select your Target products from your own Target tab, then set the display name
-                here. Users can apply your list, and those SKUs count toward their 29 Target SKU limit.</p>
-            </div>
-            <div class="form-grid">
-              <div class="field field--full">
-                <label for="targetRecommendedListNameInput">Display Name</label>
-                <input class="input" id="targetRecommendedListNameInput"
-                  placeholder="The Shore Shack List, HypeEast List, Apex Collector List..." />
-              </div>
-              <div class="field field--full panel-actions">
-                <button class="btn btn-primary" type="button" id="saveTargetRecommendedListNameButton">Save Display
-                  Name</button>
-              </div>
-            </div>
-            <div id="targetRecommendedListNameMessage" class="subtle-text"></div>
-          </section>
-        </section>
-
-        <section class="admin-pane" data-admin-pane="exports">
-          <section class="panel">
-            <div class="panel-header">
-              <div>
-                <h2>Export Profiles / Accounts</h2>
-                <p class="subtle-text">Export saved profiles as JSON or account logins as TXT.</p>
-              </div>
-            </div>
-            <div class="form-grid">
-              <div class="field"><label for="exportUserFilter">Account</label><select class="input"
-                  id="exportUserFilter" onchange="updateExportCount()">
-                  <option value="">All Accounts</option>
-                </select></div>
-              <div class="field"><label for="exportGroupFilter">Group</label><select class="input"
-                  id="exportGroupFilter" onchange="updateExportCount()">
-                  <option value="">All Groups</option>
-                  <option value="general">General</option>
-                  <option value="walmart">Walmart</option>
-                  <option value="target">Target</option>
-                  <option value="amazon">Amazon</option>
-                </select></div>
-            </div>
-            <div class="toolbar-row toolbar-row--spread"><span id="exportCountBanner" class="subtle-text">Checking
-                export count...</span><span class="subtle-text">Account export format:
-                username:::password:::proxie</span></div>
-            <div class="panel-actions"><button class="btn" onclick="exportProfilesJson()">Export Profiles
-                JSON</button><button class="btn btn-primary" onclick="exportAccountsTxt()">Export Account
-                Logins</button><button class="btn btn-primary" onclick="exportGmailImapTxt()">Export Gmail /
-                2FA</button></div>
-          </section>
-        </section>
-
-        <section class="admin-pane" data-admin-pane="selections">
-          <section class="panel" id="adminProductSelectionsSection">
-            <div class="panel-header">
-              <div>
-                <h2>User Product Selections</h2>
-                <p class="subtle-text">Select a user first, then view that user’s product picks and chosen countdown
-                  releases.</p>
-              </div>
-            </div>
-            <div class="toolbar-row">
-              <select class="input input--sm" id="adminProductUserSelect">
-                <option value="">Select a user</option>
-              </select>
-              <button class="btn btn-primary" type="button" id="adminLoadUserProductsButton">Load User
-                Selections</button>
-              <span id="adminProductSelectionsMessage" class="subtle-text"></span>
-            </div>
-            <div id="adminSelectedUserSummary" class="subtle-text"></div>
-            <div id="adminSelectedUserCountdowns" class="selection-chip-list subtle-text"></div>
-            <div class="table-wrap table-wrap--admin-scroll">
-              <table class="admin-table">
-                <thead>
-                  <tr>
-                    <th>Site</th>
-                    <th>Product</th>
-                    <th>SKU</th>
-                    <th>Mode</th>
-                    <th>Max Price</th>
-                  </tr>
-                </thead>
-                <tbody id="adminUserProductDetailBody">
-                  <tr>
-                    <td colspan="5">Choose a user to view product selections.</td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-            <div class="panel-header panel-header--nested">
-              <div>
-                <h3>Target / Amazon Selection Tools</h3>
-                <p class="subtle-text">Track changes and export selected products in bot-ready sku;name;price format.
-                </p>
-              </div>
-            </div>
-            <div class="toolbar-row toolbar-row--spread">
-              <div class="toolbar-row">
-                <select class="input input--sm" id="productSelectionExportSite">
-                  <option value="target">Target</option>
-                  <option value="amazon">Amazon</option>
-                </select>
-                <select class="input input--sm" id="productSelectionExportUser">
-                  <option value="">All users</option>
-                </select>
-                <button class="btn btn-primary" type="button" id="loadProductSelectionExportButton">Load Export</button>
-                <button class="btn" type="button" id="copyProductSelectionExportButton">Copy Export</button>
-                <button class="btn" type="button" id="markProductSelectionExportedButton">Mark Copied</button>
-                <button class="btn btn-danger" type="button" id="clearProductSelectionsButton">Clear Selected
-                  Store</button>
-              </div>
-              <span id="productSelectionExportMessage" class="subtle-text"></span>
-            </div>
-            <textarea class="input" id="productSelectionExportText" rows="10" placeholder="Export will appear here..."
-              readonly></textarea>
-            <div class="panel-header panel-header--nested">
-              <div>
-                <h3>Recent Product Selection Changes</h3>
-                <p class="subtle-text">Newest user changes are listed here so admins know when checkout lists changed.
-                </p>
-              </div>
-              <div class="panel-actions">
-                <button class="btn" type="button" id="refreshProductSelectionChangesButton">Refresh Changes</button>
-              </div>
-            </div>
-            <div class="table-wrap table-wrap--admin-scroll">
-              <table class="admin-table">
-                <thead>
-                  <tr>
-                    <th>When</th>
-                    <th>User</th>
-                    <th>Site</th>
-                    <th>Action</th>
-                    <th>SKU</th>
-                    <th>Product</th>
-                  </tr>
-                </thead>
-                <tbody id="productSelectionChangesBody">
-                  <tr>
-                    <td colspan="6">Loading changes...</td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-
-            <div class="panel-header panel-header--nested">
-              <div>
-                <h3>Users by Countdown Release</h3>
-                <p class="subtle-text">Click a countdown to view the users who selected that release.</p>
-              </div>
-            </div>
-            <div class="selection-grid-two">
-              <div class="selection-card">
-                <div id="adminCountdownSelectionList" class="countdown-user-scroll">
-                  <div class="subtle-text">Loading countdown releases...</div>
+          <section class="admin-pane" data-admin-pane="selections">
+            <section class="panel" id="adminProductSelectionsSection">
+              <div class="panel-header">
+                <div>
+                  <h2>User Product Selections</h2>
+                  <p class="subtle-text">Select a user first, then view that user’s product picks and chosen countdown
+                    releases.</p>
                 </div>
               </div>
-              <div class="selection-card">
-                <div id="adminCountdownUsersTitle" class="subtle-text">Select a countdown to see the users.</div>
-                <div id="adminCountdownUsersList" class="countdown-user-scroll">
-                  <div class="subtle-text">No countdown selected.</div>
-                </div>
+              <div class="toolbar-row">
+                <select class="input input--sm" id="adminProductUserSelect">
+                  <option value="">Select a user</option>
+                </select>
+                <button class="btn btn-primary" type="button" id="adminLoadUserProductsButton">Load User
+                  Selections</button>
+                <span id="adminProductSelectionsMessage" class="subtle-text"></span>
               </div>
-            </div>
-          </section>
-        </section>
-
-
-        <section class="admin-pane" data-admin-pane="credits">
-          <section class="panel">
-            <div class="panel-header">
-              <div>
-                <h2>Credits + Orders</h2>
-                <p class="subtle-text">Manage manual credits, Stripe purchases, and successful checkout credit charges.
-                </p>
+              <div id="adminSelectedUserSummary" class="subtle-text"></div>
+              <div id="adminSelectedUserCountdowns" class="selection-chip-list subtle-text"></div>
+              <div class="table-wrap table-wrap--admin-scroll">
+                <table class="admin-table">
+                  <thead>
+                    <tr>
+                      <th>Site</th>
+                      <th>Product</th>
+                      <th>SKU</th>
+                      <th>Mode</th>
+                      <th>Max Price</th>
+                    </tr>
+                  </thead>
+                  <tbody id="adminUserProductDetailBody">
+                    <tr>
+                      <td colspan="5">Choose a user to view product selections.</td>
+                    </tr>
+                  </tbody>
+                </table>
               </div>
-            </div>
-            <div class="banner banner-soft"><strong>Webhook endpoints</strong>
-              <p class="subtle-text">Stripe credits purchase webhook: <code>/webhooks/stripe</code>. Successful checkout
-                webhook: <code>/webhooks/orders</code>. The order webhook should include <code>external_order_id</code>
-                plus either <code>user_id</code> or user email.</p>
-            </div>
-            <div class="toolbar-row toolbar-row--spread"><span class="subtle-text">Credits are manually granted by
-                admin</span><button class="btn btn-primary" type="button" onclick="loadCreditsAdminPane()">Refresh
-                Credits + Orders</button></div>
-            <div class="table-wrap table-wrap--admin-scroll">
-              <table class="admin-table">
-                <thead>
-                  <tr>
-                    <th>User</th>
-                    <th>Role</th>
-                    <th>Credits</th>
-                    <th>Granted</th>
-                    <th>Spent</th>
-                    <th>Needs Removal</th>
-                    <th>Adjust</th>
-                  </tr>
-                </thead>
-                <tbody id="creditsUsersTableBody">
-                  <tr>
-                    <td colspan="7">Loading credit balances...</td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-            <div id="creditsAdminMessage" class="subtle-text"></div>
-            <section class="panel panel--subpanel">
               <div class="panel-header panel-header--nested">
                 <div>
-                  <h3>User Credit Receipt</h3>
-                  <p class="subtle-text">Click Details on a user to review linked orders and every credit transaction.
+                  <h3>Target / Amazon Selection Tools</h3>
+                  <p class="subtle-text">Track changes and export selected products in bot-ready sku;name;price format.
                   </p>
                 </div>
               </div>
-              <div id="creditReceiptSummary" class="subtle-text">No user selected.</div>
-              <div class="form-grid">
-                <div class="field field--full">
-                  <label>Credit Transactions</label>
-                  <div class="table-wrap table-wrap--admin-scroll">
-                    <table class="admin-table">
-                      <thead>
-                        <tr>
-                          <th>When</th>
-                          <th>Delta</th>
-                          <th>Balance After</th>
-                          <th>Reason</th>
-                          <th>Note</th>
-                        </tr>
-                      </thead>
-                      <tbody id="creditTransactionsTableBody">
-                        <tr>
-                          <td colspan="5">Select a user to view transactions.</td>
-                        </tr>
-                      </tbody>
-                    </table>
+              <div class="toolbar-row toolbar-row--spread">
+                <div class="toolbar-row">
+                  <select class="input input--sm" id="productSelectionExportSite">
+                    <option value="target">Target</option>
+                    <option value="amazon">Amazon</option>
+                  </select>
+                  <select class="input input--sm" id="productSelectionExportUser">
+                    <option value="">All users</option>
+                  </select>
+                  <button class="btn btn-primary" type="button" id="loadProductSelectionExportButton">Load
+                    Export</button>
+                  <button class="btn" type="button" id="copyProductSelectionExportButton">Copy Export</button>
+                  <button class="btn" type="button" id="markProductSelectionExportedButton">Mark Copied</button>
+                  <button class="btn btn-danger" type="button" id="clearProductSelectionsButton">Clear Selected
+                    Store</button>
+                </div>
+                <span id="productSelectionExportMessage" class="subtle-text"></span>
+              </div>
+              <textarea class="input" id="productSelectionExportText" rows="10" placeholder="Export will appear here..."
+                readonly></textarea>
+              <div class="panel-header panel-header--nested">
+                <div>
+                  <h3>Recent Product Selection Changes</h3>
+                  <p class="subtle-text">Newest user changes are listed here so admins know when checkout lists changed.
+                  </p>
+                </div>
+                <div class="panel-actions">
+                  <button class="btn" type="button" id="refreshProductSelectionChangesButton">Refresh Changes</button>
+                </div>
+              </div>
+              <div class="table-wrap table-wrap--admin-scroll">
+                <table class="admin-table">
+                  <thead>
+                    <tr>
+                      <th>When</th>
+                      <th>User</th>
+                      <th>Site</th>
+                      <th>Action</th>
+                      <th>SKU</th>
+                      <th>Product</th>
+                    </tr>
+                  </thead>
+                  <tbody id="productSelectionChangesBody">
+                    <tr>
+                      <td colspan="6">Loading changes...</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+
+              <div class="panel-header panel-header--nested">
+                <div>
+                  <h3>Users by Countdown Release</h3>
+                  <p class="subtle-text">Click a countdown to view the users who selected that release.</p>
+                </div>
+              </div>
+              <div class="selection-grid-two">
+                <div class="selection-card">
+                  <div id="adminCountdownSelectionList" class="countdown-user-scroll">
+                    <div class="subtle-text">Loading countdown releases...</div>
                   </div>
                 </div>
-                <div class="field field--full">
-                  <label>Linked Orders</label>
-                  <div class="table-wrap table-wrap--admin-scroll">
-                    <table class="admin-table">
-                      <thead>
-                        <tr>
-                          <th>When</th>
-                          <th>Site</th>
-                          <th>Product</th>
-                          <th>Status</th>
-                          <th>Credits</th>
-                          <th>Order</th>
-                        </tr>
-                      </thead>
-                      <tbody id="userOrdersTableBody">
-                        <tr>
-                          <td colspan="6">Select a user to view orders.</td>
-                        </tr>
-                      </tbody>
-                    </table>
+                <div class="selection-card">
+                  <div id="adminCountdownUsersTitle" class="subtle-text">Select a countdown to see the users.</div>
+                  <div id="adminCountdownUsersList" class="countdown-user-scroll">
+                    <div class="subtle-text">No countdown selected.</div>
                   </div>
                 </div>
               </div>
             </section>
-            <div class="panel-header panel-header--nested">
-              <div>
-                <h3>Successful Orders</h3>
-                <p class="subtle-text">Every successful checkout webhook is stored here. Refund credits manually when
-                  you need to reverse a charge.</p>
-              </div>
-            </div>
-            <div class="table-wrap table-wrap--admin-scroll">
-              <table class="admin-table">
-                <thead>
-                  <tr>
-                    <th>When</th>
-                    <th>User</th>
-                    <th>Source</th>
-                    <th>Product</th>
-                    <th>Status</th>
-                    <th>Credits</th>
-                    <th>Order</th>
-                    <th>Action</th>
-                  </tr>
-                </thead>
-                <tbody id="ordersTableBody">
-                  <tr>
-                    <td colspan="8">Loading orders...</td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
           </section>
-        </section>
 
-        <section class="admin-pane" data-admin-pane="users">
-          <section class="panel">
-            <div class="panel-header">
-              <div>
-                <h2>Current Users</h2>
-                <p class="subtle-text">Review current users and filter by owner, role, and date.</p>
-              </div>
-            </div>
-            <div class="form-grid">
-              <div class="field"><label for="usersOwnerFilter">Owner Admin</label><select class="input"
-                  id="usersOwnerFilter" onchange="applyUserFilters()">
-                  <option value="">All Admin Owners</option>
-                </select></div>
-              <div class="field"><label for="usersRoleFilter">Role</label><select class="input" id="usersRoleFilter"
-                  onchange="applyUserFilters()">
-                  <option value="">All Roles</option>
-                  <option value="user">User</option>
-                  <option value="admin">Admin</option>
-                  <option value="super_admin">Super Admin</option>
-                </select></div>
-              <div class="field"><label for="usersCreatedAfter">Created After</label><input class="input"
-                  id="usersCreatedAfter" type="date" onchange="applyUserFilters()" /></div>
-              <div class="field"><label for="usersCreatedBefore">Created Before</label><input class="input"
-                  id="usersCreatedBefore" type="date" onchange="applyUserFilters()" /></div>
-            </div>
-            <div class="table-wrap table-wrap--admin-scroll">
-              <table class="admin-table">
-                <thead>
-                  <tr>
-                    <th>Email</th>
-                    <th>Role</th>
-                    <th>Owner Admin</th>
-                    <th>Profiles</th>
-                    <th>Status</th>
-                    <th>Created</th>
-                    <th>Action</th>
-                  </tr>
-                </thead>
-                <tbody id="usersTableBody"></tbody>
-              </table>
-            </div>
-            <div class="panel-actions" id="usersPagination" style="display:none"></div>
-          </section>
-        </section>
 
-        <section class="admin-pane" data-admin-pane="webhooks">
-          <section class="panel">
-            <div class="panel-header">
-              <div>
-                <h2>Webhook Setup</h2>
-                <p class="subtle-text">Use one shared website webhook for all bots. Super admin receives every checkout.
-                  Admins can also save their own Discord webhook and collaboration label for users they own.</p>
-              </div>
-            </div>
-
-            <div class="banner banner-soft">
-              <strong>How it works</strong>
-              <p class="subtle-text">
-                Paste the generated website webhook URL into your bot. When a checkout comes in, the website finds the
-                user,
-                deducts credits, stores the order, sends a Discord webhook to the super admin, and also sends a second
-                Discord
-                webhook to the owner admin if that user belongs to one.
-              </p>
-            </div>
-
-            <div class="form-grid">
-              <div class="field field--full">
-                <label for="websiteWebhookUrl">Shared Bot Webhook URL</label>
-                <input class="input" id="websiteWebhookUrl" readonly placeholder="Click Create Webhook" />
-                <div class="subtle-text">All Stellar / Refract webhooks should use this one URL.</div>
-              </div>
-
-              <div class="field field--full panel-actions">
-                <button class="btn btn-primary" type="button" id="createWebhookButton"
-                  onclick="createWebsiteWebhook()">Create / Refresh Shared Website Webhook</button>
-              </div>
-
-              <div class="field field--full" id="superAdminDiscordField">
-                <label for="discordRelayWebhookUrl">Super Admin Successful Checkout Webhook</label>
-                <input class="input" id="discordRelayWebhookUrl" placeholder="https://discord.com/api/webhooks/..." />
-                <div class="subtle-text">This receives every successful checkout your site processes.</div>
-              </div>
-
-              <div class="field field--full" id="superAdminErrorDiscordField">
-                <label for="checkoutErrorWebhookUrl">Super Admin Failed / Error Checkout Webhook</label>
-                <input class="input" id="checkoutErrorWebhookUrl" placeholder="https://discord.com/api/webhooks/..." />
-                <div class="subtle-text">Checkout OOS, declined, canceled, and other error webhooks are sent here.</div>
-              </div>
-
-              <div class="field field--full" id="adminSuccessDiscordField">
-                <label for="adminDiscordRelayWebhookUrl">Your Admin Successful Checkout Webhook</label>
-                <input class="input" id="adminDiscordRelayWebhookUrl"
-                  placeholder="https://discord.com/api/webhooks/..." />
-                <div class="subtle-text">If users belong to you, their successful checkouts will also be sent here.
+          <section class="admin-pane" data-admin-pane="credits">
+            <section class="panel">
+              <div class="panel-header">
+                <div>
+                  <h2>Credits + Orders</h2>
+                  <p class="subtle-text">Manage manual credits, Stripe purchases, and successful checkout credit
+                    charges.
+                  </p>
                 </div>
               </div>
-
-              <div class="field field--full" id="adminErrorDiscordField">
-                <label for="adminErrorDiscordRelayWebhookUrl">Your Admin Failed / Error Checkout Webhook</label>
-                <input class="input" id="adminErrorDiscordRelayWebhookUrl"
-                  placeholder="https://discord.com/api/webhooks/..." />
-                <div class="subtle-text">Failed user checkouts also come here so you can review OOS and error attempts.
-                </div>
-              </div>
-
-              <div class="field field--full" id="adminBrandLabelField">
-                <label for="adminBrandLabel">Your Collaboration Label</label>
-                <input class="input" id="adminBrandLabel" placeholder="HYPEEAST" />
-                <div class="subtle-text">This shows in the webhook as: THANK YOU FOR CHECKING OUT WITH THE SHORE SHACK x
-                  YOUR LABEL</div>
-              </div>
-
-              <div class="field field--full">
-                <label for="monitorWebhookUrl">Shared Monitor Webhook URL</label>
-                <input class="input" id="monitorWebhookUrl" readonly placeholder="Click Create Monitor Webhook" />
-                <div class="subtle-text">Use this URL for in-stock monitor pings.</div>
-              </div>
-
-              <div class="field field--full panel-actions">
-                <button class="btn btn-primary" type="button" id="createMonitorWebhookButton"
-                  onclick="createMonitorWebhook()">Create / Refresh Shared Monitor Webhook</button>
-              </div>
-
-              <div class="field field--full" id="monitorDedupeWindowField">
-                <label for="monitorDedupeWindowSeconds">Monitor Duplicate Window (seconds)</label>
-                <input class="input" id="monitorDedupeWindowSeconds" type="number" min="0" max="600" step="1"
-                  placeholder="90" />
-                <div class="subtle-text">If the same monitor ping is received again within this window, it will be
-                  skipped. Set to 90 if you want a longer duplicate block.</div>
-              </div>
-
-              <div class="field field--full" id="superAdminMonitorGroups">
-                <label>Super Admin Monitor Routing By Product Group</label>
-                <div class="form-grid">
-                  <div class="field field--full"><label for="monitorPokemon">Pokemon Webhook URL</label><input
-                      class="input" id="monitorPokemon" placeholder="https://discord.com/api/webhooks/..." /></div>
-                  <div class="field"><label for="monitorPokemonPingMode">Pokemon Ping Mode</label><select class="input"
-                      id="monitorPokemonPingMode">
-                      <option value="none">None</option>
-                      <option value="everyone">@everyone</option>
-                      <option value="role">Role</option>
-                    </select></div>
-                  <div class="field"><label for="monitorPokemonRole">Pokemon Role Mention</label><input class="input"
-                      id="monitorPokemonRole" placeholder="<@&ROLE_ID>" /></div>
-
-                  <div class="field field--full"><label for="monitorOnePiece">One Piece Webhook URL</label><input
-                      class="input" id="monitorOnePiece" placeholder="https://discord.com/api/webhooks/..." /></div>
-                  <div class="field"><label for="monitorOnePiecePingMode">One Piece Ping Mode</label><select
-                      class="input" id="monitorOnePiecePingMode">
-                      <option value="none">None</option>
-                      <option value="everyone">@everyone</option>
-                      <option value="role">Role</option>
-                    </select></div>
-                  <div class="field"><label for="monitorOnePieceRole">One Piece Role Mention</label><input class="input"
-                      id="monitorOnePieceRole" placeholder="<@&ROLE_ID>" /></div>
-
-                  <div class="field field--full"><label for="monitorSports">Sports Cards Webhook URL</label><input
-                      class="input" id="monitorSports" placeholder="https://discord.com/api/webhooks/..." /></div>
-                  <div class="field"><label for="monitorSportsPingMode">Sports Cards Ping Mode</label><select
-                      class="input" id="monitorSportsPingMode">
-                      <option value="none">None</option>
-                      <option value="everyone">@everyone</option>
-                      <option value="role">Role</option>
-                    </select></div>
-                  <div class="field"><label for="monitorSportsRole">Sports Cards Role Mention</label><input
-                      class="input" id="monitorSportsRole" placeholder="<@&ROLE_ID>" /></div>
-
-                  <div class="field field--full"><label for="monitorOtherTcg">Other TCG Webhook URL</label><input
-                      class="input" id="monitorOtherTcg" placeholder="https://discord.com/api/webhooks/..." /></div>
-                  <div class="field"><label for="monitorOtherTcgPingMode">Other TCG Ping Mode</label><select
-                      class="input" id="monitorOtherTcgPingMode">
-                      <option value="none">None</option>
-                      <option value="everyone">@everyone</option>
-                      <option value="role">Role</option>
-                    </select></div>
-                  <div class="field"><label for="monitorOtherTcgRole">Other TCG Role Mention</label><input class="input"
-                      id="monitorOtherTcgRole" placeholder="<@&ROLE_ID>" /></div>
-
-                  <div class="field field--full"><label for="monitorLowkey">Low Key Flips Webhook URL</label><input
-                      class="input" id="monitorLowkey" placeholder="https://discord.com/api/webhooks/..." /></div>
-                  <div class="field"><label for="monitorLowkeyPingMode">Low Key Flips Ping Mode</label><select
-                      class="input" id="monitorLowkeyPingMode">
-                      <option value="none">None</option>
-                      <option value="everyone">@everyone</option>
-                      <option value="role">Role</option>
-                    </select></div>
-                  <div class="field"><label for="monitorLowkeyRole">Low Key Flips Role Mention</label><input
-                      class="input" id="monitorLowkeyRole" placeholder="<@&ROLE_ID>" /></div>
-                </div>
-                <div class="subtle-text">Use Role mode with a Discord role mention like
-                  &lt;@&amp;123456789012345678&gt;.</div>
-              </div>
-
-              <div class="field field--full" id="adminMonitorGroupsSection">
-                <label>Your Admin Monitor Routing By Product Group</label>
-                <div class="form-grid">
-                  <div class="field field--full"><label for="adminMonitorPokemon">Pokemon Webhook URL</label><input
-                      class="input" id="adminMonitorPokemon" placeholder="https://discord.com/api/webhooks/..." /></div>
-                  <div class="field"><label for="adminMonitorPokemonPingMode">Pokemon Ping Mode</label><select
-                      class="input" id="adminMonitorPokemonPingMode">
-                      <option value="none">None</option>
-                      <option value="everyone">@everyone</option>
-                      <option value="role">Role</option>
-                    </select></div>
-                  <div class="field"><label for="adminMonitorPokemonRole">Pokemon Role Mention</label><input
-                      class="input" id="adminMonitorPokemonRole" placeholder="<@&ROLE_ID>" /></div>
-
-                  <div class="field field--full"><label for="adminMonitorOnePiece">One Piece Webhook URL</label><input
-                      class="input" id="adminMonitorOnePiece" placeholder="https://discord.com/api/webhooks/..." />
-                  </div>
-                  <div class="field"><label for="adminMonitorOnePiecePingMode">One Piece Ping Mode</label><select
-                      class="input" id="adminMonitorOnePiecePingMode">
-                      <option value="none">None</option>
-                      <option value="everyone">@everyone</option>
-                      <option value="role">Role</option>
-                    </select></div>
-                  <div class="field"><label for="adminMonitorOnePieceRole">One Piece Role Mention</label><input
-                      class="input" id="adminMonitorOnePieceRole" placeholder="<@&ROLE_ID>" /></div>
-
-                  <div class="field field--full"><label for="adminMonitorSports">Sports Cards Webhook URL</label><input
-                      class="input" id="adminMonitorSports" placeholder="https://discord.com/api/webhooks/..." /></div>
-                  <div class="field"><label for="adminMonitorSportsPingMode">Sports Cards Ping Mode</label><select
-                      class="input" id="adminMonitorSportsPingMode">
-                      <option value="none">None</option>
-                      <option value="everyone">@everyone</option>
-                      <option value="role">Role</option>
-                    </select></div>
-                  <div class="field"><label for="adminMonitorSportsRole">Sports Cards Role Mention</label><input
-                      class="input" id="adminMonitorSportsRole" placeholder="<@&ROLE_ID>" /></div>
-
-                  <div class="field field--full"><label for="adminMonitorOtherTcg">Other TCG Webhook URL</label><input
-                      class="input" id="adminMonitorOtherTcg" placeholder="https://discord.com/api/webhooks/..." />
-                  </div>
-                  <div class="field"><label for="adminMonitorOtherTcgPingMode">Other TCG Ping Mode</label><select
-                      class="input" id="adminMonitorOtherTcgPingMode">
-                      <option value="none">None</option>
-                      <option value="everyone">@everyone</option>
-                      <option value="role">Role</option>
-                    </select></div>
-                  <div class="field"><label for="adminMonitorOtherTcgRole">Other TCG Role Mention</label><input
-                      class="input" id="adminMonitorOtherTcgRole" placeholder="<@&ROLE_ID>" /></div>
-
-                  <div class="field field--full"><label for="adminMonitorLowkey">Low Key Flips Webhook URL</label><input
-                      class="input" id="adminMonitorLowkey" placeholder="https://discord.com/api/webhooks/..." /></div>
-                  <div class="field"><label for="adminMonitorLowkeyPingMode">Low Key Flips Ping Mode</label><select
-                      class="input" id="adminMonitorLowkeyPingMode">
-                      <option value="none">None</option>
-                      <option value="everyone">@everyone</option>
-                      <option value="role">Role</option>
-                    </select></div>
-                  <div class="field"><label for="adminMonitorLowkeyRole">Low Key Flips Role Mention</label><input
-                      class="input" id="adminMonitorLowkeyRole" placeholder="<@&ROLE_ID>" /></div>
-                </div>
-                <div class="subtle-text">These are your own monitor outputs. Super admin can still manage the shared
-                  global routing above.</div>
-              </div>
-
-              <div class="field field--full panel-actions">
-                <button class="btn btn-primary" type="button" onclick="saveWebhookSettings()">Save Webhook
-                  Settings</button>
-              </div>
-            </div>
-
-            <div id="webhookSettingsMessage" class="subtle-text"></div>
-
-            <div id="webhookLogsSection">
-              <div class="field field--full panel-actions" style="margin-top:12px;">
-                <button class="btn" type="button" onclick="loadWebhookLogs()">Refresh Webhook Logs</button>
-              </div>
-
-              <section class="panel panel--subpanel" style="margin-top:16px;">
-                <div class="panel-header panel-header--nested">
-                  <div>
-                    <h3>Webhook Event Log</h3>
-                    <p class="subtle-text">View received checkout and monitor webhooks to catch anything you missed.</p>
-                  </div>
-                </div>
-                <div id="webhookLogs" class="subtle-text">Loading webhook logs...</div>
-              </section>
-            </div>
-          </section>
-          <section class="panel">
-            <div class="panel-header">
-              <div>
-                <h2>Product Group Manager</h2>
-                <p class="subtle-text">
-                  Combine multiple SKUs into one displayed product.
+              <div class="banner banner-soft"><strong>Webhook endpoints</strong>
+                <p class="subtle-text">Stripe credits purchase webhook: <code>/webhooks/stripe</code>. Successful
+                  checkout
+                  webhook: <code>/webhooks/orders</code>. The order webhook should include
+                  <code>external_order_id</code>
+                  plus either <code>user_id</code> or user email.
                 </p>
               </div>
-            </div>
+              <div class="toolbar-row toolbar-row--spread"><span class="subtle-text">Credits are manually granted by
+                  admin</span><button class="btn btn-primary" type="button" onclick="loadCreditsAdminPane()">Refresh
+                  Credits + Orders</button></div>
+              <div class="table-wrap table-wrap--admin-scroll">
+                <table class="admin-table">
+                  <thead>
+                    <tr>
+                      <th>User</th>
+                      <th>Role</th>
+                      <th>Credits</th>
+                      <th>Granted</th>
+                      <th>Spent</th>
+                      <th>Needs Removal</th>
+                      <th>Adjust</th>
+                    </tr>
+                  </thead>
+                  <tbody id="creditsUsersTableBody">
+                    <tr>
+                      <td colspan="7">Loading credit balances...</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+              <div id="creditsAdminMessage" class="subtle-text"></div>
+              <section class="panel panel--subpanel">
+                <div class="panel-header panel-header--nested">
+                  <div>
+                    <h3>User Credit Receipt</h3>
+                    <p class="subtle-text">Click Details on a user to review linked orders and every credit transaction.
+                    </p>
+                  </div>
+                </div>
+                <div id="creditReceiptSummary" class="subtle-text">No user selected.</div>
+                <div class="form-grid">
+                  <div class="field field--full">
+                    <label>Credit Transactions</label>
+                    <div class="table-wrap table-wrap--admin-scroll">
+                      <table class="admin-table">
+                        <thead>
+                          <tr>
+                            <th>When</th>
+                            <th>Delta</th>
+                            <th>Balance After</th>
+                            <th>Reason</th>
+                            <th>Note</th>
+                          </tr>
+                        </thead>
+                        <tbody id="creditTransactionsTableBody">
+                          <tr>
+                            <td colspan="5">Select a user to view transactions.</td>
+                          </tr>
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                  <div class="field field--full">
+                    <label>Linked Orders</label>
+                    <div class="table-wrap table-wrap--admin-scroll">
+                      <table class="admin-table">
+                        <thead>
+                          <tr>
+                            <th>When</th>
+                            <th>Site</th>
+                            <th>Product</th>
+                            <th>Status</th>
+                            <th>Credits</th>
+                            <th>Order</th>
+                          </tr>
+                        </thead>
+                        <tbody id="userOrdersTableBody">
+                          <tr>
+                            <td colspan="6">Select a user to view orders.</td>
+                          </tr>
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                </div>
+              </section>
+              <div class="panel-header panel-header--nested">
+                <div>
+                  <h3>Successful Orders</h3>
+                  <p class="subtle-text">Every successful checkout webhook is stored here. Refund credits manually when
+                    you need to reverse a charge.</p>
+                </div>
+              </div>
+              <div class="table-wrap table-wrap--admin-scroll">
+                <table class="admin-table">
+                  <thead>
+                    <tr>
+                      <th>When</th>
+                      <th>User</th>
+                      <th>Source</th>
+                      <th>Product</th>
+                      <th>Status</th>
+                      <th>Credits</th>
+                      <th>Order</th>
+                      <th>Action</th>
+                    </tr>
+                  </thead>
+                  <tbody id="ordersTableBody">
+                    <tr>
+                      <td colspan="8">Loading orders...</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </section>
+          </section>
 
-
-            <div class="group-builder">
-              <input id="groupDisplayName" placeholder="Group display name" />
-              <input id="groupCategory" placeholder="Category (pokemon, sports, needoh)" />
-              <input id="groupCredits" type="number" placeholder="Credits" />
-              <button id="createProductGroupBtn">Create Product Group</button>
-            </div>
-
-            <div class="group-tools">
-              <input id="groupSearchSku" placeholder="Search SKU to attach" />
-              <button id="searchGroupSkuBtn">Search SKU</button>
-            </div>
-
-            <div id="groupSkuResults"></div>
-
-            <div class="group-tools">
-              <input id="attachGroupId" placeholder="Product Group UUID" />
-              <input id="attachCatalogId" placeholder="Catalog Product UUID" />
-              <label>
-                <input type="checkbox" id="attachPrimarySku" />
-                Primary SKU
-              </label>
-              <button id="attachSkuToGroupBtn">Attach SKU To Group</button>
-            </div>
-
-            <div class="group-tools">
-              <input id="editGroupId" placeholder="Group UUID" />
-              <input id="editGroupCategory" placeholder="Update Category" />
-              <input id="editGroupCredits" type="number" placeholder="Update Credits" />
-              <button id="updateGroupBtn">Update Product Group</button>
-            </div>
-
-            <div id="productGroupStatus"></div>
+          <section class="admin-pane" data-admin-pane="users">
             <section class="panel">
+              <div class="panel-header">
+                <div>
+                  <h2>Current Users</h2>
+                  <p class="subtle-text">Review current users and filter by owner, role, and date.</p>
+                </div>
+              </div>
+              <div class="form-grid">
+                <div class="field"><label for="usersOwnerFilter">Owner Admin</label><select class="input"
+                    id="usersOwnerFilter" onchange="applyUserFilters()">
+                    <option value="">All Admin Owners</option>
+                  </select></div>
+                <div class="field"><label for="usersRoleFilter">Role</label><select class="input" id="usersRoleFilter"
+                    onchange="applyUserFilters()">
+                    <option value="">All Roles</option>
+                    <option value="user">User</option>
+                    <option value="admin">Admin</option>
+                    <option value="super_admin">Super Admin</option>
+                  </select></div>
+                <div class="field"><label for="usersCreatedAfter">Created After</label><input class="input"
+                    id="usersCreatedAfter" type="date" onchange="applyUserFilters()" /></div>
+                <div class="field"><label for="usersCreatedBefore">Created Before</label><input class="input"
+                    id="usersCreatedBefore" type="date" onchange="applyUserFilters()" /></div>
+              </div>
+              <div class="table-wrap table-wrap--admin-scroll">
+                <table class="admin-table">
+                  <thead>
+                    <tr>
+                      <th>Email</th>
+                      <th>Role</th>
+                      <th>Owner Admin</th>
+                      <th>Profiles</th>
+                      <th>Status</th>
+                      <th>Created</th>
+                      <th>Action</th>
+                    </tr>
+                  </thead>
+                  <tbody id="usersTableBody"></tbody>
+                </table>
+              </div>
+              <div class="panel-actions" id="usersPagination" style="display:none"></div>
+            </section>
+          </section>
+
+          <section class="admin-pane" data-admin-pane="webhooks">
+            <section class="panel">
+              <div class="panel-header">
+                <div>
+                  <h2>Webhook Setup</h2>
+                  <p class="subtle-text">Use one shared website webhook for all bots. Super admin receives every
+                    checkout.
+                    Admins can also save their own Discord webhook and collaboration label for users they own.</p>
+                </div>
+              </div>
+
+              <div class="banner banner-soft">
+                <strong>How it works</strong>
+                <p class="subtle-text">
+                  Paste the generated website webhook URL into your bot. When a checkout comes in, the website finds the
+                  user,
+                  deducts credits, stores the order, sends a Discord webhook to the super admin, and also sends a second
+                  Discord
+                  webhook to the owner admin if that user belongs to one.
+                </p>
+              </div>
+
+              <div class="form-grid">
+                <div class="field field--full">
+                  <label for="websiteWebhookUrl">Shared Bot Webhook URL</label>
+                  <input class="input" id="websiteWebhookUrl" readonly placeholder="Click Create Webhook" />
+                  <div class="subtle-text">All Stellar / Refract webhooks should use this one URL.</div>
+                </div>
+
+                <div class="field field--full panel-actions">
+                  <button class="btn btn-primary" type="button" id="createWebhookButton"
+                    onclick="createWebsiteWebhook()">Create / Refresh Shared Website Webhook</button>
+                </div>
+
+                <div class="field field--full" id="superAdminDiscordField">
+                  <label for="discordRelayWebhookUrl">Super Admin Successful Checkout Webhook</label>
+                  <input class="input" id="discordRelayWebhookUrl" placeholder="https://discord.com/api/webhooks/..." />
+                  <div class="subtle-text">This receives every successful checkout your site processes.</div>
+                </div>
+
+                <div class="field field--full" id="superAdminErrorDiscordField">
+                  <label for="checkoutErrorWebhookUrl">Super Admin Failed / Error Checkout Webhook</label>
+                  <input class="input" id="checkoutErrorWebhookUrl"
+                    placeholder="https://discord.com/api/webhooks/..." />
+                  <div class="subtle-text">Checkout OOS, declined, canceled, and other error webhooks are sent here.
+                  </div>
+                </div>
+
+                <div class="field field--full" id="adminSuccessDiscordField">
+                  <label for="adminDiscordRelayWebhookUrl">Your Admin Successful Checkout Webhook</label>
+                  <input class="input" id="adminDiscordRelayWebhookUrl"
+                    placeholder="https://discord.com/api/webhooks/..." />
+                  <div class="subtle-text">If users belong to you, their successful checkouts will also be sent here.
+                  </div>
+                </div>
+
+                <div class="field field--full" id="adminErrorDiscordField">
+                  <label for="adminErrorDiscordRelayWebhookUrl">Your Admin Failed / Error Checkout Webhook</label>
+                  <input class="input" id="adminErrorDiscordRelayWebhookUrl"
+                    placeholder="https://discord.com/api/webhooks/..." />
+                  <div class="subtle-text">Failed user checkouts also come here so you can review OOS and error
+                    attempts.
+                  </div>
+                </div>
+
+                <div class="field field--full" id="adminBrandLabelField">
+                  <label for="adminBrandLabel">Your Collaboration Label</label>
+                  <input class="input" id="adminBrandLabel" placeholder="HYPEEAST" />
+                  <div class="subtle-text">This shows in the webhook as: THANK YOU FOR CHECKING OUT WITH THE SHORE SHACK
+                    x
+                    YOUR LABEL</div>
+                </div>
+
+                <div class="field field--full">
+                  <label for="monitorWebhookUrl">Shared Monitor Webhook URL</label>
+                  <input class="input" id="monitorWebhookUrl" readonly placeholder="Click Create Monitor Webhook" />
+                  <div class="subtle-text">Use this URL for in-stock monitor pings.</div>
+                </div>
+
+                <div class="field field--full panel-actions">
+                  <button class="btn btn-primary" type="button" id="createMonitorWebhookButton"
+                    onclick="createMonitorWebhook()">Create / Refresh Shared Monitor Webhook</button>
+                </div>
+
+                <div class="field field--full" id="monitorDedupeWindowField">
+                  <label for="monitorDedupeWindowSeconds">Monitor Duplicate Window (seconds)</label>
+                  <input class="input" id="monitorDedupeWindowSeconds" type="number" min="0" max="600" step="1"
+                    placeholder="90" />
+                  <div class="subtle-text">If the same monitor ping is received again within this window, it will be
+                    skipped. Set to 90 if you want a longer duplicate block.</div>
+                </div>
+
+                <div class="field field--full" id="superAdminMonitorGroups">
+                  <label>Super Admin Monitor Routing By Product Group</label>
+                  <div class="form-grid">
+                    <div class="field field--full"><label for="monitorPokemon">Pokemon Webhook URL</label><input
+                        class="input" id="monitorPokemon" placeholder="https://discord.com/api/webhooks/..." /></div>
+                    <div class="field"><label for="monitorPokemonPingMode">Pokemon Ping Mode</label><select
+                        class="input" id="monitorPokemonPingMode">
+                        <option value="none">None</option>
+                        <option value="everyone">@everyone</option>
+                        <option value="role">Role</option>
+                      </select></div>
+                    <div class="field"><label for="monitorPokemonRole">Pokemon Role Mention</label><input class="input"
+                        id="monitorPokemonRole" placeholder="<@&ROLE_ID>" /></div>
+
+                    <div class="field field--full"><label for="monitorOnePiece">One Piece Webhook URL</label><input
+                        class="input" id="monitorOnePiece" placeholder="https://discord.com/api/webhooks/..." /></div>
+                    <div class="field"><label for="monitorOnePiecePingMode">One Piece Ping Mode</label><select
+                        class="input" id="monitorOnePiecePingMode">
+                        <option value="none">None</option>
+                        <option value="everyone">@everyone</option>
+                        <option value="role">Role</option>
+                      </select></div>
+                    <div class="field"><label for="monitorOnePieceRole">One Piece Role Mention</label><input
+                        class="input" id="monitorOnePieceRole" placeholder="<@&ROLE_ID>" /></div>
+
+                    <div class="field field--full"><label for="monitorSports">Sports Cards Webhook URL</label><input
+                        class="input" id="monitorSports" placeholder="https://discord.com/api/webhooks/..." /></div>
+                    <div class="field"><label for="monitorSportsPingMode">Sports Cards Ping Mode</label><select
+                        class="input" id="monitorSportsPingMode">
+                        <option value="none">None</option>
+                        <option value="everyone">@everyone</option>
+                        <option value="role">Role</option>
+                      </select></div>
+                    <div class="field"><label for="monitorSportsRole">Sports Cards Role Mention</label><input
+                        class="input" id="monitorSportsRole" placeholder="<@&ROLE_ID>" /></div>
+
+                    <div class="field field--full"><label for="monitorOtherTcg">Other TCG Webhook URL</label><input
+                        class="input" id="monitorOtherTcg" placeholder="https://discord.com/api/webhooks/..." /></div>
+                    <div class="field"><label for="monitorOtherTcgPingMode">Other TCG Ping Mode</label><select
+                        class="input" id="monitorOtherTcgPingMode">
+                        <option value="none">None</option>
+                        <option value="everyone">@everyone</option>
+                        <option value="role">Role</option>
+                      </select></div>
+                    <div class="field"><label for="monitorOtherTcgRole">Other TCG Role Mention</label><input
+                        class="input" id="monitorOtherTcgRole" placeholder="<@&ROLE_ID>" /></div>
+
+                    <div class="field field--full"><label for="monitorLowkey">Low Key Flips Webhook URL</label><input
+                        class="input" id="monitorLowkey" placeholder="https://discord.com/api/webhooks/..." /></div>
+                    <div class="field"><label for="monitorLowkeyPingMode">Low Key Flips Ping Mode</label><select
+                        class="input" id="monitorLowkeyPingMode">
+                        <option value="none">None</option>
+                        <option value="everyone">@everyone</option>
+                        <option value="role">Role</option>
+                      </select></div>
+                    <div class="field"><label for="monitorLowkeyRole">Low Key Flips Role Mention</label><input
+                        class="input" id="monitorLowkeyRole" placeholder="<@&ROLE_ID>" /></div>
+                  </div>
+                  <div class="subtle-text">Use Role mode with a Discord role mention like
+                    &lt;@&amp;123456789012345678&gt;.</div>
+                </div>
+
+                <div class="field field--full" id="adminMonitorGroupsSection">
+                  <label>Your Admin Monitor Routing By Product Group</label>
+                  <div class="form-grid">
+                    <div class="field field--full"><label for="adminMonitorPokemon">Pokemon Webhook URL</label><input
+                        class="input" id="adminMonitorPokemon" placeholder="https://discord.com/api/webhooks/..." />
+                    </div>
+                    <div class="field"><label for="adminMonitorPokemonPingMode">Pokemon Ping Mode</label><select
+                        class="input" id="adminMonitorPokemonPingMode">
+                        <option value="none">None</option>
+                        <option value="everyone">@everyone</option>
+                        <option value="role">Role</option>
+                      </select></div>
+                    <div class="field"><label for="adminMonitorPokemonRole">Pokemon Role Mention</label><input
+                        class="input" id="adminMonitorPokemonRole" placeholder="<@&ROLE_ID>" /></div>
+
+                    <div class="field field--full"><label for="adminMonitorOnePiece">One Piece Webhook URL</label><input
+                        class="input" id="adminMonitorOnePiece" placeholder="https://discord.com/api/webhooks/..." />
+                    </div>
+                    <div class="field"><label for="adminMonitorOnePiecePingMode">One Piece Ping Mode</label><select
+                        class="input" id="adminMonitorOnePiecePingMode">
+                        <option value="none">None</option>
+                        <option value="everyone">@everyone</option>
+                        <option value="role">Role</option>
+                      </select></div>
+                    <div class="field"><label for="adminMonitorOnePieceRole">One Piece Role Mention</label><input
+                        class="input" id="adminMonitorOnePieceRole" placeholder="<@&ROLE_ID>" /></div>
+
+                    <div class="field field--full"><label for="adminMonitorSports">Sports Cards Webhook
+                        URL</label><input class="input" id="adminMonitorSports"
+                        placeholder="https://discord.com/api/webhooks/..." /></div>
+                    <div class="field"><label for="adminMonitorSportsPingMode">Sports Cards Ping Mode</label><select
+                        class="input" id="adminMonitorSportsPingMode">
+                        <option value="none">None</option>
+                        <option value="everyone">@everyone</option>
+                        <option value="role">Role</option>
+                      </select></div>
+                    <div class="field"><label for="adminMonitorSportsRole">Sports Cards Role Mention</label><input
+                        class="input" id="adminMonitorSportsRole" placeholder="<@&ROLE_ID>" /></div>
+
+                    <div class="field field--full"><label for="adminMonitorOtherTcg">Other TCG Webhook URL</label><input
+                        class="input" id="adminMonitorOtherTcg" placeholder="https://discord.com/api/webhooks/..." />
+                    </div>
+                    <div class="field"><label for="adminMonitorOtherTcgPingMode">Other TCG Ping Mode</label><select
+                        class="input" id="adminMonitorOtherTcgPingMode">
+                        <option value="none">None</option>
+                        <option value="everyone">@everyone</option>
+                        <option value="role">Role</option>
+                      </select></div>
+                    <div class="field"><label for="adminMonitorOtherTcgRole">Other TCG Role Mention</label><input
+                        class="input" id="adminMonitorOtherTcgRole" placeholder="<@&ROLE_ID>" /></div>
+
+                    <div class="field field--full"><label for="adminMonitorLowkey">Low Key Flips Webhook
+                        URL</label><input class="input" id="adminMonitorLowkey"
+                        placeholder="https://discord.com/api/webhooks/..." /></div>
+                    <div class="field"><label for="adminMonitorLowkeyPingMode">Low Key Flips Ping Mode</label><select
+                        class="input" id="adminMonitorLowkeyPingMode">
+                        <option value="none">None</option>
+                        <option value="everyone">@everyone</option>
+                        <option value="role">Role</option>
+                      </select></div>
+                    <div class="field"><label for="adminMonitorLowkeyRole">Low Key Flips Role Mention</label><input
+                        class="input" id="adminMonitorLowkeyRole" placeholder="<@&ROLE_ID>" /></div>
+                  </div>
+                  <div class="subtle-text">These are your own monitor outputs. Super admin can still manage the shared
+                    global routing above.</div>
+                </div>
+
+                <div class="field field--full panel-actions">
+                  <button class="btn btn-primary" type="button" onclick="saveWebhookSettings()">Save Webhook
+                    Settings</button>
+                </div>
+              </div>
+
+              <div id="webhookSettingsMessage" class="subtle-text"></div>
+
+              <div id="webhookLogsSection">
+                <div class="field field--full panel-actions" style="margin-top:12px;">
+                  <button class="btn" type="button" onclick="loadWebhookLogs()">Refresh Webhook Logs</button>
+                </div>
+
+                <section class="panel panel--subpanel" style="margin-top:16px;">
+                  <div class="panel-header panel-header--nested">
+                    <div>
+                      <h3>Webhook Event Log</h3>
+                      <p class="subtle-text">View received checkout and monitor webhooks to catch anything you missed.
+                      </p>
+                    </div>
+                  </div>
+                  <div id="webhookLogs" class="subtle-text">Loading webhook logs...</div>
+                </section>
+              </div>
+            </section>
 
       </div>
     </div>
