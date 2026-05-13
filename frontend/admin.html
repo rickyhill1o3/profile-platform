@@ -40,7 +40,7 @@
         <p class="eyebrow">Admin Navigation</p>
         <button class="admin-nav-button is-active" type="button" data-admin-nav="invites">Invites</button>
         <button class="admin-nav-button" type="button" data-admin-nav="countdowns">Countdowns + Catalog</button>
-<button class="admin-nav-button" data-admin-panel="product-group-manager-panel">
+<button type="button" class="admin-nav-button admin-panel-trigger" data-admin-panel="product-group-manager-panel">
 Product Group Manager
 </button>
 
@@ -1066,34 +1066,55 @@ Product Group Manager
 </section>
 
 
+
+
+
 <script>
-document.addEventListener('DOMContentLoaded', function() {
+window.addEventListener('load', function () {
 
-  const navButtons = document.querySelectorAll('[data-admin-panel]');
-  const sections = document.querySelectorAll('.admin-panel-section');
+  const allButtons = document.querySelectorAll('[data-admin-panel]');
+  const allSections = document.querySelectorAll('.admin-panel-section');
 
-  navButtons.forEach(function(btn) {
+  function showPanel(panelId) {
 
-    btn.addEventListener('click', function() {
+    allSections.forEach(function(section) {
+      section.style.display = 'none';
+    });
 
-      const panelId = btn.getAttribute('data-admin-panel');
+    allButtons.forEach(function(btn) {
+      btn.classList.remove('active');
+    });
 
-      sections.forEach(function(sec) {
-        sec.style.display = 'none';
-      });
+    const target = document.getElementById(panelId);
 
-      navButtons.forEach(function(b) {
-        b.classList.remove('active');
-      });
+    if (target) {
+      target.style.display = 'block';
+    }
 
-      const panel = document.getElementById(panelId);
+    const activeBtn = document.querySelector('[data-admin-panel="' + panelId + '"]');
 
-      if (panel) {
-        panel.style.display = 'block';
+    if (activeBtn) {
+      activeBtn.classList.add('active');
+    }
+  }
+
+  allButtons.forEach(function(button) {
+
+    button.style.pointerEvents = 'auto';
+    button.style.cursor = 'pointer';
+
+    button.onclick = function (e) {
+      e.preventDefault();
+      e.stopPropagation();
+
+      const panelId = button.getAttribute('data-admin-panel');
+
+      if (panelId) {
+        showPanel(panelId);
       }
 
-      btn.classList.add('active');
-    });
+      return false;
+    };
 
   });
 
