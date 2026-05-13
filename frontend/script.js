@@ -3413,7 +3413,7 @@ async function saveTargetRecommendedListNameAdmin() {
             method: "POST",
             body: JSON.stringify({ name: input.value })
         });
-        if (message) message.textContent = `Saved as ${data.name}.`;
+        if (message) message.textContent = `Saved. Users will now see this running list as: ${data.name}.`;
     } catch (err) {
         if (message) message.textContent = err.message || "Could not save list name.";
     }
@@ -3454,6 +3454,16 @@ function initProductSelectionAdminTools() {
     if (saveName && !saveName.dataset.bound) {
         saveName.dataset.bound = "1";
         saveName.addEventListener("click", saveTargetRecommendedListNameAdmin);
+    }
+    const listNameInput = document.getElementById("targetRecommendedListNameInput");
+    if (listNameInput && !listNameInput.dataset.bound) {
+        listNameInput.dataset.bound = "1";
+        listNameInput.addEventListener("keydown", (event) => {
+            if (event.key === "Enter") {
+                event.preventDefault();
+                saveTargetRecommendedListNameAdmin();
+            }
+        });
     }
     const clearButton = document.getElementById("clearProductSelectionsButton");
     if (clearButton && !clearButton.dataset.bound) {

@@ -41,6 +41,7 @@
         <button class="admin-nav-button is-active" type="button" data-admin-nav="invites">Invites</button>
         <button class="admin-nav-button" type="button" data-admin-nav="countdowns">Countdowns + Catalog</button>
         <button class="admin-nav-button" type="button" data-admin-nav="target-lists">Target Checkout Lists</button>
+        <button class="admin-nav-button" type="button" data-admin-nav="running-list-name">Running List Name</button>
         <button class="admin-nav-button" type="button" data-admin-nav="exports">Exports</button>
         <button class="admin-nav-button" type="button" data-admin-nav="selections">User Product Selections</button>
         <button class="admin-nav-button" type="button" data-admin-nav="users">Current Users</button>
@@ -342,6 +343,32 @@
         </section>
 
 
+        
+        <section class="admin-pane" data-admin-pane="running-list-name">
+          <section class="panel">
+            <div class="panel-header">
+              <div>
+                <h2>Target Running List Display Name</h2>
+                <p class="subtle-text">This is the name users see above your currently selected Target products. Super admin list shows to every user. Admin lists show only to users assigned to that admin.</p>
+              </div>
+            </div>
+            <div class="banner banner-soft">
+              <strong>How this works</strong>
+              <p class="subtle-text">Select your Target products from your own Target tab, then set the display name here. Users can apply your list, and those SKUs count toward their 29 Target SKU limit.</p>
+            </div>
+            <div class="form-grid">
+              <div class="field field--full">
+                <label for="targetRecommendedListNameInput">Display Name</label>
+                <input class="input" id="targetRecommendedListNameInput" placeholder="The Shore Shack List, HypeEast List, Apex Collector List..." />
+              </div>
+              <div class="field field--full panel-actions">
+                <button class="btn btn-primary" type="button" id="saveTargetRecommendedListNameButton">Save Display Name</button>
+              </div>
+            </div>
+            <div id="targetRecommendedListNameMessage" class="subtle-text"></div>
+          </section>
+        </section>
+
         <section class="admin-pane" data-admin-pane="exports">
           <section class="panel">
             <div class="panel-header">
@@ -410,20 +437,7 @@
                 </tbody>
               </table>
             </div>
-
-            <div class="panel-header panel-header--nested">
-              <div>
-                <h3>Target Running List Name</h3>
-                <p class="subtle-text">This is the name users see for your current Target selections. Super admin shows to everyone; admins show to their assigned users.</p>
-              </div>
-            </div>
-            <div class="toolbar-row">
-              <input class="input" id="targetRecommendedListNameInput" placeholder="The Shore Shack List" />
-              <button class="btn btn-primary" type="button" id="saveTargetRecommendedListNameButton">Save List Name</button>
-              <span id="targetRecommendedListNameMessage" class="subtle-text"></span>
-            </div>
-
-            <div class="panel-header panel-header--nested">
+<div class="panel-header panel-header--nested">
               <div>
                 <h3>Target / Amazon Selection Tools</h3>
                 <p class="subtle-text">Track changes and export selected products in bot-ready sku;name;price format.</p>

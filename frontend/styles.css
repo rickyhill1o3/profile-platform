@@ -696,3 +696,6 @@ h1,h2,h3,h4,p{margin:0}
 .panel-header--compact{
   margin-bottom:10px;
 }
+
+/* running list display name pane */
+#targetRecommendedListNameInput{max-width:720px;}
