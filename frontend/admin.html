@@ -833,19 +833,25 @@
   <script src="script.js?v=20260325c"></script>
   <script src="products.js?v=20260323b"></script>
 
+
+
+
 <script>
-(function(){
+window.addEventListener('DOMContentLoaded', function(){
 
-function initProductGroups(){
-
-    const navBtn = document.getElementById('admin-nav-product-groups');
+    const btn = document.getElementById('admin-nav-product-groups');
     const panel = document.getElementById('product-group-manager');
 
-    if(!navBtn || !panel){
+    if(!btn || !panel){
+        console.log('Product Group Manager missing');
         return;
     }
 
-    navBtn.addEventListener('click', function(e){
+    btn.style.pointerEvents = 'auto';
+    btn.style.opacity = '1';
+    btn.style.cursor = 'pointer';
+
+    btn.onclick = function(e){
 
         e.preventDefault();
 
@@ -853,91 +859,76 @@ function initProductGroups(){
             el.style.display = 'none';
         });
 
-        document.querySelectorAll('.admin-nav-btn').forEach(function(btn){
-            btn.classList.remove('active');
+        document.querySelectorAll('.admin-nav-btn').forEach(function(el){
+            el.classList.remove('active');
         });
 
         panel.style.display = 'block';
-        navBtn.classList.add('active');
-
-    });
+        btn.classList.add('active');
+    };
 
     const saveBtn = document.getElementById('save-product-group');
 
+    function renderGroups(){
+
+        const wrap = document.getElementById('pgm-results');
+
+        const groups = JSON.parse(
+            localStorage.getItem('product_groups') || '[]'
+        );
+
+        if(!groups.length){
+            wrap.innerHTML = '<p>No grouped products saved yet.</p>';
+            return;
+        }
+
+        wrap.innerHTML = groups.map(g => `
+            <div style="border:1px solid #ddd;padding:14px;border-radius:10px;margin-bottom:12px;">
+                <strong>${g.name}</strong><br><br>
+                ${g.skus.join('<br>')}
+            </div>
+        `).join('');
+    }
+
     if(saveBtn){
 
-        saveBtn.addEventListener('click', function(){
+        saveBtn.onclick = function(){
 
-            const store = document.getElementById('pgm-store').value;
-            const name = document.getElementById('pgm-group-name').value.trim();
+            const name = document.getElementById('pgm-name').value.trim();
 
             const skus = document.getElementById('pgm-skus').value
                 .split('\n')
                 .map(v => v.trim())
                 .filter(Boolean);
 
-            if(!name || skus.length === 0){
-                alert('Enter a group name and at least one SKU');
+            if(!name || !skus.length){
+                alert('Enter a group name and SKUs');
                 return;
             }
 
-            const existing = JSON.parse(
-                localStorage.getItem('product_group_manager') || '[]'
+            const groups = JSON.parse(
+                localStorage.getItem('product_groups') || '[]'
             );
 
-            existing.push({
-                id: Date.now(),
-                store,
+            groups.push({
                 name,
                 skus
             });
 
             localStorage.setItem(
-                'product_group_manager',
-                JSON.stringify(existing)
+                'product_groups',
+                JSON.stringify(groups)
             );
 
             renderGroups();
+
             alert('Product group saved');
-        });
-
-    }
-
-    function renderGroups(){
-
-        const wrap = document.getElementById('product-group-results');
-
-        if(!wrap){
-            return;
-        }
-
-        const groups = JSON.parse(
-            localStorage.getItem('product_group_manager') || '[]'
-        );
-
-        if(groups.length === 0){
-            wrap.innerHTML = '<p>No product groups saved yet.</p>';
-            return;
-        }
-
-        wrap.innerHTML = groups.map(group => `
-            <div style="border:1px solid #ddd;border-radius:12px;padding:16px;margin-bottom:16px;">
-                <h3>${group.name}</h3>
-                <div><strong>Store:</strong> ${group.store}</div>
-                <div style="margin-top:10px;">
-                    <strong>SKUs:</strong><br>
-                    ${group.skus.join('<br>')}
-                </div>
-            </div>
-        `).join('');
+        };
     }
 
     renderGroups();
-}
 
-window.addEventListener('DOMContentLoaded', initProductGroups);
-
-})();
+});
 </script>
 
 </body>
