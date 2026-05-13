@@ -832,6 +832,44 @@
   </div>
   <script src="script.js?v=20260325c"></script>
   <script src="products.js?v=20260323b"></script>
+
+<section class="admin-card" id="product-group-manager">
+  <h2>Product Group Manager</h2>
+
+  <div class="group-builder">
+    <input id="groupDisplayName" placeholder="Group display name" />
+    <input id="groupCategory" placeholder="Category (pokemon, sports, needoh)" />
+    <input id="groupCredits" type="number" placeholder="Credits" />
+    <button id="createProductGroupBtn">Create Product Group</button>
+  </div>
+
+  <div class="group-tools">
+    <input id="groupSearchSku" placeholder="Search SKU to attach" />
+    <button id="searchGroupSkuBtn">Search SKU</button>
+  </div>
+
+  <div id="groupSkuResults"></div>
+
+  <div class="group-tools">
+    <input id="attachGroupId" placeholder="Product Group UUID" />
+    <input id="attachCatalogId" placeholder="Catalog Product UUID" />
+    <label>
+      <input type="checkbox" id="attachPrimarySku" />
+      Primary SKU
+    </label>
+    <button id="attachSkuToGroupBtn">Attach SKU To Group</button>
+  </div>
+
+  <div class="group-tools">
+    <input id="editGroupId" placeholder="Group UUID" />
+    <input id="editGroupCategory" placeholder="Update Category" />
+    <input id="editGroupCredits" type="number" placeholder="Update Credits" />
+    <button id="updateGroupBtn">Update Product Group</button>
+  </div>
+
+  <div id="productGroupStatus"></div>
+</section>
+
 </body>
 
 </html>

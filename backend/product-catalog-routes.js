@@ -608,6 +608,73 @@ async function setCatalogAppSetting(supabase, key, value) {
 }
 
 
+
+
+    app.get('/product-groups', auth, async (req, res) => {
+        try {
+            const site = normalizeSite(req.query.site || 'target');
+
+            const { data: groups, error } = await supabase
+                .from('product_groups')
+                .select(`
+                    *,
+                    product_group_skus (
+                        catalog_product_id,
+                        is_primary,
+                        catalog_products (
+                            id,
+                            sku,
+                            product_name,
+                            image_url,
+                            product_url,
+                            default_max_price,
+                            site,
+                            brand
+                        )
+                    )
+                `)
+                .eq('site', site)
+                .eq('is_active', true);
+
+            if (error) {
+                return res.status(500).json({ error: error.message });
+            }
+
+            const formatted = (groups || []).map((group) => {
+                const skuRows = Array.isArray(group.product_group_skus)
+                    ? group.product_group_skus
+                    : [];
+
+                const primary = skuRows.find((row) => row.is_primary)
+                    || skuRows[0]
+                    || null;
+
+                const primaryProduct = primary?.catalog_products || {};
+
+                return {
+                    id: group.id,
+                    display_name: group.display_name || primaryProduct.product_name || 'Product',
+                    site: group.site,
+                    category: group.site_category || group.category || 'other',
+                    shared_credit_cost: group.shared_credit_cost || 0,
+                    image_url: group.image_url || primaryProduct.image_url || '',
+                    product_url: group.product_url || primaryProduct.product_url || '',
+                    skus: skuRows.map((row) => ({
+                        catalog_product_id: row.catalog_product_id,
+                        sku: row.catalog_products?.sku || '',
+                        product_name: row.catalog_products?.product_name || '',
+                        default_max_price: row.catalog_products?.default_max_price
+                    }))
+                };
+            });
+
+            res.json({ products: formatted });
+        } catch (err) {
+            res.status(500).json({ error: err.message });
+        }
+    });
+
+
 module.exports = function registerProductCatalogRoutes({ app, supabase, auth, admin, getCurrentUser, ensureUserNotRevoked }) {
     app.get('/public/countdowns', async (req, res) => {
         try {
@@ -1717,3 +1784,50 @@ app.get('/admin/product-preferences', auth, admin, async (req, res) => {
         }
     });
 };
+// product_group_id migration support enabled
+
+
+
+app.post('/admin/product-groups', auth, async (req, res) => {
+    const { data, error } = await supabase
+        .from('product_groups')
+        .insert(req.body)
+        .select()
+        .single();
+
+    if (error) {
+        return res.status(500).json({ error: error.message });
+    }
+
+    res.json(data);
+});
+
+app.patch('/admin/product-groups/:id', auth, async (req, res) => {
+    const { data, error } = await supabase
+        .from('product_groups')
+        .update(req.body)
+        .eq('id', req.params.id)
+        .select()
+        .single();
+
+    if (error) {
+        return res.status(500).json({ error: error.message });
+    }
+
+    res.json(data);
+});
+
+app.post('/admin/product-group-skus', auth, async (req, res) => {
+    const { data, error } = await supabase
+        .from('product_group_skus')
+        .insert(req.body)
+        .select()
+        .single();
+
+    if (error) {
+        return res.status(500).json({ error: error.message });
+    }
+
+    res.json(data);
+});
+
