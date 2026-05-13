@@ -999,78 +999,107 @@ Product Group Manager
 
 
 
+
+
+
+
 <section id="product-group-manager-panel" class="admin-panel-section" style="display:none;">
-<div class="admin-card">
-<h2>Product Group Manager</h2>
-<p>Group multiple SKUs into one storefront product.</p>
+  <div class="admin-card">
+    <h2>Product Group Manager</h2>
+    <p style="margin-bottom:16px;color:#666;">
+      Merge multiple SKUs into one storefront product listing.
+    </p>
 
-<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;">
-<div>
-<label>Group Display Name</label>
-<input class="admin-input" id="product-group-name"/>
-</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;">
 
-<div>
-<label>Category</label>
-<input class="admin-input" id="product-group-category"/>
-</div>
+      <div>
+        <label>Product Group Name</label>
+        <input type="text" id="pgm-group-name" class="admin-input" placeholder="Pokemon Prismatic Evolutions ETB"/>
+      </div>
 
-<div>
-<label>Credits</label>
-<input class="admin-input" type="number" id="product-group-credits"/>
-</div>
+      <div>
+        <label>Category</label>
+        <input type="text" id="pgm-category" class="admin-input" placeholder="Pokemon"/>
+      </div>
 
-<div style="display:flex;align-items:end;">
-<button class="admin-button-primary" id="create-product-group-btn">
-Create Product Group
-</button>
-</div>
+      <div>
+        <label>Credits</label>
+        <input type="number" id="pgm-credits" class="admin-input" value="1"/>
+      </div>
 
-<div>
-<label>SKU</label>
-<input class="admin-input" id="group-sku-search"/>
-</div>
+      <div style="display:flex;align-items:end;">
+        <button class="admin-button-primary" id="pgm-create-group-btn">
+          Create Product Group
+        </button>
+      </div>
 
-<div>
-<label>Group UUID</label>
-<input class="admin-input" id="group-uuid"/>
-</div>
+      <div>
+        <label>Group UUID</label>
+        <input type="text" id="pgm-group-uuid" class="admin-input" placeholder="Paste group UUID"/>
+      </div>
 
-<div>
-<label><input type="checkbox" id="primary-group-sku"/> Primary SKU</label>
-</div>
+      <div>
+        <label>SKU To Attach</label>
+        <input type="text" id="pgm-sku" class="admin-input" placeholder="Enter SKU"/>
+      </div>
 
-<div style="display:flex;align-items:end;">
-<button class="admin-button-primary" id="attach-sku-btn">
-Attach SKU To Group
-</button>
-</div>
-</div>
-</div>
+      <div>
+        <label>
+          <input type="checkbox" id="pgm-primary-sku"/>
+          Primary SKU
+        </label>
+      </div>
+
+      <div style="display:flex;align-items:end;">
+        <button class="admin-button-primary" id="pgm-attach-btn">
+          Attach SKU To Group
+        </button>
+      </div>
+
+    </div>
+
+    <div style="margin-top:24px;">
+      <h3>Current Product Groups</h3>
+      <div id="pgm-group-results" style="margin-top:12px;"></div>
+    </div>
+  </div>
 </section>
 
+
 <script>
-document.addEventListener('DOMContentLoaded', function () {
+document.addEventListener('DOMContentLoaded', function() {
+
   const navButtons = document.querySelectorAll('[data-admin-panel]');
   const sections = document.querySelectorAll('.admin-panel-section');
 
-  navButtons.forEach((btn) => {
-    btn.addEventListener('click', function () {
+  navButtons.forEach(function(btn) {
+
+    btn.addEventListener('click', function() {
+
       const panelId = btn.getAttribute('data-admin-panel');
 
-      sections.forEach((sec) => {
+      sections.forEach(function(sec) {
         sec.style.display = 'none';
       });
 
-      const target = document.getElementById(panelId);
+      navButtons.forEach(function(b) {
+        b.classList.remove('active');
+      });
 
-      if (target) {
-        target.style.display = 'block';
+      const panel = document.getElementById(panelId);
+
+      if (panel) {
+        panel.style.display = 'block';
       }
+
+      btn.classList.add('active');
     });
+
   });
+
 });
 </script>
+
 </body>
 
 </html>
