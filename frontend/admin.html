@@ -40,7 +40,7 @@
         <p class="eyebrow">Admin Navigation</p>
         <button class="admin-nav-button is-active" type="button" data-admin-nav="invites">Invites</button>
         <button class="admin-nav-button" type="button" data-admin-nav="countdowns">Countdowns + Catalog</button>
-<button type="button" class="admin-nav-button admin-panel-trigger" data-admin-panel="product-group-manager-panel">
+<button type="button" class="admin-nav-button admin-panel-trigger" type="button" data-admin-panel="product-group-manager-panel">
 Product Group Manager
 </button>
 
@@ -1069,56 +1069,59 @@ Product Group Manager
 
 
 
+
+
+
 <script>
-window.addEventListener('load', function () {
+(function(){
 
-  const allButtons = document.querySelectorAll('[data-admin-panel]');
-  const allSections = document.querySelectorAll('.admin-panel-section');
+function setupProductGroupManagerTab(){
 
-  function showPanel(panelId) {
+    const productBtn = document.querySelector('[data-admin-panel="product-group-manager-panel"]');
+    const productPanel = document.getElementById('product-group-manager-panel');
 
-    allSections.forEach(function(section) {
-      section.style.display = 'none';
-    });
-
-    allButtons.forEach(function(btn) {
-      btn.classList.remove('active');
-    });
-
-    const target = document.getElementById(panelId);
-
-    if (target) {
-      target.style.display = 'block';
+    if(!productBtn || !productPanel){
+        console.log('Product group manager elements missing');
+        return;
     }
 
-    const activeBtn = document.querySelector('[data-admin-panel="' + panelId + '"]');
+    productBtn.style.pointerEvents = 'auto';
+    productBtn.style.cursor = 'pointer';
+    productBtn.disabled = false;
 
-    if (activeBtn) {
-      activeBtn.classList.add('active');
-    }
-  }
+    const allPanels = document.querySelectorAll('.admin-panel-section');
+    const allButtons = document.querySelectorAll('[data-admin-panel]');
 
-  allButtons.forEach(function(button) {
+    productBtn.addEventListener('click', function(e){
 
-    button.style.pointerEvents = 'auto';
-    button.style.cursor = 'pointer';
+        e.preventDefault();
+        e.stopPropagation();
 
-    button.onclick = function (e) {
-      e.preventDefault();
-      e.stopPropagation();
+        allPanels.forEach(function(panel){
+            panel.style.display = 'none';
+        });
 
-      const panelId = button.getAttribute('data-admin-panel');
+        allButtons.forEach(function(btn){
+            btn.classList.remove('active');
+        });
 
-      if (panelId) {
-        showPanel(panelId);
-      }
+        productPanel.style.display = 'block';
+        productBtn.classList.add('active');
 
-      return false;
-    };
+        console.log('Product Group Manager opened');
 
-  });
+        return false;
+    }, true);
 
-});
+}
+
+if(document.readyState === 'loading'){
+    document.addEventListener('DOMContentLoaded', setupProductGroupManagerTab);
+}else{
+    setupProductGroupManagerTab();
+}
+
+})();
 </script>
 
 </body>
