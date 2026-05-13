@@ -699,3 +699,32 @@ h1,h2,h3,h4,p{margin:0}
 
 /* running list display name pane */
 #targetRecommendedListNameInput{max-width:720px;}
+
+
+/* full product names in product selection cards */
+.store-product-card,
+.product-selection-card,
+.selection-product-card {
+  min-height: 170px;
+}
+
+.store-product-card h4,
+.product-selection-card h4,
+.selection-product-card h4,
+.store-product-card .product-title,
+.product-selection-card .product-title,
+.selection-product-card .product-title {
+  white-space: normal !important;
+  overflow: visible !important;
+  text-overflow: unset !important;
+  display: block !important;
+  line-height: 1.35 !important;
+  max-height: none !important;
+  word-break: break-word;
+}
+
+.store-product-card .product-meta,
+.product-selection-card .product-meta,
+.selection-product-card .product-meta {
+  white-space: normal !important;
+}
