@@ -1,58 +1,58 @@
-function normalizeSite(site='') {
+function normalizeSite(site = '') {
   return String(site || '').trim().toLowerCase();
 }
 
 function registerProductCatalogRoutes({ app, supabase, auth }) {
 
-  app.get('/product-catalog', auth, async (req,res)=>{
+  app.get('/product-catalog', auth, async (req, res) => {
     try {
       const site = normalizeSite(req.query.site || '');
       let query = supabase.from('catalog_products').select('*').eq('is_enabled', true).limit(250);
       if (site) query = query.eq('site', site);
       const { data, error } = await query.order('product_name');
       if (error) return res.status(500).json({ error: error.message });
-      return res.json({ items: data || [] });
-    } catch(err){
+      return res.json({ products: data || [] });
+    } catch (err) {
       return res.status(500).json({ error: err.message });
     }
   });
 
-  app.get('/admin/product-preferences', auth, async (req,res)=>{
+  app.get('/admin/product-preferences', auth, async (req, res) => {
     return res.json({ items: [] });
   });
 
-  app.get('/admin/product-selection-export-users', auth, async (req,res)=>{
+  app.get('/admin/product-selection-export-users', auth, async (req, res) => {
     try {
       const { data, error } = await supabase.from('users').select('id,email').limit(100);
       if (error) return res.status(500).json({ error: error.message });
-      return res.json({ items: data || [] });
-    } catch(err){
+      return res.json({ products: data || [] });
+    } catch (err) {
       return res.status(500).json({ error: err.message });
     }
   });
 
-  app.get('/admin/product-selection-changes', auth, async (req,res)=>{
+  app.get('/admin/product-selection-changes', auth, async (req, res) => {
     return res.json({ items: [] });
   });
 
-  app.get('/public/countdowns', async (req,res)=>{
+  app.get('/public/countdowns', async (req, res) => {
     return res.json({ items: [] });
   });
 
-  app.get('/countdown-selections', auth, async (req,res)=>{
+  app.get('/countdown-selections', auth, async (req, res) => {
     return res.json({ items: [] });
   });
 
-  app.get('/admin/countdowns', auth, async (req,res)=>{
+  app.get('/admin/countdowns', auth, async (req, res) => {
     return res.json({ items: [] });
   });
 
-  app.get('/admin/target-recommended-list-name', auth, async (req,res)=>{
+  app.get('/admin/target-recommended-list-name', auth, async (req, res) => {
     return res.json({ name: '' });
   });
 
 
-  app.get('/admin/catalog-products', auth, async (req,res)=>{
+  app.get('/admin/catalog-products', auth, async (req, res) => {
     try {
       const site = normalizeSite(req.query.site || '');
       const search = String(req.query.search || '').trim();
@@ -75,13 +75,13 @@ function registerProductCatalogRoutes({ app, supabase, auth }) {
         return res.status(500).json({ error: error.message });
       }
 
-      return res.json({ items: data || [] });
+      return res.json({ products: data || [] });
     } catch (err) {
       return res.status(500).json({ error: err.message });
     }
   });
 
-  app.get('/catalog-products', auth, async (req,res)=>{
+  app.get('/catalog-products', auth, async (req, res) => {
     try {
       const search = String(req.query.search || '').trim();
 
@@ -100,7 +100,7 @@ function registerProductCatalogRoutes({ app, supabase, auth }) {
         return res.status(500).json({ error: error.message });
       }
 
-      return res.json({ items: data || [] });
+      return res.json({ products: data || [] });
     } catch (err) {
       return res.status(500).json({ error: err.message });
     }
