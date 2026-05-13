@@ -1,34 +1,3 @@
-
-
-async function loadGroupedProducts(site = 'target') {
-    try {
-        const data = await authJSON(API + '/product-groups?site=' + encodeURIComponent(site));
-        return Array.isArray(data.products) ? data.products : [];
-    } catch (err) {
-        console.error('Could not load grouped products', err);
-        return [];
-    }
-}
-
-function renderGroupedProductCard(group, site) {
-    const skuText = Array.isArray(group.skus)
-        ? group.skus.map((s) => s.sku).filter(Boolean).join(', ')
-        : '';
-
-    return `
-        <article class="store-product-card store-product-card--grouped">
-            ${group.image_url ? `<img src="${group.image_url}" alt="" />` : ''}
-            <div>
-                <strong>${group.display_name || 'Product'}</strong>
-                <span>SKUs: ${skuText || '-'}</span>
-                <span>Credits: ${group.shared_credit_cost || 0}</span>
-                <span>Category: ${group.category || 'other'}</span>
-            </div>
-        </article>
-    `;
-}
-
-
 const API =
     window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1"
         ? "http://localhost:3000"
