@@ -1533,7 +1533,38 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
             const { data, error } = await query;
             if (error) return res.status(500).json({ error: error.message });
 
-            const userIds = [...new Set((data || []).map((row) => row.user_id).filter(Boolean))];
+            // Resolve old single-SKU selections to newest grouped products
+            const { data: allCatalogProducts } = await supabase
+                .from('catalog_products')
+                .select('id, site, sku, product_name, default_max_price')
+                .eq('site', site);
+
+            const groupedProducts = (allCatalogProducts || []).filter((product) => {
+                return parseMultiSkuValue(product.sku).length > 1;
+            });
+
+            const resolvedData = (data || []).map((row) => {
+                const currentProduct = row.catalog_products || {};
+                const currentSkus = parseMultiSkuValue(currentProduct.sku);
+
+                const groupedReplacement = groupedProducts.find((product) => {
+                    const groupedSkus = parseMultiSkuValue(product.sku);
+
+                    return currentSkus.some((sku) => groupedSkus.includes(sku));
+                });
+
+                if (groupedReplacement) {
+                    return {
+                        ...row,
+                        max_price: groupedReplacement.default_max_price ?? row.max_price,
+                        catalog_products: groupedReplacement
+                    };
+                }
+
+                return row;
+            });
+
+            const userIds = [...new Set((resolvedData || []).map((row) => row.user_id).filter(Boolean))];
             let userMap = new Map();
             if (userIds.length) {
                 const { data: users, error: usersError } = await supabase.from('users').select('id, email, owner_admin_id').in('id', userIds);
@@ -1542,12 +1573,27 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
             }
 
             const byUser = new Map();
-            (data || []).forEach((row) => {
+            (resolvedData || []).forEach((row) => {
                 const user = userMap.get(row.user_id);
                 if (!user) return;
+
                 const lines = productSelectionLines(row);
-                if (!byUser.has(row.user_id)) byUser.set(row.user_id, { user_id: row.user_id, user_email: user.email || row.user_id, lines: [] });
-                byUser.get(row.user_id).lines.push(...lines);
+
+                if (!byUser.has(row.user_id)) {
+                    byUser.set(row.user_id, {
+                        user_id: row.user_id,
+                        user_email: user.email || row.user_id,
+                        lines: []
+                    });
+                }
+
+                const existing = new Set(byUser.get(row.user_id).lines);
+
+                lines.forEach((line) => {
+                    existing.add(line);
+                });
+
+                byUser.get(row.user_id).lines = [...existing];
             });
 
             const users = [...byUser.values()].sort((a, b) => (a.user_email || '').localeCompare(b.user_email || ''));
@@ -1742,7 +1788,38 @@ app.get('/admin/product-preferences', auth, admin, async (req, res) => {
             const { data, error } = await query;
             if (error) return res.status(500).json({ error: error.message });
 
-            const userIds = [...new Set((data || []).map((row) => row.user_id).filter(Boolean))];
+            // Resolve old single-SKU selections to newest grouped products
+            const { data: allCatalogProducts } = await supabase
+                .from('catalog_products')
+                .select('id, site, sku, product_name, default_max_price')
+                .eq('site', site);
+
+            const groupedProducts = (allCatalogProducts || []).filter((product) => {
+                return parseMultiSkuValue(product.sku).length > 1;
+            });
+
+            const resolvedData = (data || []).map((row) => {
+                const currentProduct = row.catalog_products || {};
+                const currentSkus = parseMultiSkuValue(currentProduct.sku);
+
+                const groupedReplacement = groupedProducts.find((product) => {
+                    const groupedSkus = parseMultiSkuValue(product.sku);
+
+                    return currentSkus.some((sku) => groupedSkus.includes(sku));
+                });
+
+                if (groupedReplacement) {
+                    return {
+                        ...row,
+                        max_price: groupedReplacement.default_max_price ?? row.max_price,
+                        catalog_products: groupedReplacement
+                    };
+                }
+
+                return row;
+            });
+
+            const userIds = [...new Set((resolvedData || []).map((row) => row.user_id).filter(Boolean))];
             let userMap = new Map();
             if (userIds.length) {
                 const { data: userRows, error: usersError } = await supabase
