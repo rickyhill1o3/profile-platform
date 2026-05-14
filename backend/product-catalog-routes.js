@@ -527,6 +527,16 @@ function requireSuperAdmin(req, res) {
     return true;
 }
 
+
+function parseCatalogSkuParts(value) {
+    if (!value) return [];
+    return String(value).split(/[\n,]+/).map((sku) => sku.trim()).filter(Boolean);
+}
+
+function countCatalogSkuUnits(product) {
+    return Math.max(1, parseCatalogSkuParts(product && product.sku).length);
+}
+
 async function upsertCatalogProductManual(supabase, payloadInput) {
     const site = normalizeSite(payloadInput.site);
     const catalog = await getActiveCatalog(supabase, site);
@@ -536,12 +546,13 @@ async function upsertCatalogProductManual(supabase, payloadInput) {
     const sku = String(payloadInput.sku || '').trim() || (isPlaceholder ? `${site.toUpperCase()}-CUSTOM-${Date.now()}` : '');
     if (!sku) throw new Error('SKU is required.');
 
+    const skuParts = parseCatalogSkuParts(sku);
     const product_name = String(payloadInput.product_name || '').trim() || (isPlaceholder ? `Run Next ${site.charAt(0).toUpperCase() + site.slice(1)} Release` : sku);
     const default_max_price = normalizeMaxPrice(payloadInput.default_max_price);
     const brand = String(payloadInput.brand || '').trim() || (site === 'pokemon' ? 'Pokémon Center' : site.charAt(0).toUpperCase() + site.slice(1));
     const image_url = String(payloadInput.image_url || '').trim();
     const product_url = String(payloadInput.product_url || '').trim();
-    const metadata = Object.assign({}, payloadInput.metadata || {}, isPlaceholder ? { virtual: true, release_type: 'next_drop' } : {});
+    const metadata = Object.assign({}, payloadInput.metadata || {}, isPlaceholder ? { virtual: true, release_type: 'next_drop' } : {}, skuParts.length > 1 ? { multi_skus: skuParts } : {});
 
     const existing = await firstRowOrNull(supabase, site, sku);
     const payload = {
@@ -559,13 +570,36 @@ async function upsertCatalogProductManual(supabase, payloadInput) {
         metadata
     };
 
+    let data;
     if (existing?.id) {
-        const { data, error } = await supabase.from('catalog_products').update(payload).eq('id', existing.id).select('*').single();
-        if (error) throw new Error(error.message);
-        return data;
+        const result = await supabase.from('catalog_products').update(payload).eq('id', existing.id).select('*').single();
+        if (result.error) throw new Error(result.error.message);
+        data = result.data;
+    } else {
+        const result = await supabase.from('catalog_products').insert(payload).select('*').single();
+        if (result.error) throw new Error(result.error.message);
+        data = result.data;
     }
-    const { data, error } = await supabase.from('catalog_products').insert(payload).select('*').single();
-    if (error) throw new Error(error.message);
+
+    // If this is a grouped multi-SKU product, remove old duplicate single-SKU product rows from the same catalog.
+    if (skuParts.length > 1 && data?.id) {
+        const { data: duplicateRows, error: duplicateLookupError } = await supabase
+            .from('catalog_products')
+            .select('id')
+            .eq('catalog_id', catalog.id)
+            .eq('site', site)
+            .in('sku', skuParts)
+            .neq('id', data.id);
+        if (duplicateLookupError) throw new Error(duplicateLookupError.message);
+
+        const duplicateIds = (duplicateRows || []).map((row) => row.id).filter(Boolean);
+        if (duplicateIds.length) {
+            await supabase.from('user_product_preferences').delete().in('catalog_product_id', duplicateIds);
+            const { error: deleteError } = await supabase.from('catalog_products').delete().in('id', duplicateIds);
+            if (deleteError) throw new Error(deleteError.message);
+        }
+    }
+
     return data;
 }
 
@@ -866,16 +900,6 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
                 ? [...new Set(selectedIdsFromBody)]
                 : [...new Set(preferences.filter((row) => !!row.selected).map((row) => String(row.catalog_product_id || '')).filter(Boolean))];
 
-            if (incomingSelectedIds.length > limit) {
-                return res.status(400).json({
-                    error: site === 'target'
-                        ? 'Target allows a maximum of 29 selected SKUs.'
-                        : site === 'amazon'
-                            ? 'Amazon allows only 1 selected item right now.'
-                            : `Maximum ${limit} products allowed.`
-                });
-            }
-
             const activeCatalog = await getActiveCatalog(supabase, site);
             if (!activeCatalog?.id) return res.status(400).json({ error: `No active ${site} catalog found.` });
 
@@ -911,11 +935,15 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
             const addedIds = [...nextSelectedIds].filter((id) => !previousSelectedIds.has(id));
             const removedIds = [...previousSelectedIds].filter((id) => !nextSelectedIds.has(id));
 
+            const selectedSkuUnitCount = filteredSelectedIds.reduce((total, id) => {
+                return total + countCatalogSkuUnits(allowedMap.get(String(id)));
+            }, 0);
+
             if (site === 'amazon' && filteredSelectedIds.length > 1) {
                 return res.status(400).json({ error: 'Amazon allows only 1 selected item right now.' });
             }
 
-            if (site === 'target' && filteredSelectedIds.length > 29) {
+            if (site === 'target' && selectedSkuUnitCount > 29) {
                 return res.status(400).json({ error: 'Target allows a maximum of 29 selected SKUs.' });
             }
 

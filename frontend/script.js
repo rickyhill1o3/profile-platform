@@ -1,6 +1,42 @@
 
 function parseMultiSkuValue(rawValue) {
     if (!rawValue) return [];
+    return String(rawValue)
+        .split(/[\n,]+/)
+        .map((value) => value.trim())
+        .filter(Boolean);
+}
+
+function getProductSkuUnitCount(product) {
+    if (!product || !product.sku) return 1;
+    return Math.max(1, parseMultiSkuValue(product.sku).length);
+}
+
+function countSelectedStoreSkuUnits(site) {
+    const selected = storeSelectedProductIds[site] || new Set();
+    const products = storeProductCache[site] || [];
+    return products.reduce((total, product) => {
+        return selected.has(String(product.id)) ? total + getProductSkuUnitCount(product) : total;
+    }, 0);
+}
+
+function dedupeMultiSkuProducts(products) {
+    if (!Array.isArray(products)) return [];
+    const groupedSkus = new Set();
+    products.forEach((product) => {
+        const parts = parseMultiSkuValue(product.sku);
+        if (parts.length > 1) parts.forEach((sku) => groupedSkus.add(sku));
+    });
+    return products.filter((product) => {
+        const parts = parseMultiSkuValue(product.sku);
+        if (parts.length > 1) return true;
+        return !groupedSkus.has(String(product.sku || '').trim());
+    });
+}
+
+
+function parseMultiSkuValue(rawValue) {
+    if (!rawValue) return [];
 
     return rawValue
         .split(/[\n,]+/)
@@ -2514,10 +2550,10 @@ function renderStoreProductCard(product, site) {
 function updateStoreSelectionSummary(site) {
     const summary = document.getElementById(site + "SelectionSummary");
     const selected = storeSelectedProductIds[site] || new Set();
-    const limit = getStoreSelectionLimit(site);
+    const skuUnits = countSelectedStoreSkuUnits(site);
     if (summary) {
         summary.textContent = site === "target"
-            ? `${selected.size} / 29 Target SKUs selected`
+            ? `${skuUnits} / 29 Target SKUs selected`
             : site === "amazon"
                 ? `${selected.size} / 1 Amazon item selected`
                 : `${selected.size} selected`;
@@ -2544,7 +2580,10 @@ function applyStoreProductSelection(site, input) {
         });
     } else {
         if (input.checked) {
-            if (selected.size >= limit && !selected.has(productId)) {
+            const product = (storeProductCache[site] || []).find((row) => String(row.id) === productId);
+            const currentSkuUnits = countSelectedStoreSkuUnits(site);
+            const addedSkuUnits = selected.has(productId) ? 0 : getProductSkuUnitCount(product);
+            if (currentSkuUnits + addedSkuUnits > limit && !selected.has(productId)) {
                 input.checked = false;
                 alert(`You can select up to ${limit} Target SKUs.`);
                 return;
@@ -2601,7 +2640,7 @@ function bindStoreProductSelectionControls(site) {
                         selected_product_ids: selected
                     })
                 });
-                if (msg) msg.textContent = `Saved ${selected.length} ${site === "target" ? "Target SKU" : "Amazon item"}${selected.length === 1 ? "" : "s"}.`;
+                if (msg) msg.textContent = `Saved ${site === "target" ? countSelectedStoreSkuUnits(site) : selected.length} ${site === "target" ? "Target SKU" : "Amazon item"}${(site === "target" ? countSelectedStoreSkuUnits(site) : selected.length) === 1 ? "" : "s"}.`;
                 await loadStoreProductsForSite(site);
             } catch (err) {
                 if (msg) msg.textContent = err.message || "Could not save selections.";
@@ -2798,7 +2837,8 @@ function applyRecommendedTargetProductIds(productIds = []) {
     let added = 0;
     for (const id of productIds.map(String)) {
         if (!available.has(id) || selected.has(id)) continue;
-        if (selected.size >= 29) break;
+        const product = (storeProductCache[site] || []).find((row) => String(row.id) === String(id));
+        if (countSelectedStoreSkuUnits(site) + getProductSkuUnitCount(product) > 29) break;
         selected.add(id);
         added += 1;
     }
@@ -2833,7 +2873,7 @@ async function loadStoreProductsForSite(site) {
     try {
         const qs = new URLSearchParams({ site });
         const data = await authJSON(API + '/product-catalog?' + qs.toString());
-        const products = Array.isArray(data.products) ? data.products : [];
+        const products = dedupeMultiSkuProducts(Array.isArray(data.products) ? data.products : []);
         storeProductCache[site] = products;
         storeSelectedProductIds[site] = new Set(products.filter((product) => !!product.selected).map((product) => String(product.id)));
 
