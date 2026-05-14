@@ -1,5 +1,4 @@
 
-function parseMultiSkuValue(rawValue) {
     if (!rawValue) return [];
 
     return rawValue

@@ -1,5 +1,4 @@
 
-function parseMultiSkuValue(rawValue) {
     if (!rawValue) return [];
     return String(rawValue)
         .split(/[\n,]+/)
@@ -34,8 +33,6 @@ function dedupeMultiSkuProducts(products) {
     });
 }
 
-
-function parseMultiSkuValue(rawValue) {
     if (!rawValue) return [];
 
     return rawValue
