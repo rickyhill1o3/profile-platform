@@ -1573,11 +1573,16 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
             }
 
             const byUser = new Map();
+            const processedProducts = new Map();
+
             (resolvedData || []).forEach((row) => {
                 const user = userMap.get(row.user_id);
                 if (!user) return;
 
-                const lines = productSelectionLines(row);
+                const product = row.catalog_products || {};
+                const canonicalSkuKey = parseMultiSkuValue(product.sku)
+                    .sort()
+                    .join(',');
 
                 if (!byUser.has(row.user_id)) {
                     byUser.set(row.user_id, {
@@ -1585,8 +1590,25 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
                         user_email: user.email || row.user_id,
                         lines: []
                     });
+
+                    processedProducts.set(row.user_id, new Set());
                 }
 
+                // Prevent old single-SKU selections and new grouped-SKU
+                // selections from both exporting at the same time.
+                // If both resolve to the same grouped product,
+                // only keep one canonical export.
+                const seenProducts = processedProducts.get(row.user_id);
+
+                if (canonicalSkuKey && seenProducts.has(canonicalSkuKey)) {
+                    return;
+                }
+
+                if (canonicalSkuKey) {
+                    seenProducts.add(canonicalSkuKey);
+                }
+
+                const lines = productSelectionLines(row);
                 const existing = new Set(byUser.get(row.user_id).lines);
 
                 lines.forEach((line) => {
