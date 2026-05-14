@@ -1,14 +1,27 @@
+
 function parseMultiSkuValue(rawValue) {
     if (!rawValue) return [];
-    return String(rawValue).split(/[\n,]+/).map(v => v.trim()).filter(Boolean);
+
+    return rawValue
+        .split(/[\n,]+/)
+        .map(v => v.trim())
+        .filter(Boolean);
 }
 
 function countEffectiveSkus(product) {
     if (!product) return 0;
-    if (Array.isArray(product.multiSkus) && product.multiSkus.length) return product.multiSkus.length;
-    if (typeof product.sku === "string") return parseMultiSkuValue(product.sku).length || 1;
+
+    if (Array.isArray(product.multiSkus) && product.multiSkus.length) {
+        return product.multiSkus.length;
+    }
+
+    if (typeof product.sku === 'string') {
+        return parseMultiSkuValue(product.sku).length || 1;
+    }
+
     return 1;
 }
+
 
 (function () {
     const API =

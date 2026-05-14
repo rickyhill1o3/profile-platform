@@ -1,3 +1,27 @@
+
+function parseMultiSkuValue(rawValue) {
+    if (!rawValue) return [];
+
+    return rawValue
+        .split(/[\n,]+/)
+        .map(v => v.trim())
+        .filter(Boolean);
+}
+
+function countEffectiveSkus(product) {
+    if (!product) return 0;
+
+    if (Array.isArray(product.multiSkus) && product.multiSkus.length) {
+        return product.multiSkus.length;
+    }
+
+    if (typeof product.sku === 'string') {
+        return parseMultiSkuValue(product.sku).length || 1;
+    }
+
+    return 1;
+}
+
 const cheerio = require("cheerio");
 const crypto = require("crypto");
 
@@ -1239,10 +1263,16 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
         return data || null;
     }
 
-    function productSelectionLine(row) {
+    function productSelectionLines(row) {
         const product = row.catalog_products || row.product || {};
         const price = row.max_price ?? product.default_max_price;
-        return `${product.sku || ''};${product.product_name || product.sku || ''};${price === null || price === undefined ? '' : price}`;
+        const skuParts = parseMultiSkuValue(product.sku);
+
+        if (skuParts.length > 1) {
+            return skuParts.map((sku) => `${sku};${product.product_name || sku || ''};${price === null || price === undefined ? '' : price}`);
+        }
+
+        return [`${product.sku || ''};${product.product_name || product.sku || ''};${price === null || price === undefined ? '' : price}`];
     }
 
     app.get('/target-recommended-lists', auth, async (req, res) => {
@@ -1515,9 +1545,9 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
             (data || []).forEach((row) => {
                 const user = userMap.get(row.user_id);
                 if (!user) return;
-                const line = productSelectionLine(row);
+                const lines = productSelectionLines(row);
                 if (!byUser.has(row.user_id)) byUser.set(row.user_id, { user_id: row.user_id, user_email: user.email || row.user_id, lines: [] });
-                byUser.get(row.user_id).lines.push(line);
+                byUser.get(row.user_id).lines.push(...lines);
             });
 
             const users = [...byUser.values()].sort((a, b) => (a.user_email || '').localeCompare(b.user_email || ''));
