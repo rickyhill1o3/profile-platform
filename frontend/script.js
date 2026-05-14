@@ -1,22 +1,11 @@
-
+function parseMultiSkuValue(rawValue) {
     if (!rawValue) return [];
-    return String(rawValue)
-        .split(/[\n,]+/)
-        .map((value) => value.trim())
-        .filter(Boolean);
+    return String(rawValue).split(/[\n,]+/).map((value) => value.trim()).filter(Boolean);
 }
 
 function getProductSkuUnitCount(product) {
     if (!product || !product.sku) return 1;
     return Math.max(1, parseMultiSkuValue(product.sku).length);
-}
-
-function countSelectedStoreSkuUnits(site) {
-    const selected = storeSelectedProductIds[site] || new Set();
-    const products = storeProductCache[site] || [];
-    return products.reduce((total, product) => {
-        return selected.has(String(product.id)) ? total + getProductSkuUnitCount(product) : total;
-    }, 0);
 }
 
 function dedupeMultiSkuProducts(products) {
@@ -31,28 +20,6 @@ function dedupeMultiSkuProducts(products) {
         if (parts.length > 1) return true;
         return !groupedSkus.has(String(product.sku || '').trim());
     });
-}
-
-    if (!rawValue) return [];
-
-    return rawValue
-        .split(/[\n,]+/)
-        .map(v => v.trim())
-        .filter(Boolean);
-}
-
-function countEffectiveSkus(product) {
-    if (!product) return 0;
-
-    if (Array.isArray(product.multiSkus) && product.multiSkus.length) {
-        return product.multiSkus.length;
-    }
-
-    if (typeof product.sku === 'string') {
-        return parseMultiSkuValue(product.sku).length || 1;
-    }
-
-    return 1;
 }
 
 const API =
