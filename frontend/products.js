@@ -298,7 +298,7 @@ function countEffectiveSkus(product) {
 
     async function loadProducts() {
         const data = await fetchJSON(API + "/product-catalog?site=" + PRODUCT_STATE.site, { headers: authHeaders() });
-        PRODUCT_STATE.products = data.products || [];
+        PRODUCT_STATE.products = removeDuplicateSingleSkuProducts(data.products || []);
         renderProducts();
     }
 
