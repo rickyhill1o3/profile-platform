@@ -2603,9 +2603,9 @@ async function sendDiscordWebhookToTarget({
         const { embed } = extractEmbedFields(payload);
         const rawTitle = decodeHtmlEntities(String(embed?.title || '')).replace(/\*\*/g, '').trim();
         const rawDesc = decodeHtmlEntities(String(embed?.description || '')).trim();
-        title = `${rawTitle || 'Checkout Error'} • ${siteLabel}`;
+        title = `${rawTitle || 'Checkout Error'} • ${siteLabel}${fraudStatus ? ` • ${fraudStatus}` : ''}`;
         description = rawDesc || normalized.product_name || order.product_name || 'Checkout error received';
-        footerText = 'Checkout error captured by The Shore Shack';
+        footerText = decodeHtmlEntities(String(embed?.footer?.text || '')).trim() || 'Checkout error captured by The Shore Shack';
     } else {
         title = isInsufficient
             ? `Checkout Logged • Credits Needed`
@@ -2645,6 +2645,42 @@ async function sendDiscordWebhookToTarget({
     if (fraudStatus) {
         embed.fields.push({ name: 'Fraud Status', value: fraudStatus, inline: true });
     }
+    const orderStatus = decodeHtmlEntities(String(rawFields['order status'] || payload.order_status || '')).trim();
+    const statusDescription = decodeHtmlEntities(String(rawFields['status description'] || payload.status_description || '')).trim();
+    const betaFlow = decodeHtmlEntities(String(rawFields['beta flow'] || payload.beta_flow || '')).trim();
+    const shapeMethod = decodeHtmlEntities(String(rawFields['shape method'] || payload.shape_method || '')).trim();
+    const accountValue = decodeHtmlEntities(String(rawFields['account'] || payload.account || normalized.account_email || '')).trim();
+    const grandTotal = decodeHtmlEntities(String(rawFields['grand total'] || payload.grand_total || '')).trim();
+    const astralVersion = decodeHtmlEntities(String(embed?.footer?.text || '')).trim();
+
+    if (orderStatus) {
+        embed.fields.push({ name: 'Order Status', value: orderStatus, inline: true });
+    }
+
+    if (statusDescription) {
+        embed.fields.push({ name: 'Status Description', value: statusDescription, inline: true });
+    }
+
+    if (shapeMethod) {
+        embed.fields.push({ name: 'Shape Method', value: shapeMethod, inline: true });
+    }
+
+    if (betaFlow) {
+        embed.fields.push({ name: 'Beta Flow', value: betaFlow, inline: true });
+    }
+
+    if (accountValue) {
+        embed.fields.push({ name: 'Account', value: spoilerDiscordValue(accountValue), inline: true });
+    }
+
+    if (grandTotal) {
+        embed.fields.push({ name: 'Grand Total', value: spoilerDiscordValue(grandTotal), inline: true });
+    }
+
+    if (astralVersion) {
+        embed.fields.push({ name: 'Astral Version', value: astralVersion, inline: false });
+    }
+
     if (includeSensitive && proxyValue) {
         embed.fields.push({ name: 'Proxy', value: spoilerDiscordValue(proxyValue), inline: true });
     }
