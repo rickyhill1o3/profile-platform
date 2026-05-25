@@ -683,6 +683,66 @@ async function getUserCreditBalance(userId) {
     return asSignedCredits(balance.balance, DEFAULT_FREE_CREDITS);
 }
 
+
+async function sendCreditDepletedNotifications({ user, previousBalance, newBalance, creditsCharged, order }) {
+    const buyCreditsUrl = process.env.CREDIT_PURCHASE_URL || 'https://theshoreshacktcg.com/buy-credits';
+    const userEmail = String(user?.email || '').trim();
+    const orderRef = String(order?.external_order_id || order?.id || '').trim();
+
+    const userSubject = 'Your Shore Shack credits have run out';
+    const userText = [
+        'Your Shore Shack checkout credit balance has reached 0 or below.',
+        '',
+        `Previous balance: ${previousBalance} credits`,
+        `Credits charged: ${creditsCharged}`,
+        `Current balance: ${newBalance} credits`,
+        orderRef ? `Order: ${orderRef}` : '',
+        '',
+        'To continue using The Shore Shack checkout service, please purchase more credits:',
+        buyCreditsUrl
+    ].filter(Boolean).join('\n');
+
+    const userHtml = `
+        <p>Your Shore Shack checkout credit balance has reached <strong>0 or below</strong>.</p>
+        <p>
+            Previous balance: <strong>${previousBalance}</strong> credits<br>
+            Credits charged: <strong>${creditsCharged}</strong><br>
+            Current balance: <strong>${newBalance}</strong> credits
+            ${orderRef ? `<br>Order: <strong>${orderRef}</strong>` : ''}
+        </p>
+        <p>To continue using The Shore Shack checkout service, please purchase more credits.</p>
+        <p><a href="${buyCreditsUrl}">Buy more credits</a></p>
+    `;
+
+    if (userEmail) {
+        try {
+            await sendEmail({ to: userEmail, subject: userSubject, text: userText, html: userHtml });
+        } catch (err) {
+            console.error('Credit depleted user email failed:', err.message || err);
+        }
+    }
+
+    try {
+        await sendEmail({
+            to: SUPER_ADMIN_EMAIL,
+            subject: `User credits depleted: ${userEmail || user?.id || 'unknown user'}`,
+            text: [
+                'A user has reached 0 or negative credits.',
+                '',
+                `User: ${userEmail || user?.id || 'unknown'}`,
+                `Previous balance: ${previousBalance}`,
+                `Credits charged: ${creditsCharged}`,
+                `Current balance: ${newBalance}`,
+                orderRef ? `Order: ${orderRef}` : '',
+                '',
+                "Remove this user\'s accounts from active checkout runs until they purchase more credits."
+            ].filter(Boolean).join('\n')
+        });
+    } catch (err) {
+        console.error('Credit depleted admin email failed:', err.message || err);
+    }
+}
+
 async function adjustUserCredits({ userId, delta, reason, note = "", metadata = {}, createdBy = null, orderId = null }) {
     const amount = Math.trunc(Number(delta || 0));
     if (!Number.isFinite(amount) || amount === 0) {
@@ -2874,36 +2934,53 @@ async function recordSuccessfulCheckout(payload) {
     const creditsToCharge = asWholeCredits(resolvedCost.credits, 0);
 
     const currentBalance = await getUserCreditBalance(user.id);
-    const insufficientCredits = creditsToCharge > currentBalance;
+    const willBeZeroOrNegative = creditsToCharge > 0 && (currentBalance - creditsToCharge) <= 0;
 
-    // Create order
+    // Create order. Successful checkouts are always charged, even if the balance goes negative.
     const order = await createOrderRecord({
         ...payload,
         ...normalized,
         user_id: user.id,
         external_order_id: externalOrderId,
-        status: insufficientCredits ? "insufficient_credits" : "success",
+        status: "success",
         credits_charged: creditsToCharge,
         metadata: {
             ...(payload.metadata || {}),
             matched_user_email: user.email,
             requested_credits: creditsToCharge,
-            insufficient_credits: insufficientCredits
+            previous_balance: currentBalance,
+            projected_balance_after_charge: currentBalance - creditsToCharge,
+            balance_went_zero_or_negative: willBeZeroOrNegative
         },
         raw_payload: payload
     });
 
     let balanceAfter = currentBalance;
 
-    // Charge credits
-    if (creditsToCharge > 0 && !insufficientCredits) {
+    // Charge credits. This intentionally allows negative balances.
+    if (creditsToCharge > 0) {
         balanceAfter = await adjustUserCredits({
             userId: user.id,
             delta: -creditsToCharge,
             reason: "successful_checkout",
             note: `Credits charged for checkout ${externalOrderId}`,
+            metadata: {
+                previous_balance: currentBalance,
+                balance_after: currentBalance - creditsToCharge,
+                allowed_negative_balance: true
+            },
             orderId: order.id
         });
+
+        if (willBeZeroOrNegative) {
+            await sendCreditDepletedNotifications({
+                user,
+                previousBalance: currentBalance,
+                newBalance: balanceAfter,
+                creditsCharged: creditsToCharge,
+                order
+            });
+        }
     }
 
     return {
@@ -3501,7 +3578,7 @@ app.get("/admin/credits/users", auth, admin, async (req, res) => {
                 lifetime_credits_granted: asWholeCredits(balance.lifetime_credits_granted, 0),
                 lifetime_credits_spent: asWholeCredits(balance.lifetime_credits_spent, 0),
                 insufficient_orders: insufficientCounts.get(user.id) || 0,
-                needs_removal: creditsBalance < 0
+                needs_removal: creditsBalance <= 0
             });
         }
 
