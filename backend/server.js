@@ -4470,10 +4470,16 @@ function normalizeImportedProfilePayload(entry = {}, accountType = "walmart") {
 }
 
 
-const PROFILE_ACCOUNT_TYPES = new Set(["general", "walmart", "target", "amazon", "raffle"]);
+const PROFILE_ACCOUNT_TYPES = new Set(["general", "walmart", "target", "samsclub", "amazon", "raffle"]);
 
 function normalizeProfileAccountType(value = "general") {
-    const type = String(value || "general").trim().toLowerCase();
+    const raw = String(value || "general").trim().toLowerCase();
+    const type = raw.replace(/[\s_'’-]+/g, "");
+
+    if (["samsclub", "samclub", "sams", "sam'sclub"].includes(type)) {
+        return "samsclub";
+    }
+
     return PROFILE_ACCOUNT_TYPES.has(type) ? type : "general";
 }
 
@@ -4482,8 +4488,8 @@ function getProfileLimitForRole(role = "user", accountType = "general") {
     if (role === "super_admin") return Infinity;
     if (type === "raffle") return Infinity;
 
-    const adminLimits = { target: 6, amazon: 2, general: 5, walmart: 100 };
-    const userLimits = { target: 2, amazon: 1, general: 3, walmart: 100 };
+    const adminLimits = { target: 6, samsclub: 6, amazon: 2, general: 5, walmart: 100 };
+    const userLimits = { target: 2, samsclub: 2, amazon: 1, general: 3, walmart: 100 };
 
     const source = role === "admin" ? adminLimits : userLimits;
     return source[type] ?? 0;
