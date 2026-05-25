@@ -25,8 +25,8 @@ function countEffectiveSkus(product) {
 const cheerio = require("cheerio");
 const crypto = require("crypto");
 
-const SUPPORTED_SITES = new Set(["amazon", "target", "walmart", "general", "supreme", "pokemon"]);
-const REQUESTABLE_SITES = new Set(["amazon", "target", "walmart", "general", "supreme", "pokemon"]);
+const SUPPORTED_SITES = new Set(["amazon", "target", "walmart", "samsclub", "general", "supreme", "pokemon"]);
+const REQUESTABLE_SITES = new Set(["amazon", "target", "walmart", "samsclub", "general", "supreme", "pokemon"]);
 const VIRTUAL_SITE_DEFAULTS = {
     amazon: {
         catalogName: "Amazon next drop",
@@ -49,6 +49,14 @@ const VIRTUAL_SITE_DEFAULTS = {
         sku: "WALMART-NEXT-DROP",
         product_name: "Run Next Walmart Release",
         brand: "Walmart",
+        release_mode_default: "next",
+        metadata: { virtual: true, release_type: "next_drop" }
+    },
+    samsclub: {
+        catalogName: "Sam's Club next drop",
+        sku: "SAMSCLUB-NEXT-DROP",
+        product_name: "Run Next Sam's Club Release",
+        brand: "Sam's Club",
         release_mode_default: "next",
         metadata: { virtual: true, release_type: "next_drop" }
     },
@@ -79,9 +87,10 @@ const VIRTUAL_SITE_DEFAULTS = {
 };
 
 function normalizeSite(value) {
-    const site = String(value || "").trim().toLowerCase();
+    const raw = String(value || "").trim().toLowerCase();
+    const site = ["sams", "samclub", "samclubs", "sam's club", "sams club", "samsclub"].includes(raw) ? "samsclub" : raw;
     if (!SUPPORTED_SITES.has(site)) {
-        throw new Error("Invalid site. Expected amazon, target, walmart, supreme, pokemon, or general.");
+        throw new Error("Invalid site. Expected amazon, target, walmart, samsclub, supreme, pokemon, or general.");
     }
     return site;
 }
@@ -1463,8 +1472,8 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
             const site = req.query.site ? normalizeSite(req.query.site) : '';
             const scopedUserIds = await getScopedUserIds(supabase, currentUser);
 
-            if (!site || !['target', 'amazon'].includes(site)) {
-                return res.status(400).json({ error: 'Choose target or amazon.' });
+            if (!site || !['target', 'amazon', 'samsclub'].includes(site)) {
+                return res.status(400).json({ error: "Choose target, samsclub, or amazon." });
             }
 
             let productQuery = supabase

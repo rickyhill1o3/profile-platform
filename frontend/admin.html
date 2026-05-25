@@ -127,6 +127,7 @@
               <div class="field"><label for="countdownSite">Site</label>
                 <select class="input" id="countdownSite">
                   <option value="walmart">Walmart</option>
+                <option value="samsclub">Sam's Club</option>
                   <option value="target">Target</option>
                   <option value="general">General / Custom</option>
                   <option value="supreme">Supreme</option>
@@ -174,6 +175,7 @@ You can now attach multiple SKUs to the same product. Enter one SKU per line.
                     <option value="amazon">Amazon</option>
                     <option value="target">Target</option>
                     <option value="walmart">Walmart</option>
+                <option value="samsclub">Sam's Club</option>
                     <option value="supreme">Supreme</option>
                     <option value="pokemon">Pokémon Center</option>
                     <option value="general">General</option>
@@ -198,6 +200,7 @@ placeholder="Enter one SKU per line&#10;12345678&#10;87654321"></textarea>
                     <option value="amazon">Amazon</option>
                     <option value="target">Target</option>
                     <option value="walmart">Walmart</option>
+                <option value="samsclub">Sam's Club</option>
                     <option value="supreme">Supreme</option>
                     <option value="pokemon">Pokémon Center</option>
                     <option value="general">General</option>
@@ -256,6 +259,7 @@ placeholder="Enter one SKU per line&#10;12345678&#10;87654321"></textarea>
                   <option value="amazon">Amazon</option>
                   <option value="target">Target</option>
                   <option value="walmart">Walmart</option>
+                <option value="samsclub">Sam's Club</option>
                   <option value="supreme">Supreme</option>
                   <option value="pokemon">Pokémon Center</option>
                   <option value="general">General</option>
@@ -395,7 +399,9 @@ placeholder="Enter one SKU per line&#10;12345678&#10;87654321"></textarea>
                   <option value="">All Groups</option>
                   <option value="general">General</option>
                   <option value="walmart">Walmart</option>
+                <option value="samsclub">Sam's Club</option>
                   <option value="target">Target</option>
+                  <option value="samsclub">Sam's Club</option>
                   <option value="amazon">Amazon</option>
                 </select></div>
             </div>
@@ -447,7 +453,7 @@ placeholder="Enter one SKU per line&#10;12345678&#10;87654321"></textarea>
             </div>
 <div class="panel-header panel-header--nested">
               <div>
-                <h3>Target / Amazon Selection Tools</h3>
+                <h3>Target / Sam's Club / Amazon Selection Tools</h3>
                 <p class="subtle-text">Track changes and export selected products in bot-ready sku;name;price format.</p>
               </div>
             </div>
@@ -455,6 +461,7 @@ placeholder="Enter one SKU per line&#10;12345678&#10;87654321"></textarea>
               <div class="toolbar-row">
                 <select class="input input--sm" id="productSelectionExportSite">
                   <option value="target">Target</option>
+                  <option value="samsclub">Sam's Club</option>
                   <option value="amazon">Amazon</option>
                 </select>
                 <select class="input input--sm" id="productSelectionExportUser">
@@ -838,57 +845,7 @@ placeholder="Enter one SKU per line&#10;12345678&#10;87654321"></textarea>
       </div>
     </div>
   </div>
-  <script src="script.js?v=20260325c">
-
-// MULTI SKU HELPERS
-function parseMultiSkuValue(rawValue) {
-    if (!rawValue) return [];
-    return String(rawValue)
-        .split(/[
-,]+/)
-        .map(v => v.trim())
-        .filter(Boolean);
-}
-
-function countEffectiveSkus(product) {
-    if (!product) return 0;
-
-    if (Array.isArray(product.multiSkus) && product.multiSkus.length) {
-        return product.multiSkus.length;
-    }
-
-    if (typeof product.sku === "string") {
-        return parseMultiSkuValue(product.sku).length || 1;
-    }
-
-    return 1;
-}
-
-function removeDuplicateSingleSkuProducts(products) {
-    if (!Array.isArray(products)) return [];
-
-    const groupedSkuSet = new Set();
-
-    products.forEach(product => {
-        const skuList = parseMultiSkuValue(product.sku);
-
-        if (skuList.length > 1) {
-            skuList.forEach(sku => groupedSkuSet.add(String(sku).trim()));
-        }
-    });
-
-    return products.filter(product => {
-        const skuList = parseMultiSkuValue(product.sku);
-
-        // keep grouped item
-        if (skuList.length > 1) return true;
-
-        // remove old single sku duplicates
-        return !groupedSkuSet.has(String(product.sku).trim());
-    });
-}
-
-</script>
+  <script src="script.js?v=20260325c"></script>
   <script src="products.js?v=20260323b"></script>
 
 

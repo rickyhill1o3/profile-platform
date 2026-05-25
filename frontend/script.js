@@ -284,7 +284,7 @@ function toggleAccountCredentialFields() {
     gmailFields.style.display = "none";
     amazonFields.style.display = "none";
 
-    if (type === "walmart" || type === "target") {
+    if (type === "walmart" || type === "target" || type === "samsclub") {
         section.style.display = "block";
         gmailFields.style.display = "block";
     } else if (type === "amazon") {
@@ -409,7 +409,7 @@ async function loadProfiles() {
         }
 
         allDashboardProfiles = profiles;
-        const groups = { general: [], walmart: [], target: [], amazon: [], raffle: [] };
+        const groups = { general: [], walmart: [], target: [], samsclub: [], amazon: [], raffle: [] };
         profiles.forEach((p) => {
             const key = String(p.account_type || "general").toLowerCase();
             if (groups[key]) groups[key].push(p);
@@ -423,6 +423,7 @@ async function loadProfiles() {
         setStat("profileCountStat", profiles.length);
         setStat("amazonProfileCountStat", groups.amazon.length);
         setStat("retailProfileCountStat", groups.target.length + groups.walmart.length);
+        setStat("samsclubProfileCountStat", groups.samsclub.length);
         setStat("raffleProfileCountStat", groups.raffle.length);
         setStat("generalProfileCountStat", groups.general.length);
 
@@ -430,6 +431,7 @@ async function loadProfiles() {
             general: "General Profiles",
             walmart: "Walmart Profiles",
             target: "Target Profiles",
+            samsclub: "Sam's Club Profiles",
             amazon: "Amazon Profiles",
             raffle: "Raffle Profiles"
         };
@@ -438,6 +440,7 @@ async function loadProfiles() {
             general: "Flexible profiles for general checkouts.",
             walmart: "Profiles configured for Walmart accounts.",
             target: "Profiles configured for Target accounts.",
+            samsclub: "Profiles configured for Sam's Club accounts.",
             amazon: "Profiles configured for Amazon accounts.",
             raffle: "Bulk-built raffle entries. Payment fields use invalid placeholder card-style numbers unless edited manually."
         };
@@ -778,7 +781,7 @@ async function loadProfileEditor() {
 
     toggleAccountCredentialFields();
 
-    if (profile.account_type === "walmart" || profile.account_type === "target") {
+    if (profile.account_type === "walmart" || profile.account_type === "target" || profile.account_type === "samsclub") {
         const gmailEmailEl = document.getElementById("account_login_email");
         const gmailPasswordEl = document.getElementById("account_login_password");
         const gmailAppPasswordEl = document.getElementById("gmail_app_password");
@@ -811,7 +814,7 @@ if (profileForm) {
         let gmailAppPassword = "";
         let amazon2FASecret = "";
 
-        if (type === "walmart" || type === "target") {
+        if (type === "walmart" || type === "target" || type === "samsclub") {
             accountLoginEmail = document.getElementById("account_login_email")?.value.trim() || "";
             accountLoginPassword = document.getElementById("account_login_password")?.value.trim() || "";
             gmailAppPassword = document.getElementById("gmail_app_password")?.value.trim() || "";
@@ -2550,7 +2553,7 @@ const storeProductCache = {};
 const storeSelectedProductIds = {};
 
 function getStoreSelectionLimit(site) {
-    if (site === "target") return 29;
+    if (site === "target" || site === "samsclub") return 29;
     if (site === "amazon") return 1;
     return 9999;
 }
@@ -2561,7 +2564,7 @@ function renderStoreProductCard(product, site) {
     const price = product.default_max_price !== null && product.default_max_price !== undefined ? formatMoney(product.default_max_price) : 'No limit';
     const credits = formatCredits(product.credit_cost || 0);
     const link = product.product_url ? `<a href="${escapeHTML(product.product_url)}" target="_blank" rel="noopener">Open</a>` : '';
-    const selectable = site === 'target' || site === 'amazon';
+    const selectable = site === 'target' || site === 'samsclub' || site === 'amazon';
     const inputType = site === 'amazon' ? 'radio' : 'checkbox';
     const selected = !!product.selected;
     const control = selectable
@@ -2589,9 +2592,11 @@ function updateStoreSelectionSummary(site) {
     if (summary) {
         summary.textContent = site === "target"
             ? `${skuUnits} / 29 Target SKUs selected`
-            : site === "amazon"
-                ? `${selected.size} / 1 Amazon item selected`
-                : `${selected.size} selected`;
+            : site === "samsclub"
+                ? `${skuUnits} / 29 Sam's Club SKUs selected`
+                : site === "amazon"
+                    ? `${selected.size} / 1 Amazon item selected`
+                    : `${selected.size} selected`;
     }
 }
 
@@ -2620,7 +2625,7 @@ function applyStoreProductSelection(site, input) {
             const addedSkuUnits = selected.has(productId) ? 0 : getProductSkuUnitCount(product);
             if (currentSkuUnits + addedSkuUnits > limit && !selected.has(productId)) {
                 input.checked = false;
-                alert(`You can select up to ${limit} Target SKUs.`);
+                alert(`You can select up to ${limit} ${site === "samsclub" ? "Sam's Club" : "Target"} SKUs.`);
                 return;
             }
             selected.add(productId);
@@ -2675,7 +2680,11 @@ function bindStoreProductSelectionControls(site) {
                         selected_product_ids: selected
                     })
                 });
-                if (msg) msg.textContent = `Saved ${site === "target" ? countSelectedStoreSkuUnits(site) : selected.length} ${site === "target" ? "Target SKU" : "Amazon item"}${(site === "target" ? countSelectedStoreSkuUnits(site) : selected.length) === 1 ? "" : "s"}.`;
+                if (msg) {
+                    const savedCount = (site === "target" || site === "samsclub") ? countSelectedStoreSkuUnits(site) : selected.length;
+                    const unitLabel = site === "amazon" ? "Amazon item" : (site === "samsclub" ? "Sam's Club SKU" : "Target SKU");
+                    msg.textContent = `Saved ${savedCount} ${unitLabel}${savedCount === 1 ? "" : "s"}.`;
+                }
                 await loadStoreProductsForSite(site);
             } catch (err) {
                 if (msg) msg.textContent = err.message || "Could not save selections.";
@@ -2917,12 +2926,14 @@ async function loadStoreProductsForSite(site) {
             return;
         }
 
-        const selectable = site === 'target' || site === 'amazon';
+        const selectable = site === 'target' || site === 'samsclub' || site === 'amazon';
         const limitText = site === 'target'
             ? 'Select up to 29 Target SKUs.'
-            : site === 'amazon'
-                ? 'Select 1 Amazon item.'
-                : '';
+            : site === 'samsclub'
+                ? "Select up to 29 Sam's Club SKUs."
+                : site === 'amazon'
+                    ? 'Select 1 Amazon item.'
+                    : '';
 
         panel.innerHTML = `
             <div class="store-product-summary-row">
@@ -2930,7 +2941,7 @@ async function loadStoreProductsForSite(site) {
                     <div class="store-product-summary">${products.length} product${products.length === 1 ? '' : 's'} available</div>
                     ${selectable ? `<div class="subtle-text" id="${site}SelectionSummary"></div>` : ''}
                 </div>
-                ${selectable ? `<div class="panel-actions"><button class="btn btn-primary" type="button" id="${site}ProductSelectionSave">Save ${site === 'target' ? 'Target' : 'Amazon'} Selections</button></div>` : ''}
+                ${selectable ? `<div class="panel-actions"><button class="btn btn-primary" type="button" id="${site}ProductSelectionSave">Save ${site === 'target' ? 'Target' : site === 'samsclub' ? "Sam's Club" : 'Amazon'} Selections</button></div>` : ''}
             </div>
             <div class="toolbar-row store-product-search-row">
                 <input id="${site}ProductSearch" class="input" type="search" placeholder="Search ${site} products by name, SKU, brand, or category" />
@@ -2955,7 +2966,7 @@ async function loadStoreProductsForSite(site) {
 }
 
 async function loadStoreProductPanels() {
-    await Promise.all(['target', 'walmart', 'amazon', 'general'].map(loadStoreProductsForSite));
+    await Promise.all(['target', 'samsclub', 'walmart', 'amazon', 'general'].map(loadStoreProductsForSite));
 }
 
 
@@ -3379,8 +3390,8 @@ async function loadCreditsAdminPane() {
 async function clearProductSelectionsForSelectedStore() {
     const site = document.getElementById("productSelectionExportSite")?.value || "target";
     const message = document.getElementById("productSelectionExportMessage");
-    if (!["target", "amazon"].includes(site)) {
-        if (message) message.textContent = "Only Target or Amazon selections can be cleared.";
+    if (!["target", "amazon", "samsclub"].includes(site)) {
+        if (message) message.textContent = "Only Target, Sam's Club, or Amazon selections can be cleared.";
         return;
     }
     if (!confirm(`Clear all saved ${site} product selections for users you manage? Users will need to reselect with the new limits.`)) return;
@@ -3588,6 +3599,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         document.getElementById("dashboard") ||
         document.getElementById("targetProfilesPanel") ||
         document.getElementById("walmartProfilesPanel") ||
+        document.getElementById("samsclubProfilesPanel") ||
         document.getElementById("amazonProfilesPanel") ||
         document.getElementById("generalProfilesPanel") ||
         document.getElementById("raffleProfilesPanel")
