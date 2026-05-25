@@ -890,6 +890,8 @@ function userStatusBadge(user) {
 function handleInviteRoleChange() {
     const roleSelect = document.getElementById("inviteRoleSelect");
     const quantitySelect = document.getElementById("inviteQuantitySelect");
+    const ownerField = document.getElementById("inviteOwnerField");
+    const ownerSelect = document.getElementById("inviteOwnerAdminSelect");
 
     if (!roleSelect || !quantitySelect) return;
 
@@ -899,14 +901,51 @@ function handleInviteRoleChange() {
     if (!superAdmin && selectedRole === "admin") {
         roleSelect.value = "user";
         quantitySelect.disabled = false;
+        if (ownerField) ownerField.style.display = "none";
         return;
     }
 
     if (selectedRole === "admin") {
         quantitySelect.value = "1";
         quantitySelect.disabled = true;
+        if (ownerField) ownerField.style.display = "none";
+        if (ownerSelect) ownerSelect.value = "";
     } else {
         quantitySelect.disabled = false;
+        if (ownerField) ownerField.style.display = superAdmin ? "block" : "none";
+    }
+}
+
+async function loadInviteOwnerAdmins() {
+    const ownerSelect = document.getElementById("inviteOwnerAdminSelect");
+    const ownerField = document.getElementById("inviteOwnerField");
+
+    if (!ownerSelect || !ownerField) return;
+
+    if (!isSuperAdmin()) {
+        ownerField.style.display = "none";
+        return;
+    }
+
+    try {
+        const res = await fetch(API + "/admin/users?all=1&role=admin", {
+            headers: { Authorization: "Bearer " + token() }
+        });
+        const payload = await res.json();
+        const admins = Array.isArray(payload) ? payload : (payload.items || []);
+
+        ownerSelect.innerHTML = `<option value="">My users / Super admin group</option>`;
+        admins
+            .filter((adminUser) => adminUser && adminUser.id && !adminUser.revoked)
+            .forEach((adminUser) => {
+                const option = document.createElement("option");
+                option.value = adminUser.id;
+                option.textContent = adminUser.email || adminUser.id;
+                ownerSelect.appendChild(option);
+            });
+    } catch (err) {
+        console.error("Could not load invite owner admins", err);
+        ownerSelect.innerHTML = `<option value="">My users / Super admin group</option>`;
     }
 }
 
@@ -918,14 +957,25 @@ function setupInviteControls() {
 
     if (!isSuperAdmin()) {
         roleSelect.innerHTML = `<option value="user">User Invite</option>`;
+    } else {
+        loadInviteOwnerAdmins();
     }
 
     handleInviteRoleChange();
 }
 
-async function createInvite(inviteRole = "user", quantity = 1) {
+async function createInvite(inviteRole = "user", quantity = 1, ownerAdminId = "") {
     const resultBox = document.getElementById("inviteResult");
     if (!resultBox) return;
+
+    const body = {
+        invite_role: inviteRole,
+        quantity
+    };
+
+    if (inviteRole === "user" && ownerAdminId) {
+        body.owner_admin_id = ownerAdminId;
+    }
 
     const res = await fetch(API + "/admin/create-invite", {
         method: "POST",
@@ -933,25 +983,26 @@ async function createInvite(inviteRole = "user", quantity = 1) {
             "Content-Type": "application/json",
             Authorization: "Bearer " + token()
         },
-        body: JSON.stringify({
-            invite_role: inviteRole,
-            quantity
-        })
+        body: JSON.stringify(body)
     });
 
     const data = await res.json();
 
     if (data.error) {
         resultBox.innerText = data.error;
+        resultBox.classList.add("error");
         return;
     }
 
+    resultBox.classList.remove("error");
+
     const codes = Array.isArray(data.codes) ? data.codes : [];
+    const ownerLabel = data.owner_admin_email ? ` for ${data.owner_admin_email}` : "";
 
     if (codes.length === 1) {
-        resultBox.innerText = `${inviteRole === "admin" ? "Admin" : "User"} invite created: ${codes[0]}`;
+        resultBox.innerText = `${inviteRole === "admin" ? "Admin" : "User"} invite${ownerLabel} created: ${codes[0]}`;
     } else {
-        resultBox.innerText = `${inviteRole === "admin" ? "Admin" : "User"} invites created: ${codes.join(", ")}`;
+        resultBox.innerText = `${inviteRole === "admin" ? "Admin" : "User"} invites${ownerLabel} created: ${codes.join(", ")}`;
     }
 
     invitePage = 1;
@@ -961,11 +1012,13 @@ async function createInvite(inviteRole = "user", quantity = 1) {
 async function submitInviteCreation() {
     const roleSelect = document.getElementById("inviteRoleSelect");
     const quantitySelect = document.getElementById("inviteQuantitySelect");
+    const ownerSelect = document.getElementById("inviteOwnerAdminSelect");
 
     const inviteRole = roleSelect ? roleSelect.value : "user";
     const quantity = quantitySelect ? Number(quantitySelect.value || 1) : 1;
+    const ownerAdminId = ownerSelect && inviteRole === "user" ? ownerSelect.value : "";
 
-    return createInvite(inviteRole, quantity);
+    return createInvite(inviteRole, quantity, ownerAdminId);
 }
 
 async function loadInvites(page = invitePage) {

@@ -55,7 +55,7 @@
             <div class="panel-header">
               <div>
                 <h2>Create Invite Code</h2>
-                <p class="subtle-text">Generate signup access codes.</p>
+                <p class="subtle-text">Generate user signup codes. Super admin can also create admin invite codes.</p>
               </div>
             </div>
             <div class="form-grid">
@@ -63,8 +63,15 @@
                 <label for="inviteRoleSelect">Invite Role</label>
                 <select class="input" id="inviteRoleSelect" onchange="handleInviteRoleChange()">
                   <option value="user">User Invite</option>
-                  <option value="admin">Admin Invite</option>
+                  <option value="admin">Admin Invite (super admin only)</option>
                 </select>
+              </div>
+              <div class="field" id="inviteOwnerField" style="display:none;">
+                <label for="inviteOwnerAdminSelect">User Invite Owner</label>
+                <select class="input" id="inviteOwnerAdminSelect">
+                  <option value="">My users / Super admin group</option>
+                </select>
+                <p class="subtle-text">Super admin only: choose which admin group this user invite belongs to.</p>
               </div>
               <div class="field">
                 <label for="inviteQuantitySelect">Quantity</label>

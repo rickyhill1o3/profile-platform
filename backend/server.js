@@ -5404,6 +5404,7 @@ app.post("/admin/create-invite", auth, admin, async (req, res) => {
         const requestedRole = req.body?.invite_role || "user";
         const quantityRaw = Number(req.body?.quantity || 1);
         const quantity = Number.isInteger(quantityRaw) ? quantityRaw : 1;
+        const requestedOwnerAdminId = String(req.body?.owner_admin_id || "").trim();
 
         if (!["user", "admin"].includes(requestedRole)) {
             return res.status(400).json({ error: "Invalid invite role" });
@@ -5412,6 +5413,9 @@ app.post("/admin/create-invite", auth, admin, async (req, res) => {
         if (quantity < 1 || quantity > 10) {
             return res.status(400).json({ error: "Quantity must be between 1 and 10" });
         }
+
+        let createdByAdminId = currentUser.id;
+        let ownerAdminEmail = "";
 
         if (requestedRole === "admin") {
             if (currentUser.role !== "super_admin") {
@@ -5423,11 +5427,38 @@ app.post("/admin/create-invite", auth, admin, async (req, res) => {
             }
         }
 
+        if (requestedRole === "user" && requestedOwnerAdminId) {
+            if (currentUser.role !== "super_admin") {
+                return res.status(403).json({ error: "Only super admin can create user invites for another admin group" });
+            }
+
+            const { data: ownerAdmin, error: ownerError } = await supabase
+                .from("users")
+                .select("id,email,role,revoked")
+                .eq("id", requestedOwnerAdminId)
+                .single();
+
+            if (ownerError || !ownerAdmin) {
+                return res.status(400).json({ error: "Selected admin owner was not found" });
+            }
+
+            if (ownerAdmin.role !== "admin") {
+                return res.status(400).json({ error: "Selected owner must be an admin account" });
+            }
+
+            if (ownerAdmin.revoked) {
+                return res.status(400).json({ error: "Selected admin owner is revoked" });
+            }
+
+            createdByAdminId = ownerAdmin.id;
+            ownerAdminEmail = ownerAdmin.email || "";
+        }
+
         const inviteRows = Array.from({ length: quantity }, () => ({
             code: uuidv4().slice(0, 8),
             used: false,
             canceled: false,
-            created_by_admin_id: currentUser.id,
+            created_by_admin_id: createdByAdminId,
             invite_role: requestedRole
         }));
 
@@ -5444,6 +5475,8 @@ app.post("/admin/create-invite", auth, admin, async (req, res) => {
             success: true,
             invite_role: requestedRole,
             quantity,
+            owner_admin_id: createdByAdminId,
+            owner_admin_email: ownerAdminEmail,
             codes: (data || []).map((row) => row.code)
         });
     } catch (err) {

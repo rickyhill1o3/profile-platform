@@ -1086,7 +1086,13 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
             const product = await upsertCatalogProductManual(supabase, req.body || {});
             res.json({ success: true, product, message: `${product.product_name} was saved to the catalog.` });
         } catch (err) {
-            res.status(500).json({ error: err.message });
+            const msg = String(err && err.message || err);
+            if (msg.includes('product_catalogs_site_check') || msg.includes('catalog_products_site_check')) {
+                return res.status(500).json({
+                    error: "Database constraint is blocking Sam's Club products. Run backend/sql/2026-05-25-add-samsclub-site.sql in Supabase SQL Editor once, then try again."
+                });
+            }
+            res.status(500).json({ error: msg });
         }
     });
 
