@@ -649,7 +649,9 @@ function bindRaffleBuilderControls() {
             const skipped = Number(data.skipped_count || data.skipped?.length || 0);
             const errors = Number(data.error_count || data.errors?.length || 0);
 
-            message.textContent = `Built ${created} raffle profile${created === 1 ? "" : "s"}. Skipped ${skipped}. Errors ${errors}.`;
+            const firstSkipped = Array.isArray(data.skipped) && data.skipped.length ? ` First skipped: ${data.skipped[0].email || "email"} - ${data.skipped[0].reason || "duplicate"}.` : "";
+            const firstError = Array.isArray(data.errors) && data.errors.length ? ` First error: ${data.errors[0].email || "email"} - ${data.errors[0].reason || "error"}.` : "";
+            message.textContent = `Built ${created} raffle profile${created === 1 ? "" : "s"}. Skipped ${skipped}. Errors ${errors}.${firstSkipped}${firstError}`;
             emailsInput.value = "";
 
             raffleBuilderBound = false;
