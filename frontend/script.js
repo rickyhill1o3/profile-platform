@@ -371,6 +371,7 @@ async function loadProfiles() {
         general: document.getElementById("generalProfilesPanel"),
         walmart: document.getElementById("walmartProfilesPanel"),
         target: document.getElementById("targetProfilesPanel"),
+        samsclub: document.getElementById("samsclubProfilesPanel"),
         amazon: document.getElementById("amazonProfilesPanel"),
         raffle: document.getElementById("raffleProfilesPanel")
     };
