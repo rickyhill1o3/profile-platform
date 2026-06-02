@@ -5223,15 +5223,33 @@ app.put("/profiles/:id", auth, async (req, res) => {
         }
 
         const existingProfiles = await getUserProfilesWithRelations(req.user_id);
-        const duplicateError = findDuplicateAcrossAssignedStores(
+        const currentProfile = existingProfiles.find((profile) => String(profile.id) === String(id));
+        const previousStores = profileAssignedStores(currentProfile || {});
+        const previousAddress = currentProfile?.addresses?.[0] || {};
+        const previousPayment = currentProfile?.payments?.[0] || {};
+        const duplicateFieldsChanged =
+            String(currentProfile?.profile_name || "") !== String(data.profile_name || "") ||
+            String(previousAddress.email || "").toLowerCase() !== String(data.email || "").toLowerCase() ||
+            String(previousAddress.phone || "") !== String(data.phone || "") ||
+            String(previousPayment.card_last4 || "") !== String(cardLast4 || "");
+
+        // When editing an existing profile to add another store assignment, do not re-block the
+        // store assignment that the profile already has. Older data can contain duplicate phone/card
+        // values inside the existing store, and that should not prevent adding Target/Sam's Club/etc.
+        // If the user actually changes shared identity/payment fields, validate every assigned store.
+        const storesToDuplicateCheck = duplicateFieldsChanged
+            ? assignedStores
+            : assignedStores.filter((store) => !previousStores.includes(store));
+
+        const duplicateError = storesToDuplicateCheck.length ? findDuplicateAcrossAssignedStores(
             existingProfiles,
             id,
-            assignedStores,
+            storesToDuplicateCheck,
             data.profile_name,
             data.email,
             data.phone,
             cardLast4
-        );
+        ) : null;
 
         if (duplicateError) {
             return res.status(400).json({ error: duplicateError });
