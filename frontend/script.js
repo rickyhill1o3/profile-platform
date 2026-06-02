@@ -270,8 +270,10 @@ function maskCard(cardNumber, fallbackLast4 = "") {
 
 
 function selectedAccountType() {
+    const assignments = selectedStoreAssignments();
+    if (assignments.length) return assignments[0];
     const el = document.getElementById("account_type");
-    return el ? el.value : "";
+    return el ? el.value : "general";
 }
 
 function selectedStoreAssignments() {
@@ -285,6 +287,10 @@ function setStoreAssignments(stores = []) {
     document.querySelectorAll('input[name="assigned_stores"]').forEach((input) => {
         input.checked = clean.includes(String(input.value || '').toLowerCase());
     });
+    const accountType = document.getElementById("account_type");
+    if (accountType) {
+        accountType.value = clean[0] || "general";
+    }
 }
 
 function profileAssignedStores(profile = {}) {
@@ -908,22 +914,15 @@ async function loadProfileEditor() {
     }
 
     const accountTypeSelect = document.getElementById("account_type");
-    if (accountTypeSelect) {
-        accountTypeSelect.addEventListener("change", () => {
-            const assignments = selectedStoreAssignments();
-            if (!assignments.length && accountTypeSelect.value && accountTypeSelect.value !== 'raffle') {
-                setStoreAssignments([accountTypeSelect.value]);
-            }
-            toggleAccountCredentialFields();
-        });
-    }
     document.querySelectorAll('input[name="assigned_stores"]').forEach((input) => {
         input.addEventListener('change', toggleAccountCredentialFields);
     });
 
     const editId = localStorage.getItem("edit");
     if (!editId) {
-        setStoreAssignments([selectedAccountType() || 'general']);
+        if (!selectedStoreAssignments().length) {
+            setStoreAssignments(['general']);
+        }
         toggleAccountCredentialFields();
         return;
     }
@@ -971,15 +970,15 @@ if (profileForm) {
 
         const message = document.getElementById("profileMessage");
         const editId = localStorage.getItem("edit");
-        const assignedStores = selectedStoreAssignments().length ? selectedStoreAssignments() : [account_type.value];
-        const type = account_type.value;
+        const assignedStores = selectedStoreAssignments().length ? selectedStoreAssignments() : ['general'];
+        if (account_type) account_type.value = assignedStores[0] || 'general';
 
         const storeCredentials = collectStoreCredentials(assignedStores);
         const firstCredential = Object.values(storeCredentials)[0] || {};
 
         const payload = {
             profile_name: profile_name.value.trim(),
-            account_type: account_type.value,
+            account_type: assignedStores[0] || 'general',
             assigned_stores: assignedStores,
             first_name: first_name.value.trim(),
             last_name: last_name.value.trim(),
