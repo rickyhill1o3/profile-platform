@@ -1461,7 +1461,90 @@ function normalizeDiscordHandle(value = '') {
 }
 
 function normalizeDiscordUserId(value = '') {
-    return String(value || '').trim();
+    return String(value || '').trim().replace(/^<@!?/, '').replace(/>$/, '');
+}
+
+function formatDiscordDisplayName(user = {}) {
+    const display = String(user.discord_display_name || user.discord_username || '').trim();
+    const email = String(user.email || '').trim();
+    return display ? `${display} (${email || user.id || ''})` : (email || user.id || '');
+}
+
+function getFrontendBaseUrl(req) {
+    return String(process.env.FRONTEND_BASE_URL || process.env.PUBLIC_BASE_URL || `${req.protocol}://${req.get('host')}`).replace(/\/$/, '');
+}
+
+function getDiscordRedirectUri(req) {
+    return String(process.env.DISCORD_REDIRECT_URI || `${req.protocol}://${req.get('host')}/auth/discord/callback`);
+}
+
+function signDiscordOAuthState(payload = {}) {
+    return jwt.sign({ ...payload, purpose: 'discord_oauth' }, process.env.JWT_SECRET, { expiresIn: '10m' });
+}
+
+function verifyDiscordOAuthState(value = '') {
+    const decoded = jwt.verify(String(value || ''), process.env.JWT_SECRET);
+    if (decoded?.purpose !== 'discord_oauth') throw new Error('Invalid Discord login state');
+    return decoded;
+}
+
+async function fetchDiscordOAuthUser({ code, redirectUri }) {
+    const clientId = process.env.DISCORD_CLIENT_ID;
+    const clientSecret = process.env.DISCORD_CLIENT_SECRET;
+    if (!clientId || !clientSecret) throw new Error('Discord OAuth is not configured. Add DISCORD_CLIENT_ID and DISCORD_CLIENT_SECRET.');
+
+    const tokenRes = await fetch('https://discord.com/api/oauth2/token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+            client_id: clientId,
+            client_secret: clientSecret,
+            grant_type: 'authorization_code',
+            code: String(code || ''),
+            redirect_uri: redirectUri
+        })
+    });
+    const tokenJson = await tokenRes.json().catch(() => ({}));
+    if (!tokenRes.ok || !tokenJson.access_token) {
+        throw new Error(tokenJson.error_description || tokenJson.error || 'Discord token exchange failed');
+    }
+
+    const userRes = await fetch('https://discord.com/api/users/@me', {
+        headers: { Authorization: `Bearer ${tokenJson.access_token}` }
+    });
+    const userJson = await userRes.json().catch(() => ({}));
+    if (!userRes.ok || !userJson.id) {
+        throw new Error(userJson.message || 'Could not read Discord user');
+    }
+
+    return {
+        discord_user_id: normalizeDiscordUserId(userJson.id),
+        discord_username: String(userJson.username || '').trim(),
+        discord_display_name: String(userJson.global_name || userJson.username || '').trim(),
+        discord_avatar: userJson.avatar ? `https://cdn.discordapp.com/avatars/${userJson.id}/${userJson.avatar}.png` : '',
+        discord_email: String(userJson.email || '').trim().toLowerCase()
+    };
+}
+
+async function upsertDiscordIdentityForUser(userId, discordUser) {
+    if (!userId || !discordUser?.discord_user_id) throw new Error('Discord user id is required');
+    const payload = {
+        discord_user_id: discordUser.discord_user_id,
+        discord_username: discordUser.discord_username || null,
+        discord_display_name: discordUser.discord_display_name || null,
+        discord_avatar: discordUser.discord_avatar || null,
+        discord_email: discordUser.discord_email || null,
+        discord_connected_at: new Date().toISOString()
+    };
+    const { error } = await supabase.from('users').update(payload).eq('id', userId);
+    if (error) throw new Error(error.message);
+    const existingSettings = await getUserSettings(userId).catch(() => ({}));
+    await setUserSettings(userId, { ...existingSettings, ...payload });
+    return payload;
+}
+
+function createAuthToken(user) {
+    return jwt.sign({ user_id: user.id, role: user.role }, process.env.JWT_SECRET, { expiresIn: '7d' });
 }
 
 function formatDiscordMention(value = '', fallbackEmail = '') {
@@ -2861,7 +2944,7 @@ async function sendCheckoutDiscordNotifications(order, user) {
     const results = [];
     const userEmail = String(user?.email || '');
     const userSettings = user?.id ? await getUserSettings(user.id) : {};
-    const discordHandle = normalizeDiscordUserId(userSettings?.discord_user_id || '');
+    const discordHandle = normalizeDiscordUserId(user?.discord_user_id || userSettings?.discord_user_id || '');
 
     const checkoutType = classifyCheckoutWebhookType(order);
     const globalSettings = await getAppSetting('webhook_settings', {});
@@ -3557,7 +3640,7 @@ app.get("/admin/credits/users", auth, admin, async (req, res) => {
         const currentUser = await getCurrentUser(req);
         const scopedUserIds = await getScopeUserIdsForAdmin(currentUser);
 
-        let query = supabase.from("users").select("id, email, role, owner_admin_id, created_at").order("created_at", { ascending: false });
+        let query = supabase.from("users").select("id, email, role, owner_admin_id, created_at, discord_username, discord_display_name").order("created_at", { ascending: false });
         if (scopedUserIds && scopedUserIds.length) query = query.in("id", scopedUserIds);
 
         const { data: users, error } = await query;
@@ -3592,6 +3675,7 @@ app.get("/admin/credits/users", auth, admin, async (req, res) => {
             const creditsBalance = asSignedCredits(balance.balance, 0);
             items.push({
                 ...user,
+                user_display: formatDiscordDisplayName(user),
                 credits_balance: creditsBalance,
                 lifetime_credits_granted: asWholeCredits(balance.lifetime_credits_granted, 0),
                 lifetime_credits_spent: asWholeCredits(balance.lifetime_credits_spent, 0),
@@ -3661,7 +3745,7 @@ app.get("/admin/users/:id/credits/history", auth, admin, async (req, res) => {
         ]);
 
         res.json({
-            user: { id: targetUser.id, email: targetUser.email, role: targetUser.role },
+            user: { id: targetUser.id, email: targetUser.email, role: targetUser.role, discord_username: targetUser.discord_username || '', discord_display_name: targetUser.discord_display_name || '', user_display: formatDiscordDisplayName(targetUser) },
             balance: asSignedCredits(balanceRow.balance, 0),
             lifetime_credits_granted: asWholeCredits(balanceRow.lifetime_credits_granted, 0),
             lifetime_credits_spent: asWholeCredits(balanceRow.lifetime_credits_spent, 0),
@@ -4158,6 +4242,137 @@ app.post('/admin/webhooks/monitor/create', auth, admin, async (req, res) => {
 
 /* ================= AUTH ROUTES ================= */
 
+app.get('/auth/discord/start', async (req, res) => {
+    try {
+        const clientId = process.env.DISCORD_CLIENT_ID;
+        if (!clientId) return res.status(500).send('Discord OAuth is not configured. Missing DISCORD_CLIENT_ID.');
+        const mode = ['login', 'signup', 'connect'].includes(String(req.query.mode || 'login')) ? String(req.query.mode || 'login') : 'login';
+        const inviteCode = String(req.query.invite_code || '').trim();
+        let userId = null;
+        if (mode === 'connect') {
+            const rawToken = String(req.query.token || '').trim();
+            if (!rawToken) return res.status(401).send('Missing session token.');
+            const decoded = jwt.verify(rawToken, process.env.JWT_SECRET);
+            userId = decoded.user_id;
+        }
+        const state = signDiscordOAuthState({ mode, invite_code: inviteCode, user_id: userId });
+        const authUrl = new URL('https://discord.com/oauth2/authorize');
+        authUrl.searchParams.set('client_id', clientId);
+        authUrl.searchParams.set('redirect_uri', getDiscordRedirectUri(req));
+        authUrl.searchParams.set('response_type', 'code');
+        authUrl.searchParams.set('scope', 'identify email');
+        authUrl.searchParams.set('state', state);
+        return res.redirect(authUrl.toString());
+    } catch (err) {
+        return res.status(500).send(err.message || 'Could not start Discord login.');
+    }
+});
+
+app.get('/auth/discord/callback', async (req, res) => {
+    const frontendBase = getFrontendBaseUrl(req);
+    try {
+        const code = String(req.query.code || '').trim();
+        const state = verifyDiscordOAuthState(req.query.state || '');
+        if (!code) throw new Error('Discord did not return an authorization code.');
+        const discordUser = await fetchDiscordOAuthUser({ code, redirectUri: getDiscordRedirectUri(req) });
+
+        if (state.mode === 'connect') {
+            await upsertDiscordIdentityForUser(state.user_id, discordUser);
+            return res.redirect(`${frontendBase}/dashboard.html?discord_connected=1`);
+        }
+
+        let user = null;
+        const { data: discordMatches, error: discordMatchError } = await supabase
+            .from('users')
+            .select('*')
+            .eq('discord_user_id', discordUser.discord_user_id)
+            .limit(1);
+        if (discordMatchError && !String(discordMatchError.message || '').includes('column')) throw new Error(discordMatchError.message);
+        if (discordMatches?.length) user = discordMatches[0];
+
+        if (!user && discordUser.discord_email) {
+            const { data: emailUser } = await supabase
+                .from('users')
+                .select('*')
+                .ilike('email', discordUser.discord_email)
+                .maybeSingle();
+            if (emailUser) user = emailUser;
+        }
+
+        if (!user && state.mode === 'signup') {
+            const inviteCode = String(state.invite_code || '').trim();
+            if (!inviteCode) throw new Error('Invite code is required for Discord signup.');
+            const { data: invite, error: inviteError } = await supabase
+                .from('invite_codes')
+                .select('*')
+                .eq('code', inviteCode)
+                .eq('used', false)
+                .eq('canceled', false)
+                .single();
+            if (inviteError || !invite) throw new Error('Invalid invite code');
+            const inviteRole = invite.invite_role || 'user';
+            const email = discordUser.discord_email || `${discordUser.discord_user_id}@discord.local`;
+            const hash = await bcrypt.hash(crypto.randomBytes(24).toString('hex'), 10);
+            const { data: createdUser, error: createError } = await supabase
+                .from('users')
+                .insert({
+                    email,
+                    password_hash: hash,
+                    role: inviteRole,
+                    revoked: false,
+                    owner_admin_id: inviteRole === 'user' ? invite.created_by_admin_id || null : null,
+                    discord_user_id: discordUser.discord_user_id,
+                    discord_username: discordUser.discord_username || null,
+                    discord_display_name: discordUser.discord_display_name || null,
+                    discord_avatar: discordUser.discord_avatar || null,
+                    discord_email: discordUser.discord_email || null,
+                    discord_connected_at: new Date().toISOString()
+                })
+                .select()
+                .single();
+            if (createError) throw new Error(createError.message);
+            await supabase.from('invite_codes').update({ used: true, used_by: createdUser.id }).eq('id', invite.id);
+            await ensureUserCreditBalance(createdUser.id).catch(() => null);
+            user = createdUser;
+        }
+
+        if (!user) {
+            throw new Error('No account is linked to this Discord user yet. Sign up with an invite code or log in by email and connect Discord from Discord Settings.');
+        }
+
+        if (user.revoked) throw new Error('This account has been revoked');
+        await upsertDiscordIdentityForUser(user.id, discordUser);
+        const token = createAuthToken(user);
+        return res.redirect(`${frontendBase}/dashboard.html?token=${encodeURIComponent(token)}&discord_login=1`);
+    } catch (err) {
+        return res.redirect(`${frontendBase}/login.html?error=${encodeURIComponent(err.message || 'Discord login failed')}`);
+    }
+});
+
+app.post('/auth/discord/disconnect', auth, async (req, res) => {
+    try {
+        await supabase.from('users').update({
+            discord_user_id: null,
+            discord_username: null,
+            discord_display_name: null,
+            discord_avatar: null,
+            discord_email: null,
+            discord_connected_at: null
+        }).eq('id', req.user_id);
+        const settings = await getUserSettings(req.user_id).catch(() => ({}));
+        delete settings.discord_user_id;
+        delete settings.discord_username;
+        delete settings.discord_display_name;
+        delete settings.discord_avatar;
+        delete settings.discord_email;
+        delete settings.discord_connected_at;
+        await setUserSettings(req.user_id, settings);
+        res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
 app.post("/auth/signup", async (req, res) => {
     const { email, password, invite_code } = req.body;
 
@@ -4245,11 +4460,7 @@ app.post("/auth/login", async (req, res) => {
         return res.status(401).json({ error: "Wrong password" });
     }
 
-    const token = jwt.sign(
-        { user_id: user.id, role: user.role },
-        process.env.JWT_SECRET,
-        { expiresIn: "7d" }
-    );
+    const token = createAuthToken(user);
 
     const creditBalance = await getUserCreditBalance(user.id);
 
@@ -4262,7 +4473,10 @@ app.post("/auth/login", async (req, res) => {
             owner_admin_id: user.owner_admin_id || null,
             revoked: !!user.revoked,
             credits_balance: creditBalance,
-            discord_user_id: normalizeDiscordUserId((await getUserSettings(user.id))?.discord_user_id || '')
+            discord_user_id: normalizeDiscordUserId(user.discord_user_id || (await getUserSettings(user.id))?.discord_user_id || ''),
+            discord_username: user.discord_username || '',
+            discord_display_name: user.discord_display_name || '',
+            discord_avatar: user.discord_avatar || ''
         }
     });
 });
@@ -4281,7 +4495,10 @@ app.get("/auth/me", auth, async (req, res) => {
                 owner_admin_id: user.owner_admin_id || null,
                 revoked: !!user.revoked,
                 credits_balance: creditBalance,
-                discord_user_id: normalizeDiscordUserId((await getUserSettings(user.id))?.discord_user_id || '')
+                discord_user_id: normalizeDiscordUserId(user.discord_user_id || (await getUserSettings(user.id))?.discord_user_id || ''),
+            discord_username: user.discord_username || '',
+            discord_display_name: user.discord_display_name || '',
+            discord_avatar: user.discord_avatar || ''
             }
         });
     } catch (err) {
@@ -4292,8 +4509,13 @@ app.get("/auth/me", auth, async (req, res) => {
 app.get("/user/settings", auth, async (req, res) => {
     try {
         const settings = await getUserSettings(req.user_id);
+        const user = req.currentUser || await getCurrentUser(req);
         res.json({
-            discord_user_id: normalizeDiscordUserId(settings?.discord_user_id || '')
+            discord_user_id: normalizeDiscordUserId(user.discord_user_id || settings?.discord_user_id || ''),
+            discord_username: user.discord_username || settings?.discord_username || '',
+            discord_display_name: user.discord_display_name || settings?.discord_display_name || '',
+            discord_avatar: user.discord_avatar || settings?.discord_avatar || '',
+            discord_connected: !!(user.discord_user_id || settings?.discord_user_id)
         });
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -4303,7 +4525,9 @@ app.get("/user/settings", auth, async (req, res) => {
 app.post("/user/settings", auth, async (req, res) => {
     try {
         const discordUserId = normalizeDiscordUserId(req.body?.discord_user_id || '');
-        const updated = await setUserSettings(req.user_id, { discord_user_id: discordUserId });
+        const existingSettings = await getUserSettings(req.user_id).catch(() => ({}));
+        const updated = await setUserSettings(req.user_id, { ...existingSettings, discord_user_id: discordUserId });
+        await supabase.from('users').update({ discord_user_id: discordUserId || null }).eq('id', req.user_id);
         res.json({
             success: true,
             discord_user_id: normalizeDiscordUserId(updated?.discord_user_id || discordUserId)
@@ -5360,10 +5584,10 @@ app.get("/admin/users", auth, admin, async (req, res) => {
         if (ownerIds.length) {
             const { data: owners } = await supabase
                 .from("users")
-                .select("id, email")
+                .select("id, email, discord_username, discord_display_name")
                 .in("id", ownerIds);
 
-            ownerMap = Object.fromEntries((owners || []).map((o) => [o.id, o.email]));
+            ownerMap = Object.fromEntries((owners || []).map((o) => [o.id, formatDiscordDisplayName(o)]));
         }
 
         const userIds = (users || []).map((u) => u.id);
@@ -5383,7 +5607,8 @@ app.get("/admin/users", auth, admin, async (req, res) => {
         const output = (users || []).map((u) => ({
             ...u,
             profile_count: profileCountMap[u.id] || 0,
-            owner_admin_email: u.owner_admin_id ? ownerMap[u.owner_admin_id] || "" : ""
+            owner_admin_email: u.owner_admin_id ? ownerMap[u.owner_admin_id] || "" : "",
+            owner_admin_display: u.owner_admin_id ? ownerMap[u.owner_admin_id] || "" : "",
         }));
 
         res.json({
@@ -5408,7 +5633,7 @@ app.get("/admin/admin-owners", auth, admin, async (req, res) => {
 
         const { data, error } = await supabase
             .from("users")
-            .select("id, email")
+            .select("id, email, discord_username, discord_display_name")
             .in("role", ["admin", "super_admin"])
             .order("email", { ascending: true });
 

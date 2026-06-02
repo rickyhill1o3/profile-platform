@@ -98,6 +98,58 @@ const API =
         ? "http://localhost:3000"
         : "https://profile-platform.onrender.com";
 
+function consumeOAuthRedirectParams() {
+    const params = new URLSearchParams(window.location.search || '');
+    const tokenValue = params.get('token');
+    const errorValue = params.get('error');
+    if (tokenValue) {
+        localStorage.token = tokenValue;
+        const cleanUrl = window.location.pathname || 'dashboard.html';
+        window.history.replaceState({}, document.title, cleanUrl);
+    }
+    if (errorValue) {
+        const msg = document.getElementById('error') || document.getElementById('userSettingsMessage');
+        if (msg) msg.textContent = errorValue;
+    }
+}
+
+function startDiscordOAuth(mode = 'login') {
+    const params = new URLSearchParams({ mode });
+    if (mode === 'signup') {
+        const inviteInput = document.getElementById('invite');
+        const inviteCode = String(inviteInput?.value || '').trim();
+        if (!inviteCode) {
+            const msg = document.getElementById('error');
+            if (msg) msg.textContent = 'Enter your invite code before signing up with Discord.';
+            return;
+        }
+        params.set('invite_code', inviteCode);
+    }
+    if (mode === 'connect') {
+        const saved = token();
+        if (!saved) {
+            window.location.href = 'login.html';
+            return;
+        }
+        params.set('token', saved);
+    }
+    window.location.href = `${API}/auth/discord/start?${params.toString()}`;
+}
+
+function userDisplayName(user = {}) {
+    const discord = String(user.discord_display_name || user.discord_username || user.discord_name || '').trim();
+    const email = String(user.email || user.user_email || '').trim();
+    if (discord && email) return `${discord} (${email})`;
+    return email || discord || user.id || user.user_id || '-';
+}
+
+function userExportDisplayName(user = {}) {
+    const discord = String(user.discord_display_name || user.discord_username || '').trim();
+    const email = String(user.user_email || user.email || '').trim();
+    if (discord && email) return `${discord} (${email})`;
+    return email || discord || user.user_id || '-';
+}
+
 let invitePage = 1;
 let usersPage = 1;
 const PAGE_SIZE = 10;
@@ -109,6 +161,7 @@ let allDashboardProfiles = [];
 let profileGroupFilters = { all: '', general: '', walmart: '', target: '', samsclub: '', amazon: '', crunchyroll: '', pokemoncenter: '', raffle: '' };
 let selectedProfileIds = new Set();
 
+consumeOAuthRedirectParams();
 
 const PUBLIC_PATHS = new Set(["/", "/index.html", "/guide", "/guide.html", "/login", "/login.html", "/signup", "/signup.html", "/forgot-password", "/forgot-password.html", "/reset-password", "/reset-password.html"]);
 
@@ -1092,7 +1145,7 @@ async function loadInviteOwnerAdmins() {
             .forEach((adminUser) => {
                 const option = document.createElement("option");
                 option.value = adminUser.id;
-                option.textContent = adminUser.email || adminUser.id;
+                option.textContent = userDisplayName(adminUser);
                 ownerSelect.appendChild(option);
             });
     } catch (err) {
@@ -1381,9 +1434,9 @@ async function loadUsers(page = usersPage) {
 
             html += `
                 <tr>
-                    <td>${u.email}</td>
+                    <td>${escapeHTML(userDisplayName(u))}</td>
                     <td>${u.role}</td>
-                    <td>${u.owner_admin_email || (u.owner_admin_id ? u.owner_admin_id : "-")}</td>
+                    <td>${escapeHTML(u.owner_admin_display || u.owner_admin_email || (u.owner_admin_id ? u.owner_admin_id : "-"))}</td>
                     <td>${u.profile_count || 0}</td>
                     <td>${userStatusBadge(u)}</td>
                     <td>${u.created_at ? new Date(u.created_at).toLocaleString() : "-"}</td>
@@ -2721,12 +2774,23 @@ async function saveWebhookSettings() {
 async function loadUserSettings() {
     const input = document.getElementById('userDiscordHandle');
     const message = document.getElementById('userSettingsMessage');
-    if (!input) return;
+    const connectedBox = document.getElementById('discordConnectedBox');
+    const connectButton = document.getElementById('connectDiscordButton');
+    const disconnectButton = document.getElementById('disconnectDiscordButton');
+    if (!input && !connectedBox) return;
 
     try {
         const data = await authJSON(API + '/user/settings');
-        input.value = data.discord_user_id || '';
-        if (message) message.textContent = 'Discord settings loaded.';
+        if (input) input.value = data.discord_user_id || '';
+        const display = data.discord_display_name || data.discord_username || data.discord_user_id || '';
+        if (connectedBox) {
+            connectedBox.innerHTML = data.discord_connected
+                ? `<strong>Discord Connected</strong><br><span class="subtle-text">✓ ${escapeHTML(display)}</span>`
+                : '<strong>Discord Not Connected</strong><br><span class="subtle-text">Connect Discord so checkout webhooks can ping you automatically.</span>';
+        }
+        if (connectButton) connectButton.style.display = data.discord_connected ? 'none' : 'inline-flex';
+        if (disconnectButton) disconnectButton.style.display = data.discord_connected ? 'inline-flex' : 'none';
+        if (message) message.textContent = data.discord_connected ? 'Discord is connected.' : '';
     } catch (err) {
         if (message) message.textContent = err.message;
     }
@@ -2747,6 +2811,19 @@ async function saveUserSettings() {
 
         input.value = data.discord_user_id || '';
         if (message) message.textContent = 'Discord user ID saved.';
+        await loadUserSettings();
+    } catch (err) {
+        if (message) message.textContent = err.message;
+    }
+}
+
+async function disconnectDiscord() {
+    const message = document.getElementById('userSettingsMessage');
+    try {
+        await authJSON(API + '/auth/discord/disconnect', { method: 'POST' });
+        if (message) message.textContent = 'Discord disconnected.';
+        await refreshCurrentUserFromServer();
+        await loadUserSettings();
     } catch (err) {
         if (message) message.textContent = err.message;
     }
@@ -3474,7 +3551,7 @@ async function loadUserCreditReceipt(userId) {
         const user = data.user || {};
         const balance = Number(data.balance || 0);
         summary.innerHTML = `
-            <strong>${escapeHTML(user.email || '-')}</strong>
+            <strong>${escapeHTML(userDisplayName(user))}</strong>
             <span class="subtle-text"> • Balance: ${escapeHTML(String(balance))} credits • Granted: ${escapeHTML(String(data.lifetime_credits_granted || 0))} • Spent: ${escapeHTML(String(data.lifetime_credits_spent || 0))} • ${data.needs_removal ? 'Needs removal until positive balance' : 'Eligible / positive balance'}</span>
         `;
 
@@ -3519,7 +3596,7 @@ async function loadCreditsAdminPane() {
         const users = Array.isArray(usersData.items) ? usersData.items : [];
         usersBody.innerHTML = users.length ? users.map((item) => `
             <tr>
-              <td>${escapeHTML(item.email || '-')}</td>
+              <td>${escapeHTML(userDisplayName(item))}</td>
               <td>${escapeHTML(item.role || '-')}</td>
               <td>${escapeHTML(String(item.credits_balance || 0))}</td>
               <td>${escapeHTML(String(item.lifetime_credits_granted || 0))}</td>
@@ -3624,7 +3701,7 @@ async function loadProductSelectionChanges() {
             const product = item.product || {};
             return `<tr>
                 <td>${escapeHTML(formatDateTime(item.created_at))}</td>
-                <td>${escapeHTML(item.user_email || item.user_id || "-")}</td>
+                <td>${escapeHTML(userExportDisplayName(item))}</td>
                 <td>${escapeHTML(item.site || "-")}</td>
                 <td>${escapeHTML(item.action || "-")}</td>
                 <td>${escapeHTML(product.sku || "-")}</td>
@@ -3648,7 +3725,7 @@ async function loadProductSelectionExportUsers() {
         users.forEach((user) => {
             const option = document.createElement("option");
             option.value = user.user_id;
-            option.textContent = `${user.changed_since_export ? "● " : ""}${user.user_email} (${user.selection_count})${user.changed_since_export ? " - changed" : ""}`;
+            option.textContent = `${user.changed_since_export ? "● " : ""}${userExportDisplayName(user)} (${user.selection_count})${user.changed_since_export ? " - changed" : ""}`;
             option.dataset.changed = user.changed_since_export ? "1" : "0";
             select.appendChild(option);
         });

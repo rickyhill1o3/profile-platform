@@ -684,6 +684,11 @@ async function setCatalogAppSetting(supabase, key, value) {
 
 
 module.exports = function registerProductCatalogRoutes({ app, supabase, auth, admin, getCurrentUser, ensureUserNotRevoked }) {
+    function formatDiscordDisplayName(user = {}) {
+        const display = String(user.discord_display_name || user.discord_username || '').trim();
+        const email = String(user.email || '').trim();
+        return display ? `${display} (${email || user.id || ''})` : (email || user.id || '');
+    }
     app.get('/public/countdowns', async (req, res) => {
         try {
             const { data, error } = await supabase
@@ -1404,7 +1409,7 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
             const userIds = [...grouped.keys()];
             let userMap = new Map();
             if (userIds.length) {
-                const { data: users, error: usersError } = await supabase.from('users').select('id, email, owner_admin_id').in('id', userIds);
+                const { data: users, error: usersError } = await supabase.from('users').select('id, email, owner_admin_id, discord_username, discord_display_name').in('id', userIds);
                 if (usersError) return res.status(500).json({ error: usersError.message });
                 userMap = new Map((users || []).map((user) => [user.id, user]));
             }
@@ -1416,6 +1421,9 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
                 return {
                     ...row,
                     user_email: userMap.get(row.user_id)?.email || row.user_id,
+                    discord_username: userMap.get(row.user_id)?.discord_username || '',
+                    discord_display_name: userMap.get(row.user_id)?.discord_display_name || '',
+                    user_display: formatDiscordDisplayName(userMap.get(row.user_id) || { id: row.user_id }),
                     last_exported_at: lastExportedAt,
                     changed_since_export: !!changedSinceExport
                 };
@@ -1463,7 +1471,7 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
             const userIds = [...new Set(filtered.map((row) => row.user_id).filter(Boolean))];
             let userMap = new Map();
             if (userIds.length) {
-                const { data: users, error: usersError } = await supabase.from('users').select('id, email, owner_admin_id').in('id', userIds);
+                const { data: users, error: usersError } = await supabase.from('users').select('id, email, owner_admin_id, discord_username, discord_display_name').in('id', userIds);
                 if (usersError) return res.status(500).json({ error: usersError.message });
                 userMap = new Map((users || []).map((user) => [user.id, user]));
             }
@@ -1471,7 +1479,10 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
             res.json({
                 items: filtered.slice(0, 150).map((row) => ({
                     ...row,
-                    user_email: userMap.get(row.user_id)?.email || row.user_id || ''
+                    user_email: userMap.get(row.user_id)?.email || row.user_id || '',
+                    discord_username: userMap.get(row.user_id)?.discord_username || '',
+                    discord_display_name: userMap.get(row.user_id)?.discord_display_name || '',
+                    user_display: formatDiscordDisplayName(userMap.get(row.user_id) || { id: row.user_id })
                 }))
             });
         } catch (err) {
@@ -1590,7 +1601,7 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
             const userIds = [...new Set((resolvedData || []).map((row) => row.user_id).filter(Boolean))];
             let userMap = new Map();
             if (userIds.length) {
-                const { data: users, error: usersError } = await supabase.from('users').select('id, email, owner_admin_id').in('id', userIds);
+                const { data: users, error: usersError } = await supabase.from('users').select('id, email, owner_admin_id, discord_username, discord_display_name').in('id', userIds);
                 if (usersError) return res.status(500).json({ error: usersError.message });
                 userMap = new Map((users || []).map((user) => [user.id, user]));
             }
@@ -1611,6 +1622,9 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
                     byUser.set(row.user_id, {
                         user_id: row.user_id,
                         user_email: user.email || row.user_id,
+                        discord_username: user.discord_username || '',
+                        discord_display_name: user.discord_display_name || '',
+                        user_display: formatDiscordDisplayName(user),
                         lines: []
                     });
 
@@ -1644,7 +1658,7 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
             const users = [...byUser.values()].sort((a, b) => (a.user_email || '').localeCompare(b.user_email || ''));
             const text = requestedUserId
                 ? (users[0]?.lines || []).join('\n')
-                : users.map((user) => `${user.user_email}\n${user.lines.join('\n')}`).join('\n\n');
+                : users.map((user) => `${user.user_display || user.user_email}\n${user.lines.join('\n')}`).join('\n\n');
             res.json({ site, users, text });
         } catch (err) {
             res.status(500).json({ error: err.message });

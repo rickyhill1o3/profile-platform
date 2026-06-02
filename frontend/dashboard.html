@@ -348,15 +348,20 @@
         <section class="admin-pane" data-user-pane="discord">
           <section class="panel banner banner-soft" id="userDiscordSettingsPanel">
             <strong>Discord notifications</strong>
-            <p class="subtle-text">Paste your Discord User ID so checkout webhooks can truly ping you. In Discord, turn on Developer Mode, right click your profile, and choose Copy User ID.</p>
-            <div class="form-grid">
+            <p class="subtle-text">Connect Discord so checkout webhooks can ping you automatically. You can still paste a Discord User ID manually if needed.</p>
+            <div class="form-stack">
+              <div id="discordConnectedBox" class="panel banner banner-soft">Loading Discord status...</div>
+              <div class="panel-actions">
+                <button class="btn btn-primary" id="connectDiscordButton" type="button" onclick="startDiscordOAuth('connect')">Connect Discord</button>
+                <button class="btn" id="disconnectDiscordButton" type="button" onclick="disconnectDiscord()" style="display:none;">Disconnect Discord</button>
+              </div>
               <div class="field field--full">
-                <label for="userDiscordHandle">Discord User ID</label>
+                <label for="userDiscordHandle">Manual Discord User ID</label>
                 <input class="input" id="userDiscordHandle" placeholder="123456789012345678" />
-                <div class="subtle-text">Accepted formats: raw user ID or a full mention like &lt;@123456789012345678&gt;.</div>
+                <div class="subtle-text">Optional fallback. Accepted formats: raw user ID or a full mention like &lt;@123456789012345678&gt;.</div>
               </div>
               <div class="field field--full panel-actions">
-                <button class="btn btn-primary" type="button" onclick="saveUserSettings()">Save Discord User ID</button>
+                <button class="btn" type="button" onclick="saveUserSettings()">Save Manual Discord User ID</button>
                 <span id="userSettingsMessage" class="subtle-text"></span>
               </div>
             </div>
