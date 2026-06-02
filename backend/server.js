@@ -426,7 +426,7 @@ function findDuplicateInSameGroup(
     cardLast4
 ) {
     for (const profile of profiles) {
-        if (currentProfileId && profile.id === currentProfileId) {
+        if (currentProfileId && String(profile.id) === String(currentProfileId)) {
             continue;
         }
 
