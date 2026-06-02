@@ -407,7 +407,11 @@ async function getUserProfilesWithRelations(userId) {
         throw new Error(error.message);
     }
 
-    return data || [];
+    const assignments = await loadProfileStoreAssignments(userId);
+    return (data || []).map((profile) => ({
+        ...profile,
+        store_assignments: assignments?.get(String(profile.id)) || [normalizeProfileAccountType(profile.account_type || "general")]
+    }));
 }
 
 function findDuplicateInSameGroup(
@@ -4480,7 +4484,7 @@ function normalizeImportedProfilePayload(entry = {}, accountType = "walmart") {
 }
 
 
-const PROFILE_ACCOUNT_TYPES = new Set(["general", "walmart", "target", "samsclub", "amazon", "raffle"]);
+const PROFILE_ACCOUNT_TYPES = new Set(["general", "walmart", "target", "samsclub", "amazon", "pokemoncenter", "raffle"]);
 
 function normalizeProfileAccountType(value = "general") {
     const raw = String(value || "general").trim().toLowerCase();
@@ -4489,8 +4493,133 @@ function normalizeProfileAccountType(value = "general") {
     if (["samsclub", "samclub", "sams", "sam'sclub"].includes(type)) {
         return "samsclub";
     }
+    if (["pokemoncenter", "pokemon", "pokecenter", "pc"].includes(type)) {
+        return "pokemoncenter";
+    }
 
     return PROFILE_ACCOUNT_TYPES.has(type) ? type : "general";
+}
+
+function normalizeAssignedStores(value, fallback = "general") {
+    const raw = Array.isArray(value) ? value : String(value || "").split(/[;,\s]+/);
+    const stores = raw
+        .map((item) => normalizeProfileAccountType(item))
+        .filter((store) => store && store !== "raffle");
+
+    if (!stores.length) {
+        const fallbackStore = normalizeProfileAccountType(fallback || "general");
+        return fallbackStore === "raffle" ? ["general"] : [fallbackStore];
+    }
+
+    return [...new Set(stores)];
+}
+
+function profileAssignedStores(profile = {}) {
+    if (Array.isArray(profile.store_assignments) && profile.store_assignments.length) {
+        return profile.store_assignments.map(normalizeProfileAccountType);
+    }
+    if (Array.isArray(profile.profile_store_assignments) && profile.profile_store_assignments.length) {
+        return profile.profile_store_assignments.map((row) => normalizeProfileAccountType(row.store));
+    }
+    return [normalizeProfileAccountType(profile.account_type || "general")];
+}
+
+async function loadProfileStoreAssignments(userId) {
+    try {
+        const { data, error } = await supabase
+            .from("profile_store_assignments")
+            .select("profile_id, store")
+            .eq("user_id", userId);
+
+        if (error) throw error;
+
+        const map = new Map();
+        (data || []).forEach((row) => {
+            const id = String(row.profile_id || "");
+            const store = normalizeProfileAccountType(row.store);
+            if (!id || store === "raffle") return;
+            if (!map.has(id)) map.set(id, []);
+            map.get(id).push(store);
+        });
+        return map;
+    } catch (err) {
+        // Migration may not be installed yet. Existing account_type behavior still works.
+        return null;
+    }
+}
+
+async function replaceProfileStoreAssignments(userId, profileId, stores) {
+    const cleanStores = normalizeAssignedStores(stores);
+    try {
+        await supabase.from("profile_store_assignments").delete().eq("profile_id", profileId);
+        const rows = cleanStores.map((store) => ({ user_id: userId, profile_id: profileId, store }));
+        const { error } = await supabase.from("profile_store_assignments").insert(rows);
+        if (error) throw error;
+    } catch (err) {
+        // If the migration is not installed, keep the primary account_type fallback working.
+    }
+}
+
+async function enforceProfileAssignmentLimits({ userId, role, stores, excludeProfileId = null }) {
+    const cleanStores = normalizeAssignedStores(stores);
+    if (role === "super_admin") return;
+
+    const existingProfiles = await getUserProfilesWithRelations(userId);
+
+    for (const store of cleanStores) {
+        if (store === "raffle") continue;
+        const limit = getProfileLimitForRole(role, store);
+        if (!Number.isFinite(limit)) continue;
+
+        const currentCount = existingProfiles.filter((profile) => {
+            if (excludeProfileId && String(profile.id) === String(excludeProfileId)) return false;
+            return profileAssignedStores(profile).includes(store);
+        }).length;
+
+        if (currentCount + 1 > limit) {
+            throw new Error(`Profile limit reached for ${store}. Your account can have up to ${limit} ${store} profile${limit === 1 ? "" : "s"}.`);
+        }
+    }
+}
+
+function findDuplicateAcrossAssignedStores(profiles, currentProfileId, stores, profileName, email, phone, cardLast4) {
+    const cleanStores = normalizeAssignedStores(stores);
+    for (const store of cleanStores) {
+        const duplicateError = findDuplicateInSameGroup(
+            profiles.map((profile) => ({ ...profile, account_type: profileAssignedStores(profile).includes(store) ? store : profile.account_type })),
+            currentProfileId,
+            store,
+            profileName,
+            email,
+            phone,
+            cardLast4
+        );
+        if (duplicateError) return `${duplicateError} (${store})`;
+    }
+    return null;
+}
+
+async function attachAndFilterProfilesByStore(profiles, group = "") {
+    const items = Array.isArray(profiles) ? profiles : [];
+    const users = [...new Set(items.map((profile) => profile.user_id).filter(Boolean))];
+    const assignmentMaps = new Map();
+
+    for (const userId of users) {
+        assignmentMaps.set(String(userId), await loadProfileStoreAssignments(userId));
+    }
+
+    const attached = items.map((profile) => {
+        const map = assignmentMaps.get(String(profile.user_id));
+        return {
+            ...profile,
+            store_assignments: map?.get(String(profile.id)) || [normalizeProfileAccountType(profile.account_type || "general")]
+        };
+    });
+
+    if (!group) return attached;
+
+    const cleanGroup = normalizeProfileAccountType(group);
+    return attached.filter((profile) => profileAssignedStores(profile).includes(cleanGroup));
 }
 
 function getProfileLimitForRole(role = "user", accountType = "general") {
@@ -4498,8 +4627,8 @@ function getProfileLimitForRole(role = "user", accountType = "general") {
     if (role === "super_admin") return Infinity;
     if (type === "raffle") return Infinity;
 
-    const adminLimits = { target: 6, samsclub: 6, amazon: 2, general: 5, walmart: 100 };
-    const userLimits = { target: 2, samsclub: 2, amazon: 1, general: 3, walmart: 100 };
+    const adminLimits = { target: 8, samsclub: 6, amazon: 2, general: 5, walmart: 100, pokemoncenter: 5 };
+    const userLimits = { target: 4, samsclub: 2, amazon: 1, general: 3, walmart: 100, pokemoncenter: 2 };
 
     const source = role === "admin" ? adminLimits : userLimits;
     return source[type] ?? 0;
@@ -4686,7 +4815,10 @@ app.get("/profiles", auth, async (req, res) => {
             return res.status(500).json({ error: error.message });
         }
 
+        const assignments = await loadProfileStoreAssignments(req.user_id);
+
         (data || []).forEach((profile) => {
+            profile.store_assignments = assignments?.get(String(profile.id)) || [normalizeProfileAccountType(profile.account_type || "general")];
             if (profile.payments?.length) {
                 const payment = profile.payments[0];
                 try {
@@ -4918,6 +5050,7 @@ app.delete("/profiles/bulk", auth, async (req, res) => {
             return res.status(404).json({ error: 'No matching profiles found' });
         }
 
+        await supabase.from('profile_store_assignments').delete().in('profile_id', ownedIds);
         await supabase.from('accounts').delete().in('profile_id', ownedIds);
         await supabase.from('payments').delete().in('profile_id', ownedIds);
         await supabase.from('addresses').delete().in('profile_id', ownedIds);
@@ -4934,21 +5067,22 @@ app.delete("/profiles/bulk", auth, async (req, res) => {
 
 app.post("/profiles", auth, async (req, res) => {
     try {
-        const data = { ...req.body, account_type: normalizeProfileAccountType(req.body?.account_type) };
+        const assignedStores = normalizeAssignedStores(req.body?.assigned_stores, req.body?.account_type);
+        const data = { ...req.body, account_type: assignedStores[0] || normalizeProfileAccountType(req.body?.account_type), assigned_stores: assignedStores };
         const cardLast4 = (data.card || "").slice(-4);
 
         const currentUser = await ensureUserNotRevoked(req.user_id);
-        await enforceProfileLimit({ userId: req.user_id, role: currentUser.role, accountType: data.account_type });
+        await enforceProfileAssignmentLimits({ userId: req.user_id, role: currentUser.role, stores: assignedStores });
 
         if (!phoneRegex.test(data.phone || "")) {
             return res.status(400).json({ error: "Phone must be xxxxxxxxxx" });
         }
 
         const existingProfiles = await getUserProfilesWithRelations(req.user_id);
-        const duplicateError = findDuplicateInSameGroup(
+        const duplicateError = findDuplicateAcrossAssignedStores(
             existingProfiles,
             null,
-            data.account_type,
+            assignedStores,
             data.profile_name,
             data.email,
             data.phone,
@@ -4974,6 +5108,7 @@ app.post("/profiles", auth, async (req, res) => {
         }
 
         await upsertProfileRelations(createdProfile.id, data);
+        await replaceProfileStoreAssignments(req.user_id, createdProfile.id, assignedStores);
 
         res.json({ success: true });
     } catch (err) {
@@ -4984,21 +5119,22 @@ app.post("/profiles", auth, async (req, res) => {
 app.put("/profiles/:id", auth, async (req, res) => {
     try {
         const id = req.params.id;
-        const data = { ...req.body, account_type: normalizeProfileAccountType(req.body?.account_type) };
+        const assignedStores = normalizeAssignedStores(req.body?.assigned_stores, req.body?.account_type);
+        const data = { ...req.body, account_type: assignedStores[0] || normalizeProfileAccountType(req.body?.account_type), assigned_stores: assignedStores };
         const cardLast4 = (data.card || "").slice(-4);
 
         const currentUser = await ensureUserNotRevoked(req.user_id);
-        await enforceProfileLimit({ userId: req.user_id, role: currentUser.role, accountType: data.account_type });
+        await enforceProfileAssignmentLimits({ userId: req.user_id, role: currentUser.role, stores: assignedStores, excludeProfileId: id });
 
         if (!phoneRegex.test(data.phone || "")) {
             return res.status(400).json({ error: "Phone must be xxxxxxxxxx" });
         }
 
         const existingProfiles = await getUserProfilesWithRelations(req.user_id);
-        const duplicateError = findDuplicateInSameGroup(
+        const duplicateError = findDuplicateAcrossAssignedStores(
             existingProfiles,
             id,
-            data.account_type,
+            assignedStores,
             data.profile_name,
             data.email,
             data.phone,
@@ -5023,6 +5159,7 @@ app.put("/profiles/:id", auth, async (req, res) => {
         }
 
         await upsertProfileRelations(id, data);
+        await replaceProfileStoreAssignments(req.user_id, id, assignedStores);
 
         res.json({ success: true });
     } catch (err) {
@@ -5036,6 +5173,7 @@ app.delete("/profiles/:id", auth, async (req, res) => {
 
         const id = req.params.id;
 
+        await supabase.from("profile_store_assignments").delete().eq("profile_id", id);
         await supabase.from("accounts").delete().eq("profile_id", id);
         await supabase.from("payments").delete().eq("profile_id", id);
         await supabase.from("addresses").delete().eq("profile_id", id);
@@ -5695,9 +5833,6 @@ app.get("/admin/export/count", auth, admin, async (req, res) => {
             if (user_id) {
                 query = query.eq("user_id", user_id);
             }
-            if (group) {
-                query = query.eq("account_type", group);
-            }
         } else {
             const ownedUserIds = await getScopeUserIdsForAdmin(currentUser);
 
@@ -5711,9 +5846,6 @@ app.get("/admin/export/count", auth, admin, async (req, res) => {
                 query = query.eq("user_id", user_id);
             }
 
-            if (group) {
-                query = query.eq("account_type", group);
-            }
         }
 
         const { data, error } = await query;
@@ -5722,7 +5854,8 @@ app.get("/admin/export/count", auth, admin, async (req, res) => {
             return res.status(500).json({ error: error.message });
         }
 
-        res.json({ count: (data || []).length });
+        const filtered = await attachAndFilterProfilesByStore(data || [], group || "");
+        res.json({ count: filtered.length });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
@@ -5746,7 +5879,6 @@ app.get("/admin/export/profiles-json", auth, admin, async (req, res) => {
 
         if (currentUser.role === "super_admin") {
             if (user_id) query = query.eq("user_id", user_id);
-            if (group) query = query.eq("account_type", group);
         } else {
             const ownedUserIds = await getScopeUserIdsForAdmin(currentUser);
 
@@ -5757,7 +5889,6 @@ app.get("/admin/export/profiles-json", auth, admin, async (req, res) => {
             query = query.in("user_id", safeIn(ownedUserIds));
 
             if (user_id) query = query.eq("user_id", user_id);
-            if (group) query = query.eq("account_type", group);
         }
 
         const { data: profiles, error } = await query;
@@ -5766,7 +5897,9 @@ app.get("/admin/export/profiles-json", auth, admin, async (req, res) => {
             return res.status(500).json({ error: error.message });
         }
 
-        const rows = (profiles || []).map((profile) => {
+        const exportProfiles = await attachAndFilterProfilesByStore(profiles || [], group || "");
+
+        const rows = exportProfiles.map((profile) => {
             const address = profile.addresses?.[0] || {};
             const payment = profile.payments?.[0] || {};
 
@@ -5858,7 +5991,6 @@ app.get("/admin/export/accounts-txt", auth, admin, async (req, res) => {
 
         if (currentUser.role === "super_admin") {
             if (user_id) query = query.eq("user_id", user_id);
-            if (group) query = query.eq("account_type", group);
         } else {
             const ownedUserIds = await getScopeUserIdsForAdmin(currentUser);
 
@@ -5869,7 +6001,6 @@ app.get("/admin/export/accounts-txt", auth, admin, async (req, res) => {
             query = query.in("user_id", safeIn(ownedUserIds));
 
             if (user_id) query = query.eq("user_id", user_id);
-            if (group) query = query.eq("account_type", group);
         }
 
         const { data: profiles, error } = await query;
@@ -5878,7 +6009,9 @@ app.get("/admin/export/accounts-txt", auth, admin, async (req, res) => {
             return res.status(500).json({ error: error.message });
         }
 
-        const rows = (profiles || [])
+        const exportProfiles = await attachAndFilterProfilesByStore(profiles || [], group || "");
+
+        const rows = exportProfiles
             .map((profile) => {
                 const account = profile.accounts?.[0] || {};
                 const email = (account.login_email || "").trim();
@@ -5922,7 +6055,6 @@ app.get("/admin/export/gmail-imap-txt", auth, admin, async (req, res) => {
 
         if (currentUser.role === "super_admin") {
             if (user_id) query = query.eq("user_id", user_id);
-            if (group) query = query.eq("account_type", group);
         } else {
             const ownedUserIds = await getScopeUserIdsForAdmin(currentUser);
 
@@ -5933,7 +6065,6 @@ app.get("/admin/export/gmail-imap-txt", auth, admin, async (req, res) => {
             query = query.in("user_id", safeIn(ownedUserIds));
 
             if (user_id) query = query.eq("user_id", user_id);
-            if (group) query = query.eq("account_type", group);
         }
 
         const { data: profiles, error } = await query;
@@ -5942,7 +6073,9 @@ app.get("/admin/export/gmail-imap-txt", auth, admin, async (req, res) => {
             return res.status(500).json({ error: error.message });
         }
 
-        const rows = (profiles || [])
+        const exportProfiles = await attachAndFilterProfilesByStore(profiles || [], group || "");
+
+        const rows = exportProfiles
             .map((profile) => {
                 const account = profile.accounts?.[0] || {};
                 const email = String(account.login_email || "").trim();

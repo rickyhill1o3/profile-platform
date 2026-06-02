@@ -37,15 +37,29 @@
               <input class="input" id="profile_name" placeholder="Profile Name" required />
             </div>
             <div class="field field--full">
-              <label for="account_type">Account Type</label>
+              <label for="account_type">Primary Store</label>
               <select class="input" id="account_type" required>
                 <option value="general">General</option>
-                <option value="walmart">Walmart</option>
                 <option value="target">Target</option>
+                <option value="walmart">Walmart</option>
                 <option value="samsclub">Sam's Club</option>
                 <option value="amazon">Amazon</option>
+                <option value="pokemoncenter">Pokémon Center</option>
                 <option value="raffle">Raffle</option>
               </select>
+              <p class="form-help">Primary store is used as a fallback for older exports. Use the store assignments below to make one profile active for multiple stores.</p>
+            </div>
+            <div class="field field--full">
+              <label>Store Assignments</label>
+              <div class="checkbox-grid" id="storeAssignments">
+                <label class="checkbox-inline"><input type="checkbox" name="assigned_stores" value="target" /> Target</label>
+                <label class="checkbox-inline"><input type="checkbox" name="assigned_stores" value="walmart" /> Walmart</label>
+                <label class="checkbox-inline"><input type="checkbox" name="assigned_stores" value="samsclub" /> Sam's Club</label>
+                <label class="checkbox-inline"><input type="checkbox" name="assigned_stores" value="amazon" /> Amazon</label>
+                <label class="checkbox-inline"><input type="checkbox" name="assigned_stores" value="pokemoncenter" /> Pokémon Center</label>
+                <label class="checkbox-inline"><input type="checkbox" name="assigned_stores" value="general" /> General</label>
+              </div>
+              <p class="form-help">Create the profile once, then assign it to every store group it should run for. Target limit: 4 user profiles, 8 admin profiles, unlimited for super admin.</p>
             </div>
           </div>
 
@@ -143,7 +157,7 @@
         <div class="panel-header">
           <div>
             <h2>Setup Tips</h2>
-            <p class="subtle-text">Use clear names and match account type to the site you plan to run.</p>
+            <p class="subtle-text">Create one profile, then assign it to every store group it should run for.</p>
           </div>
         </div>
         <div class="tip-stack">

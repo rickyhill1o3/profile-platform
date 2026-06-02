@@ -273,6 +273,33 @@ function selectedAccountType() {
     return el ? el.value : "";
 }
 
+function selectedStoreAssignments() {
+    return Array.from(document.querySelectorAll('input[name="assigned_stores"]:checked'))
+        .map((input) => String(input.value || '').trim().toLowerCase())
+        .filter(Boolean);
+}
+
+function setStoreAssignments(stores = []) {
+    const clean = Array.isArray(stores) ? stores.map((store) => String(store || '').toLowerCase()) : [];
+    document.querySelectorAll('input[name="assigned_stores"]').forEach((input) => {
+        input.checked = clean.includes(String(input.value || '').toLowerCase());
+    });
+}
+
+function profileAssignedStores(profile = {}) {
+    if (Array.isArray(profile.store_assignments) && profile.store_assignments.length) {
+        return profile.store_assignments.map((store) => String(store || '').toLowerCase());
+    }
+    if (Array.isArray(profile.profile_store_assignments) && profile.profile_store_assignments.length) {
+        return profile.profile_store_assignments.map((row) => String(row.store || '').toLowerCase());
+    }
+    return [String(profile.account_type || 'general').toLowerCase()];
+}
+
+function profileInGroup(profile, group) {
+    return profileAssignedStores(profile).includes(String(group || '').toLowerCase());
+}
+
 function toggleAccountCredentialFields() {
     const section = document.getElementById("accountCredentialsSection");
     const gmailFields = document.getElementById("gmailAccountFields");
@@ -280,14 +307,17 @@ function toggleAccountCredentialFields() {
     if (!section || !gmailFields || !amazonFields) return;
 
     const type = selectedAccountType();
+    const assignments = selectedStoreAssignments();
+    const activeStores = assignments.length ? assignments : [type];
     section.style.display = "none";
     gmailFields.style.display = "none";
     amazonFields.style.display = "none";
 
-    if (type === "walmart" || type === "target" || type === "samsclub") {
+    if (activeStores.some((store) => ["walmart", "target", "samsclub"].includes(store))) {
         section.style.display = "block";
         gmailFields.style.display = "block";
-    } else if (type === "amazon") {
+    }
+    if (activeStores.includes("amazon")) {
         section.style.display = "block";
         amazonFields.style.display = "block";
     }
@@ -412,8 +442,16 @@ async function loadProfiles() {
         allDashboardProfiles = profiles;
         const groups = { general: [], walmart: [], target: [], samsclub: [], amazon: [], raffle: [] };
         profiles.forEach((p) => {
-            const key = String(p.account_type || "general").toLowerCase();
-            if (groups[key]) groups[key].push(p);
+            const assignedStores = profileAssignedStores(p);
+            if (String(p.account_type || '').toLowerCase() === 'raffle') {
+                groups.raffle.push(p);
+                return;
+            }
+            assignedStores.forEach((key) => {
+                if (groups[key] && !groups[key].some((existing) => String(existing.id) === String(p.id))) {
+                    groups[key].push(p);
+                }
+            });
         });
 
         const setStat = (id, value) => {
@@ -498,7 +536,7 @@ async function loadProfiles() {
                         <article class="profile-card-modern">
                             <div class="profile-card-top">
                                 <label class="checkbox-inline"><input type="checkbox" data-profile-select="${p.id}" ${checked} /><span>Select</span></label>
-                                <span class="badge">${escapeHTML(p.account_type || groupKey)}</span>
+                                <span class="badge">${escapeHTML(profileAssignedStores(p).join(", ") || groupKey)}</span>
                             </div>
                             <div class="profile-card-top">
                                 <div>
@@ -560,7 +598,7 @@ function bindProfileDashboardControls() {
         button.addEventListener('click', () => {
             const group = button.dataset.profileSelectVisible;
             const filterValue = String(profileGroupFilters[group] || '').trim().toLowerCase();
-            allDashboardProfiles.filter((p) => p.account_type === group).forEach((p) => {
+            allDashboardProfiles.filter((p) => profileInGroup(p, group)).forEach((p) => {
                 const address = p.addresses?.[0] || {};
                 const payment = p.payments?.[0] || {};
                 const haystack = [p.profile_name, address.email, address.phone, address.city, address.state, payment.card_last4].join(' ').toLowerCase();
@@ -572,7 +610,7 @@ function bindProfileDashboardControls() {
     document.querySelectorAll('[data-profile-delete-group]').forEach((button) => {
         button.addEventListener('click', async () => {
             const group = button.dataset.profileDeleteGroup;
-            const ids = allDashboardProfiles.filter((p) => p.account_type === group && selectedProfileIds.has(String(p.id))).map((p) => String(p.id));
+            const ids = allDashboardProfiles.filter((p) => profileInGroup(p, group) && selectedProfileIds.has(String(p.id))).map((p) => String(p.id));
             if (!ids.length) return;
             if (!confirm(`Delete ${ids.length} selected ${group} profile(s)?`)) return;
             const res = await fetch(API + '/profiles/bulk', {
@@ -741,11 +779,21 @@ async function loadProfileEditor() {
 
     const accountTypeSelect = document.getElementById("account_type");
     if (accountTypeSelect) {
-        accountTypeSelect.addEventListener("change", toggleAccountCredentialFields);
+        accountTypeSelect.addEventListener("change", () => {
+            const assignments = selectedStoreAssignments();
+            if (!assignments.length && accountTypeSelect.value && accountTypeSelect.value !== 'raffle') {
+                setStoreAssignments([accountTypeSelect.value]);
+            }
+            toggleAccountCredentialFields();
+        });
     }
+    document.querySelectorAll('input[name="assigned_stores"]').forEach((input) => {
+        input.addEventListener('change', toggleAccountCredentialFields);
+    });
 
     const editId = localStorage.getItem("edit");
     if (!editId) {
+        setStoreAssignments([selectedAccountType() || 'general']);
         toggleAccountCredentialFields();
         return;
     }
@@ -769,6 +817,7 @@ async function loadProfileEditor() {
 
     profile_name.value = profile.profile_name || "";
     account_type.value = profile.account_type || "general";
+    setStoreAssignments(profileAssignedStores(profile));
     first_name.value = addr.first_name || "";
     last_name.value = addr.last_name || "";
     email.value = addr.email || "";
@@ -784,7 +833,8 @@ async function loadProfileEditor() {
 
     toggleAccountCredentialFields();
 
-    if (profile.account_type === "walmart" || profile.account_type === "target" || profile.account_type === "samsclub") {
+    const assignedStores = profileAssignedStores(profile);
+    if (assignedStores.some((store) => ["walmart", "target", "samsclub"].includes(store))) {
         const gmailEmailEl = document.getElementById("account_login_email");
         const gmailPasswordEl = document.getElementById("account_login_password");
         const gmailAppPasswordEl = document.getElementById("gmail_app_password");
@@ -793,7 +843,7 @@ async function loadProfileEditor() {
         if (gmailAppPasswordEl) gmailAppPasswordEl.value = account.gmail_app_password || "";
     }
 
-    if (profile.account_type === "amazon") {
+    if (assignedStores.includes("amazon")) {
         const amazonEmailEl = document.getElementById("amazon_login_email");
         const amazonPasswordEl = document.getElementById("amazon_login_password");
         const amazonSecretEl = document.getElementById("amazon_2fa_secret");
@@ -810,6 +860,7 @@ if (profileForm) {
 
         const message = document.getElementById("profileMessage");
         const editId = localStorage.getItem("edit");
+        const assignedStores = selectedStoreAssignments().length ? selectedStoreAssignments() : [account_type.value];
         const type = account_type.value;
 
         let accountLoginEmail = "";
@@ -817,13 +868,13 @@ if (profileForm) {
         let gmailAppPassword = "";
         let amazon2FASecret = "";
 
-        if (type === "walmart" || type === "target" || type === "samsclub") {
+        if (assignedStores.some((store) => ["walmart", "target", "samsclub"].includes(store))) {
             accountLoginEmail = document.getElementById("account_login_email")?.value.trim() || "";
             accountLoginPassword = document.getElementById("account_login_password")?.value.trim() || "";
             gmailAppPassword = document.getElementById("gmail_app_password")?.value.trim() || "";
         }
 
-        if (type === "amazon") {
+        if (assignedStores.includes("amazon")) {
             accountLoginEmail = document.getElementById("amazon_login_email")?.value.trim() || "";
             accountLoginPassword = document.getElementById("amazon_login_password")?.value.trim() || "";
             amazon2FASecret = document.getElementById("amazon_2fa_secret")?.value.trim() || "";
@@ -832,6 +883,7 @@ if (profileForm) {
         const payload = {
             profile_name: profile_name.value.trim(),
             account_type: account_type.value,
+            assigned_stores: assignedStores,
             first_name: first_name.value.trim(),
             last_name: last_name.value.trim(),
             email: email.value.trim(),
