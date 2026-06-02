@@ -44,6 +44,7 @@
                 <option value="walmart">Walmart</option>
                 <option value="samsclub">Sam's Club</option>
                 <option value="amazon">Amazon</option>
+                <option value="crunchyroll">Crunchyroll</option>
                 <option value="pokemoncenter">Pokémon Center</option>
                 <option value="raffle">Raffle</option>
               </select>
@@ -56,6 +57,7 @@
                 <label class="checkbox-inline"><input type="checkbox" name="assigned_stores" value="walmart" /> Walmart</label>
                 <label class="checkbox-inline"><input type="checkbox" name="assigned_stores" value="samsclub" /> Sam's Club</label>
                 <label class="checkbox-inline"><input type="checkbox" name="assigned_stores" value="amazon" /> Amazon</label>
+                <label class="checkbox-inline"><input type="checkbox" name="assigned_stores" value="crunchyroll" /> Crunchyroll</label>
                 <label class="checkbox-inline"><input type="checkbox" name="assigned_stores" value="pokemoncenter" /> Pokémon Center</label>
                 <label class="checkbox-inline"><input type="checkbox" name="assigned_stores" value="general" /> General</label>
               </div>
@@ -64,45 +66,10 @@
           </div>
 
           <section id="accountCredentialsSection" style="display:none;">
-            <h3 class="section-title">Account Login Details</h3>
+            <h3 class="section-title">Store Login Details</h3>
+            <p class="form-help">Shipping and payment stay on this profile. Each selected store can keep its own login requirements.</p>
 
-            <div id="gmailAccountFields" class="form-grid" style="display:none;">
-              <div class="field field--full">
-                <label for="account_login_email">Login Email</label>
-                <input class="input" id="account_login_email" placeholder="Login Email (must be Gmail)" />
-              </div>
-              <div class="field">
-                <label for="account_login_password">Account Password</label>
-                <input class="input" id="account_login_password" type="password" placeholder="Account Password" />
-              </div>
-              <div class="field field-actions">
-                <label>&nbsp;</label>
-                <button class="btn" type="button" onclick="togglePasswordVisibility('account_login_password', this)">Show</button>
-              </div>
-              <div class="field field--full">
-                <label for="gmail_app_password">Gmail App Password</label>
-                <input class="input" id="gmail_app_password" type="password" placeholder="Gmail App Password" />
-              </div>
-            </div>
-
-            <div id="amazonAccountFields" class="form-grid" style="display:none;">
-              <div class="field field--full">
-                <label for="amazon_login_email">Amazon Account Email</label>
-                <input class="input" id="amazon_login_email" placeholder="Amazon Account Email" />
-              </div>
-              <div class="field">
-                <label for="amazon_login_password">Amazon Password</label>
-                <input class="input" id="amazon_login_password" type="password" placeholder="Amazon Password" />
-              </div>
-              <div class="field field-actions">
-                <label>&nbsp;</label>
-                <button class="btn" type="button" onclick="togglePasswordVisibility('amazon_login_password', this)">Show</button>
-              </div>
-              <div class="field field--full">
-                <label for="amazon_2fa_secret">Amazon Authenticator Secret</label>
-                <input class="input" id="amazon_2fa_secret" placeholder="Amazon Authenticator Secret" />
-              </div>
-            </div>
+            <div id="storeCredentialFields"></div>
           </section>
 
           <section>

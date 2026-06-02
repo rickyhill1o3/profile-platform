@@ -106,7 +106,7 @@ const PAGE_SIZE = 10;
 let profileImportBound = false;
 let raffleBuilderBound = false;
 let allDashboardProfiles = [];
-let profileGroupFilters = { general: '', walmart: '', target: '', amazon: '', raffle: '' };
+let profileGroupFilters = { all: '', general: '', walmart: '', target: '', samsclub: '', amazon: '', crunchyroll: '', pokemoncenter: '', raffle: '' };
 let selectedProfileIds = new Set();
 
 
@@ -268,6 +268,7 @@ function maskCard(cardNumber, fallbackLast4 = "") {
     return "**** **** **** " + last4;
 }
 
+
 function selectedAccountType() {
     const el = document.getElementById("account_type");
     return el ? el.value : "";
@@ -297,31 +298,128 @@ function profileAssignedStores(profile = {}) {
 }
 
 function profileInGroup(profile, group) {
-    return profileAssignedStores(profile).includes(String(group || '').toLowerCase());
+    const cleanGroup = String(group || '').toLowerCase();
+    if (cleanGroup === 'all' || cleanGroup === 'profiles') return true;
+    return profileAssignedStores(profile).includes(cleanGroup);
 }
 
-function toggleAccountCredentialFields() {
-    const section = document.getElementById("accountCredentialsSection");
-    const gmailFields = document.getElementById("gmailAccountFields");
-    const amazonFields = document.getElementById("amazonAccountFields");
-    if (!section || !gmailFields || !amazonFields) return;
+const STORE_CREDENTIAL_CONFIG = {
+    target: { label: 'Target', method: 'imap', help: 'Target uses email, account password, and Gmail app password / IMAP.' },
+    walmart: { label: 'Walmart', method: 'imap', help: 'Walmart uses email, account password, and Gmail app password / IMAP.' },
+    samsclub: { label: "Sam's Club", method: 'imap', help: "Sam's Club uses email, account password, and Gmail app password / IMAP." },
+    amazon: { label: 'Amazon', method: 'amazon2fa', help: 'Amazon uses email, password, and authenticator / 2FA secret.' },
+    crunchyroll: { label: 'Crunchyroll', method: 'password', help: 'Crunchyroll uses email and password only.' }
+};
 
+function profileStoreCredentials(profile = {}, store = '') {
+    const key = String(store || '').toLowerCase();
+    const fromMap = profile.store_credentials && profile.store_credentials[key];
+    if (fromMap) return fromMap;
+    const accounts = Array.isArray(profile.accounts) ? profile.accounts : [];
+    return accounts.find((acct) => String(acct.provider || '').toLowerCase() === key) || accounts[0] || {};
+}
+
+function storeCredentialBlock(store, values = {}) {
+    const cfg = STORE_CREDENTIAL_CONFIG[store];
+    if (!cfg) return '';
+    const prefix = `store_${store}`;
+    const loginEmail = escapeHTML(values.login_email || '');
+    const loginPassword = escapeHTML(values.login_password || '');
+    const gmailAppPassword = escapeHTML(values.gmail_app_password || '');
+    const amazonSecret = escapeHTML(values.amazon_2fa_secret || values.two_fa_secret || '');
+    const sharedEmail = escapeHTML(document.getElementById('email')?.value || '');
+
+    let extra = '';
+    if (cfg.method === 'imap') {
+        extra = `
+            <div class="field field--full">
+                <label for="${prefix}_gmail_app_password">${cfg.label} Gmail App Password / IMAP</label>
+                <input class="input" id="${prefix}_gmail_app_password" type="password" value="${gmailAppPassword}" placeholder="Gmail App Password" />
+            </div>`;
+    } else if (cfg.method === 'amazon2fa') {
+        extra = `
+            <div class="field field--full">
+                <label for="${prefix}_amazon_2fa_secret">Amazon Authenticator / 2FA Secret</label>
+                <input class="input" id="${prefix}_amazon_2fa_secret" value="${amazonSecret}" placeholder="Amazon Authenticator Secret" />
+            </div>`;
+    }
+
+    return `
+        <section class="credential-store-card" data-store-credential-card="${store}">
+            <div class="panel-header">
+                <div>
+                    <h4>${cfg.label} Login</h4>
+                    <p class="form-help">${cfg.help}</p>
+                </div>
+            </div>
+            <div class="form-grid">
+                <div class="field field--full">
+                    <label for="${prefix}_login_email">${cfg.label} Login Email</label>
+                    <input class="input" id="${prefix}_login_email" value="${loginEmail || sharedEmail}" placeholder="Login Email" />
+                </div>
+                <div class="field">
+                    <label for="${prefix}_login_password">${cfg.label} Password</label>
+                    <input class="input" id="${prefix}_login_password" type="password" value="${loginPassword}" placeholder="Account Password" />
+                </div>
+                <div class="field field-actions">
+                    <label>&nbsp;</label>
+                    <button class="btn" type="button" onclick="togglePasswordVisibility('${prefix}_login_password', this)">Show</button>
+                </div>
+                ${extra}
+            </div>
+        </section>`;
+}
+
+function toggleAccountCredentialFields(profile = null) {
+    const section = document.getElementById("accountCredentialsSection");
+    const container = document.getElementById("storeCredentialFields");
+    if (!section || !container) return;
+
+    const existingValues = collectStoreCredentials(Object.keys(STORE_CREDENTIAL_CONFIG));
     const type = selectedAccountType();
     const assignments = selectedStoreAssignments();
     const activeStores = assignments.length ? assignments : [type];
-    section.style.display = "none";
-    gmailFields.style.display = "none";
-    amazonFields.style.display = "none";
+    const storesNeedingCredentials = activeStores.filter((store) => STORE_CREDENTIAL_CONFIG[store]);
 
-    if (activeStores.some((store) => ["walmart", "target", "samsclub"].includes(store))) {
-        section.style.display = "block";
-        gmailFields.style.display = "block";
-    }
-    if (activeStores.includes("amazon")) {
-        section.style.display = "block";
-        amazonFields.style.display = "block";
-    }
+    section.style.display = storesNeedingCredentials.length ? "block" : "none";
+    container.innerHTML = storesNeedingCredentials.map((store) => {
+        const saved = profileStoreCredentials(profile || {}, store);
+        const current = existingValues[store] || {};
+        const values = Object.assign({}, saved, Object.fromEntries(Object.entries(current).filter(([, value]) => value)));
+        return storeCredentialBlock(store, values);
+    }).join('');
 }
+
+function collectStoreCredentials(assignedStores = []) {
+    const out = {};
+    assignedStores.forEach((store) => {
+        store = String(store || '').toLowerCase();
+        if (!STORE_CREDENTIAL_CONFIG[store]) return;
+        const prefix = `store_${store}`;
+        out[store] = {
+            store,
+            login_email: document.getElementById(`${prefix}_login_email`)?.value.trim() || '',
+            login_password: document.getElementById(`${prefix}_login_password`)?.value.trim() || '',
+            gmail_app_password: document.getElementById(`${prefix}_gmail_app_password`)?.value.trim() || '',
+            amazon_2fa_secret: document.getElementById(`${prefix}_amazon_2fa_secret`)?.value.trim() || ''
+        };
+    });
+    return out;
+}
+
+function credentialStatusForStore(profile = {}, store = '') {
+    const cfg = STORE_CREDENTIAL_CONFIG[store];
+    if (!cfg) return 'No login needed';
+    const creds = profileStoreCredentials(profile, store);
+    const hasEmail = !!String(creds.login_email || '').trim();
+    const hasPassword = !!String(creds.login_password || '').trim();
+    const hasImap = !!String(creds.gmail_app_password || '').trim();
+    const has2fa = !!String(creds.amazon_2fa_secret || creds.two_fa_secret || '').trim();
+    if (cfg.method === 'imap') return hasEmail && hasPassword && hasImap ? 'Login complete' : 'Missing login info';
+    if (cfg.method === 'amazon2fa') return hasEmail && hasPassword && has2fa ? 'Login complete' : 'Missing login info';
+    return hasEmail && hasPassword ? 'Login complete' : 'Missing login info';
+}
+
 
 /* ================= LOGIN ================= */
 
@@ -398,11 +496,13 @@ if (signupForm) {
 
 async function loadProfiles() {
     const profilePanels = {
+        all: document.getElementById("allProfilesPanel"),
         general: document.getElementById("generalProfilesPanel"),
         walmart: document.getElementById("walmartProfilesPanel"),
         target: document.getElementById("targetProfilesPanel"),
         samsclub: document.getElementById("samsclubProfilesPanel"),
         amazon: document.getElementById("amazonProfilesPanel"),
+        crunchyroll: document.getElementById("crunchyrollProfilesPanel"),
         raffle: document.getElementById("raffleProfilesPanel")
     };
 
@@ -440,8 +540,9 @@ async function loadProfiles() {
         }
 
         allDashboardProfiles = profiles;
-        const groups = { general: [], walmart: [], target: [], samsclub: [], amazon: [], raffle: [] };
+        const groups = { all: [], general: [], walmart: [], target: [], samsclub: [], amazon: [], crunchyroll: [], pokemoncenter: [], raffle: [] };
         profiles.forEach((p) => {
+            groups.all.push(p);
             const assignedStores = profileAssignedStores(p);
             if (String(p.account_type || '').toLowerCase() === 'raffle') {
                 groups.raffle.push(p);
@@ -472,6 +573,9 @@ async function loadProfiles() {
             target: "Target Profiles",
             samsclub: "Sam's Club Profiles",
             amazon: "Amazon Profiles",
+            crunchyroll: "Crunchyroll Profiles",
+            pokemoncenter: "Pokémon Center Profiles",
+            all: "All Profiles",
             raffle: "Raffle Profiles"
         };
 
@@ -548,6 +652,7 @@ async function loadProfiles() {
                                 <div><span>Email</span><strong>${escapeHTML(address.email || "-")}</strong></div>
                                 <div><span>Phone</span><strong>${escapeHTML(address.phone || "-")}</strong></div>
                                 <div><span>Card</span><strong>${escapeHTML(maskedCard)}</strong></div>
+                                <div><span>Login</span><strong>${escapeHTML(groupKey === "all" ? profileAssignedStores(p).map((store) => `${store}: ${credentialStatusForStore(p, store)}`).join(" | ") : credentialStatusForStore(p, groupKey))}</strong></div>
                             </div>
                             <div class="panel-actions">
                                 <button class="btn" onclick="edit('${p.id}')">Edit</button>
@@ -831,26 +936,7 @@ async function loadProfileEditor() {
     exp_year.value = pay.exp_year || "";
     cvv.value = pay.cvv || "";
 
-    toggleAccountCredentialFields();
-
-    const assignedStores = profileAssignedStores(profile);
-    if (assignedStores.some((store) => ["walmart", "target", "samsclub"].includes(store))) {
-        const gmailEmailEl = document.getElementById("account_login_email");
-        const gmailPasswordEl = document.getElementById("account_login_password");
-        const gmailAppPasswordEl = document.getElementById("gmail_app_password");
-        if (gmailEmailEl) gmailEmailEl.value = account.login_email || "";
-        if (gmailPasswordEl) gmailPasswordEl.value = account.login_password || "";
-        if (gmailAppPasswordEl) gmailAppPasswordEl.value = account.gmail_app_password || "";
-    }
-
-    if (assignedStores.includes("amazon")) {
-        const amazonEmailEl = document.getElementById("amazon_login_email");
-        const amazonPasswordEl = document.getElementById("amazon_login_password");
-        const amazonSecretEl = document.getElementById("amazon_2fa_secret");
-        if (amazonEmailEl) amazonEmailEl.value = account.login_email || "";
-        if (amazonPasswordEl) amazonPasswordEl.value = account.login_password || "";
-        if (amazonSecretEl) amazonSecretEl.value = account.amazon_2fa_secret || "";
-    }
+    toggleAccountCredentialFields(profile);
 }
 
 const profileForm = document.getElementById("profileForm");
@@ -863,22 +949,8 @@ if (profileForm) {
         const assignedStores = selectedStoreAssignments().length ? selectedStoreAssignments() : [account_type.value];
         const type = account_type.value;
 
-        let accountLoginEmail = "";
-        let accountLoginPassword = "";
-        let gmailAppPassword = "";
-        let amazon2FASecret = "";
-
-        if (assignedStores.some((store) => ["walmart", "target", "samsclub"].includes(store))) {
-            accountLoginEmail = document.getElementById("account_login_email")?.value.trim() || "";
-            accountLoginPassword = document.getElementById("account_login_password")?.value.trim() || "";
-            gmailAppPassword = document.getElementById("gmail_app_password")?.value.trim() || "";
-        }
-
-        if (assignedStores.includes("amazon")) {
-            accountLoginEmail = document.getElementById("amazon_login_email")?.value.trim() || "";
-            accountLoginPassword = document.getElementById("amazon_login_password")?.value.trim() || "";
-            amazon2FASecret = document.getElementById("amazon_2fa_secret")?.value.trim() || "";
-        }
+        const storeCredentials = collectStoreCredentials(assignedStores);
+        const firstCredential = Object.values(storeCredentials)[0] || {};
 
         const payload = {
             profile_name: profile_name.value.trim(),
@@ -896,10 +968,11 @@ if (profileForm) {
             exp_month: exp_month.value.trim(),
             exp_year: exp_year.value.trim(),
             cvv: cvv.value.trim(),
-            account_login_email: accountLoginEmail,
-            account_login_password: accountLoginPassword,
-            gmail_app_password: gmailAppPassword,
-            amazon_2fa_secret: amazon2FASecret
+            store_credentials: storeCredentials,
+            account_login_email: firstCredential.login_email || "",
+            account_login_password: firstCredential.login_password || "",
+            gmail_app_password: firstCredential.gmail_app_password || "",
+            amazon_2fa_secret: firstCredential.amazon_2fa_secret || ""
         };
 
         const url = editId ? API + "/profiles/" + editId : API + "/profiles";
@@ -3074,7 +3147,7 @@ async function loadStoreProductsForSite(site) {
 }
 
 async function loadStoreProductPanels() {
-    await Promise.all(['target', 'samsclub', 'walmart', 'amazon', 'general'].map(loadStoreProductsForSite));
+    await Promise.all(['target', 'samsclub', 'walmart', 'amazon', 'general', 'crunchyroll'].map(loadStoreProductsForSite));
 }
 
 

@@ -37,11 +37,13 @@
     <div class="admin-layout-shell">
       <aside class="admin-sidebar panel">
         <p class="eyebrow">Dashboard Navigation</p>
-        <button class="admin-nav-button is-active" type="button" data-user-nav="target">Target</button>
+        <button class="admin-nav-button is-active" type="button" data-user-nav="profiles">Profiles</button>
+        <button class="admin-nav-button" type="button" data-user-nav="target">Target</button>
         <button class="admin-nav-button" type="button" data-user-nav="walmart">Walmart</button>
         <button class="admin-nav-button" type="button" data-user-nav="samsclub">Sam's Club</button>
         <button class="admin-nav-button" type="button" data-user-nav="amazon">Amazon</button>
         <button class="admin-nav-button" type="button" data-user-nav="general">General</button>
+        <button class="admin-nav-button" type="button" data-user-nav="crunchyroll">Crunchyroll</button>
         <button class="admin-nav-button" type="button" data-user-nav="raffle">Raffle Builder</button>
         <button class="admin-nav-button" type="button" data-user-nav="selections">Countdowns</button>
         <button class="admin-nav-button" type="button" data-user-nav="credits">Buy Credits</button>
@@ -50,7 +52,19 @@
       </aside>
 
       <div class="admin-content-stack">
-        <section class="admin-pane is-active" data-user-pane="target">
+
+        <section class="admin-pane is-active" data-user-pane="profiles">
+          <section class="panel banner banner-soft">
+            <strong>Profile Manager</strong>
+            <p class="subtle-text">Create one profile with shared shipping and payment, then assign it to Target, Walmart, Sam's Club, Amazon, Crunchyroll, Pokémon Center, or General.</p>
+            <div class="panel-actions">
+              <button class="btn btn-primary" onclick="createProfile()">Create Profile</button>
+            </div>
+          </section>
+          <section class="panel" id="allProfilesPanel"></section>
+        </section>
+
+        <section class="admin-pane" data-user-pane="target">
           <section class="panel banner banner-soft">
             <strong>Target hub</strong>
             <p class="subtle-text">Target profiles and available Target products are shown together. Product selection is informational only; active SKUs are controlled by admin runs.</p>
@@ -160,6 +174,27 @@
               </div>
             </div>
             <div id="generalProductsPanel" class="store-products-panel"></div>
+          </section>
+        </section>
+
+
+        <section class="admin-pane" data-user-pane="crunchyroll">
+          <section class="panel banner banner-soft">
+            <strong>Crunchyroll hub</strong>
+            <p class="subtle-text">Crunchyroll assigned profiles and Crunchyroll product selections.</p>
+            <div class="panel-actions">
+              <button class="btn btn-primary" onclick="createProfile()">Create / Assign Profile</button>
+            </div>
+          </section>
+          <section class="panel" id="crunchyrollProfilesPanel"></section>
+          <section class="panel">
+            <div class="panel-header">
+              <div>
+                <h2>Crunchyroll Products</h2>
+                <p class="subtle-text">Products loaded from the website catalog when available.</p>
+              </div>
+            </div>
+            <div id="crunchyrollProductsPanel" class="store-products-panel"></div>
           </section>
         </section>
 

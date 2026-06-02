@@ -408,9 +408,11 @@ async function getUserProfilesWithRelations(userId) {
     }
 
     const assignments = await loadProfileStoreAssignments(userId);
+    const credentials = await loadProfileStoreCredentials((data || []).map((profile) => profile.id));
     return (data || []).map((profile) => ({
         ...profile,
-        store_assignments: assignments?.get(String(profile.id)) || [normalizeProfileAccountType(profile.account_type || "general")]
+        store_assignments: assignments?.get(String(profile.id)) || [normalizeProfileAccountType(profile.account_type || "general")],
+        store_credentials: credentials.get(String(profile.id)) || {}
     }));
 }
 
@@ -545,7 +547,7 @@ async function upsertProfileRelations(profileId, payload) {
 
     const accountPayload = {
         profile_id: profileId,
-        provider: payload.account_type || null,
+        provider: normalizeProfileAccountType(payload.account_type || (payload.assigned_stores || [])[0] || "general"),
         login_email: payload.account_login_email || null,
         login_password: payload.account_login_password || null,
         gmail_app_password: payload.gmail_app_password || null,
@@ -583,6 +585,8 @@ async function upsertProfileRelations(profileId, payload) {
             throw new Error(error.message);
         }
     }
+
+    await replaceProfileStoreCredentials(profileId, payload);
 }
 
 
@@ -4484,7 +4488,7 @@ function normalizeImportedProfilePayload(entry = {}, accountType = "walmart") {
 }
 
 
-const PROFILE_ACCOUNT_TYPES = new Set(["general", "walmart", "target", "samsclub", "amazon", "pokemoncenter", "raffle"]);
+const PROFILE_ACCOUNT_TYPES = new Set(["general", "walmart", "target", "samsclub", "amazon", "crunchyroll", "pokemoncenter", "raffle"]);
 
 function normalizeProfileAccountType(value = "general") {
     const raw = String(value || "general").trim().toLowerCase();
@@ -4495,6 +4499,9 @@ function normalizeProfileAccountType(value = "general") {
     }
     if (["pokemoncenter", "pokemon", "pokecenter", "pc"].includes(type)) {
         return "pokemoncenter";
+    }
+    if (["crunchyroll", "crunchy", "cr"].includes(type)) {
+        return "crunchyroll";
     }
 
     return PROFILE_ACCOUNT_TYPES.has(type) ? type : "general";
@@ -4560,6 +4567,82 @@ async function replaceProfileStoreAssignments(userId, profileId, stores) {
     }
 }
 
+function normalizeStoreCredentialsPayload(payload = {}) {
+    const raw = payload.store_credentials && typeof payload.store_credentials === 'object' ? payload.store_credentials : {};
+    const stores = normalizeAssignedStores(payload.assigned_stores, payload.account_type);
+    const out = {};
+
+    stores.forEach((store) => {
+        const item = raw[store] || {};
+        out[store] = {
+            store,
+            login_email: String(item.login_email || '').trim() || String(payload.account_login_email || payload.email || '').trim(),
+            login_password: String(item.login_password || '').trim() || String(payload.account_login_password || '').trim(),
+            gmail_app_password: String(item.gmail_app_password || '').trim() || String(payload.gmail_app_password || '').trim(),
+            amazon_2fa_secret: String(item.amazon_2fa_secret || item.two_fa_secret || '').trim() || String(payload.amazon_2fa_secret || '').trim()
+        };
+    });
+
+    return out;
+}
+
+async function loadProfileStoreCredentials(profileIds = []) {
+    const ids = [...new Set((profileIds || []).map((id) => String(id || '').trim()).filter(Boolean))];
+    const map = new Map();
+    if (!ids.length) return map;
+
+    try {
+        const { data, error } = await supabase
+            .from('profile_store_credentials')
+            .select('*')
+            .in('profile_id', ids);
+        if (error) throw error;
+
+        (data || []).forEach((row) => {
+            const profileId = String(row.profile_id || '');
+            const store = normalizeProfileAccountType(row.store);
+            if (!profileId || !store) return;
+            if (!map.has(profileId)) map.set(profileId, {});
+            map.get(profileId)[store] = row;
+        });
+    } catch (_) {
+        // Migration may not be installed yet; accounts table fallback still works.
+    }
+    return map;
+}
+
+async function replaceProfileStoreCredentials(profileId, payload = {}) {
+    const credentials = normalizeStoreCredentialsPayload(payload);
+    try {
+        await supabase.from('profile_store_credentials').delete().eq('profile_id', profileId);
+        const rows = Object.entries(credentials)
+            .filter(([, c]) => c.login_email || c.login_password || c.gmail_app_password || c.amazon_2fa_secret)
+            .map(([store, c]) => ({
+                profile_id: profileId,
+                store,
+                login_email: c.login_email || null,
+                login_password: c.login_password || null,
+                gmail_app_password: c.gmail_app_password || null,
+                amazon_2fa_secret: c.amazon_2fa_secret || null
+            }));
+        if (rows.length) {
+            const { error } = await supabase.from('profile_store_credentials').insert(rows);
+            if (error) throw error;
+        }
+    } catch (_) {
+        // If migration is not installed yet, the primary accounts row still saves below.
+    }
+}
+
+function accountForExport(profile = {}, group = '') {
+    const cleanGroup = normalizeProfileAccountType(group || profile.account_type || 'general');
+    if (profile.store_credentials && profile.store_credentials[cleanGroup]) {
+        return profile.store_credentials[cleanGroup];
+    }
+    const accounts = Array.isArray(profile.accounts) ? profile.accounts : [];
+    return accounts.find((acct) => normalizeProfileAccountType(acct.provider || '') === cleanGroup) || accounts[0] || {};
+}
+
 async function enforceProfileAssignmentLimits({ userId, role, stores, excludeProfileId = null }) {
     const cleanStores = normalizeAssignedStores(stores);
     if (role === "super_admin") return;
@@ -4608,11 +4691,13 @@ async function attachAndFilterProfilesByStore(profiles, group = "") {
         assignmentMaps.set(String(userId), await loadProfileStoreAssignments(userId));
     }
 
+    const credentialMap = await loadProfileStoreCredentials(items.map((profile) => profile.id));
     const attached = items.map((profile) => {
         const map = assignmentMaps.get(String(profile.user_id));
         return {
             ...profile,
-            store_assignments: map?.get(String(profile.id)) || [normalizeProfileAccountType(profile.account_type || "general")]
+            store_assignments: map?.get(String(profile.id)) || [normalizeProfileAccountType(profile.account_type || "general")],
+            store_credentials: credentialMap.get(String(profile.id)) || {}
         };
     });
 
@@ -4627,8 +4712,8 @@ function getProfileLimitForRole(role = "user", accountType = "general") {
     if (role === "super_admin") return Infinity;
     if (type === "raffle") return Infinity;
 
-    const adminLimits = { target: 8, samsclub: 6, amazon: 2, general: 5, walmart: 100, pokemoncenter: 5 };
-    const userLimits = { target: 4, samsclub: 2, amazon: 1, general: 3, walmart: 100, pokemoncenter: 2 };
+    const adminLimits = { target: 8, samsclub: 6, amazon: 2, general: 5, walmart: 100, crunchyroll: 10, pokemoncenter: 5 };
+    const userLimits = { target: 4, samsclub: 4, amazon: 2, general: 3, walmart: 100, crunchyroll: 4, pokemoncenter: 2 };
 
     const source = role === "admin" ? adminLimits : userLimits;
     return source[type] ?? 0;
@@ -4816,9 +4901,11 @@ app.get("/profiles", auth, async (req, res) => {
         }
 
         const assignments = await loadProfileStoreAssignments(req.user_id);
+        const credentials = await loadProfileStoreCredentials((data || []).map((profile) => profile.id));
 
         (data || []).forEach((profile) => {
             profile.store_assignments = assignments?.get(String(profile.id)) || [normalizeProfileAccountType(profile.account_type || "general")];
+            profile.store_credentials = credentials.get(String(profile.id)) || {};
             if (profile.payments?.length) {
                 const payment = profile.payments[0];
                 try {
@@ -6013,7 +6100,7 @@ app.get("/admin/export/accounts-txt", auth, admin, async (req, res) => {
 
         const rows = exportProfiles
             .map((profile) => {
-                const account = profile.accounts?.[0] || {};
+                const account = accountForExport(profile, group || profile.account_type);
                 const email = (account.login_email || "").trim();
                 const password = (account.login_password || "").trim();
 
@@ -6077,7 +6164,7 @@ app.get("/admin/export/gmail-imap-txt", auth, admin, async (req, res) => {
 
         const rows = exportProfiles
             .map((profile) => {
-                const account = profile.accounts?.[0] || {};
+                const account = accountForExport(profile, group || profile.account_type);
                 const email = String(account.login_email || "").trim();
                 const appPassOr2fa = String(account.gmail_app_password || account.amazon_2fa_secret || "").trim();
 

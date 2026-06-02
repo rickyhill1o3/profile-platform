@@ -25,8 +25,8 @@ function countEffectiveSkus(product) {
 const cheerio = require("cheerio");
 const crypto = require("crypto");
 
-const SUPPORTED_SITES = new Set(["amazon", "target", "walmart", "samsclub", "general", "supreme", "pokemon"]);
-const REQUESTABLE_SITES = new Set(["amazon", "target", "walmart", "samsclub", "general", "supreme", "pokemon"]);
+const SUPPORTED_SITES = new Set(["amazon", "target", "walmart", "samsclub", "crunchyroll", "general", "supreme", "pokemon"]);
+const REQUESTABLE_SITES = new Set(["amazon", "target", "walmart", "samsclub", "crunchyroll", "general", "supreme", "pokemon"]);
 const VIRTUAL_SITE_DEFAULTS = {
     amazon: {
         catalogName: "Amazon next drop",
@@ -60,6 +60,14 @@ const VIRTUAL_SITE_DEFAULTS = {
         release_mode_default: "next",
         metadata: { virtual: true, release_type: "next_drop" }
     },
+    crunchyroll: {
+        catalogName: "Crunchyroll next drop",
+        sku: "CRUNCHYROLL-NEXT-DROP",
+        product_name: "Run Next Crunchyroll Release",
+        brand: "Crunchyroll",
+        release_mode_default: "next",
+        metadata: { virtual: true, release_type: "next_drop" }
+    },
     supreme: {
         catalogName: "Supreme next drop",
         sku: "SUPREME-NEXT-DROP",
@@ -90,7 +98,7 @@ function normalizeSite(value) {
     const raw = String(value || "").trim().toLowerCase();
     const site = ["sams", "samclub", "samclubs", "sam's club", "sams club", "samsclub"].includes(raw) ? "samsclub" : raw;
     if (!SUPPORTED_SITES.has(site)) {
-        throw new Error("Invalid site. Expected amazon, target, walmart, samsclub, supreme, pokemon, or general.");
+        throw new Error("Invalid site. Expected amazon, target, walmart, samsclub, crunchyroll, supreme, pokemon, or general.");
     }
     return site;
 }
@@ -1478,8 +1486,8 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
             const site = req.query.site ? normalizeSite(req.query.site) : '';
             const scopedUserIds = await getScopedUserIds(supabase, currentUser);
 
-            if (!site || !['target', 'amazon', 'samsclub'].includes(site)) {
-                return res.status(400).json({ error: "Choose target, samsclub, or amazon." });
+            if (!site || !['target', 'amazon', 'samsclub', 'crunchyroll'].includes(site)) {
+                return res.status(400).json({ error: "Choose target, samsclub, crunchyroll, or amazon." });
             }
 
             let productQuery = supabase
