@@ -1543,6 +1543,88 @@ async function upsertDiscordIdentityForUser(userId, discordUser) {
     return payload;
 }
 
+async function getUserDiscordIdentity(user = {}) {
+    const settings = await getUserSettings(user.id).catch(() => ({}));
+    return {
+        discord_user_id: normalizeDiscordUserId(user.discord_user_id || settings.discord_user_id || ''),
+        discord_username: user.discord_username || settings.discord_username || '',
+        discord_display_name: user.discord_display_name || settings.discord_display_name || '',
+        discord_avatar: user.discord_avatar || settings.discord_avatar || '',
+        discord_email: user.discord_email || settings.discord_email || '',
+        discord_connected_at: user.discord_connected_at || settings.discord_connected_at || null
+    };
+}
+
+async function notifyDiscordConnected(userId, discordUser = {}) {
+    try {
+        if (!userId) return { skipped: 'missing_user_id' };
+        const { data: user, error } = await supabase
+            .from('users')
+            .select('id,email,role,owner_admin_id,discord_user_id,discord_username,discord_display_name,discord_email')
+            .eq('id', userId)
+            .single();
+        if (error || !user) return { skipped: error?.message || 'user_not_found' };
+
+        let scope = 'super_admin';
+        let routeUserId = null;
+        let webhookUrl = '';
+
+        if (user.owner_admin_id) {
+            scope = 'admin';
+            routeUserId = user.owner_admin_id;
+            const route = await getWebhookRouteFromDb({ scope: 'admin', userId: routeUserId, webhookType: 'checkout_success', category: 'all' }).catch(() => null);
+            const settings = await getAdminWebhookSettings(routeUserId).catch(() => ({}));
+            webhookUrl = String(route?.webhook_url || settings?.discord_webhook_url || '').trim();
+        }
+
+        if (!webhookUrl) {
+            scope = 'super_admin';
+            routeUserId = null;
+            const globalSettings = await getAppSetting('webhook_settings', {});
+            const route = await getWebhookRouteFromDb({ scope: 'super_admin', webhookType: 'checkout_success', category: 'all' }).catch(() => null);
+            webhookUrl = String(route?.webhook_url || globalSettings?.discord_webhook_url || '').trim();
+        }
+
+        if (!webhookUrl) return { skipped: 'checkout_webhook_not_configured' };
+
+        const identity = await getUserDiscordIdentity(user);
+        const discordId = normalizeDiscordUserId(discordUser.discord_user_id || identity.discord_user_id || '');
+        const discordName = String(discordUser.discord_display_name || identity.discord_display_name || discordUser.discord_username || identity.discord_username || '').trim();
+        const mention = discordId ? `<@${discordId}>` : '';
+        const email = String(user.email || '').trim();
+        const embed = {
+            title: 'Discord Connected',
+            description: `${mention ? `${mention} ` : ''}${discordName || 'A Discord user'} connected Discord to The Shore Shack.`,
+            fields: [
+                { name: 'User', value: formatDiscordDisplayName({ ...user, ...identity }) || email || user.id, inline: false },
+                { name: 'Email', value: email || '-', inline: true },
+                { name: 'Discord', value: discordName || '-', inline: true },
+                { name: 'Discord ID', value: discordId || '-', inline: true }
+            ],
+            timestamp: new Date().toISOString(),
+            footer: { text: scope === 'admin' ? 'Admin checkout webhook' : 'Super admin checkout webhook' }
+        };
+
+        return enqueueDiscordWebhookJob(webhookUrl, async () => {
+            const response = await globalThis.fetch(webhookUrl, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    username: 'The Shore Shack',
+                    content: mention || '',
+                    allowed_mentions: { parse: ['users'] },
+                    embeds: [embed]
+                })
+            });
+            const text = response.ok ? '' : await response.text().catch(() => '');
+            return { scope, user_id: routeUserId, success: response.ok, status: response.status, error: text };
+        });
+    } catch (err) {
+        console.error('Discord connected notification failed:', err);
+        return { success: false, error: err.message || String(err) };
+    }
+}
+
 function createAuthToken(user) {
     return jwt.sign({ user_id: user.id, role: user.role }, process.env.JWT_SECRET, { expiresIn: '7d' });
 }
@@ -4278,6 +4360,7 @@ app.get('/auth/discord/callback', async (req, res) => {
 
         if (state.mode === 'connect') {
             await upsertDiscordIdentityForUser(state.user_id, discordUser);
+            await notifyDiscordConnected(state.user_id, discordUser).catch(() => null);
             return res.redirect(`${frontendBase}/dashboard.html?discord_connected=1`);
         }
 
@@ -4341,7 +4424,9 @@ app.get('/auth/discord/callback', async (req, res) => {
         }
 
         if (user.revoked) throw new Error('This account has been revoked');
+        const wasAlreadyConnected = !!normalizeDiscordUserId(user.discord_user_id || '');
         await upsertDiscordIdentityForUser(user.id, discordUser);
+        if (!wasAlreadyConnected) await notifyDiscordConnected(user.id, discordUser).catch(() => null);
         const token = createAuthToken(user);
         return res.redirect(`${frontendBase}/dashboard.html?token=${encodeURIComponent(token)}&discord_login=1`);
     } catch (err) {
@@ -4528,6 +4613,7 @@ app.post("/user/settings", auth, async (req, res) => {
         const existingSettings = await getUserSettings(req.user_id).catch(() => ({}));
         const updated = await setUserSettings(req.user_id, { ...existingSettings, discord_user_id: discordUserId });
         await supabase.from('users').update({ discord_user_id: discordUserId || null }).eq('id', req.user_id);
+        if (discordUserId) await notifyDiscordConnected(req.user_id, { discord_user_id: discordUserId }).catch(() => null);
         res.json({
             success: true,
             discord_user_id: normalizeDiscordUserId(updated?.discord_user_id || discordUserId)
@@ -5604,12 +5690,30 @@ app.get("/admin/users", auth, admin, async (req, res) => {
             }
         }
 
-        const output = (users || []).map((u) => ({
-            ...u,
-            profile_count: profileCountMap[u.id] || 0,
-            owner_admin_email: u.owner_admin_id ? ownerMap[u.owner_admin_id] || "" : "",
-            owner_admin_display: u.owner_admin_id ? ownerMap[u.owner_admin_id] || "" : "",
-        }));
+        const settingsDiscordMap = {};
+        for (const u of users || []) {
+            if (!u.discord_user_id || !u.discord_username || !u.discord_display_name) {
+                settingsDiscordMap[u.id] = await getUserDiscordIdentity(u).catch(() => ({}));
+            }
+        }
+
+        const output = (users || []).map((u) => {
+            const identity = settingsDiscordMap[u.id] || {};
+            const merged = {
+                ...u,
+                discord_user_id: normalizeDiscordUserId(u.discord_user_id || identity.discord_user_id || ''),
+                discord_username: u.discord_username || identity.discord_username || '',
+                discord_display_name: u.discord_display_name || identity.discord_display_name || '',
+                discord_avatar: u.discord_avatar || identity.discord_avatar || '',
+                discord_email: u.discord_email || identity.discord_email || '',
+                discord_connected_at: u.discord_connected_at || identity.discord_connected_at || null,
+                profile_count: profileCountMap[u.id] || 0,
+                owner_admin_email: u.owner_admin_id ? ownerMap[u.owner_admin_id] || "" : "",
+                owner_admin_display: u.owner_admin_id ? ownerMap[u.owner_admin_id] || "" : "",
+            };
+            merged.user_display = formatDiscordDisplayName(merged);
+            return merged;
+        });
 
         res.json({
             items: output,
