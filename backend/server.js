@@ -4571,14 +4571,19 @@ function normalizeStoreCredentialsPayload(payload = {}) {
     const raw = payload.store_credentials && typeof payload.store_credentials === 'object' ? payload.store_credentials : {};
     const stores = normalizeAssignedStores(payload.assigned_stores, payload.account_type);
     const out = {};
+    const imapStores = new Set(['target', 'walmart', 'samsclub']);
+    const sharedGmailAppPassword = String(payload.gmail_app_password || '').trim()
+        || Object.values(raw).map((item) => String(item?.gmail_app_password || '').trim()).find(Boolean)
+        || '';
 
     stores.forEach((store) => {
         const item = raw[store] || {};
+        const isImapStore = imapStores.has(store);
         out[store] = {
             store,
             login_email: String(item.login_email || '').trim() || String(payload.account_login_email || payload.email || '').trim(),
             login_password: String(item.login_password || '').trim() || String(payload.account_login_password || '').trim(),
-            gmail_app_password: String(item.gmail_app_password || '').trim() || String(payload.gmail_app_password || '').trim(),
+            gmail_app_password: String(item.gmail_app_password || '').trim() || (isImapStore ? sharedGmailAppPassword : String(payload.gmail_app_password || '').trim()),
             amazon_2fa_secret: String(item.amazon_2fa_secret || item.two_fa_secret || '').trim() || String(payload.amazon_2fa_secret || '').trim()
         };
     });

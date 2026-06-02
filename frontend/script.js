@@ -319,6 +319,27 @@ function profileStoreCredentials(profile = {}, store = '') {
     return accounts.find((acct) => String(acct.provider || '').toLowerCase() === key) || accounts[0] || {};
 }
 
+function firstSavedImapAppPassword(profile = {}, existingValues = {}) {
+    const imapStores = Object.entries(STORE_CREDENTIAL_CONFIG)
+        .filter(([, cfg]) => cfg.method === 'imap')
+        .map(([store]) => store);
+
+    for (const store of imapStores) {
+        const current = existingValues[store] || {};
+        const value = String(current.gmail_app_password || '').trim();
+        if (value) return value;
+    }
+
+    for (const store of imapStores) {
+        const saved = profileStoreCredentials(profile || {}, store) || {};
+        const value = String(saved.gmail_app_password || '').trim();
+        if (value) return value;
+    }
+
+    const account = Array.isArray(profile?.accounts) ? profile.accounts.find((acct) => String(acct.gmail_app_password || '').trim()) : null;
+    return String(account?.gmail_app_password || profile?.gmail_app_password || '').trim();
+}
+
 function storeCredentialBlock(store, values = {}) {
     const cfg = STORE_CREDENTIAL_CONFIG[store];
     if (!cfg) return '';
@@ -382,10 +403,14 @@ function toggleAccountCredentialFields(profile = null) {
     const storesNeedingCredentials = activeStores.filter((store) => STORE_CREDENTIAL_CONFIG[store]);
 
     section.style.display = storesNeedingCredentials.length ? "block" : "none";
+    const sharedGmailAppPassword = firstSavedImapAppPassword(profile || {}, existingValues);
     container.innerHTML = storesNeedingCredentials.map((store) => {
         const saved = profileStoreCredentials(profile || {}, store);
         const current = existingValues[store] || {};
         const values = Object.assign({}, saved, Object.fromEntries(Object.entries(current).filter(([, value]) => value)));
+        if (STORE_CREDENTIAL_CONFIG[store]?.method === 'imap' && !String(values.gmail_app_password || '').trim() && sharedGmailAppPassword) {
+            values.gmail_app_password = sharedGmailAppPassword;
+        }
         return storeCredentialBlock(store, values);
     }).join('');
 }
