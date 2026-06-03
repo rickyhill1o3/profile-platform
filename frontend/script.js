@@ -3869,6 +3869,165 @@ function initProductSelectionAdminTools() {
 }
 
 
+
+
+/* ================= STORE RUN STATUS ================= */
+
+const STORE_RUN_STATUS_OPTIONS = [
+    { site: 'target', label: 'Target' },
+    { site: 'walmart', label: 'Walmart' },
+    { site: 'samsclub', label: "Sam's Club" },
+    { site: 'amazon', label: 'Amazon' },
+    { site: 'general', label: 'General' },
+    { site: 'crunchyroll', label: 'Crunchyroll' },
+    { site: 'pokemoncenter', label: 'Pokémon Center' }
+];
+
+function formatDateTimeShort(value) {
+    if (!value) return 'Never changed';
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return 'Never changed';
+    return date.toLocaleString();
+}
+
+async function loadStoreRunStatusPanel() {
+    const panel = document.getElementById('storeRunStatusPanel');
+    if (!panel || !token()) return;
+    panel.innerHTML = '<div class="empty-card"><p>Loading store run status...</p></div>';
+    try {
+        const data = await authJSON(API + '/store-run-status');
+        const stores = Array.isArray(data.stores) ? data.stores : [];
+        const html = `
+            <div class="store-run-status-list">
+                ${stores.map((store) => `
+                    <article class="store-run-card ${store.is_enabled ? 'is-running' : ''}">
+                        <div>
+                            <h3>${escapeHTML(store.label)}</h3>
+                            <p class="subtle-text">${store.is_enabled
+                                ? 'Active: The Shore Shack may attempt checkouts for this store.'
+                                : 'Paused: Your accounts should not be run for this store.'}</p>
+                            <p class="subtle-text">Last updated: ${escapeHTML(formatDateTimeShort(store.updated_at))}</p>
+                        </div>
+                        <label class="run-toggle">
+                            <input type="checkbox" data-store-run-toggle="${escapeHTML(store.site)}" ${store.is_enabled ? 'checked' : ''} />
+                            <span>${store.is_enabled ? 'Active' : 'Paused'}</span>
+                        </label>
+                    </article>
+                `).join('')}
+            </div>
+            <div class="banner banner-soft" style="margin-top:12px;">
+                <strong>Important</strong>
+                <p class="subtle-text">Active means you are authorizing The Shore Shack to try running that store. It does not guarantee a successful checkout. Paused means your accounts should not be run for that store.</p>
+            </div>
+        `;
+        panel.innerHTML = html;
+        panel.querySelectorAll('[data-store-run-toggle]').forEach((input) => {
+            input.addEventListener('change', async () => {
+                const site = input.dataset.storeRunToggle;
+                const enabled = input.checked;
+                input.disabled = true;
+                try {
+                    await authJSON(API + '/store-run-status', {
+                        method: 'PUT',
+                        body: JSON.stringify({ site, is_enabled: enabled })
+                    });
+                    await loadStoreRunStatusPanel();
+                } catch (err) {
+                    input.checked = !enabled;
+                    alert(err.message || 'Could not update store run status.');
+                } finally {
+                    input.disabled = false;
+                }
+            });
+        });
+    } catch (err) {
+        panel.innerHTML = `<div class="empty-card"><p>${escapeHTML(err.message || 'Could not load store run status.')}</p></div>`;
+    }
+}
+
+async function initAdminStoreRunStatus() {
+    const panel = document.getElementById('adminRunStatusPanel');
+    const storeFilter = document.getElementById('adminRunStatusStoreFilter');
+    const userFilter = document.getElementById('adminRunStatusUserFilter');
+    const refreshButton = document.getElementById('adminRunStatusRefreshButton');
+    const summary = document.getElementById('adminRunStatusSummary');
+    if (!panel || !storeFilter || !userFilter) return;
+
+    let lastUsers = [];
+
+    const renderUserOptions = (users) => {
+        const current = userFilter.value;
+        userFilter.innerHTML = '<option value="">All Users</option>' + (users || []).map((user) =>
+            `<option value="${escapeHTML(user.id)}">${escapeHTML(user.user_display || user.email || 'User')}</option>`
+        ).join('');
+        if ([...userFilter.options].some((opt) => opt.value === current)) userFilter.value = current;
+    };
+
+    const load = async () => {
+        panel.innerHTML = '<div class="empty-card"><p>Loading store run status...</p></div>';
+        const params = new URLSearchParams();
+        if (storeFilter.value) params.set('site', storeFilter.value);
+        if (userFilter.value) params.set('user_id', userFilter.value);
+        try {
+            const data = await authJSON(API + '/admin/store-run-status' + (params.toString() ? `?${params.toString()}` : ''));
+            const users = Array.isArray(data.users) ? data.users : [];
+            if (!userFilter.value) {
+                lastUsers = users;
+                renderUserOptions(users);
+            } else if (!lastUsers.length) {
+                lastUsers = users;
+                renderUserOptions(users);
+                userFilter.value = params.get('user_id') || '';
+            }
+            const activeSummary = STORE_RUN_STATUS_OPTIONS.map((store) => `${store.label}: ${Number(data.summary?.[store.site] || 0)} active`).join(' • ');
+            if (summary) summary.textContent = activeSummary;
+
+            if (!users.length) {
+                panel.innerHTML = '<div class="empty-card"><p>No users found for this filter.</p></div>';
+                return;
+            }
+
+            const rows = [];
+            users.forEach((user) => {
+                (user.stores || []).forEach((store) => {
+                    rows.push(`
+                        <tr>
+                            <td>${escapeHTML(user.user_display || user.email || 'User')}</td>
+                            <td>${escapeHTML(store.label)}</td>
+                            <td><span class="status-pill ${store.is_enabled ? 'status-success' : 'status-muted'}">${store.is_enabled ? 'Active' : 'Paused'}</span></td>
+                            <td>${Number(store.profile_count || 0)}</td>
+                            <td>${escapeHTML(formatDateTimeShort(store.updated_at))}</td>
+                        </tr>
+                    `);
+                });
+            });
+
+            panel.innerHTML = `
+                <table class="admin-table">
+                    <thead>
+                        <tr>
+                            <th>User</th>
+                            <th>Store</th>
+                            <th>Run Status</th>
+                            <th>Assigned Profiles</th>
+                            <th>Last Updated</th>
+                        </tr>
+                    </thead>
+                    <tbody>${rows.join('')}</tbody>
+                </table>
+            `;
+        } catch (err) {
+            panel.innerHTML = `<div class="empty-card"><p>${escapeHTML(err.message || 'Could not load store run status.')}</p></div>`;
+        }
+    };
+
+    storeFilter.addEventListener('change', load);
+    userFilter.addEventListener('change', load);
+    if (refreshButton) refreshButton.addEventListener('click', load);
+    await load();
+}
+
+
 document.addEventListener("DOMContentLoaded", async () => {
     if (!requireAuthForPrivatePages()) return;
     try {
@@ -3915,6 +4074,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         try { initTargetCheckoutListAdmin(); } catch (_) { }
         try { await loadCreditsAdminPane(); } catch (_) { }
         try { await loadWebhookSettings(); } catch (_) { }
+        try { await initAdminStoreRunStatus(); } catch (_) { }
     }
     if (document.getElementById('userDiscordHandle')) {
         try { await loadUserSettings(); } catch (_) { }

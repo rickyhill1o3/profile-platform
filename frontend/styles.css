@@ -776,3 +776,50 @@ h1,h2,h3,h4,p{margin:0}
 .credential-store-card h4 {
   margin: 0;
 }
+
+/* Store run status */
+.store-run-status-list {
+  display: grid;
+  gap: 12px;
+}
+.store-run-card {
+  border: 1px solid var(--border, #d9e2ef);
+  border-radius: 14px;
+  padding: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  background: #fff;
+}
+.store-run-card.is-running {
+  border-color: #2563eb;
+  background: #f8fbff;
+}
+.run-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.run-toggle input {
+  width: 22px;
+  height: 22px;
+}
+.status-pill {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 4px 10px;
+  font-size: 12px;
+  font-weight: 700;
+}
+.status-success {
+  color: #047857;
+  background: #d1fae5;
+}
+.status-muted {
+  color: #64748b;
+  background: #e2e8f0;
+}

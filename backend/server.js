@@ -4817,6 +4817,47 @@ function normalizeProfileAccountType(value = "general") {
     return PROFILE_ACCOUNT_TYPES.has(type) ? type : "general";
 }
 
+
+const STORE_RUN_STATUS_SITES = ["target", "walmart", "samsclub", "amazon", "general", "crunchyroll", "pokemoncenter"];
+const STORE_RUN_STATUS_LABELS = {
+    target: "Target",
+    walmart: "Walmart",
+    samsclub: "Sam's Club",
+    amazon: "Amazon",
+    general: "General",
+    crunchyroll: "Crunchyroll",
+    pokemoncenter: "Pokémon Center"
+};
+
+function normalizeStoreRunSite(value = "") {
+    const site = normalizeProfileAccountType(value || "");
+    return STORE_RUN_STATUS_SITES.includes(site) ? site : "";
+}
+
+async function loadStoreRunStatusForUsers(userIds = []) {
+    const cleanIds = [...new Set((userIds || []).map((id) => String(id || '').trim()).filter(Boolean))];
+    const map = new Map();
+    cleanIds.forEach((id) => {
+        map.set(id, Object.fromEntries(STORE_RUN_STATUS_SITES.map((site) => [site, false])));
+    });
+    if (!cleanIds.length) return map;
+    const { data, error } = await supabase
+        .from("user_store_run_status")
+        .select("user_id, site, is_enabled, updated_at")
+        .in("user_id", cleanIds);
+    if (error) throw error;
+    (data || []).forEach((row) => {
+        const id = String(row.user_id || '');
+        const site = normalizeStoreRunSite(row.site);
+        if (!id || !site) return;
+        const current = map.get(id) || Object.fromEntries(STORE_RUN_STATUS_SITES.map((key) => [key, false]));
+        current[site] = !!row.is_enabled;
+        current[`${site}_updated_at`] = row.updated_at || null;
+        map.set(id, current);
+    });
+    return map;
+}
+
 function normalizeAssignedStores(value, fallback = "general") {
     const raw = Array.isArray(value) ? value : String(value || "").split(/[;,\s]+/);
     const stores = raw
@@ -5195,6 +5236,138 @@ function buildRafflePayload(email, zip, index = 0, zipLocation = {}) {
         amazon_2fa_secret: ""
     };
 }
+
+
+app.get("/store-run-status", auth, async (req, res) => {
+    try {
+        await ensureUserNotRevoked(req.user_id);
+        const statusMap = await loadStoreRunStatusForUsers([req.user_id]);
+        const status = statusMap.get(String(req.user_id)) || Object.fromEntries(STORE_RUN_STATUS_SITES.map((site) => [site, false]));
+        res.json({
+            stores: STORE_RUN_STATUS_SITES.map((site) => ({
+                site,
+                label: STORE_RUN_STATUS_LABELS[site] || site,
+                is_enabled: !!status[site],
+                updated_at: status[`${site}_updated_at`] || null
+            }))
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message || "Could not load store run status" });
+    }
+});
+
+app.put("/store-run-status", auth, async (req, res) => {
+    try {
+        await ensureUserNotRevoked(req.user_id);
+        const site = normalizeStoreRunSite(req.body?.site);
+        if (!site) return res.status(400).json({ error: "Invalid store" });
+        const isEnabled = !!req.body?.is_enabled;
+        const now = new Date().toISOString();
+        const { error } = await supabase
+            .from("user_store_run_status")
+            .upsert({ user_id: req.user_id, site, is_enabled: isEnabled, updated_at: now }, { onConflict: "user_id,site" });
+        if (error) return res.status(500).json({ error: error.message });
+        res.json({ success: true, site, label: STORE_RUN_STATUS_LABELS[site] || site, is_enabled: isEnabled, updated_at: now });
+    } catch (err) {
+        res.status(500).json({ error: err.message || "Could not update store run status" });
+    }
+});
+
+app.get("/admin/store-run-status", auth, admin, async (req, res) => {
+    try {
+        const currentUser = await getCurrentUser(req);
+        const siteFilter = normalizeStoreRunSite(req.query.site || "");
+        const userFilter = String(req.query.user_id || "").trim();
+
+        let usersQuery = supabase
+            .from("users")
+            .select("id, email, role, owner_admin_id, discord_username, discord_display_name, discord_user_id")
+            .order("email", { ascending: true });
+
+        if (currentUser.role !== "super_admin") {
+            usersQuery = usersQuery.eq("owner_admin_id", currentUser.id);
+        }
+        if (userFilter) {
+            usersQuery = usersQuery.eq("id", userFilter);
+        }
+
+        const { data: users, error: usersError } = await usersQuery;
+        if (usersError) return res.status(500).json({ error: usersError.message });
+
+        const userIds = (users || []).map((u) => u.id);
+        const statusMap = await loadStoreRunStatusForUsers(userIds);
+
+        let assignmentRows = [];
+        if (userIds.length) {
+            const { data: profiles } = await supabase
+                .from("profiles")
+                .select("id, user_id, account_type")
+                .in("user_id", userIds);
+            const profileIds = (profiles || []).map((p) => p.id);
+            let assignmentByProfile = new Map();
+            if (profileIds.length) {
+                const { data: assignments } = await supabase
+                    .from("profile_store_assignments")
+                    .select("profile_id, store")
+                    .in("profile_id", profileIds);
+                (assignments || []).forEach((row) => {
+                    const key = String(row.profile_id || "");
+                    const list = assignmentByProfile.get(key) || [];
+                    list.push(normalizeProfileAccountType(row.store));
+                    assignmentByProfile.set(key, list);
+                });
+            }
+            assignmentRows = (profiles || []).map((profile) => ({
+                user_id: profile.user_id,
+                stores: assignmentByProfile.get(String(profile.id)) || [normalizeProfileAccountType(profile.account_type)]
+            }));
+        }
+
+        const profileCounts = new Map();
+        assignmentRows.forEach((row) => {
+            const userId = String(row.user_id || "");
+            const current = profileCounts.get(userId) || Object.fromEntries(STORE_RUN_STATUS_SITES.map((site) => [site, 0]));
+            [...new Set(row.stores || [])].forEach((store) => {
+                if (STORE_RUN_STATUS_SITES.includes(store)) current[store] = (current[store] || 0) + 1;
+            });
+            profileCounts.set(userId, current);
+        });
+
+        const usersOut = (users || []).map((user) => {
+            const status = statusMap.get(String(user.id)) || Object.fromEntries(STORE_RUN_STATUS_SITES.map((site) => [site, false]));
+            const counts = profileCounts.get(String(user.id)) || Object.fromEntries(STORE_RUN_STATUS_SITES.map((site) => [site, 0]));
+            return {
+                id: user.id,
+                email: user.email,
+                role: user.role,
+                user_display: formatDiscordDisplayName(user),
+                owner_admin_id: user.owner_admin_id,
+                stores: STORE_RUN_STATUS_SITES
+                    .filter((site) => !siteFilter || site === siteFilter)
+                    .map((site) => ({
+                        site,
+                        label: STORE_RUN_STATUS_LABELS[site] || site,
+                        is_enabled: !!status[site],
+                        updated_at: status[`${site}_updated_at`] || null,
+                        profile_count: counts[site] || 0
+                    }))
+            };
+        });
+
+        const summary = {};
+        STORE_RUN_STATUS_SITES.forEach((site) => {
+            summary[site] = usersOut.filter((user) => (user.stores || []).some((store) => store.site === site && store.is_enabled)).length;
+        });
+
+        res.json({
+            stores: STORE_RUN_STATUS_SITES.map((site) => ({ site, label: STORE_RUN_STATUS_LABELS[site] || site })),
+            users: usersOut,
+            summary
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message || "Could not load admin store run status" });
+    }
+});
 
 app.get("/profiles", auth, async (req, res) => {
     try {
@@ -5690,6 +5863,8 @@ app.get("/admin/users", auth, admin, async (req, res) => {
             }
         }
 
+        const runStatusMap = await loadStoreRunStatusForUsers(userIds).catch(() => new Map());
+
         const settingsDiscordMap = {};
         for (const u of users || []) {
             if (!u.discord_user_id || !u.discord_username || !u.discord_display_name) {
@@ -5710,6 +5885,7 @@ app.get("/admin/users", auth, admin, async (req, res) => {
                 profile_count: profileCountMap[u.id] || 0,
                 owner_admin_email: u.owner_admin_id ? ownerMap[u.owner_admin_id] || "" : "",
                 owner_admin_display: u.owner_admin_id ? ownerMap[u.owner_admin_id] || "" : "",
+                store_run_status: runStatusMap.get(String(u.id)) || {},
             };
             merged.user_display = formatDiscordDisplayName(merged);
             return merged;

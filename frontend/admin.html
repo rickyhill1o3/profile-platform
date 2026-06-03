@@ -45,6 +45,7 @@
         <button class="admin-nav-button" type="button" data-admin-nav="exports">Exports</button>
         <button class="admin-nav-button" type="button" data-admin-nav="selections">User Product Selections</button>
         <button class="admin-nav-button" type="button" data-admin-nav="users">Current Users</button>
+        <button class="admin-nav-button" type="button" data-admin-nav="run-status">Store Run Status</button>
         <button class="admin-nav-button" type="button" data-admin-nav="credits">Credits + Orders</button>
         <button class="admin-nav-button" type="button" data-admin-nav="webhooks">Webhooks</button>
       </aside>
@@ -531,6 +532,45 @@ placeholder="Enter one SKU per line&#10;12345678&#10;87654321"></textarea>
           </section>
         </section>
 
+
+        
+        <section class="admin-pane" data-admin-pane="run-status">
+          <section class="panel">
+            <div class="panel-header">
+              <div>
+                <h2>Store Run Status</h2>
+                <p class="subtle-text">See which users currently have each store turned on. Use the store filter or choose a user to review all store settings for that user.</p>
+              </div>
+            </div>
+            <div class="form-grid">
+              <div class="field">
+                <label for="adminRunStatusStoreFilter">Store</label>
+                <select class="input" id="adminRunStatusStoreFilter">
+                  <option value="">All Stores</option>
+                  <option value="target">Target</option>
+                  <option value="walmart">Walmart</option>
+                  <option value="samsclub">Sam's Club</option>
+                  <option value="amazon">Amazon</option>
+                  <option value="general">General</option>
+                  <option value="crunchyroll">Crunchyroll</option>
+                  <option value="pokemoncenter">Pokémon Center</option>
+                </select>
+              </div>
+              <div class="field">
+                <label for="adminRunStatusUserFilter">User</label>
+                <select class="input" id="adminRunStatusUserFilter">
+                  <option value="">All Users</option>
+                </select>
+              </div>
+              <div class="field field-actions">
+                <label>&nbsp;</label>
+                <button class="btn btn-primary" type="button" id="adminRunStatusRefreshButton">Refresh</button>
+              </div>
+            </div>
+            <div id="adminRunStatusSummary" class="subtle-text"></div>
+            <div id="adminRunStatusPanel" class="table-wrap table-wrap--admin-scroll"></div>
+          </section>
+        </section>
 
         <section class="admin-pane" data-admin-pane="credits">
           <section class="panel">

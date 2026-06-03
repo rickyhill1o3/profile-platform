@@ -38,6 +38,7 @@
       <aside class="admin-sidebar panel">
         <p class="eyebrow">Dashboard Navigation</p>
         <button class="admin-nav-button is-active" type="button" data-user-nav="profiles">Profiles</button>
+        <button class="admin-nav-button" type="button" data-user-nav="run-status">Store Run Status</button>
         <button class="admin-nav-button" type="button" data-user-nav="target">Target</button>
         <button class="admin-nav-button" type="button" data-user-nav="walmart">Walmart</button>
         <button class="admin-nav-button" type="button" data-user-nav="samsclub">Sam's Club</button>
@@ -52,6 +53,18 @@
       </aside>
 
       <div class="admin-content-stack">
+
+
+
+        <section class="admin-pane" data-user-pane="run-status">
+          <section class="panel banner banner-soft">
+            <strong>Store Run Status</strong>
+            <p class="subtle-text">Choose which store groups are currently approved to run. When a store is active, The Shore Shack may attempt checkouts for that store using your assigned profiles and product selections. Turning a store off means your accounts should not be run for that store until you turn it back on.</p>
+          </section>
+          <section class="panel" id="storeRunStatusPanel">
+            <div class="empty-card"><p>Loading store run status...</p></div>
+          </section>
+        </section>
 
         <section class="admin-pane is-active" data-user-pane="profiles">
           <section class="panel banner banner-soft">
