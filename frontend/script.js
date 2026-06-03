@@ -3950,18 +3950,62 @@ async function initAdminStoreRunStatus() {
     const storeFilter = document.getElementById('adminRunStatusStoreFilter');
     const userFilter = document.getElementById('adminRunStatusUserFilter');
     const refreshButton = document.getElementById('adminRunStatusRefreshButton');
+    const exportProfilesButton = document.getElementById('adminRunStatusExportProfilesButton');
+    const exportAccountsButton = document.getElementById('adminRunStatusExportAccountsButton');
+    const exportGmailButton = document.getElementById('adminRunStatusExportGmailButton');
     const summary = document.getElementById('adminRunStatusSummary');
     if (!panel || !storeFilter || !userFilter) return;
 
     let lastUsers = [];
+    let lastData = null;
 
     const renderUserOptions = (users) => {
         const current = userFilter.value;
-        userFilter.innerHTML = '<option value="">All Users</option>' + (users || []).map((user) =>
+        const byId = new Map();
+        (users || []).forEach((user) => {
+            if (user && user.id && !byId.has(user.id)) byId.set(user.id, user);
+        });
+        userFilter.innerHTML = '<option value="">All Users</option>' + [...byId.values()].map((user) =>
             `<option value="${escapeHTML(user.id)}">${escapeHTML(user.user_display || user.email || 'User')}</option>`
         ).join('');
         if ([...userFilter.options].some((opt) => opt.value === current)) userFilter.value = current;
     };
+
+    const activeExportParams = () => {
+        const selectedStore = storeFilter.value;
+        if (!selectedStore) {
+            alert('Select a specific store first, then export active profiles for that store.');
+            return null;
+        }
+        const params = new URLSearchParams();
+        params.set('group', selectedStore);
+        params.set('active_only', '1');
+        if (userFilter.value) params.set('user_id', userFilter.value);
+        return params;
+    };
+
+    const activeExportFilename = (prefix) => {
+        const store = storeFilter.value || 'store';
+        const date = new Date().toISOString().slice(0, 10);
+        return `${prefix}-${store}-active-${date}`;
+    };
+
+    const exportActive = async (endpoint, prefix, ext) => {
+        try {
+            const params = activeExportParams();
+            if (!params) return;
+            const filename = promptForExportFilename(activeExportFilename(prefix));
+            if (!filename) return;
+            params.set('filename', filename);
+            await downloadExportFile(API + endpoint + '?' + params.toString(), filename + ext);
+        } catch (err) {
+            if (err.message) alert(err.message);
+        }
+    };
+
+    if (exportProfilesButton) exportProfilesButton.addEventListener('click', () => exportActive('/admin/export/profiles-json', 'profiles', '.json'));
+    if (exportAccountsButton) exportAccountsButton.addEventListener('click', () => exportActive('/admin/export/accounts-txt', 'accounts', '.txt'));
+    if (exportGmailButton) exportGmailButton.addEventListener('click', () => exportActive('/admin/export/gmail-imap-txt', 'gmail-imap', '.txt'));
 
     const load = async () => {
         panel.innerHTML = '<div class="empty-card"><p>Loading store run status...</p></div>';
@@ -3970,6 +4014,7 @@ async function initAdminStoreRunStatus() {
         if (userFilter.value) params.set('user_id', userFilter.value);
         try {
             const data = await authJSON(API + '/admin/store-run-status' + (params.toString() ? `?${params.toString()}` : ''));
+            lastData = data;
             const users = Array.isArray(data.users) ? data.users : [];
             if (!userFilter.value) {
                 lastUsers = users;
@@ -3987,6 +4032,54 @@ async function initAdminStoreRunStatus() {
                 return;
             }
 
+            if (!storeFilter.value && !userFilter.value) {
+                const storeTotals = STORE_RUN_STATUS_OPTIONS.map((store) => {
+                    let assignedProfiles = 0;
+                    let activeAssignedProfiles = 0;
+                    let newestRunChange = null;
+                    let newestProfileChange = null;
+                    users.forEach((user) => {
+                        const row = (user.stores || []).find((item) => item.site === store.site);
+                        if (!row) return;
+                        assignedProfiles += Number(row.profile_count || 0);
+                        if (row.is_enabled) activeAssignedProfiles += Number(row.profile_count || 0);
+                        if (row.updated_at && (!newestRunChange || new Date(row.updated_at) > new Date(newestRunChange))) newestRunChange = row.updated_at;
+                        if (row.profile_updated_at && (!newestProfileChange || new Date(row.profile_updated_at) > new Date(newestProfileChange))) newestProfileChange = row.profile_updated_at;
+                    });
+                    return { store, assignedProfiles, activeAssignedProfiles, newestRunChange, newestProfileChange, activeUsers: Number(data.summary?.[store.site] || 0) };
+                });
+
+                panel.innerHTML = `
+                    <table class="admin-table">
+                        <thead>
+                            <tr>
+                                <th>Store</th>
+                                <th>Active Users</th>
+                                <th>Active Assigned Profiles</th>
+                                <th>Total Assigned Profiles</th>
+                                <th>Newest Run Change</th>
+                                <th>Newest Profile Change</th>
+                            </tr>
+                        </thead>
+                        <tbody>${storeTotals.map((row) => `
+                            <tr>
+                                <td>${escapeHTML(row.store.label)}</td>
+                                <td>${row.activeUsers}</td>
+                                <td>${row.activeAssignedProfiles}</td>
+                                <td>${row.assignedProfiles}</td>
+                                <td>${escapeHTML(formatDateTimeShort(row.newestRunChange))}</td>
+                                <td>${escapeHTML(formatDateTimeShort(row.newestProfileChange))}</td>
+                            </tr>
+                        `).join('')}</tbody>
+                    </table>
+                    <div class="banner banner-soft" style="margin-top:12px;">
+                        <strong>Export active profiles</strong>
+                        <p class="subtle-text">Choose a specific store above, then use the export buttons. The export will include only users with that store marked Active.</p>
+                    </div>
+                `;
+                return;
+            }
+
             const rows = [];
             users.forEach((user) => {
                 (user.stores || []).forEach((store) => {
@@ -3997,6 +4090,7 @@ async function initAdminStoreRunStatus() {
                             <td><span class="status-pill ${store.is_enabled ? 'status-success' : 'status-muted'}">${store.is_enabled ? 'Active' : 'Paused'}</span></td>
                             <td>${Number(store.profile_count || 0)}</td>
                             <td>${escapeHTML(formatDateTimeShort(store.updated_at))}</td>
+                            <td>${escapeHTML(formatDateTimeShort(store.profile_updated_at))}</td>
                         </tr>
                     `);
                 });
@@ -4010,7 +4104,8 @@ async function initAdminStoreRunStatus() {
                             <th>Store</th>
                             <th>Run Status</th>
                             <th>Assigned Profiles</th>
-                            <th>Last Updated</th>
+                            <th>Run Status Changed</th>
+                            <th>Profile Changed</th>
                         </tr>
                     </thead>
                     <tbody>${rows.join('')}</tbody>

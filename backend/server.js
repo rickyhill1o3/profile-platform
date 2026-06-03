@@ -5063,6 +5063,20 @@ async function attachAndFilterProfilesByStore(profiles, group = "") {
     return attached.filter((profile) => profileAssignedStores(profile).includes(cleanGroup));
 }
 
+async function filterProfilesByActiveRunStatus(profiles, group = "", activeOnly = false) {
+    const cleanGroup = normalizeStoreRunSite(group || "");
+    const items = Array.isArray(profiles) ? profiles : [];
+    if (!activeOnly) return items;
+    if (!cleanGroup) return [];
+
+    const userIds = [...new Set(items.map((profile) => profile.user_id).filter(Boolean))];
+    const statusMap = await loadStoreRunStatusForUsers(userIds);
+    return items.filter((profile) => {
+        const status = statusMap.get(String(profile.user_id)) || {};
+        return !!status[cleanGroup];
+    });
+}
+
 function getProfileLimitForRole(role = "user", accountType = "general") {
     const type = normalizeProfileAccountType(accountType);
     if (role === "super_admin") return Infinity;
@@ -5301,7 +5315,7 @@ app.get("/admin/store-run-status", auth, admin, async (req, res) => {
         if (userIds.length) {
             const { data: profiles } = await supabase
                 .from("profiles")
-                .select("id, user_id, account_type")
+                .select("id, user_id, account_type, updated_at, created_at")
                 .in("user_id", userIds);
             const profileIds = (profiles || []).map((p) => p.id);
             let assignmentByProfile = new Map();
@@ -5319,23 +5333,32 @@ app.get("/admin/store-run-status", auth, admin, async (req, res) => {
             }
             assignmentRows = (profiles || []).map((profile) => ({
                 user_id: profile.user_id,
-                stores: assignmentByProfile.get(String(profile.id)) || [normalizeProfileAccountType(profile.account_type)]
+                stores: assignmentByProfile.get(String(profile.id)) || [normalizeProfileAccountType(profile.account_type)],
+                updated_at: profile.updated_at || null,
+                created_at: profile.created_at || null
             }));
         }
 
         const profileCounts = new Map();
+        const profileUpdated = new Map();
         assignmentRows.forEach((row) => {
             const userId = String(row.user_id || "");
             const current = profileCounts.get(userId) || Object.fromEntries(STORE_RUN_STATUS_SITES.map((site) => [site, 0]));
+            const updated = profileUpdated.get(userId) || Object.fromEntries(STORE_RUN_STATUS_SITES.map((site) => [site, null]));
             [...new Set(row.stores || [])].forEach((store) => {
-                if (STORE_RUN_STATUS_SITES.includes(store)) current[store] = (current[store] || 0) + 1;
+                if (!STORE_RUN_STATUS_SITES.includes(store)) return;
+                current[store] = (current[store] || 0) + 1;
+                const changedAt = row.updated_at || row.created_at || null;
+                if (changedAt && (!updated[store] || new Date(changedAt) > new Date(updated[store]))) updated[store] = changedAt;
             });
             profileCounts.set(userId, current);
+            profileUpdated.set(userId, updated);
         });
 
         const usersOut = (users || []).map((user) => {
             const status = statusMap.get(String(user.id)) || Object.fromEntries(STORE_RUN_STATUS_SITES.map((site) => [site, false]));
             const counts = profileCounts.get(String(user.id)) || Object.fromEntries(STORE_RUN_STATUS_SITES.map((site) => [site, 0]));
+            const updated = profileUpdated.get(String(user.id)) || Object.fromEntries(STORE_RUN_STATUS_SITES.map((site) => [site, null]));
             return {
                 id: user.id,
                 email: user.email,
@@ -5349,7 +5372,8 @@ app.get("/admin/store-run-status", auth, admin, async (req, res) => {
                         label: STORE_RUN_STATUS_LABELS[site] || site,
                         is_enabled: !!status[site],
                         updated_at: status[`${site}_updated_at`] || null,
-                        profile_count: counts[site] || 0
+                        profile_count: counts[site] || 0,
+                        profile_updated_at: updated[site] || null
                     }))
             };
         });
@@ -6439,6 +6463,7 @@ app.get("/admin/export/count", auth, admin, async (req, res) => {
     try {
         const currentUser = await getCurrentUser(req);
         const { user_id, group } = req.query;
+        const activeOnly = String(req.query.active_only || "") === "1";
 
         let query = supabase
             .from("profiles")
@@ -6469,7 +6494,8 @@ app.get("/admin/export/count", auth, admin, async (req, res) => {
             return res.status(500).json({ error: error.message });
         }
 
-        const filtered = await attachAndFilterProfilesByStore(data || [], group || "");
+        let filtered = await attachAndFilterProfilesByStore(data || [], group || "");
+        filtered = await filterProfilesByActiveRunStatus(filtered, group || "", activeOnly);
         res.json({ count: filtered.length });
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -6481,6 +6507,7 @@ app.get("/admin/export/profiles-json", auth, admin, async (req, res) => {
         const currentUser = await getCurrentUser(req);
         const { user_id, group } = req.query;
         const filename = (req.query.filename || "profiles").replace(/[^a-zA-Z0-9-_]/g, "");
+        const activeOnly = String(req.query.active_only || "") === "1";
 
         let query = supabase
             .from("profiles")
@@ -6512,7 +6539,8 @@ app.get("/admin/export/profiles-json", auth, admin, async (req, res) => {
             return res.status(500).json({ error: error.message });
         }
 
-        const exportProfiles = await attachAndFilterProfilesByStore(profiles || [], group || "");
+        let exportProfiles = await attachAndFilterProfilesByStore(profiles || [], group || "");
+        exportProfiles = await filterProfilesByActiveRunStatus(exportProfiles, group || "", activeOnly);
 
         const rows = exportProfiles.map((profile) => {
             const address = profile.addresses?.[0] || {};
@@ -6592,6 +6620,7 @@ app.get("/admin/export/accounts-txt", auth, admin, async (req, res) => {
         const currentUser = await getCurrentUser(req);
         const { user_id, group } = req.query;
         const filename = (req.query.filename || "accounts").replace(/[^a-zA-Z0-9-_]/g, "");
+        const activeOnly = String(req.query.active_only || "") === "1";
 
         let query = supabase
             .from("profiles")
@@ -6624,7 +6653,8 @@ app.get("/admin/export/accounts-txt", auth, admin, async (req, res) => {
             return res.status(500).json({ error: error.message });
         }
 
-        const exportProfiles = await attachAndFilterProfilesByStore(profiles || [], group || "");
+        let exportProfiles = await attachAndFilterProfilesByStore(profiles || [], group || "");
+        exportProfiles = await filterProfilesByActiveRunStatus(exportProfiles, group || "", activeOnly);
 
         const rows = exportProfiles
             .map((profile) => {
@@ -6656,6 +6686,7 @@ app.get("/admin/export/gmail-imap-txt", auth, admin, async (req, res) => {
         const currentUser = await getCurrentUser(req);
         const { user_id, group } = req.query;
         const filename = (req.query.filename || "gmail-imap").replace(/[^a-zA-Z0-9-_]/g, "");
+        const activeOnly = String(req.query.active_only || "") === "1";
 
         let query = supabase
             .from("profiles")
@@ -6688,7 +6719,8 @@ app.get("/admin/export/gmail-imap-txt", auth, admin, async (req, res) => {
             return res.status(500).json({ error: error.message });
         }
 
-        const exportProfiles = await attachAndFilterProfilesByStore(profiles || [], group || "");
+        let exportProfiles = await attachAndFilterProfilesByStore(profiles || [], group || "");
+        exportProfiles = await filterProfilesByActiveRunStatus(exportProfiles, group || "", activeOnly);
 
         const rows = exportProfiles
             .map((profile) => {
