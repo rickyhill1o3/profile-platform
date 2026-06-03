@@ -4047,6 +4047,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     ) {
         initUserDashboardNavigation();
         await loadProfiles();
+        try { await loadStoreRunStatusPanel(); } catch (err) { console.error("Store run status failed:", err); }
         try { await loadStoreProductPanels(); } catch (err) { console.error("Store products failed:", err); }
         try { await loadTargetCheckoutListsForUser(); } catch (err) { console.error("Target checkout lists failed:", err); }
         try { await loadCreditsBalance(); } catch (_) { }
