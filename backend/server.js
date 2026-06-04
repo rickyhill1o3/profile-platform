@@ -4830,7 +4830,9 @@ const STORE_RUN_STATUS_LABELS = {
 };
 
 function normalizeStoreRunSite(value = "") {
-    const site = normalizeProfileAccountType(value || "");
+    const raw = String(value || "").trim().toLowerCase();
+    if (!raw || raw === "all" || raw === "allstores" || raw === "all_stores") return "";
+    const site = normalizeProfileAccountType(raw);
     return STORE_RUN_STATUS_SITES.includes(site) ? site : "";
 }
 
