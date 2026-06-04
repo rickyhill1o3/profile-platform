@@ -1303,6 +1303,17 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
         return [`${product.sku || ''};${product.product_name || product.sku || ''};${price === null || price === undefined ? '' : price}`];
     }
 
+    function chunkProductSelectionLines(lines = [], batchSize = 29) {
+        const chunks = [];
+        const size = Math.max(1, Number(batchSize) || 29);
+        for (let i = 0; i < lines.length; i += size) chunks.push(lines.slice(i, i + size));
+        return chunks;
+    }
+
+    function flattenProductSelectionBatches(lines = [], batchSize = 29) {
+        return chunkProductSelectionLines(lines, batchSize).map((chunk) => chunk.join('\n')).join('\n\n');
+    }
+
     app.get('/target-recommended-lists', auth, async (req, res) => {
         try {
             await ensureUserNotRevoked(req.user_id);
@@ -1388,7 +1399,7 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
 
             let query = supabase
                 .from('user_product_preferences')
-                .select(`user_id, selected, updated_at, catalog_products!inner ( site )`)
+                .select(`user_id, selected, max_price, updated_at, catalog_products!inner ( id, site, sku, product_name, default_max_price )`)
                 .eq('selected', true)
                 .eq('catalog_products.site', site);
 
@@ -1397,12 +1408,40 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
             const { data, error } = await query;
             if (error) return res.status(500).json({ error: error.message });
 
+            // Resolve old single-SKU selections to the current grouped multi-SKU product,
+            // then count export lines/SKUs instead of preference rows.
+            const { data: allCatalogProducts } = await supabase
+                .from('catalog_products')
+                .select('id, site, sku, product_name, default_max_price')
+                .eq('site', site);
+
+            const groupedProducts = (allCatalogProducts || []).filter((product) => parseMultiSkuValue(product.sku).length > 1);
+
             const grouped = new Map();
+            const processedProducts = new Map();
+
             (data || []).forEach((row) => {
                 if (!row.user_id) return;
+                const currentProduct = row.catalog_products || {};
+                const currentSkus = parseMultiSkuValue(currentProduct.sku);
+                const groupedReplacement = groupedProducts.find((product) => {
+                    const groupedSkus = parseMultiSkuValue(product.sku);
+                    return currentSkus.some((sku) => groupedSkus.includes(sku));
+                });
+                const resolvedRow = groupedReplacement
+                    ? { ...row, max_price: groupedReplacement.default_max_price ?? row.max_price, catalog_products: groupedReplacement }
+                    : row;
+                const product = resolvedRow.catalog_products || {};
+                const canonicalSkuKey = parseMultiSkuValue(product.sku).sort().join(',') || String(product.id || resolvedRow.catalog_product_id || '');
+
                 if (!grouped.has(row.user_id)) grouped.set(row.user_id, { user_id: row.user_id, selection_count: 0, latest_change_at: null });
+                if (!processedProducts.has(row.user_id)) processedProducts.set(row.user_id, new Set());
+                const seenProducts = processedProducts.get(row.user_id);
+                if (canonicalSkuKey && seenProducts.has(canonicalSkuKey)) return;
+                if (canonicalSkuKey) seenProducts.add(canonicalSkuKey);
+
                 const item = grouped.get(row.user_id);
-                item.selection_count += 1;
+                item.selection_count += productSelectionLines(resolvedRow).length;
                 if (!item.latest_change_at || new Date(row.updated_at) > new Date(item.latest_change_at)) item.latest_change_at = row.updated_at;
             });
 
@@ -1655,11 +1694,15 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
                 byUser.get(row.user_id).lines = [...existing];
             });
 
-            const users = [...byUser.values()].sort((a, b) => (a.user_email || '').localeCompare(b.user_email || ''));
+            const users = [...byUser.values()].sort((a, b) => (a.user_email || '').localeCompare(b.user_email || ''))
+                .map((user) => ({
+                    ...user,
+                    batches: chunkProductSelectionLines(user.lines, 29)
+                }));
             const text = requestedUserId
-                ? (users[0]?.lines || []).join('\n')
-                : users.map((user) => `${user.user_display || user.user_email}\n${user.lines.join('\n')}`).join('\n\n');
-            res.json({ site, users, text });
+                ? flattenProductSelectionBatches(users[0]?.lines || [], 29)
+                : users.map((user) => `${user.user_display || user.user_email}\n${flattenProductSelectionBatches(user.lines, 29)}`).join('\n\n');
+            res.json({ site, batch_size: 29, users, text });
         } catch (err) {
             res.status(500).json({ error: err.message });
         }

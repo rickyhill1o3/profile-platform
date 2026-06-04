@@ -2835,8 +2835,9 @@ const storeProductCache = {};
 const storeSelectedProductIds = {};
 
 function getStoreSelectionLimit(site) {
-    if (site === "target" || site === "samsclub") return 29;
     if (site === "amazon") return 1;
+    // Target no longer has a user-side SKU selection cap.
+    // Sam's Club remains uncapped on the dashboard too; admin exports still batch at 29.
     return 9999;
 }
 
@@ -2873,9 +2874,9 @@ function updateStoreSelectionSummary(site) {
     const skuUnits = countSelectedStoreSkuUnits(site);
     if (summary) {
         summary.textContent = site === "target"
-            ? `${skuUnits} / 29 Target SKUs selected`
+            ? `${skuUnits} Target SKU${skuUnits === 1 ? "" : "s"} selected`
             : site === "samsclub"
-                ? `${skuUnits} / 29 Sam's Club SKUs selected`
+                ? `${skuUnits} Sam's Club SKU${skuUnits === 1 ? "" : "s"} selected`
                 : site === "amazon"
                     ? `${selected.size} / 1 Amazon item selected`
                     : `${selected.size} selected`;
@@ -3164,7 +3165,6 @@ function applyRecommendedTargetProductIds(productIds = []) {
     for (const id of productIds.map(String)) {
         if (!available.has(id) || selected.has(id)) continue;
         const product = (storeProductCache[site] || []).find((row) => String(row.id) === String(id));
-        if (countSelectedStoreSkuUnits(site) + getProductSkuUnitCount(product) > 29) break;
         selected.add(id);
         added += 1;
     }
@@ -3185,7 +3185,7 @@ function applyRecommendedTargetProductIds(productIds = []) {
     if (msg) {
         msg.textContent = added
             ? `Applied ${added} product${added === 1 ? "" : "s"} from that list. Save Target Selections to lock them in.`
-            : "No products were added. You may already have them selected or you may be at the 29 SKU limit.";
+            : "No products were added. They may already be selected.";
     }
 }
 
@@ -3210,9 +3210,9 @@ async function loadStoreProductsForSite(site) {
 
         const selectable = site === 'target' || site === 'samsclub' || site === 'amazon';
         const limitText = site === 'target'
-            ? 'Select up to 29 Target SKUs.'
+            ? 'Select the Target SKUs you want us to run.'
             : site === 'samsclub'
-                ? "Select up to 29 Sam's Club SKUs."
+                ? "Select the Sam's Club SKUs you want us to run."
                 : site === 'amazon'
                     ? 'Select 1 Amazon item.'
                     : '';
@@ -3228,7 +3228,7 @@ async function loadStoreProductsForSite(site) {
             <div class="toolbar-row store-product-search-row">
                 <input id="${site}ProductSearch" class="input" type="search" placeholder="Search ${site} products by name, SKU, brand, or category" />
             </div>
-            ${site === 'target' ? `<section class="recommended-lists-section"><div class="panel-header panel-header--compact"><div><h3>Current Running Lists</h3><p class="subtle-text">Apply The Shore Shack list or your admin’s list. List products count toward your 29 Target SKU limit.</p></div></div><div id="targetRecommendedListsPanel" class="recommended-list-grid"></div></section>` : ''}
+            ${site === 'target' ? `<section class="recommended-lists-section"><div class="panel-header panel-header--compact"><div><h3>Current Running Lists</h3><p class="subtle-text">Apply The Shore Shack list or your admin’s list.</p></div></div><div id="targetRecommendedListsPanel" class="recommended-list-grid"></div></section>` : ''}
             ${selectable ? `<div class="banner banner-soft"><strong>${escapeHTML(limitText)}</strong><p class="subtle-text">You can pick your own products even if they are not currently recommended.</p><div id="${site}ProductSelectionMessage" class="subtle-text"></div></div>` : ''}
             <div class="store-product-scroll">
                 <div id="${site}ProductGridWrap">
