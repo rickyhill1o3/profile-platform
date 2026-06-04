@@ -2836,8 +2836,7 @@ const storeSelectedProductIds = {};
 
 function getStoreSelectionLimit(site) {
     if (site === "amazon") return 1;
-    // Target no longer has a user-side SKU selection cap.
-    // Sam's Club remains uncapped on the dashboard too; admin exports still batch at 29.
+    // Target and Sam's Club are uncapped on the dashboard. Admin exports still batch selected SKUs into 29-SKU lists.
     return 9999;
 }
 
@@ -3210,7 +3209,7 @@ async function loadStoreProductsForSite(site) {
 
         const selectable = site === 'target' || site === 'samsclub' || site === 'amazon';
         const limitText = site === 'target'
-            ? 'Select the Target SKUs you want us to run.'
+            ? 'Select all Target SKUs you want us to run.'
             : site === 'samsclub'
                 ? "Select the Sam's Club SKUs you want us to run."
                 : site === 'amazon'
@@ -3229,7 +3228,7 @@ async function loadStoreProductsForSite(site) {
                 <input id="${site}ProductSearch" class="input" type="search" placeholder="Search ${site} products by name, SKU, brand, or category" />
             </div>
             ${site === 'target' ? `<section class="recommended-lists-section"><div class="panel-header panel-header--compact"><div><h3>Current Running Lists</h3><p class="subtle-text">Apply The Shore Shack list or your admin’s list.</p></div></div><div id="targetRecommendedListsPanel" class="recommended-list-grid"></div></section>` : ''}
-            ${selectable ? `<div class="banner banner-soft"><strong>${escapeHTML(limitText)}</strong><p class="subtle-text">You can pick your own products even if they are not currently recommended.</p><div id="${site}ProductSelectionMessage" class="subtle-text"></div></div>` : ''}
+            ${selectable ? `<div class="banner banner-soft"><strong>${escapeHTML(limitText)}</strong><p class="subtle-text">You can pick your own products even if they are not currently recommended. Exports will still be split into 29-SKU batches for the bot.</p><div id="${site}ProductSelectionMessage" class="subtle-text"></div></div>` : ''}
             <div class="store-product-scroll">
                 <div id="${site}ProductGridWrap">
                     ${renderStoreProductGroups(site, products)}

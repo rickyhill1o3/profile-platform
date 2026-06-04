@@ -910,7 +910,7 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
         try {
             await ensureUserNotRevoked(req.user_id);
             const site = normalizeSite(req.body.site);
-            const limit = site === 'target' ? 29 : (site === 'amazon' ? 1 : 9999);
+            const limit = site === 'amazon' ? 1 : 9999;
 
             const selectedIdsFromBody = Array.isArray(req.body.selected_product_ids)
                 ? req.body.selected_product_ids.map(String).filter(Boolean)
@@ -965,9 +965,6 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
                 return res.status(400).json({ error: 'Amazon allows only 1 selected item right now.' });
             }
 
-            if (site === 'target' && selectedSkuUnitCount > 29) {
-                return res.status(400).json({ error: 'Target allows a maximum of 29 selected SKUs.' });
-            }
 
             const { data: siteProducts, error: siteProductsError } = await supabase
                 .from('catalog_products')
