@@ -72,6 +72,24 @@
             <p class="subtle-text">Create one profile with shared shipping and payment, then assign it to Target, Walmart, Sam's Club, Amazon, Crunchyroll, Pokémon Center, or General.</p>
             <div class="panel-actions">
               <button class="btn btn-primary" onclick="createProfile()">Create Profile</button>
+              <button class="btn" type="button" id="showProfileImportButton">Import Profiles</button>
+            </div>
+            <div class="profile-import-panel" id="profileImportPanel" style="display:none; margin-top:12px;">
+              <div class="toolbar-row">
+                <select class="input" id="profileImportType">
+                  <option value="target">Target</option>
+                  <option value="walmart">Walmart</option>
+                  <option value="samsclub">Sam's Club</option>
+                  <option value="amazon">Amazon</option>
+                  <option value="general">General</option>
+                  <option value="crunchyroll">Crunchyroll</option>
+                  <option value="pokemoncenter">Pokémon Center</option>
+                </select>
+                <input class="input" type="file" id="profileImportFile" accept=".json,application/json" />
+                <button class="btn btn-primary" type="button" id="profileImportButton">Upload Import</button>
+              </div>
+              <p class="subtle-text">Accepts Refract and Stellar JSON profile exports. Imported profiles will be assigned to the selected store.</p>
+              <div class="form-help" id="profileImportMessage"></div>
             </div>
           </section>
           <section class="panel" id="allProfilesPanel"></section>

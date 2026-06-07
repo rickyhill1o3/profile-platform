@@ -4773,26 +4773,39 @@ function normalizeImportedProfilePayload(entry = {}, accountType = "walmart") {
     const billing = entry.billing || {};
     const payment = entry.payment || {};
     const digitsOnly = (value) => String(value || "").replace(/\D/g, "");
-    const phone = digitsOnly(shipping.phone || billing.phone || "");
+    const valueFrom = (...values) => values.map((value) => String(value || "").trim()).find(Boolean) || "";
+    const normalizeYear = (value) => {
+        const raw = digitsOnly(value);
+        if (!raw) return "";
+        if (raw.length === 2) return `20${raw}`;
+        return raw.slice(-4);
+    };
+
+    // Refract exports use: name, shipping.address1/province/postalCode, payment.num/month/year/cvv.
+    // Stellar exports use: profileName, shipping.address/state/zipcode, payment.cardNumber/cardMonth/cardYear/cardCvv.
+    const email = valueFrom(entry.email, shipping.email, billing.email).toLowerCase();
+    const phone = digitsOnly(valueFrom(entry.phone, shipping.phone, billing.phone));
+    const card = digitsOnly(valueFrom(payment.num, payment.card_number, payment.cardNumber));
+
     return {
-        profile_name: String(entry.name || entry.profile_name || entry.email || "Imported Profile").trim(),
-        account_type: String(accountType || entry.account_type || 'walmart').trim().toLowerCase(),
-        first_name: String(shipping.firstName || shipping.first_name || billing.firstName || "").trim(),
-        last_name: String(shipping.lastName || shipping.last_name || billing.lastName || "").trim(),
-        email: String(entry.email || shipping.email || billing.email || "").trim().toLowerCase(),
+        profile_name: valueFrom(entry.name, entry.profileName, entry.profile_name, email, "Imported Profile"),
+        account_type: normalizeProfileAccountType(accountType || entry.account_type || entry.store || 'walmart'),
+        first_name: valueFrom(shipping.firstName, shipping.first_name, billing.firstName, billing.first_name),
+        last_name: valueFrom(shipping.lastName, shipping.last_name, billing.lastName, billing.last_name),
+        email,
         phone: phone.slice(-10),
-        address1: String(shipping.address1 || shipping.address_1 || billing.address1 || "").trim(),
-        city: String(shipping.city || billing.city || "").trim(),
-        state: String(shipping.province || shipping.state || billing.province || billing.state || "").trim(),
-        zip: String(shipping.postalCode || shipping.zip || billing.postalCode || billing.zip || "").trim(),
-        card: digitsOnly(payment.num || payment.card_number || ""),
-        exp_month: String(payment.month || payment.exp_month || "").padStart(2, '0').slice(-2),
-        exp_year: String(payment.year || payment.exp_year || "").slice(-4),
-        cvv: digitsOnly(payment.cvv || ""),
-        account_login_email: "",
-        account_login_password: "",
-        gmail_app_password: "",
-        amazon_2fa_secret: "",
+        address1: valueFrom(shipping.address1, shipping.address_1, shipping.address, billing.address1, billing.address_1, billing.address),
+        city: valueFrom(shipping.city, billing.city),
+        state: valueFrom(shipping.province, shipping.state, billing.province, billing.state),
+        zip: valueFrom(shipping.postalCode, shipping.zip, shipping.zipcode, billing.postalCode, billing.zip, billing.zipcode),
+        card,
+        exp_month: valueFrom(payment.month, payment.exp_month, payment.cardMonth).padStart(2, '0').slice(-2),
+        exp_year: normalizeYear(valueFrom(payment.year, payment.exp_year, payment.cardYear)),
+        cvv: digitsOnly(valueFrom(payment.cvv, payment.cardCvv, payment.card_cvv)),
+        account_login_email: email,
+        account_login_password: valueFrom(entry.password, entry.account_password, entry.login_password),
+        gmail_app_password: valueFrom(entry.gmail_app_password, entry.app_password, entry.imap_password),
+        amazon_2fa_secret: valueFrom(entry.amazon_2fa_secret, entry.two_fa_secret, entry.totp_secret),
         imported_profile_id: String(entry.id || "").trim()
     };
 }
@@ -5443,6 +5456,7 @@ app.post("/profiles/import", auth, async (req, res) => {
     try {
         await ensureUserNotRevoked(req.user_id);
         const accountType = normalizeProfileAccountType(req.body?.account_type || 'walmart');
+        const assignedStores = normalizeAssignedStores(req.body?.assigned_stores || [accountType], accountType);
         const rawProfiles = Array.isArray(req.body?.profiles) ? req.body.profiles : [];
         if (!rawProfiles.length) {
             return res.status(400).json({ error: "No profiles were provided" });
@@ -5460,7 +5474,7 @@ app.post("/profiles/import", auth, async (req, res) => {
         const seen = new Set();
 
         for (const entry of rawProfiles) {
-            const payload = normalizeImportedProfilePayload(entry, accountType);
+            const payload = { ...normalizeImportedProfilePayload(entry, accountType), assigned_stores: assignedStores };
             const dedupeKey = [payload.account_type, payload.profile_name, payload.email, payload.phone, (payload.card || '').slice(-4)].join('|').toLowerCase();
             if (seen.has(dedupeKey)) {
                 skipped.push({ profile_name: payload.profile_name, reason: 'Duplicate in upload' });
@@ -5510,6 +5524,7 @@ app.post("/profiles/import", auth, async (req, res) => {
 
             try {
                 await upsertProfileRelations(createdProfile.id, payload);
+                await replaceProfileStoreAssignments(req.user_id, createdProfile.id, assignedStores);
                 imported.push({ id: createdProfile.id, profile_name: payload.profile_name });
                 existingProfiles.push({
                     id: createdProfile.id,

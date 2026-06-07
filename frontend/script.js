@@ -759,6 +759,9 @@ async function loadProfiles() {
         if (typeof bindRaffleBuilderControls === "function") {
             bindRaffleBuilderControls();
         }
+        if (typeof bindProfileImportControls === "function") {
+            bindProfileImportControls();
+        }
     } catch (err) {
         console.error("Profile dashboard load failed:", err);
         const msg = escapeHTML(err?.message || "Could not connect to the server.");
@@ -896,20 +899,32 @@ function bindRaffleBuilderControls() {
 
 function bindProfileImportControls() {
     if (profileImportBound) return;
+    const showButton = document.getElementById('showProfileImportButton');
+    const panel = document.getElementById('profileImportPanel');
     const button = document.getElementById('profileImportButton');
     const fileInput = document.getElementById('profileImportFile');
     const typeSelect = document.getElementById('profileImportType');
     const message = document.getElementById('profileImportMessage');
     if (!button || !fileInput || !typeSelect || !message) return;
     profileImportBound = true;
+
+    if (showButton && panel) {
+        showButton.addEventListener('click', () => {
+            const hidden = panel.style.display === 'none' || !panel.style.display;
+            panel.style.display = hidden ? 'block' : 'none';
+        });
+    }
+
     button.addEventListener('click', async () => {
         message.textContent = '';
         const file = fileInput.files?.[0];
         if (!file) {
-            message.textContent = 'Choose a JSON export first.';
+            message.textContent = 'Choose a Refract or Stellar JSON export first.';
             return;
         }
         button.disabled = true;
+        const originalText = button.textContent;
+        button.textContent = 'Importing...';
         try {
             const text = await file.text();
             const parsed = JSON.parse(text);
@@ -918,17 +933,20 @@ function bindProfileImportControls() {
             const res = await fetch(API + '/profiles/import', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token() },
-                body: JSON.stringify({ account_type: typeSelect.value, profiles })
+                body: JSON.stringify({ account_type: typeSelect.value, assigned_stores: [typeSelect.value], profiles })
             });
             const data = await res.json();
-            if (data.error) throw new Error(data.error);
-            message.textContent = `Imported ${data.imported_count || 0}, skipped ${data.skipped_count || 0}, errors ${data.error_count || 0}.`;
+            if (!res.ok || data.error) throw new Error(data.error || 'Could not import profiles.');
+            const firstSkipped = Array.isArray(data.skipped) && data.skipped.length ? ` First skipped: ${data.skipped[0].profile_name || 'profile'} - ${data.skipped[0].reason || 'skipped'}.` : '';
+            const firstError = Array.isArray(data.errors) && data.errors.length ? ` First error: ${data.errors[0].profile_name || 'profile'} - ${data.errors[0].reason || 'error'}.` : '';
+            message.textContent = `Imported ${data.imported_count || 0}, skipped ${data.skipped_count || 0}, errors ${data.error_count || 0}.${firstSkipped}${firstError}`;
             fileInput.value = '';
             await loadProfiles();
         } catch (error) {
             message.textContent = error.message || 'Could not import profiles.';
         } finally {
             button.disabled = false;
+            button.textContent = originalText || 'Upload Import';
         }
     });
 }
