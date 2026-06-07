@@ -1491,6 +1491,19 @@ function verifyDiscordOAuthState(value = '') {
     return decoded;
 }
 
+function normalizeDiscordName(value = '') {
+    return String(value || '').trim();
+}
+
+function buildDiscordDisplayNameFromApiUser(userJson = {}) {
+    const globalName = normalizeDiscordName(userJson.global_name || userJson.display_name);
+    const username = normalizeDiscordName(userJson.username || userJson.name);
+    const discriminator = normalizeDiscordName(userJson.discriminator);
+    if (globalName) return globalName;
+    if (username && discriminator && discriminator !== '0') return `${username}#${discriminator}`;
+    return username;
+}
+
 async function fetchDiscordOAuthUser({ code, redirectUri }) {
     const clientId = process.env.DISCORD_CLIENT_ID;
     const clientSecret = process.env.DISCORD_CLIENT_SECRET;
@@ -1512,18 +1525,36 @@ async function fetchDiscordOAuthUser({ code, redirectUri }) {
         throw new Error(tokenJson.error_description || tokenJson.error || 'Discord token exchange failed');
     }
 
+    let userJson = {};
     const userRes = await fetch('https://discord.com/api/users/@me', {
         headers: { Authorization: `Bearer ${tokenJson.access_token}` }
     });
-    const userJson = await userRes.json().catch(() => ({}));
+    userJson = await userRes.json().catch(() => ({}));
+
+    // Fallback for cases where Discord returns only part of the user object from /users/@me.
+    // /oauth2/@me includes the authorized user and can restore username/global_name.
+    if (userRes.ok && userJson.id && !buildDiscordDisplayNameFromApiUser(userJson)) {
+        const meRes = await fetch('https://discord.com/api/oauth2/@me', {
+            headers: { Authorization: `Bearer ${tokenJson.access_token}` }
+        }).catch(() => null);
+        if (meRes?.ok) {
+            const meJson = await meRes.json().catch(() => ({}));
+            if (meJson?.user?.id) userJson = { ...userJson, ...meJson.user };
+        }
+    }
+
     if (!userRes.ok || !userJson.id) {
         throw new Error(userJson.message || 'Could not read Discord user');
     }
 
+    const discordId = normalizeDiscordUserId(userJson.id);
+    const username = normalizeDiscordName(userJson.username || userJson.name);
+    const displayName = buildDiscordDisplayNameFromApiUser(userJson) || (discordId ? `Discord user ${discordId}` : '');
+
     return {
-        discord_user_id: normalizeDiscordUserId(userJson.id),
-        discord_username: String(userJson.username || '').trim(),
-        discord_display_name: String(userJson.global_name || userJson.username || '').trim(),
+        discord_user_id: discordId,
+        discord_username: username || displayName || null,
+        discord_display_name: displayName || username || null,
         discord_avatar: userJson.avatar ? `https://cdn.discordapp.com/avatars/${userJson.id}/${userJson.avatar}.png` : '',
         discord_email: String(userJson.email || '').trim().toLowerCase()
     };
