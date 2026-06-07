@@ -901,14 +901,57 @@ function bindProfileImportControls() {
     if (profileImportBound) return;
     const showButton = document.getElementById('showProfileImportButton');
     const panel = document.getElementById('profileImportPanel');
-    const stellarButton = document.getElementById('profileImportStellarButton');
-    const refractButton = document.getElementById('profileImportRefractButton');
-    const legacyButton = document.getElementById('profileImportButton');
+    const importButton = document.getElementById('profileImportButton');
     const fileInput = document.getElementById('profileImportFile');
     const typeSelect = document.getElementById('profileImportType');
     const message = document.getElementById('profileImportMessage');
-    const buttons = [stellarButton, refractButton, legacyButton].filter(Boolean);
-    if (!fileInput || !typeSelect || !message || !buttons.length) return;
+    let reportBox = document.getElementById('profileImportReport');
+    if (!reportBox && message?.parentElement) {
+        reportBox = document.createElement('textarea');
+        reportBox.id = 'profileImportReport';
+        reportBox.className = 'input';
+        reportBox.readOnly = true;
+        reportBox.style.display = 'none';
+        reportBox.style.marginTop = '8px';
+        reportBox.style.minHeight = '160px';
+        reportBox.style.whiteSpace = 'pre';
+        reportBox.placeholder = 'Skipped/error profile details will appear here.';
+        message.parentElement.appendChild(reportBox);
+    }
+
+    const clearImportReport = () => {
+        if (!reportBox) return;
+        reportBox.value = '';
+        reportBox.style.display = 'none';
+    };
+
+    const profileLabelForImportIssue = (item = {}) => {
+        return item.profile_name || item.name || item.email || item.id || 'Unknown profile';
+    };
+
+    const renderImportReport = (data = {}) => {
+        if (!reportBox) return;
+        const lines = [];
+        const skipped = Array.isArray(data.skipped) ? data.skipped : [];
+        const errors = Array.isArray(data.errors) ? data.errors : [];
+        if (skipped.length) {
+            lines.push(`Skipped profiles (${skipped.length})`);
+            skipped.forEach((item, index) => {
+                lines.push(`${index + 1}. ${profileLabelForImportIssue(item)} - ${item.reason || 'Skipped'}`);
+            });
+        }
+        if (errors.length) {
+            if (lines.length) lines.push('');
+            lines.push(`Error profiles (${errors.length})`);
+            errors.forEach((item, index) => {
+                lines.push(`${index + 1}. ${profileLabelForImportIssue(item)} - ${item.reason || item.error || 'Error'}`);
+            });
+        }
+        reportBox.value = lines.join('\n');
+        reportBox.style.display = lines.length ? 'block' : 'none';
+    };
+
+    if (!fileInput || !typeSelect || !message || !importButton) return;
     profileImportBound = true;
 
     if (showButton && panel) {
@@ -922,7 +965,7 @@ function bindProfileImportControls() {
         const raw = String(rawText || '').replace(/^\uFEFF/, '').trim();
         if (!raw) throw new Error('That import file is empty.');
         if (/^<!doctype\s+html/i.test(raw) || /^<html[\s>]/i.test(raw)) {
-            throw new Error('That file is an HTML page, not a profile JSON export. Re-export the profiles from the bot and choose the .json file directly.');
+            throw new Error('That file is an HTML page, not a profile export. Re-export the profiles and choose the profile export file directly.');
         }
         try {
             return JSON.parse(raw);
@@ -938,11 +981,18 @@ function bindProfileImportControls() {
                 const sliced = raw.slice(start, end + 1);
                 try { return JSON.parse(sliced); } catch {}
             }
-            throw new Error('That file could not be read as JSON. Make sure you are uploading the actual Refract or Stellar .json export, not a saved webpage.');
+            throw new Error('That file could not be read as a profile export. Make sure you are uploading the actual export file, not a saved webpage.');
         }
     };
 
-    const extractProfilesFromImport = (parsed, sourceFormat) => {
+    const detectImportFormat = (parsed) => {
+        const text = JSON.stringify(parsed || {}).slice(0, 50000).toLowerCase();
+        if (text.includes('prism') || text.includes('refract')) return 'refract';
+        if (text.includes('stellar')) return 'stellar';
+        return 'auto';
+    };
+
+    const extractProfilesFromImport = (parsed) => {
         let profiles = [];
         if (Array.isArray(parsed)) profiles = parsed;
         else if (Array.isArray(parsed?.profiles)) profiles = parsed.profiles;
@@ -950,28 +1000,31 @@ function bindProfileImportControls() {
         else if (Array.isArray(parsed?.profileList)) profiles = parsed.profileList;
         else if (Array.isArray(parsed?.Profiles)) profiles = parsed.Profiles;
 
-        if (!profiles.length) throw new Error(`No ${sourceFormat || 'profile'} profiles found in that file.`);
-        return profiles.map((profile) => ({ ...profile, import_source: sourceFormat || 'auto' }));
+        if (!profiles.length) throw new Error('No profiles were found in that file.');
+        const detected = detectImportFormat(parsed);
+        return profiles.map((profile) => ({ ...profile, import_source: detected }));
     };
 
-    const runProfileImport = async (sourceFormat, clickedButton) => {
+    const runProfileImport = async () => {
         message.textContent = '';
+        clearImportReport();
         const file = fileInput.files?.[0];
         if (!file) {
-            message.textContent = `Choose a ${sourceFormat === 'stellar' ? 'Stellar' : 'Refract'} JSON export first.`;
+            message.textContent = 'Choose a profile export file first.';
             return;
         }
-        buttons.forEach((btn) => { btn.disabled = true; });
-        const originalText = clickedButton?.textContent;
-        if (clickedButton) clickedButton.textContent = 'Importing...';
+        importButton.disabled = true;
+        const originalText = importButton.textContent;
+        importButton.textContent = 'Importing...';
         try {
             const text = await file.text();
             const parsed = normalizeImportText(text);
-            const profiles = extractProfilesFromImport(parsed, sourceFormat);
+            const profiles = extractProfilesFromImport(parsed);
+            const importSource = profiles[0]?.import_source || 'auto';
             const res = await fetch(API + '/profiles/import', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token() },
-                body: JSON.stringify({ account_type: typeSelect.value, assigned_stores: [typeSelect.value], import_source: sourceFormat, profiles })
+                body: JSON.stringify({ account_type: typeSelect.value, assigned_stores: [typeSelect.value], import_source: importSource, profiles })
             });
             const responseText = await res.text();
             let data = {};
@@ -984,22 +1037,22 @@ function bindProfileImportControls() {
                 throw new Error(responseText || 'Could not import profiles.');
             }
             if (!res.ok || data.error) throw new Error(data.error || 'Could not import profiles.');
-            const firstSkipped = Array.isArray(data.skipped) && data.skipped.length ? ` First skipped: ${data.skipped[0].profile_name || 'profile'} - ${data.skipped[0].reason || 'skipped'}.` : '';
-            const firstError = Array.isArray(data.errors) && data.errors.length ? ` First error: ${data.errors[0].profile_name || 'profile'} - ${data.errors[0].reason || 'error'}.` : '';
-            message.textContent = `${sourceFormat === 'stellar' ? 'Stellar' : 'Refract'} import complete. Imported ${data.imported_count || 0}, skipped ${data.skipped_count || 0}, errors ${data.error_count || 0}.${firstSkipped}${firstError}`;
+            const skippedCount = Number(data.skipped_count || 0);
+            const errorCount = Number(data.error_count || 0);
+            const detailText = skippedCount || errorCount ? ' Review the skipped/error details below.' : '';
+            message.textContent = `Import complete. Imported ${data.imported_count || 0}, skipped ${skippedCount}, errors ${errorCount}.${detailText}`;
+            renderImportReport(data);
             fileInput.value = '';
             await loadProfiles();
         } catch (error) {
             message.textContent = error.message || 'Could not import profiles.';
         } finally {
-            buttons.forEach((btn) => { btn.disabled = false; });
-            if (clickedButton) clickedButton.textContent = originalText || (sourceFormat === 'stellar' ? 'Import Stellar Profiles' : 'Import Refract Profiles');
+            importButton.disabled = false;
+            importButton.textContent = originalText || 'Import Profiles';
         }
     };
 
-    stellarButton?.addEventListener('click', () => runProfileImport('stellar', stellarButton));
-    refractButton?.addEventListener('click', () => runProfileImport('refract', refractButton));
-    legacyButton?.addEventListener('click', () => runProfileImport('auto', legacyButton));
+    importButton.addEventListener('click', runProfileImport);
 }
 
 function createProfile() {
