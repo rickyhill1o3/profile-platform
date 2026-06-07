@@ -105,8 +105,11 @@ app.use((req, res, next) => {
     if (req.originalUrl.startsWith("/webhooks/stripe")) {
         return next();
     }
-    express.json()(req, res, next);
+    // Refract profile exports can be much larger than Express's default 100kb JSON limit.
+    // Keep Stellar unchanged, but allow larger profile-import payloads to reach /profiles/import.
+    express.json({ limit: "10mb" })(req, res, next);
 });
+app.use(express.urlencoded({ extended: true, limit: "10mb" }));
 
 const phoneRegex = /^[0-9]{10}$/;
 const SUPER_ADMIN_EMAIL = "theshoreshacktcg@gmail.com";

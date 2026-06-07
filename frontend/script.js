@@ -973,7 +973,16 @@ function bindProfileImportControls() {
                 headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token() },
                 body: JSON.stringify({ account_type: typeSelect.value, assigned_stores: [typeSelect.value], import_source: sourceFormat, profiles })
             });
-            const data = await res.json();
+            const responseText = await res.text();
+            let data = {};
+            try {
+                data = responseText ? JSON.parse(responseText) : {};
+            } catch {
+                if (responseText.trim().startsWith('<')) {
+                    throw new Error('The server rejected the import before it reached the profile importer. This is usually a request-size limit.');
+                }
+                throw new Error(responseText || 'Could not import profiles.');
+            }
             if (!res.ok || data.error) throw new Error(data.error || 'Could not import profiles.');
             const firstSkipped = Array.isArray(data.skipped) && data.skipped.length ? ` First skipped: ${data.skipped[0].profile_name || 'profile'} - ${data.skipped[0].reason || 'skipped'}.` : '';
             const firstError = Array.isArray(data.errors) && data.errors.length ? ` First error: ${data.errors[0].profile_name || 'profile'} - ${data.errors[0].reason || 'error'}.` : '';
