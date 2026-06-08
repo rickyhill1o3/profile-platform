@@ -2848,6 +2848,58 @@ function spoilerDiscordValue(value = '') {
 }
 
 
+function stripDiscordSpoilerValue(value = '') {
+    return decodeHtmlEntities(String(value || '')).replace(/^\|\|/, '').replace(/\|\|$/, '').trim();
+}
+
+function extractCheckoutLineItems(payload = {}) {
+    const { fields: rawFields } = extractEmbedFields(payload || {});
+    const itemsByIndex = new Map();
+    for (const [rawName, rawValue] of Object.entries(rawFields || {})) {
+        const name = String(rawName || '').trim().toLowerCase();
+        const value = stripDiscordSpoilerValue(rawValue);
+        const match = name.match(/^(product|price|quantity)\s*\((\d+)\)$/i);
+        if (!match) continue;
+        const key = match[1].toLowerCase();
+        const index = Number(match[2]);
+        if (!Number.isFinite(index) || index < 1) continue;
+        const current = itemsByIndex.get(index) || { index };
+        if (key === 'product') current.product = value;
+        if (key === 'price') {
+            current.price = value;
+            const priceNumber = Number(String(value).replace(/[^0-9.-]/g, ''));
+            if (Number.isFinite(priceNumber)) current.priceNumber = priceNumber;
+        }
+        if (key === 'quantity') {
+            current.quantity = value;
+            const qtyNumber = Number(String(value).replace(/[^0-9.-]/g, ''));
+            if (Number.isFinite(qtyNumber)) current.quantityNumber = Math.max(1, Math.round(qtyNumber));
+        }
+        itemsByIndex.set(index, current);
+    }
+    return Array.from(itemsByIndex.values())
+        .sort((a, b) => a.index - b.index)
+        .filter((item) => item.product || item.price || item.quantity)
+        .map((item) => ({
+            index: item.index,
+            product: item.product || '-',
+            price: item.price || '-',
+            priceNumber: item.priceNumber,
+            quantity: item.quantityNumber || item.quantity || 1
+        }));
+}
+
+function formatCheckoutItemsForDiscord(items = []) {
+    const lines = (Array.isArray(items) ? items : []).map((item) => {
+        const qty = item.quantity || 1;
+        const price = item.price && item.price !== '-' ? `$${String(item.price).replace(/^\$/, '')}` : '-';
+        return `${item.index || ''}. ${item.product || '-'} — Qty ${qty} — ${price}`;
+    }).filter(Boolean);
+    const text = lines.join('\n');
+    return text.length > 1000 ? `${text.slice(0, 997)}...` : (text || '-');
+}
+
+
 async function sendDiscordWebhookToTarget({
     webhookUrl,
     order,
@@ -2894,15 +2946,16 @@ async function sendDiscordWebhookToTarget({
     }
 
     const checkoutItems = extractCheckoutLineItems(payload);
-    const totalQuantity = checkoutItems.reduce((sum, item) => sum + (Number.isFinite(Number(item.quantity)) ? Math.max(1, Math.round(Number(item.quantity))) : 1), 0) || (Number(normalized.quantity) || 1);
-    const itemPrices = checkoutItems.map((item) => Number(item.priceNumber)).filter((price) => Number.isFinite(price));
+    const totalQuantity = checkoutItems.length
+        ? checkoutItems.reduce((sum, item) => sum + (Number.isFinite(Number(item.quantity)) ? Math.max(1, Math.round(Number(item.quantity))) : 1), 0)
+        : (Number(normalized.quantity) || 1);
     const totalPriceNumber = checkoutItems.reduce((sum, item) => {
         const price = Number(item.priceNumber);
         const qty = Number.isFinite(Number(item.quantity)) ? Math.max(1, Math.round(Number(item.quantity))) : 1;
         return Number.isFinite(price) ? sum + (price * qty) : sum;
     }, 0);
     const priceNumber = Number(normalized.price);
-    const priceValue = checkoutItems.length > 1 && itemPrices.length
+    const priceValue = checkoutItems.length > 1
         ? `$${totalPriceNumber.toFixed(2)} total`
         : (Number.isFinite(priceNumber) ? `$${priceNumber.toFixed(2)}` : '-');
 
@@ -4286,6 +4339,35 @@ app.get('/admin/webhooks/logs', auth, admin, async (req, res) => {
         res.json({ items: rows });
     } catch (err) {
         res.status(500).json({ error: err.message });
+    }
+});
+
+
+
+app.post('/admin/webhooks/logs/:id/resend', auth, admin, async (req, res) => {
+    try {
+        const currentUser = await getCurrentUser(req);
+        if (currentUser.role !== 'super_admin') return res.status(403).json({ error: 'Only super admin can resend webhook logs.' });
+        const rows = await getWebhookLogEntries(500);
+        const row = rows.find((item) => String(item.id) === String(req.params.id));
+        if (!row) return res.status(404).json({ error: 'Webhook log not found.' });
+        if (!row.payload) return res.status(400).json({ error: 'This log does not have a raw payload to resend.' });
+        if (String(row.type || '') !== 'checkout') return res.status(400).json({ error: 'Only checkout webhook logs can be resent to checkout Discord webhooks.' });
+
+        const matchedUser = await findUserForWebhook(row.payload).catch(() => null);
+        const checkoutType = classifyCheckoutWebhookType({ raw_payload: row.payload, status: '' });
+        const results = await sendCheckoutDiscordNotificationsForPayload(row.payload, matchedUser?.id ? matchedUser : null, {
+            status: checkoutType === 'error' ? 'checkout_error' : 'processed'
+        });
+        await updateWebhookLogEntry(row.id, {
+            discord_targets: Array.isArray(results) ? results : [],
+            error: Array.isArray(results) && results.some((r) => r && r.success === false)
+                ? results.filter((r) => r && r.success === false).map((r) => r.error || 'Discord resend failed').join(' | ')
+                : String(row.error || '')
+        }).catch(() => null);
+        res.json({ ok: true, results });
+    } catch (err) {
+        res.status(500).json({ error: err.message || String(err) });
     }
 });
 

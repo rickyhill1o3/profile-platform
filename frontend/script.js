@@ -2607,6 +2607,28 @@ function escapeHtml(value = '') {
         .replace(/'/g, '&#39;');
 }
 
+async function resendWebhookLog(id, button) {
+    if (!id) return;
+    const originalText = button ? button.textContent : '';
+    try {
+        if (button) {
+            button.disabled = true;
+            button.textContent = 'Sending...';
+        }
+        const data = await authJSON(API + `/admin/webhooks/logs/${encodeURIComponent(id)}/resend`, { method: 'POST' });
+        alert('Webhook resent to Discord. Check the Discord target details/logs for delivery status.');
+        await loadWebhookLogs();
+        return data;
+    } catch (err) {
+        alert(err.message || 'Failed to resend webhook.');
+    } finally {
+        if (button) {
+            button.disabled = false;
+            button.textContent = originalText || 'Resend to Discord';
+        }
+    }
+}
+
 async function loadWebhookLogs() {
     const container = document.getElementById('webhookLogs');
     if (!container) return;
@@ -2640,12 +2662,13 @@ async function loadWebhookLogs() {
               <td style="max-width:280px;word-break:break-word;">${escapeHtml(item.product || '-')}</td>
               <td>${escapeHtml(item.sku || '-')}</td>
               <td style="max-width:360px;word-break:break-word;">${escapeHtml(item.error || '')}${details}${targetDetails}${payloadDetails}</td>
+              <td><button class="secondary" type="button" onclick="resendWebhookLog('${escapeHtml(item.id || '')}', this)">Resend to Discord</button></td>
             </tr>`;
         }).join('');
         container.innerHTML = `
             <div style="overflow:auto;">
               <table class="admin-table">
-                <thead><tr><th>Time</th><th>Type</th><th>Status</th><th>Site</th><th>Product Type</th><th>Product</th><th>SKU</th><th>Error / Debug</th></tr></thead>
+                <thead><tr><th>Time</th><th>Type</th><th>Status</th><th>Site</th><th>Product Type</th><th>Product</th><th>SKU</th><th>Error / Debug</th><th>Actions</th></tr></thead>
                 <tbody>${rows}</tbody>
               </table>
             </div>`;
