@@ -2893,8 +2893,22 @@ async function sendDiscordWebhookToTarget({
             : 'Youve Been Served by The Shore Shack';
     }
 
+    const checkoutItems = extractCheckoutLineItems(payload);
+    const totalQuantity = checkoutItems.reduce((sum, item) => sum + (Number.isFinite(Number(item.quantity)) ? Math.max(1, Math.round(Number(item.quantity))) : 1), 0) || (Number(normalized.quantity) || 1);
+    const itemPrices = checkoutItems.map((item) => Number(item.priceNumber)).filter((price) => Number.isFinite(price));
+    const totalPriceNumber = checkoutItems.reduce((sum, item) => {
+        const price = Number(item.priceNumber);
+        const qty = Number.isFinite(Number(item.quantity)) ? Math.max(1, Math.round(Number(item.quantity))) : 1;
+        return Number.isFinite(price) ? sum + (price * qty) : sum;
+    }, 0);
     const priceNumber = Number(normalized.price);
-    const priceValue = Number.isFinite(priceNumber) ? `$${priceNumber.toFixed(2)}` : '-';
+    const priceValue = checkoutItems.length > 1 && itemPrices.length
+        ? `$${totalPriceNumber.toFixed(2)} total`
+        : (Number.isFinite(priceNumber) ? `$${priceNumber.toFixed(2)}` : '-');
+
+    if (checkoutItems.length > 1 && checkoutItems[0]?.product) {
+        description = `${checkoutItems[0].product} + ${checkoutItems.length - 1} more`;
+    }
 
     const embed = {
         title,
@@ -2902,12 +2916,16 @@ async function sendDiscordWebhookToTarget({
         fields: [
             { name: 'Site', value: String(order.site || normalized.site || '-'), inline: true },
             { name: 'Source', value: String(order.source || normalized.source || '-'), inline: true },
-            { name: 'Quantity', value: String(normalized.quantity || 1), inline: true },
-            { name: 'Price', value: priceValue, inline: true }
+            { name: checkoutItems.length > 1 ? 'Total Quantity' : 'Quantity', value: String(totalQuantity), inline: true },
+            { name: checkoutItems.length > 1 ? 'Total Price' : 'Price', value: priceValue, inline: true }
         ],
         footer: { text: footerText },
         timestamp: new Date().toISOString()
     };
+
+    if (checkoutItems.length > 1) {
+        embed.fields.push({ name: 'Items', value: formatCheckoutItemsForDiscord(checkoutItems), inline: false });
+    }
 
     if (checkoutType === 'success') {
         embed.fields.push({ name: 'Credits', value: String(order.credits_charged || 0), inline: true });
