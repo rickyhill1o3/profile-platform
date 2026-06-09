@@ -45,6 +45,7 @@
         <button class="admin-nav-button" type="button" data-user-nav="amazon">Amazon</button>
         <button class="admin-nav-button" type="button" data-user-nav="general">General</button>
         <button class="admin-nav-button" type="button" data-user-nav="crunchyroll">Crunchyroll</button>
+        <button class="admin-nav-button" type="button" data-user-nav="pokemoncenter">Pokémon Center</button>
         <button class="admin-nav-button" type="button" data-user-nav="raffle">Raffle Builder</button>
         <button class="admin-nav-button" type="button" data-user-nav="selections">Countdowns</button>
         <button class="admin-nav-button" type="button" data-user-nav="credits">Buy Credits</button>
@@ -228,6 +229,26 @@
               </div>
             </div>
             <div id="crunchyrollProductsPanel" class="store-products-panel"></div>
+          </section>
+        </section>
+
+        <section class="admin-pane" data-user-pane="pokemoncenter">
+          <section class="panel banner banner-soft">
+            <strong>Pokémon Center hub</strong>
+            <p class="subtle-text">Pokémon Center profiles and available Pokémon Center products are shown together. Assign profiles here, then select the Pokémon Center items you want us to run.</p>
+            <div class="panel-actions">
+              <button class="btn btn-primary" onclick="createProfile()">Create / Assign Profile</button>
+            </div>
+          </section>
+          <section class="panel" id="pokemoncenterProfilesPanel"></section>
+          <section class="panel">
+            <div class="panel-header">
+              <div>
+                <h2>Pokémon Center Products</h2>
+                <p class="subtle-text">Products loaded from the website catalog. Admins can add Pokémon Center items from the admin catalog tools.</p>
+              </div>
+            </div>
+            <div id="pokemonProductsPanel" class="store-products-panel"></div>
           </section>
         </section>
 

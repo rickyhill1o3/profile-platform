@@ -587,6 +587,7 @@ async function loadProfiles() {
         samsclub: document.getElementById("samsclubProfilesPanel"),
         amazon: document.getElementById("amazonProfilesPanel"),
         crunchyroll: document.getElementById("crunchyrollProfilesPanel"),
+        pokemoncenter: document.getElementById("pokemoncenterProfilesPanel"),
         raffle: document.getElementById("raffleProfilesPanel")
     };
 
@@ -660,6 +661,7 @@ async function loadProfiles() {
             crunchyroll: "Crunchyroll Profiles",
             pokemoncenter: "Pokémon Center Profiles",
             all: "All Profiles",
+            pokemoncenter: "Pokémon Center Profiles",
             raffle: "Raffle Profiles"
         };
 
@@ -2991,7 +2993,7 @@ function renderStoreProductCard(product, site) {
     const price = product.default_max_price !== null && product.default_max_price !== undefined ? formatMoney(product.default_max_price) : 'No limit';
     const credits = formatCredits(product.credit_cost || 0);
     const link = product.product_url ? `<a href="${escapeHTML(product.product_url)}" target="_blank" rel="noopener">Open</a>` : '';
-    const selectable = site === 'target' || site === 'samsclub' || site === 'amazon';
+    const selectable = site === 'target' || site === 'samsclub' || site === 'amazon' || site === 'pokemon';
     const inputType = site === 'amazon' ? 'radio' : 'checkbox';
     const selected = !!product.selected;
     const control = selectable
@@ -3021,9 +3023,11 @@ function updateStoreSelectionSummary(site) {
             ? `${skuUnits} Target SKU${skuUnits === 1 ? "" : "s"} selected`
             : site === "samsclub"
                 ? `${skuUnits} Sam's Club SKU${skuUnits === 1 ? "" : "s"} selected`
-                : site === "amazon"
-                    ? `${selected.size} / 1 Amazon item selected`
-                    : `${selected.size} selected`;
+                : site === "pokemon"
+                    ? `${skuUnits} Pokémon Center item${skuUnits === 1 ? "" : "s"} selected`
+                    : site === "amazon"
+                        ? `${selected.size} / 1 Amazon item selected`
+                        : `${selected.size} selected`;
     }
 }
 
@@ -3052,7 +3056,7 @@ function applyStoreProductSelection(site, input) {
             const addedSkuUnits = selected.has(productId) ? 0 : getProductSkuUnitCount(product);
             if (currentSkuUnits + addedSkuUnits > limit && !selected.has(productId)) {
                 input.checked = false;
-                alert(`You can select up to ${limit} ${site === "samsclub" ? "Sam's Club" : "Target"} SKUs.`);
+                alert(`You can select up to ${limit} ${site === "samsclub" ? "Sam\'s Club" : site === "pokemon" ? "Pokémon Center" : "Target"} SKUs.`);
                 return;
             }
             selected.add(productId);
@@ -3108,8 +3112,8 @@ function bindStoreProductSelectionControls(site) {
                     })
                 });
                 if (msg) {
-                    const savedCount = (site === "target" || site === "samsclub") ? countSelectedStoreSkuUnits(site) : selected.length;
-                    const unitLabel = site === "amazon" ? "Amazon item" : (site === "samsclub" ? "Sam's Club SKU" : "Target SKU");
+                    const savedCount = (site === "target" || site === "samsclub" || site === "pokemon") ? countSelectedStoreSkuUnits(site) : selected.length;
+                    const unitLabel = site === "amazon" ? "Amazon item" : (site === "samsclub" ? "Sam's Club SKU" : site === "pokemon" ? "Pokémon Center item" : "Target SKU");
                     msg.textContent = `Saved ${savedCount} ${unitLabel}${savedCount === 1 ? "" : "s"}.`;
                 }
                 await loadStoreProductsForSite(site);
@@ -3352,14 +3356,16 @@ async function loadStoreProductsForSite(site) {
             return;
         }
 
-        const selectable = site === 'target' || site === 'samsclub' || site === 'amazon';
+        const selectable = site === 'target' || site === 'samsclub' || site === 'amazon' || site === 'pokemon';
         const limitText = site === 'target'
             ? 'Select all Target SKUs you want us to run.'
             : site === 'samsclub'
                 ? "Select the Sam's Club SKUs you want us to run."
-                : site === 'amazon'
-                    ? 'Select 1 Amazon item.'
-                    : '';
+                : site === 'pokemon'
+                    ? 'Select the Pokémon Center items you want us to run.'
+                    : site === 'amazon'
+                        ? 'Select 1 Amazon item.'
+                        : '';
 
         panel.innerHTML = `
             <div class="store-product-summary-row">
@@ -3367,7 +3373,7 @@ async function loadStoreProductsForSite(site) {
                     <div class="store-product-summary">${products.length} product${products.length === 1 ? '' : 's'} available</div>
                     ${selectable ? `<div class="subtle-text" id="${site}SelectionSummary"></div>` : ''}
                 </div>
-                ${selectable ? `<div class="panel-actions"><button class="btn btn-primary" type="button" id="${site}ProductSelectionSave">Save ${site === 'target' ? 'Target' : site === 'samsclub' ? "Sam's Club" : 'Amazon'} Selections</button></div>` : ''}
+                ${selectable ? `<div class="panel-actions"><button class="btn btn-primary" type="button" id="${site}ProductSelectionSave">Save ${site === 'target' ? 'Target' : site === 'samsclub' ? "Sam's Club" : site === 'pokemon' ? 'Pokémon Center' : 'Amazon'} Selections</button></div>` : ''}
             </div>
             <div class="toolbar-row store-product-search-row">
                 <input id="${site}ProductSearch" class="input" type="search" placeholder="Search ${site} products by name, SKU, brand, or category" />
@@ -3392,7 +3398,7 @@ async function loadStoreProductsForSite(site) {
 }
 
 async function loadStoreProductPanels() {
-    await Promise.all(['target', 'samsclub', 'walmart', 'amazon', 'general', 'crunchyroll'].map(loadStoreProductsForSite));
+    await Promise.all(['target', 'samsclub', 'walmart', 'amazon', 'general', 'crunchyroll', 'pokemon'].map(loadStoreProductsForSite));
 }
 
 
