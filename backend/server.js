@@ -5237,8 +5237,8 @@ function getProfileLimitForRole(role = "user", accountType = "general") {
     if (role === "super_admin") return Infinity;
     if (type === "raffle") return Infinity;
 
-    const adminLimits = { target: 8, samsclub: 6, amazon: 2, general: 5, walmart: 100, crunchyroll: 10, pokemoncenter: 5 };
-    const userLimits = { target: 4, samsclub: 4, amazon: 2, general: 3, walmart: 100, crunchyroll: 4, pokemoncenter: 2 };
+    const adminLimits = { target: 8, samsclub: 6, amazon: 2, general: 5, walmart: 100, crunchyroll: 10, pokemoncenter: 10 };
+    const userLimits = { target: 4, samsclub: 4, amazon: 2, general: 3, walmart: 100, crunchyroll: 4, pokemoncenter: 5 };
 
     const source = role === "admin" ? adminLimits : userLimits;
     return source[type] ?? 0;
@@ -5468,41 +5468,19 @@ app.get("/admin/store-run-status", auth, admin, async (req, res) => {
 
         let assignmentRows = [];
         if (userIds.length) {
-            const { data: profiles } = await supabase
+            const { data: rawProfiles, error: profilesError } = await supabase
                 .from("profiles")
-                .select("id, user_id, account_type, updated_at, created_at")
+                .select("id, user_id, account_type, updated_at, created_at, accounts(provider)")
                 .in("user_id", userIds);
-            const profileIds = (profiles || []).map((p) => p.id).filter(Boolean);
-            let assignmentByProfile = new Map();
-            const addProfileStore = (profileId, storeValue) => {
-                const key = String(profileId || "");
-                const store = normalizeProfileAccountType(storeValue);
-                if (!key || !store || store === "raffle") return;
-                const list = assignmentByProfile.get(key) || [];
-                list.push(store);
-                assignmentByProfile.set(key, list);
-            };
-            if (profileIds.length) {
-                const { data: assignments } = await supabase
-                    .from("profile_store_assignments")
-                    .select("profile_id, store")
-                    .in("profile_id", profileIds);
-                (assignments || []).forEach((row) => addProfileStore(row.profile_id, row.store));
+            if (profilesError) return res.status(500).json({ error: profilesError.message });
 
-                const { data: credentials } = await supabase
-                    .from("profile_store_credentials")
-                    .select("profile_id, store")
-                    .in("profile_id", profileIds);
-                (credentials || []).forEach((row) => addProfileStore(row.profile_id, row.store));
-
-                const { data: accounts } = await supabase
-                    .from("accounts")
-                    .select("profile_id, provider")
-                    .in("profile_id", profileIds);
-                (accounts || []).forEach((row) => addProfileStore(row.profile_id, row.provider));
-            }
-            assignmentRows = (profiles || []).map((profile) => {
-                const stores = [...new Set([normalizeProfileAccountType(profile.account_type), ...(assignmentByProfile.get(String(profile.id)) || [])]
+            // Use the same store-assignment resolver as profile exports. This keeps counts accurate for
+            // newer shared profiles where Pokémon Center may be attached through account_type,
+            // profile_store_assignments, profile_store_credentials, or legacy accounts.provider rows.
+            const attachedProfiles = await attachAndFilterProfilesByStore(rawProfiles || [], "");
+            assignmentRows = (attachedProfiles || []).map((profile) => {
+                const stores = [...new Set(profileAssignedStores(profile)
+                    .map(normalizeProfileAccountType)
                     .filter((store) => store && store !== "raffle"))];
                 return {
                     user_id: profile.user_id,
