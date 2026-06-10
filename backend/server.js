@@ -5470,22 +5470,75 @@ app.get("/admin/store-run-status", auth, admin, async (req, res) => {
         if (userIds.length) {
             const { data: rawProfiles, error: profilesError } = await supabase
                 .from("profiles")
-                .select("id, user_id, account_type, updated_at, created_at, accounts(provider)")
+                .select("id, user_id, account_type, created_at")
                 .in("user_id", userIds);
             if (profilesError) return res.status(500).json({ error: profilesError.message });
 
-            // Use the same store-assignment resolver as profile exports. This keeps counts accurate for
-            // newer shared profiles where Pokémon Center may be attached through account_type,
-            // profile_store_assignments, profile_store_credentials, or legacy accounts.provider rows.
-            const attachedProfiles = await attachAndFilterProfilesByStore(rawProfiles || [], "");
-            assignmentRows = (attachedProfiles || []).map((profile) => {
-                const stores = [...new Set(profileAssignedStores(profile)
-                    .map(normalizeProfileAccountType)
-                    .filter((store) => store && store !== "raffle"))];
+            const profilesById = new Map((rawProfiles || []).map((profile) => [String(profile.id), profile]));
+            const storeSetsByProfileId = new Map();
+            const addStoreForProfile = (profileId, store) => {
+                const id = String(profileId || "");
+                const cleanStore = normalizeProfileAccountType(store);
+                if (!id || !cleanStore || cleanStore === "raffle" || !STORE_RUN_STATUS_SITES.includes(cleanStore)) return;
+                if (!storeSetsByProfileId.has(id)) storeSetsByProfileId.set(id, new Set());
+                storeSetsByProfileId.get(id).add(cleanStore);
+            };
+
+            (rawProfiles || []).forEach((profile) => {
+                addStoreForProfile(profile.id, profile.account_type || "general");
+            });
+
+            try {
+                const { data: assignmentData, error: assignmentError } = await supabase
+                    .from("profile_store_assignments")
+                    .select("profile_id, user_id, store")
+                    .in("user_id", userIds);
+                if (!assignmentError) {
+                    (assignmentData || []).forEach((row) => addStoreForProfile(row.profile_id, row.store));
+                }
+            } catch (_) {
+                // Older deployments may not have profile_store_assignments yet.
+            }
+
+            try {
+                const { data: credentialData, error: credentialError } = await supabase
+                    .from("profile_store_credentials")
+                    .select("profile_id, store")
+                    .in("profile_id", Array.from(profilesById.keys()));
+                if (!credentialError) {
+                    (credentialData || []).forEach((row) => addStoreForProfile(row.profile_id, row.store));
+                }
+            } catch (_) {
+                // Older deployments may not have profile_store_credentials yet.
+            }
+
+            try {
+                const { data: accountData, error: accountError } = await supabase
+                    .from("accounts")
+                    .select("profile_id, provider, account_type")
+                    .in("profile_id", Array.from(profilesById.keys()));
+                if (!accountError) {
+                    (accountData || []).forEach((row) => addStoreForProfile(row.profile_id, row.provider || row.account_type));
+                }
+            } catch (_) {
+                // Some accounts schemas only have provider; account_type is optional.
+                try {
+                    const { data: accountData, error: accountError } = await supabase
+                        .from("accounts")
+                        .select("profile_id, provider")
+                        .in("profile_id", Array.from(profilesById.keys()));
+                    if (!accountError) {
+                        (accountData || []).forEach((row) => addStoreForProfile(row.profile_id, row.provider));
+                    }
+                } catch (_) {}
+            }
+
+            assignmentRows = (rawProfiles || []).map((profile) => {
+                const stores = Array.from(storeSetsByProfileId.get(String(profile.id)) || []);
                 return {
                     user_id: profile.user_id,
-                    stores: stores.length ? stores : [normalizeProfileAccountType(profile.account_type)],
-                    updated_at: profile.updated_at || null,
+                    stores: stores.length ? stores : [normalizeProfileAccountType(profile.account_type || "general")],
+                    updated_at: profile.created_at || null,
                     created_at: profile.created_at || null
                 };
             });
