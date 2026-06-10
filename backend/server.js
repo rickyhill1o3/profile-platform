@@ -6840,6 +6840,28 @@ function countryForStellar(value) {
     return text;
 }
 
+function stateForStellar(value) {
+    const text = String(value || "").trim();
+    if (!text) return "";
+    const normalized = text.toLowerCase().replace(/[^a-z]/g, "");
+    const states = {
+        alabama: "AL", alaska: "AK", arizona: "AZ", arkansas: "AR", california: "CA",
+        colorado: "CO", connecticut: "CT", delaware: "DE", florida: "FL", georgia: "GA",
+        hawaii: "HI", idaho: "ID", illinois: "IL", indiana: "IN", iowa: "IA",
+        kansas: "KS", kentucky: "KY", louisiana: "LA", maine: "ME", maryland: "MD",
+        massachusetts: "MA", michigan: "MI", minnesota: "MN", mississippi: "MS",
+        missouri: "MO", montana: "MT", nebraska: "NE", nevada: "NV", newhampshire: "NH",
+        newjersey: "NJ", newmexico: "NM", newyork: "NY", northcarolina: "NC",
+        northdakota: "ND", ohio: "OH", oklahoma: "OK", oregon: "OR", pennsylvania: "PA",
+        rhodeisland: "RI", southcarolina: "SC", southdakota: "SD", tennessee: "TN",
+        texas: "TX", utah: "UT", vermont: "VT", virginia: "VA", washington: "WA",
+        westvirginia: "WV", wisconsin: "WI", wyoming: "WY", districtofcolumbia: "DC",
+        dc: "DC", puertorico: "PR"
+    };
+    if (/^[A-Za-z]{2}$/.test(text)) return text.toUpperCase();
+    return states[normalized] || text;
+}
+
 function cardTypeForNumber(cardNumber) {
     const digits = String(cardNumber || "").replace(/\D/g, "");
     if (/^4/.test(digits)) return "Visa";
@@ -6920,7 +6942,7 @@ app.get("/admin/export/profiles-stellar-json", auth, admin, async (req, res) => 
                 country: countryForStellar(address.country),
                 address: address.address1 || "",
                 address2: address.address2 || "",
-                state: address.state || "",
+                state: stateForStellar(address.state),
                 city: address.city || "",
                 zipcode: address.zip || ""
             };
@@ -6931,7 +6953,7 @@ app.get("/admin/export/profiles-stellar-json", auth, admin, async (req, res) => 
                 country: countryForStellar(address.billing_country || address.country),
                 address: address.billing_address1 || "",
                 address2: address.billing_address2 || "",
-                state: address.billing_state || "",
+                state: stateForStellar(address.billing_state),
                 city: address.billing_city || "",
                 zipcode: address.billing_zip || ""
             };
