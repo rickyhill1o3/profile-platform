@@ -96,7 +96,10 @@ const VIRTUAL_SITE_DEFAULTS = {
 
 function normalizeSite(value) {
     const raw = String(value || "").trim().toLowerCase();
-    const site = ["sams", "samclub", "samclubs", "sam's club", "sams club", "samsclub"].includes(raw) ? "samsclub" : raw;
+    const compact = raw.replace(/[\s_'’-]+/g, "");
+    const site = ["sams", "samclub", "samclubs", "sam's club", "sams club", "samsclub"].includes(raw) || compact === "samsclub"
+        ? "samsclub"
+        : (["pokemoncenter", "pokecenter", "pc"].includes(compact) ? "pokemon" : raw);
     if (!SUPPORTED_SITES.has(site)) {
         throw new Error("Invalid site. Expected amazon, target, walmart, samsclub, crunchyroll, supreme, pokemon, or general.");
     }
@@ -1533,8 +1536,8 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
             const site = req.query.site ? normalizeSite(req.query.site) : '';
             const scopedUserIds = await getScopedUserIds(supabase, currentUser);
 
-            if (!site || !['target', 'amazon', 'samsclub', 'crunchyroll'].includes(site)) {
-                return res.status(400).json({ error: "Choose target, samsclub, crunchyroll, or amazon." });
+            if (!site || !['target', 'walmart', 'amazon', 'samsclub', 'crunchyroll', 'pokemon', 'general'].includes(site)) {
+                return res.status(400).json({ error: "Choose target, walmart, samsclub, pokemon, crunchyroll, amazon, or general." });
             }
 
             let productQuery = supabase

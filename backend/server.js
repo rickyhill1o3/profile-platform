@@ -5199,9 +5199,15 @@ async function attachAndFilterProfilesByStore(profiles, group = "") {
     const credentialMap = await loadProfileStoreCredentials(items.map((profile) => profile.id));
     const attached = items.map((profile) => {
         const map = assignmentMaps.get(String(profile.user_id));
+        const credentialStores = Object.keys(credentialMap.get(String(profile.id)) || {}).map(normalizeProfileAccountType);
+        const accountStores = (Array.isArray(profile.accounts) ? profile.accounts : [])
+            .map((account) => normalizeProfileAccountType(account.provider || account.account_type || ''))
+            .filter((store) => store && store !== 'raffle');
+        const baseStores = map?.get(String(profile.id)) || [normalizeProfileAccountType(profile.account_type || "general")];
+        const storeAssignments = [...new Set([...baseStores, ...credentialStores, ...accountStores].filter((store) => store && store !== 'raffle'))];
         return {
             ...profile,
-            store_assignments: map?.get(String(profile.id)) || [normalizeProfileAccountType(profile.account_type || "general")],
+            store_assignments: storeAssignments.length ? storeAssignments : [normalizeProfileAccountType(profile.account_type || "general")],
             store_credentials: credentialMap.get(String(profile.id)) || {}
         };
     });
@@ -5466,26 +5472,45 @@ app.get("/admin/store-run-status", auth, admin, async (req, res) => {
                 .from("profiles")
                 .select("id, user_id, account_type, updated_at, created_at")
                 .in("user_id", userIds);
-            const profileIds = (profiles || []).map((p) => p.id);
+            const profileIds = (profiles || []).map((p) => p.id).filter(Boolean);
             let assignmentByProfile = new Map();
+            const addProfileStore = (profileId, storeValue) => {
+                const key = String(profileId || "");
+                const store = normalizeProfileAccountType(storeValue);
+                if (!key || !store || store === "raffle") return;
+                const list = assignmentByProfile.get(key) || [];
+                list.push(store);
+                assignmentByProfile.set(key, list);
+            };
             if (profileIds.length) {
                 const { data: assignments } = await supabase
                     .from("profile_store_assignments")
                     .select("profile_id, store")
                     .in("profile_id", profileIds);
-                (assignments || []).forEach((row) => {
-                    const key = String(row.profile_id || "");
-                    const list = assignmentByProfile.get(key) || [];
-                    list.push(normalizeProfileAccountType(row.store));
-                    assignmentByProfile.set(key, list);
-                });
+                (assignments || []).forEach((row) => addProfileStore(row.profile_id, row.store));
+
+                const { data: credentials } = await supabase
+                    .from("profile_store_credentials")
+                    .select("profile_id, store")
+                    .in("profile_id", profileIds);
+                (credentials || []).forEach((row) => addProfileStore(row.profile_id, row.store));
+
+                const { data: accounts } = await supabase
+                    .from("accounts")
+                    .select("profile_id, provider")
+                    .in("profile_id", profileIds);
+                (accounts || []).forEach((row) => addProfileStore(row.profile_id, row.provider));
             }
-            assignmentRows = (profiles || []).map((profile) => ({
-                user_id: profile.user_id,
-                stores: assignmentByProfile.get(String(profile.id)) || [normalizeProfileAccountType(profile.account_type)],
-                updated_at: profile.updated_at || null,
-                created_at: profile.created_at || null
-            }));
+            assignmentRows = (profiles || []).map((profile) => {
+                const stores = [...new Set([normalizeProfileAccountType(profile.account_type), ...(assignmentByProfile.get(String(profile.id)) || [])]
+                    .filter((store) => store && store !== "raffle"))];
+                return {
+                    user_id: profile.user_id,
+                    stores: stores.length ? stores : [normalizeProfileAccountType(profile.account_type)],
+                    updated_at: profile.updated_at || null,
+                    created_at: profile.created_at || null
+                };
+            });
         }
 
         const profileCounts = new Map();
