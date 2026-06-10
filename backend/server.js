@@ -6821,6 +6821,148 @@ app.get("/admin/export/profiles-json", auth, admin, async (req, res) => {
     }
 });
 
+function twoDigitYear(value) {
+    const text = String(value || "").trim();
+    if (!text) return "";
+    return text.length === 4 ? text.slice(-2) : text.padStart(2, "0");
+}
+
+function twoDigitMonth(value) {
+    const text = String(value || "").trim();
+    if (!text) return "";
+    return text.padStart(2, "0");
+}
+
+function countryForStellar(value) {
+    const text = String(value || "").trim();
+    if (!text) return "US";
+    if (/^(united states|usa|us|u\.s\.|u\.s\.a\.)$/i.test(text)) return "US";
+    return text;
+}
+
+function cardTypeForNumber(cardNumber) {
+    const digits = String(cardNumber || "").replace(/\D/g, "");
+    if (/^4/.test(digits)) return "Visa";
+    if (/^(5[1-5]|2[2-7])/.test(digits)) return "MasterCard";
+    if (/^3[47]/.test(digits)) return "Amex";
+    if (/^6/.test(digits)) return "Discover";
+    return "";
+}
+
+
+app.get("/admin/export/profiles-stellar-json", auth, admin, async (req, res) => {
+    try {
+        const currentUser = await getCurrentUser(req);
+        const { user_id, group } = req.query;
+        const filename = (req.query.filename || "stellar-profiles").replace(/[^a-zA-Z0-9-_]/g, "");
+        const activeOnly = String(req.query.active_only || "") === "1";
+
+        let query = supabase
+            .from("profiles")
+            .select(`
+                *,
+                addresses(*),
+                payments(*),
+                accounts(*)
+            `)
+            .order("created_at", { ascending: false });
+
+        if (currentUser.role === "super_admin") {
+            if (user_id) query = query.eq("user_id", user_id);
+        } else {
+            const ownedUserIds = await getScopeUserIdsForAdmin(currentUser);
+
+            if (user_id && !ownedUserIds.includes(user_id)) {
+                return res.status(403).json({ error: "Cannot export that account" });
+            }
+
+            query = query.in("user_id", safeIn(ownedUserIds));
+
+            if (user_id) query = query.eq("user_id", user_id);
+        }
+
+        const { data: profiles, error } = await query;
+
+        if (error) {
+            return res.status(500).json({ error: error.message });
+        }
+
+        let exportProfiles = await attachAndFilterProfilesByStore(profiles || [], group || "");
+        exportProfiles = await filterProfilesByActiveRunStatus(exportProfiles, group || "", activeOnly);
+
+        const rows = exportProfiles.map((profile) => {
+            const address = profile.addresses?.[0] || {};
+            const payment = profile.payments?.[0] || {};
+
+            let cardNumber = "";
+            let cardCvv = "";
+
+            try {
+                cardNumber = payment.card_encrypted ? decrypt(payment.card_encrypted) : "";
+            } catch { }
+
+            try {
+                cardCvv = payment.cvv_encrypted ? decrypt(payment.cvv_encrypted) : "";
+            } catch { }
+
+            const billingSameAsShipping =
+                !address.billing_first_name &&
+                !address.billing_last_name &&
+                !address.billing_address1 &&
+                !address.billing_city &&
+                !address.billing_state &&
+                !address.billing_zip &&
+                !address.billing_phone;
+
+            const ship = {
+                firstName: address.first_name || "",
+                lastName: address.last_name || "",
+                country: countryForStellar(address.country),
+                address: address.address1 || "",
+                address2: address.address2 || "",
+                state: address.state || "",
+                city: address.city || "",
+                zipcode: address.zip || ""
+            };
+
+            const bill = billingSameAsShipping ? { ...ship } : {
+                firstName: address.billing_first_name || "",
+                lastName: address.billing_last_name || "",
+                country: countryForStellar(address.billing_country || address.country),
+                address: address.billing_address1 || "",
+                address2: address.billing_address2 || "",
+                state: address.billing_state || "",
+                city: address.billing_city || "",
+                zipcode: address.billing_zip || ""
+            };
+
+            return {
+                profileName: profile.profile_name || "",
+                email: address.email || "",
+                phone: address.phone || "",
+                shipping: ship,
+                billingAsShipping: billingSameAsShipping,
+                oneCheckoutPerProfile: false,
+                billing: bill,
+                payment: {
+                    cardName: payment.card_name || `${address.first_name || ""} ${address.last_name || ""}`.trim(),
+                    cardType: cardTypeForNumber(cardNumber),
+                    cardNumber,
+                    cardMonth: twoDigitMonth(payment.exp_month),
+                    cardYear: twoDigitYear(payment.exp_year),
+                    cardCvv
+                }
+            };
+        });
+
+        res.setHeader("Content-Type", "application/json");
+        res.setHeader("Content-Disposition", `attachment; filename="${filename}.json"`);
+        res.send(JSON.stringify(rows, null, 2));
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
 
 app.get("/admin/export/accounts-txt", auth, admin, async (req, res) => {
     try {

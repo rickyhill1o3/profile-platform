@@ -422,7 +422,8 @@ placeholder="Enter one SKU per line&#10;12345678&#10;87654321"></textarea>
             <div class="toolbar-row toolbar-row--spread"><span id="exportCountBanner" class="subtle-text">Checking
                 export count...</span><span class="subtle-text">Account export format:
                 username:::password:::proxie</span></div>
-            <div class="panel-actions"><button class="btn" onclick="exportProfilesJson()">Export Profiles
+            <div class="panel-actions"><button class="btn" onclick="exportProfilesJson()">Export Refract Profiles
+                JSON</button><button class="btn" onclick="exportProfilesStellarJson()">Export Stellar Profiles
                 JSON</button><button class="btn btn-primary" onclick="exportAccountsTxt()">Export Account
                 Logins</button><button class="btn btn-primary" onclick="exportGmailImapTxt()">Export Gmail / 2FA</button></div>
           </section>
@@ -572,7 +573,11 @@ placeholder="Enter one SKU per line&#10;12345678&#10;87654321"></textarea>
               </div>
               <div class="field field-actions">
                 <label>&nbsp;</label>
-                <button class="btn" type="button" id="adminRunStatusExportProfilesButton">Export Active Profiles</button>
+                <button class="btn" type="button" id="adminRunStatusExportProfilesButton">Export Active Refract Profiles</button>
+              </div>
+              <div class="field field-actions">
+                <label>&nbsp;</label>
+                <button class="btn" type="button" id="adminRunStatusExportStellarProfilesButton">Export Active Stellar Profiles</button>
               </div>
               <div class="field field-actions">
                 <label>&nbsp;</label>
