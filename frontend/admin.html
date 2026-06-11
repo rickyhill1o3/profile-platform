@@ -906,6 +906,10 @@ placeholder="Enter one SKU per line&#10;12345678&#10;87654321"></textarea>
           <div id="webhookSettingsMessage" class="subtle-text"></div>
 
           <div id="webhookLogsSection">
+          <div class="form-grid" style="margin-top:12px;">
+            <div class="field"><label for="webhookLogTypeFilter">Webhook type</label><select class="input" id="webhookLogTypeFilter" onchange="loadWebhookLogs()"><option value="">All webhook types</option><option value="checkout">Checkout webhooks</option><option value="monitor">Monitor webhooks</option></select></div>
+            <div class="field"><label for="webhookLogSiteFilter">Store</label><select class="input" id="webhookLogSiteFilter" onchange="loadWebhookLogs()"><option value="">All stores</option><option value="target">Target</option><option value="walmart">Walmart</option><option value="samsclub">Sam's Club</option><option value="amazon">Amazon</option><option value="pokemon">Pokémon Center</option><option value="crunchyroll">Crunchyroll</option><option value="general">General</option></select></div>
+          </div>
           <div class="field field--full panel-actions" style="margin-top:12px;">
             <button class="btn" type="button" onclick="loadWebhookLogs()">Refresh Webhook Logs</button>
           </div>

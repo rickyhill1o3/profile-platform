@@ -2646,12 +2646,43 @@ async function resendWebhookLog(id, button) {
     }
 }
 
+async function recheckWebhookCredits(id, button) {
+    if (!id) return;
+    const originalText = button ? button.textContent : '';
+    try {
+        if (button) {
+            button.disabled = true;
+            button.textContent = 'Checking...';
+        }
+        const data = await authJSON(API + `/admin/webhooks/logs/${encodeURIComponent(id)}/recheck-credits`, { method: 'POST' });
+        const charged = Number(data.chargedNow || 0);
+        alert(charged > 0
+            ? `Credit recheck charged ${charged} missing credits. Correct total: ${data.expectedCredits}.`
+            : `Credit recheck OK. Already charged ${data.existingCredits} credits.`);
+        await loadWebhookLogs();
+        return data;
+    } catch (err) {
+        alert(err.message || 'Failed to recheck credits.');
+    } finally {
+        if (button) {
+            button.disabled = false;
+            button.textContent = originalText || 'Recheck Credits';
+        }
+    }
+}
+
 async function loadWebhookLogs() {
     const container = document.getElementById('webhookLogs');
     if (!container) return;
     try {
         container.textContent = 'Loading webhook logs...';
-        const data = await authJSON(API + '/admin/webhooks/logs');
+        const typeFilter = document.getElementById('webhookLogTypeFilter')?.value || '';
+        const siteFilter = document.getElementById('webhookLogSiteFilter')?.value || '';
+        const params = new URLSearchParams();
+        if (typeFilter) params.set('type', typeFilter);
+        if (siteFilter) params.set('site', siteFilter);
+        params.set('limit', '500');
+        const data = await authJSON(API + '/admin/webhooks/logs?' + params.toString());
         const items = Array.isArray(data.items) ? data.items : [];
         if (!items.length) {
             container.innerHTML = '<div class="subtle-text">No webhook events yet.</div>';
@@ -2679,7 +2710,7 @@ async function loadWebhookLogs() {
               <td style="max-width:280px;word-break:break-word;">${escapeHtml(item.product || '-')}</td>
               <td>${escapeHtml(item.sku || '-')}</td>
               <td style="max-width:360px;word-break:break-word;">${escapeHtml(item.error || '')}${details}${targetDetails}${payloadDetails}</td>
-              <td><button class="secondary" type="button" onclick="resendWebhookLog('${escapeHtml(item.id || '')}', this)">Resend to Discord</button></td>
+              <td><div style="display:flex;gap:6px;flex-wrap:wrap;"><button class="secondary" type="button" onclick="resendWebhookLog('${escapeHtml(item.id || '')}', this)">Resend to Discord</button><button class="secondary" type="button" onclick="recheckWebhookCredits('${escapeHtml(item.id || '')}', this)">Recheck Credits</button></div></td>
             </tr>`;
         }).join('');
         container.innerHTML = `

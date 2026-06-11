@@ -854,7 +854,44 @@ async function getProductCreditCost({ productId = null, site = "", sku = "", pro
         if (match?.id) return { credits: asWholeCredits(match.credit_cost, 0), product: match };
     }
 
+    if (site && cleanName) {
+        const { data, error } = await supabase
+            .from("catalog_products")
+            .select("id, credit_cost, site, sku, product_name")
+            .eq("site", String(site).toLowerCase())
+            .order("created_at", { ascending: false })
+            .limit(250);
+        if (error) throw new Error(error.message);
+        const candidates = Array.isArray(data) ? data : [];
+        let best = null;
+        let bestScore = 0;
+        for (const candidate of candidates) {
+            const score = productMatchScore(cleanName, candidate.product_name || '');
+            if (score > bestScore) {
+                best = candidate;
+                bestScore = score;
+            }
+        }
+        if (best?.id && bestScore >= 6) return { credits: asWholeCredits(best.credit_cost, 0), product: best };
+    }
+
     return { credits: 0, product: null };
+}
+
+async function getPokemonCenterMultiItemCreditCost(payload = {}) {
+    const { embed, fields } = buildFieldMapFromEmbeds(payload || {});
+    if (!isPokemonCenterPayload(payload, embed, fields)) return { credits: 0, items: [] };
+    const indexedItems = getIndexedCheckoutItemsFromFields(fields);
+    if (!indexedItems.length) return { credits: 0, items: [] };
+    let total = 0;
+    const matchedItems = [];
+    for (const item of indexedItems) {
+        const match = await getProductCreditCost({ site: 'pokemon', productName: item.product_name || '' });
+        const credits = asWholeCredits(match.credits, 0);
+        total += credits; // Pokemon Center charges once per picked-up item line, not per quantity.
+        matchedItems.push({ ...item, credits, matched_product_id: match.product?.id || null, matched_product_name: match.product?.product_name || '' });
+    }
+    return { credits: total, items: matchedItems };
 }
 
 async function getCountdownCreditCost({ countdownId = null, productId = null, site = "", sku = "" }) {
@@ -898,15 +935,17 @@ async function resolveOrderCreditCost(payload) {
 
     const productMatch = await getProductCreditCost({ productId, site, sku, productName: payload.product_name || payload.product?.name || '' });
     const countdownMatch = await getCountdownCreditCost({ countdownId, productId: productMatch.product?.id || productId, site, sku });
+    const pokemonMultiItemMatch = await getPokemonCenterMultiItemCreditCost(payload);
 
     const explicitCredits = payload.credits_charged !== undefined && payload.credits_charged !== null
         ? asWholeCredits(payload.credits_charged, 0)
         : null;
 
-    if (explicitCredits !== null) return { credits: explicitCredits, productMatch, countdownMatch };
-    if (countdownMatch.credits > 0) return { credits: countdownMatch.credits, productMatch, countdownMatch };
-    if (productMatch.credits > 0) return { credits: productMatch.credits, productMatch, countdownMatch };
-    return { credits: 0, productMatch, countdownMatch };
+    if (explicitCredits !== null) return { credits: explicitCredits, productMatch, countdownMatch, pokemonMultiItemMatch };
+    if (pokemonMultiItemMatch.credits > 0) return { credits: pokemonMultiItemMatch.credits, productMatch, countdownMatch, pokemonMultiItemMatch };
+    if (countdownMatch.credits > 0) return { credits: countdownMatch.credits, productMatch, countdownMatch, pokemonMultiItemMatch };
+    if (productMatch.credits > 0) return { credits: productMatch.credits, productMatch, countdownMatch, pokemonMultiItemMatch };
+    return { credits: 0, productMatch, countdownMatch, pokemonMultiItemMatch };
 }
 
 function normalizeFieldLabel(value = "") {
@@ -927,6 +966,65 @@ function cleanFieldValue(value = "") {
         .replace(/\[(.*?)\]\((.*?)\)/g, "$1")
         .replace(/\s+/g, " ")
         .trim();
+}
+
+
+function normalizeProductMatchText(value = "") {
+    return decodeHtmlEntities(String(value || ""))
+        .toLowerCase()
+        .replace(/pok[eé]mon/g, 'pokemon')
+        .replace(/\btcga?\b/g, ' ')
+        .replace(/\bpokemon center\b/g, ' ')
+        .replace(/\bmega evolution\b/g, ' ')
+        .replace(/\bpitch black\b/g, ' pitch black ')
+        .replace(/[^a-z0-9]+/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+}
+
+function productMatchScore(needle = '', haystack = '') {
+    const a = normalizeProductMatchText(needle);
+    const b = normalizeProductMatchText(haystack);
+    if (!a || !b) return 0;
+    if (a === b) return 1000;
+    if (a.includes(b) || b.includes(a)) return 800 + Math.min(a.length, b.length);
+    const aTokens = new Set(a.split(/\s+/).filter((x) => x.length >= 3));
+    const bTokens = new Set(b.split(/\s+/).filter((x) => x.length >= 3));
+    let shared = 0;
+    for (const token of aTokens) if (bTokens.has(token)) shared += 1;
+    const important = ['elite','trainer','box','booster','bundle','display','packs','charizard','tin','collection','premium','center','black','pitch'];
+    let bonus = 0;
+    for (const token of important) if (aTokens.has(token) && bTokens.has(token)) bonus += 2;
+    return shared + bonus;
+}
+
+function getIndexedCheckoutItemsFromFields(fields = {}) {
+    const items = [];
+    const indexes = new Set();
+    for (const key of Object.keys(fields || {})) {
+        const match = key.match(/^(product|price|quantity)\s+(\d+)$/i);
+        if (match) indexes.add(Number(match[2]));
+    }
+    for (const index of Array.from(indexes).sort((a, b) => a - b)) {
+        const product = fields[`product ${index}`] || '';
+        if (!product) continue;
+        const priceRaw = fields[`price ${index}`] || '';
+        const qtyRaw = fields[`quantity ${index}`] || '1';
+        const priceText = String(priceRaw || '').replace(/[^0-9.]/g, '');
+        const qtyText = String(qtyRaw || '').replace(/[^0-9.]/g, '');
+        items.push({
+            index,
+            product_name: cleanFieldValue(product),
+            price: priceText ? Number(priceText) : null,
+            quantity: qtyText ? Math.max(1, Math.round(Number(qtyText))) : 1
+        });
+    }
+    return items;
+}
+
+function getIndexedCheckoutItems(payload = {}) {
+    const { fields } = buildFieldMapFromEmbeds(payload || {});
+    return getIndexedCheckoutItemsFromFields(fields);
 }
 
 function extractMarkdownLink(value = "") {
@@ -3238,7 +3336,8 @@ async function recordSuccessfulCheckout(payload) {
             requested_credits: creditsToCharge,
             previous_balance: currentBalance,
             projected_balance_after_charge: currentBalance - creditsToCharge,
-            balance_went_zero_or_negative: willBeZeroOrNegative
+            balance_went_zero_or_negative: willBeZeroOrNegative,
+            pokemon_credit_items: resolvedCost.pokemonMultiItemMatch?.items || []
         },
         raw_payload: payload
     });
@@ -3703,6 +3802,7 @@ app.post(["/webhooks/orders", "/webhooks/orders/:token"], async (req, res) => {
                     product: String(normalized.product_name || payload.product_name || ''),
                     sku: String(normalized.sku || payload.sku || ''),
                     payload,
+                    parsed_items: getIndexedCheckoutItems(payload).map((x) => ({ title: x.product_name, price: x.price, quantity: x.quantity })),
                     fingerprint
                 })).id;
 
@@ -4335,8 +4435,13 @@ app.get('/admin/webhooks/logs', auth, admin, async (req, res) => {
     try {
         const currentUser = await getCurrentUser(req);
         if (currentUser.role !== 'super_admin') return res.status(403).json({ error: 'Only super admin can view webhook logs.' });
-        const rows = await getWebhookLogEntries(200);
-        res.json({ items: rows });
+        let rows = await getWebhookLogEntries(500);
+        const type = String(req.query.type || '').trim().toLowerCase();
+        const site = String(req.query.site || '').trim().toLowerCase();
+        if (type) rows = rows.filter((row) => String(row.type || '').toLowerCase() === type);
+        if (site) rows = rows.filter((row) => String(row.site || '').toLowerCase() === site);
+        const limit = Math.min(500, Math.max(1, Number(req.query.limit) || 200));
+        res.json({ items: rows.slice(0, limit) });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
@@ -4366,6 +4471,86 @@ app.post('/admin/webhooks/logs/:id/resend', auth, admin, async (req, res) => {
                 : String(row.error || '')
         }).catch(() => null);
         res.json({ ok: true, results });
+    } catch (err) {
+        res.status(500).json({ error: err.message || String(err) });
+    }
+});
+
+
+app.post('/admin/webhooks/logs/:id/recheck-credits', auth, admin, async (req, res) => {
+    try {
+        const currentUser = await getCurrentUser(req);
+        if (currentUser.role !== 'super_admin') return res.status(403).json({ error: 'Only super admin can recheck credit charges.' });
+        const rows = await getWebhookLogEntries(500);
+        const row = rows.find((item) => String(item.id) === String(req.params.id));
+        if (!row) return res.status(404).json({ error: 'Webhook log not found.' });
+        if (!row.payload) return res.status(400).json({ error: 'This log does not have a raw payload to recheck.' });
+        if (String(row.type || '') !== 'checkout') return res.status(400).json({ error: 'Only checkout webhook logs can be rechecked.' });
+        const checkoutType = classifyCheckoutWebhookType({ raw_payload: row.payload, status: '' });
+        if (checkoutType === 'error') return res.status(400).json({ error: 'Declined/error checkout logs do not charge credits.' });
+
+        const normalized = normalizeIncomingOrderPayload(row.payload);
+        const resolvedCost = await resolveOrderCreditCost({ ...row.payload, ...normalized });
+        const expectedCredits = asWholeCredits(resolvedCost.credits, 0);
+        const matchedUser = await findUserForWebhook(row.payload).catch(() => null);
+        if (!matchedUser?.id) return res.status(400).json({ error: 'Could not match this webhook to a user.' });
+
+        const { data: order, error: orderError } = await maybeSingle('orders', (qb) =>
+            qb.select('*').eq('external_order_id', normalized.external_order_id).maybeSingle()
+        );
+        if (orderError) throw new Error(orderError.message);
+        if (!order?.id) return res.status(404).json({ error: 'Matching order record was not found. Re-send the original webhook first.' });
+
+        const existingCredits = asWholeCredits(order.credits_charged, 0);
+        const deltaNeeded = expectedCredits - existingCredits;
+        let balanceAfter = await getUserCreditBalance(matchedUser.id);
+        let changed = false;
+
+        if (deltaNeeded > 0) {
+            const previousBalance = balanceAfter;
+            balanceAfter = await adjustUserCredits({
+                userId: matchedUser.id,
+                delta: -deltaNeeded,
+                reason: 'successful_checkout_credit_recheck',
+                note: `Credit recheck charged missing ${deltaNeeded} credits for checkout ${normalized.external_order_id}`,
+                metadata: {
+                    previous_credits_charged: existingCredits,
+                    corrected_credits_charged: expectedCredits,
+                    pokemon_credit_items: resolvedCost.pokemonMultiItemMatch?.items || [],
+                    webhook_log_id: row.id
+                },
+                orderId: order.id,
+                createdBy: currentUser.id
+            });
+            await supabase.from('orders').update({
+                credits_charged: expectedCredits,
+                metadata: {
+                    ...(order.metadata || {}),
+                    credit_rechecked_at: new Date().toISOString(),
+                    previous_credits_charged: existingCredits,
+                    corrected_credits_charged: expectedCredits,
+                    pokemon_credit_items: resolvedCost.pokemonMultiItemMatch?.items || []
+                }
+            }).eq('id', order.id);
+            changed = true;
+            if (previousBalance > 0 && balanceAfter <= 0) {
+                await sendCreditDepletedNotifications({ user: matchedUser, previousBalance, newBalance: balanceAfter, creditsCharged: deltaNeeded, order });
+            }
+        } else if (deltaNeeded < 0) {
+            return res.status(400).json({ error: `This order already has ${existingCredits} credits charged, which is more than the recalculated ${expectedCredits}. No automatic refund was applied.` });
+        }
+
+        const refreshedOrder = { ...order, credits_charged: Math.max(existingCredits, expectedCredits) };
+        const results = await sendCheckoutDiscordNotificationsForPayload(row.payload, matchedUser, {
+            status: 'processed',
+            order: refreshedOrder,
+            credits_charged: refreshedOrder.credits_charged
+        });
+        await updateWebhookLogEntry(row.id, {
+            error: changed ? `Credit recheck charged missing ${deltaNeeded} credits. Correct total: ${expectedCredits}.` : `Credit recheck OK. Already charged ${existingCredits} credits.`,
+            discord_targets: Array.isArray(results) ? results : []
+        }).catch(() => null);
+        res.json({ ok: true, changed, expectedCredits, existingCredits, chargedNow: Math.max(0, deltaNeeded), balanceAfter, items: resolvedCost.pokemonMultiItemMatch?.items || [], results });
     } catch (err) {
         res.status(500).json({ error: err.message || String(err) });
     }
