@@ -411,10 +411,17 @@ function storeCredentialBlock(store, values = {}) {
 
     let extra = '';
     if (cfg.method === 'imap') {
+        const imapHelpId = `${prefix}_gmail_app_password_help`;
         extra = `
             <div class="field field--full">
-                <label for="${prefix}_gmail_app_password">${cfg.label} Gmail App Password / IMAP</label>
+                <label for="${prefix}_gmail_app_password">
+                    ${cfg.label} Gmail App Password / IMAP
+                    <button class="help-link-button" type="button" data-toggle-help="${imapHelpId}">What is this?</button>
+                </label>
                 <input class="input" id="${prefix}_gmail_app_password" type="password" value="${gmailAppPassword}" placeholder="Gmail App Password" />
+                <div class="inline-help-card" id="${imapHelpId}" hidden>
+                    A Gmail app password is different from your normal Gmail password. Create the store account first, then turn on 2-Step Verification in your Gmail account. After 2-Step Verification is on, search Gmail/Google Account settings for <strong>App passwords</strong>, create a new app password, and paste the 16-character code here. It usually looks like <strong>xxxx xxxx xxxx xxxx</strong>.
+                </div>
             </div>`;
     } else if (cfg.method === 'amazon2fa') {
         extra = `
@@ -4473,3 +4480,12 @@ if (resetPasswordForm) {
         }
     };
 }
+
+// Toggle explanatory help text blocks such as Gmail app password guidance.
+document.addEventListener('click', (event) => {
+    const helpButton = event.target.closest('[data-toggle-help]');
+    if (!helpButton) return;
+    const helpId = helpButton.getAttribute('data-toggle-help');
+    const helpEl = helpId ? document.getElementById(helpId) : null;
+    if (helpEl) helpEl.hidden = !helpEl.hidden;
+});

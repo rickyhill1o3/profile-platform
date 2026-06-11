@@ -823,3 +823,35 @@ h1,h2,h3,h4,p{margin:0}
   color: #64748b;
   background: #e2e8f0;
 }
+
+.help-link-button {
+  margin-left: 0.45rem;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--primary, #2563eb);
+  font: inherit;
+  font-weight: 700;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.inline-help-card {
+  margin-top: 0.55rem;
+  padding: 0.75rem 0.85rem;
+  border: 1px solid var(--border, #d8e0ea);
+  border-radius: 0.75rem;
+  background: #f8fbff;
+  color: var(--muted, #52627a);
+  line-height: 1.45;
+}
+
+.target-profile-notice {
+  margin-top: 0.65rem;
+  padding: 0.8rem 0.9rem;
+  border: 1px solid #bfdbfe;
+  border-radius: 0.75rem;
+  background: #eff6ff;
+  color: #1e3a8a;
+  line-height: 1.45;
+}
