@@ -3262,8 +3262,11 @@ async function sendCheckoutDiscordNotifications(order, user) {
 
     addDestination('super_admin', globalWebhookUrl, { brandLabel: '', username: 'The Shore Shack' });
 
-    // admin checkout should also go to their own admin webhook
-    if (user?.role === 'admin' && user?.id) {
+    // Admin checkout routing:
+    // - top-level admins send their own personal checkouts to their own admin webhook.
+    // - admins that still belong under another admin keep their personal checkouts under that owner admin.
+    //   Their own admin webhook is used for users they invite/create, not for their original personal account.
+    if (user?.role === 'admin' && user?.id && !user?.owner_admin_id) {
         const adminSettings = await getAdminWebhookSettings(user.id);
         const adminRoute = await getWebhookRouteFromDb({ scope: 'admin', userId: user.id, webhookType: checkoutType === 'error' ? 'checkout_error' : 'checkout_success', category: 'all' }).catch(() => null);
         const adminWebhookUrl = String((adminRoute?.webhook_url || (checkoutType === 'error' ? adminSettings?.checkout_error_webhook_url : adminSettings?.discord_webhook_url)) || '').trim();
@@ -6576,11 +6579,13 @@ app.patch("/admin/users/:id/promote", auth, admin, async (req, res) => {
             return res.status(400).json({ error: "Only user accounts can be promoted" });
         }
 
+        // Preserve owner_admin_id when promoting a user who was invited by an admin.
+        // This lets the promoted account open its own admin panel while its personal checkout
+        // webhooks still route under the original owner admin.
         const { error } = await supabase
             .from("users")
             .update({
                 role: "admin",
-                owner_admin_id: null,
                 revoked: false
             })
             .eq("id", targetId);
@@ -6618,11 +6623,11 @@ app.patch("/admin/users/:id/demote", auth, admin, async (req, res) => {
             return res.status(400).json({ error: "Super admin cannot be demoted" });
         }
 
-        const superAdminId = currentUser.id;
+        const fallbackOwnerId = targetUser.owner_admin_id || currentUser.id;
 
         const { error: reassignError } = await supabase
             .from("users")
-            .update({ owner_admin_id: superAdminId })
+            .update({ owner_admin_id: fallbackOwnerId })
             .eq("owner_admin_id", targetUser.id);
 
         if (reassignError) {
@@ -6633,7 +6638,7 @@ app.patch("/admin/users/:id/demote", auth, admin, async (req, res) => {
             .from("users")
             .update({
                 role: "user",
-                owner_admin_id: superAdminId,
+                owner_admin_id: fallbackOwnerId,
                 revoked: false
             })
             .eq("id", targetUser.id);
@@ -6644,7 +6649,7 @@ app.patch("/admin/users/:id/demote", auth, admin, async (req, res) => {
 
         res.json({
             success: true,
-            message: "Admin demoted and all owned users moved to super admin"
+            message: "Admin demoted and owned users moved to the correct parent admin"
         });
     } catch (err) {
         res.status(500).json({ error: err.message });
