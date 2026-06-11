@@ -2671,6 +2671,33 @@ async function recheckWebhookCredits(id, button) {
     }
 }
 
+
+async function recheckOrderCredits(id, button) {
+    if (!id) return;
+    const originalText = button ? button.textContent : '';
+    try {
+        if (button) {
+            button.disabled = true;
+            button.textContent = 'Checking...';
+        }
+        const data = await authJSON(API + `/admin/orders/${encodeURIComponent(id)}/recheck-credits`, { method: 'POST' });
+        const charged = Number(data.chargedNow || 0);
+        alert(charged > 0
+            ? `Credit recheck charged ${charged} missing credits. Correct total: ${data.expectedCredits}.`
+            : `Credit recheck OK. Already charged ${data.existingCredits} credits. No charge was made.`);
+        await loadCreditsAdminPane();
+        try { await loadWebhookLogs(); } catch (_) {}
+        return data;
+    } catch (err) {
+        alert(err.message || 'Failed to recheck credits.');
+    } finally {
+        if (button) {
+            button.disabled = false;
+            button.textContent = originalText || 'Recheck Credits';
+        }
+    }
+}
+
 async function loadWebhookLogs() {
     const container = document.getElementById('webhookLogs');
     if (!container) return;
@@ -2700,12 +2727,16 @@ async function loadWebhookLogs() {
             const payloadDetails = item.payload
               ? `<details><summary>Raw payload</summary><pre style="white-space:pre-wrap;max-width:520px;">${escapeHtml(JSON.stringify(item.payload, null, 2))}</pre></details>`
               : '';
+            const userLabel = item.user_display || item.user_email || '-';
+            const creditsLabel = (item.type === 'checkout') ? String(item.credits_charged ?? 0) : '-';
             return `
             <tr>
               <td>${escapeHtml(new Date(item.created_at).toLocaleString())}</td>
               <td>${escapeHtml(item.type || '-')}</td>
               <td>${escapeHtml(item.status || '-')}</td>
               <td>${escapeHtml(item.site || '-')}</td>
+              <td>${escapeHtml(userLabel)}</td>
+              <td>${escapeHtml(creditsLabel)}</td>
               <td>${escapeHtml(item.product_type || '-')}</td>
               <td style="max-width:280px;word-break:break-word;">${escapeHtml(item.product || '-')}</td>
               <td>${escapeHtml(item.sku || '-')}</td>
@@ -2716,7 +2747,7 @@ async function loadWebhookLogs() {
         container.innerHTML = `
             <div style="overflow:auto;">
               <table class="admin-table">
-                <thead><tr><th>Time</th><th>Type</th><th>Status</th><th>Site</th><th>Product Type</th><th>Product</th><th>SKU</th><th>Error / Debug</th><th>Actions</th></tr></thead>
+                <thead><tr><th>Time</th><th>Type</th><th>Status</th><th>Site</th><th>User</th><th>Credits</th><th>Product Type</th><th>Product</th><th>SKU</th><th>Error / Debug</th><th>Actions</th></tr></thead>
                 <tbody>${rows}</tbody>
               </table>
             </div>`;
@@ -3838,8 +3869,17 @@ async function loadCreditsAdminPane() {
               <td>${String(item.status || '') === 'insufficient_credits' ? '<span class="status-tag status-tag--danger">Insufficient Credits</span>' : '<span class="status-tag status-tag--success">Charged</span>'}</td>
               <td>${escapeHTML(String(item.credits_charged || 0))}</td>
               <td>${escapeHTML(item.external_order_id || '-')}</td>
-              <td>${Number(item.credits_charged || 0) > 0 ? `<button class="btn" type="button" data-refund-order="${escapeHTML(item.id)}" data-refund-amount="${escapeHTML(String(item.credits_charged || 0))}">Refund Credits</button>` : '<span class="subtle-text">No charge</span>'}</td>
+              <td><div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;">
+                ${Number(item.credits_charged || 0) > 0 ? `<button class="btn" type="button" data-refund-order="${escapeHTML(item.id)}" data-refund-amount="${escapeHTML(String(item.credits_charged || 0))}">Refund Credits</button>` : '<span class="subtle-text">No charge</span>'}
+                <button class="btn secondary" type="button" data-recheck-order="${escapeHTML(item.id)}">Recheck Credits</button>
+              </div></td>
             </tr>`).join('') : '<tr><td colspan="8">No orders found yet.</td></tr>';
+
+        ordersBody.querySelectorAll('[data-recheck-order]').forEach((button) => {
+            button.addEventListener('click', async () => {
+                await recheckOrderCredits(button.dataset.recheckOrder, button);
+            });
+        });
 
         ordersBody.querySelectorAll('[data-refund-order]').forEach((button) => {
             button.addEventListener('click', async () => {

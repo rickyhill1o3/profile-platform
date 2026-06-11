@@ -3061,6 +3061,11 @@ async function sendDiscordWebhookToTarget({
         description = `${checkoutItems[0].product} + ${checkoutItems.length - 1} more`;
     }
 
+    const isCreditRecheckNotice = !!order.metadata?.credit_recheck_notice;
+    if (isCreditRecheckNotice && checkoutType === 'success') {
+        title = `Credit Recheck • ${title}`;
+    }
+
     const embed = {
         title,
         description,
@@ -3073,6 +3078,14 @@ async function sendDiscordWebhookToTarget({
         footer: { text: footerText },
         timestamp: new Date().toISOString()
     };
+
+    if (isCreditRecheckNotice) {
+        embed.fields.unshift({
+            name: 'Credit Recheck',
+            value: String(order.metadata.credit_recheck_message || 'Credits were rechecked for this checkout.'),
+            inline: false
+        });
+    }
 
     if (checkoutItems.length > 1) {
         embed.fields.push({ name: 'Items', value: formatCheckoutItemsForDiscord(checkoutItems), inline: false });
@@ -4075,6 +4088,19 @@ app.get("/admin/orders", auth, admin, async (req, res) => {
     }
 });
 
+app.post("/admin/orders/:id/recheck-credits", auth, admin, async (req, res) => {
+    try {
+        const currentUser = await getCurrentUser(req);
+        const { data: order, error } = await supabase.from("orders").select("*").eq("id", req.params.id).maybeSingle();
+        if (error) return res.status(500).json({ error: error.message });
+        if (!order?.id) return res.status(404).json({ error: "Order not found" });
+        const result = await recheckSuccessfulOrderCredits({ currentUser, order, resendDiscord: true });
+        res.json(result);
+    } catch (err) {
+        res.status(err.status || 500).json({ error: err.message || String(err) });
+    }
+});
+
 app.post("/admin/orders/:id/refund-credits", auth, admin, async (req, res) => {
     try {
         const currentUser = await getCurrentUser(req);
@@ -4436,6 +4462,43 @@ app.get('/admin/webhooks/logs', auth, admin, async (req, res) => {
         const currentUser = await getCurrentUser(req);
         if (currentUser.role !== 'super_admin') return res.status(403).json({ error: 'Only super admin can view webhook logs.' });
         let rows = await getWebhookLogEntries(500);
+        const orderIds = [];
+        const rowOrderIdMap = new Map();
+        for (const row of rows) {
+            if (row.payload && String(row.type || '') === 'checkout') {
+                try {
+                    const normalized = normalizeIncomingOrderPayload(row.payload);
+                    if (normalized.external_order_id) {
+                        rowOrderIdMap.set(row.id, normalized.external_order_id);
+                        orderIds.push(normalized.external_order_id);
+                    }
+                } catch (_) {}
+            }
+        }
+        const orderByExternalId = new Map();
+        const userIds = new Set();
+        if (orderIds.length) {
+            const { data: orderRows } = await supabase.from('orders').select('id,user_id,external_order_id,credits_charged').in('external_order_id', [...new Set(orderIds)]);
+            for (const order of orderRows || []) {
+                orderByExternalId.set(String(order.external_order_id), order);
+                if (order.user_id) userIds.add(order.user_id);
+            }
+        }
+        const userById = new Map();
+        if (userIds.size) {
+            const { data: userRows } = await supabase.from('users').select('id,email,discord_username,discord_display_name').in('id', [...userIds]);
+            for (const user of userRows || []) userById.set(user.id, user);
+        }
+        rows = rows.map((row) => {
+            const order = orderByExternalId.get(String(rowOrderIdMap.get(row.id) || ''));
+            const user = order?.user_id ? userById.get(order.user_id) : null;
+            return {
+                ...row,
+                credits_charged: order ? asWholeCredits(order.credits_charged, 0) : asWholeCredits(row.credits_charged, 0),
+                user_email: user?.email || row.user_email || '',
+                user_display: user ? formatDiscordDisplayName(user) : (row.user_display || '')
+            };
+        });
         const type = String(req.query.type || '').trim().toLowerCase();
         const site = String(req.query.site || '').trim().toLowerCase();
         if (type) rows = rows.filter((row) => String(row.type || '').toLowerCase() === type);
@@ -4477,6 +4540,142 @@ app.post('/admin/webhooks/logs/:id/resend', auth, admin, async (req, res) => {
 });
 
 
+
+async function recheckSuccessfulOrderCredits({ currentUser, order = null, webhookLogRow = null, resendDiscord = true }) {
+    if (!currentUser?.id) throw new Error('Current admin is required.');
+    let targetOrder = order;
+    let payload = webhookLogRow?.payload || targetOrder?.raw_payload || null;
+
+    if (!targetOrder?.id && webhookLogRow?.payload) {
+        const normalizedFromLog = normalizeIncomingOrderPayload(webhookLogRow.payload);
+        if (normalizedFromLog.external_order_id) {
+            const { data, error } = await maybeSingle('orders', (qb) =>
+                qb.select('*').eq('external_order_id', normalizedFromLog.external_order_id).maybeSingle()
+            );
+            if (error) throw new Error(error.message);
+            targetOrder = data || null;
+        }
+    }
+
+    if (!targetOrder?.id) throw new Error('Matching order record was not found. Re-send the original webhook first.');
+    if (!payload) throw new Error('This order does not have a raw webhook payload to recheck.');
+
+    const targetUser = await getUserById(targetOrder.user_id);
+    if (!(await canManageTarget(currentUser, targetUser))) {
+        const err = new Error('You do not have access to this order.');
+        err.status = 403;
+        throw err;
+    }
+
+    const checkoutType = classifyCheckoutWebhookType({ raw_payload: payload, status: targetOrder.status || '' });
+    if (checkoutType === 'error') throw new Error('Declined/error checkout logs do not charge credits.');
+
+    const normalized = normalizeIncomingOrderPayload(payload);
+    const resolvedCost = await resolveOrderCreditCost({ ...payload, ...normalized });
+    const expectedCredits = asWholeCredits(resolvedCost.credits, 0);
+    const existingCredits = asWholeCredits(targetOrder.credits_charged, 0);
+    const deltaNeeded = expectedCredits - existingCredits;
+    let balanceAfter = await getUserCreditBalance(targetUser.id);
+    let changed = false;
+    let message = '';
+
+    if (deltaNeeded > 0) {
+        const previousBalance = balanceAfter;
+        balanceAfter = await adjustUserCredits({
+            userId: targetUser.id,
+            delta: -deltaNeeded,
+            reason: 'successful_checkout_credit_recheck',
+            note: `Credit recheck charged missing ${deltaNeeded} credits for checkout ${targetOrder.external_order_id || normalized.external_order_id}`,
+            metadata: {
+                previous_credits_charged: existingCredits,
+                corrected_credits_charged: expectedCredits,
+                pokemon_credit_items: resolvedCost.pokemonMultiItemMatch?.items || [],
+                webhook_log_id: webhookLogRow?.id || null
+            },
+            orderId: targetOrder.id,
+            createdBy: currentUser.id
+        });
+        const { error: updateError } = await supabase.from('orders').update({
+            credits_charged: expectedCredits,
+            metadata: {
+                ...(targetOrder.metadata || {}),
+                credit_rechecked_at: new Date().toISOString(),
+                previous_credits_charged: existingCredits,
+                corrected_credits_charged: expectedCredits,
+                pokemon_credit_items: resolvedCost.pokemonMultiItemMatch?.items || []
+            }
+        }).eq('id', targetOrder.id);
+        if (updateError) throw new Error(updateError.message);
+        targetOrder = { ...targetOrder, credits_charged: expectedCredits, metadata: { ...(targetOrder.metadata || {}), corrected_credits_charged: expectedCredits } };
+        changed = true;
+        message = `Credits were rechecked. Previous charge: ${existingCredits}. Correct charge: ${expectedCredits}. Charged ${deltaNeeded} additional credits.`;
+        if (previousBalance > 0 && balanceAfter <= 0) {
+            await sendCreditDepletedNotifications({ user: targetUser, previousBalance, newBalance: balanceAfter, creditsCharged: deltaNeeded, order: targetOrder });
+        }
+    } else if (deltaNeeded === 0) {
+        message = `Credits were rechecked. The credits were already correct at ${existingCredits}. No charge was made.`;
+    } else {
+        message = `Credits were rechecked. Existing charge ${existingCredits} is higher than recalculated ${expectedCredits}. No automatic refund was applied.`;
+        const err = new Error(message);
+        err.status = 400;
+        throw err;
+    }
+
+    let results = [];
+    if (resendDiscord) {
+        const notificationOrder = {
+            ...targetOrder,
+            raw_payload: payload,
+            credits_charged: Math.max(existingCredits, expectedCredits),
+            metadata: {
+                ...(targetOrder.metadata || {}),
+                credit_recheck_notice: true,
+                credit_recheck_message: message
+            }
+        };
+        results = await sendCheckoutDiscordNotifications(notificationOrder, targetUser);
+    }
+
+    if (webhookLogRow?.id) {
+        await updateWebhookLogEntry(webhookLogRow.id, {
+            error: changed ? `Credit recheck charged missing ${deltaNeeded} credits. Correct total: ${expectedCredits}.` : `Credit recheck OK. Already charged ${existingCredits} credits.`,
+            credits_charged: Math.max(existingCredits, expectedCredits),
+            user_email: targetUser.email || '',
+            user_display: formatDiscordDisplayName(targetUser),
+            discord_targets: Array.isArray(results) ? results : []
+        }).catch(() => null);
+    } else {
+        const logRows = await getWebhookLogEntries(500).catch(() => []);
+        const matchingLog = logRows.find((item) => {
+            try {
+                const n = item.payload ? normalizeIncomingOrderPayload(item.payload) : {};
+                return n.external_order_id && String(n.external_order_id) === String(targetOrder.external_order_id || normalized.external_order_id);
+            } catch (_) { return false; }
+        });
+        if (matchingLog?.id) {
+            await updateWebhookLogEntry(matchingLog.id, {
+                error: changed ? `Credit recheck charged missing ${deltaNeeded} credits. Correct total: ${expectedCredits}.` : `Credit recheck OK. Already charged ${existingCredits} credits.`,
+                credits_charged: Math.max(existingCredits, expectedCredits),
+                user_email: targetUser.email || '',
+                user_display: formatDiscordDisplayName(targetUser),
+                discord_targets: Array.isArray(results) ? results : []
+            }).catch(() => null);
+        }
+    }
+
+    return {
+        ok: true,
+        changed,
+        expectedCredits,
+        existingCredits,
+        chargedNow: Math.max(0, deltaNeeded),
+        balanceAfter,
+        message,
+        items: resolvedCost.pokemonMultiItemMatch?.items || [],
+        results
+    };
+}
+
 app.post('/admin/webhooks/logs/:id/recheck-credits', auth, admin, async (req, res) => {
     try {
         const currentUser = await getCurrentUser(req);
@@ -4486,73 +4685,10 @@ app.post('/admin/webhooks/logs/:id/recheck-credits', auth, admin, async (req, re
         if (!row) return res.status(404).json({ error: 'Webhook log not found.' });
         if (!row.payload) return res.status(400).json({ error: 'This log does not have a raw payload to recheck.' });
         if (String(row.type || '') !== 'checkout') return res.status(400).json({ error: 'Only checkout webhook logs can be rechecked.' });
-        const checkoutType = classifyCheckoutWebhookType({ raw_payload: row.payload, status: '' });
-        if (checkoutType === 'error') return res.status(400).json({ error: 'Declined/error checkout logs do not charge credits.' });
-
-        const normalized = normalizeIncomingOrderPayload(row.payload);
-        const resolvedCost = await resolveOrderCreditCost({ ...row.payload, ...normalized });
-        const expectedCredits = asWholeCredits(resolvedCost.credits, 0);
-        const matchedUser = await findUserForWebhook(row.payload).catch(() => null);
-        if (!matchedUser?.id) return res.status(400).json({ error: 'Could not match this webhook to a user.' });
-
-        const { data: order, error: orderError } = await maybeSingle('orders', (qb) =>
-            qb.select('*').eq('external_order_id', normalized.external_order_id).maybeSingle()
-        );
-        if (orderError) throw new Error(orderError.message);
-        if (!order?.id) return res.status(404).json({ error: 'Matching order record was not found. Re-send the original webhook first.' });
-
-        const existingCredits = asWholeCredits(order.credits_charged, 0);
-        const deltaNeeded = expectedCredits - existingCredits;
-        let balanceAfter = await getUserCreditBalance(matchedUser.id);
-        let changed = false;
-
-        if (deltaNeeded > 0) {
-            const previousBalance = balanceAfter;
-            balanceAfter = await adjustUserCredits({
-                userId: matchedUser.id,
-                delta: -deltaNeeded,
-                reason: 'successful_checkout_credit_recheck',
-                note: `Credit recheck charged missing ${deltaNeeded} credits for checkout ${normalized.external_order_id}`,
-                metadata: {
-                    previous_credits_charged: existingCredits,
-                    corrected_credits_charged: expectedCredits,
-                    pokemon_credit_items: resolvedCost.pokemonMultiItemMatch?.items || [],
-                    webhook_log_id: row.id
-                },
-                orderId: order.id,
-                createdBy: currentUser.id
-            });
-            await supabase.from('orders').update({
-                credits_charged: expectedCredits,
-                metadata: {
-                    ...(order.metadata || {}),
-                    credit_rechecked_at: new Date().toISOString(),
-                    previous_credits_charged: existingCredits,
-                    corrected_credits_charged: expectedCredits,
-                    pokemon_credit_items: resolvedCost.pokemonMultiItemMatch?.items || []
-                }
-            }).eq('id', order.id);
-            changed = true;
-            if (previousBalance > 0 && balanceAfter <= 0) {
-                await sendCreditDepletedNotifications({ user: matchedUser, previousBalance, newBalance: balanceAfter, creditsCharged: deltaNeeded, order });
-            }
-        } else if (deltaNeeded < 0) {
-            return res.status(400).json({ error: `This order already has ${existingCredits} credits charged, which is more than the recalculated ${expectedCredits}. No automatic refund was applied.` });
-        }
-
-        const refreshedOrder = { ...order, credits_charged: Math.max(existingCredits, expectedCredits) };
-        const results = await sendCheckoutDiscordNotificationsForPayload(row.payload, matchedUser, {
-            status: 'processed',
-            order: refreshedOrder,
-            credits_charged: refreshedOrder.credits_charged
-        });
-        await updateWebhookLogEntry(row.id, {
-            error: changed ? `Credit recheck charged missing ${deltaNeeded} credits. Correct total: ${expectedCredits}.` : `Credit recheck OK. Already charged ${existingCredits} credits.`,
-            discord_targets: Array.isArray(results) ? results : []
-        }).catch(() => null);
-        res.json({ ok: true, changed, expectedCredits, existingCredits, chargedNow: Math.max(0, deltaNeeded), balanceAfter, items: resolvedCost.pokemonMultiItemMatch?.items || [], results });
+        const result = await recheckSuccessfulOrderCredits({ currentUser, webhookLogRow: row, resendDiscord: true });
+        res.json(result);
     } catch (err) {
-        res.status(500).json({ error: err.message || String(err) });
+        res.status(err.status || 500).json({ error: err.message || String(err) });
     }
 });
 
