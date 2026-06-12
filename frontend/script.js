@@ -3064,6 +3064,8 @@ async function disconnectDiscord() {
 
 const storeProductCache = {};
 const storeSelectedProductIds = {};
+const storeProductAutosaveTimers = {};
+const storeProductAutosaveControllers = {};
 
 function getStoreSelectionLimit(site) {
     if (site === "amazon") return 1;
@@ -3159,12 +3161,61 @@ function applyStoreProductSelection(site, input) {
     updateStoreSelectionSummary(site);
 }
 
+function getStoreSelectionUnitLabel(site) {
+    if (site === "amazon") return "Amazon item";
+    if (site === "samsclub") return "Sam's Club SKU";
+    if (site === "pokemon") return "Pokémon Center item";
+    return "Target SKU";
+}
+
+async function saveStoreProductSelections(site, options = {}) {
+    const msg = document.getElementById(site + "ProductSelectionMessage");
+    const selected = Array.from(storeSelectedProductIds[site] || new Set());
+
+    if (storeProductAutosaveControllers[site]) {
+        try { storeProductAutosaveControllers[site].abort(); } catch (_) {}
+    }
+
+    const controller = new AbortController();
+    storeProductAutosaveControllers[site] = controller;
+    if (msg) msg.innerHTML = `<span class="autosave-pill">Saving selections...</span>`;
+
+    try {
+        await authJSON(API + "/product-preferences", {
+            method: "PUT",
+            body: JSON.stringify({ site, selected_product_ids: selected }),
+            signal: controller.signal
+        });
+        if (storeProductAutosaveControllers[site] === controller) {
+            const savedCount = (site === "target" || site === "samsclub" || site === "pokemon") ? countSelectedStoreSkuUnits(site) : selected.length;
+            const unitLabel = getStoreSelectionUnitLabel(site);
+            if (msg) msg.innerHTML = `<span class="autosave-pill">Saved automatically: ${savedCount} ${unitLabel}${savedCount === 1 ? "" : "s"} selected.</span>`;
+            storeProductAutosaveControllers[site] = null;
+        }
+    } catch (err) {
+        if (err?.name === "AbortError") return;
+        if (msg) msg.textContent = err.message || "Could not save selections. Please try clicking the checkbox again.";
+    }
+}
+
+function scheduleStoreProductAutosave(site) {
+    clearTimeout(storeProductAutosaveTimers[site]);
+    const msg = document.getElementById(site + "ProductSelectionMessage");
+    if (msg) msg.innerHTML = `<span class="autosave-pill">Selection changed. Saving automatically...</span>`;
+    storeProductAutosaveTimers[site] = setTimeout(() => {
+        saveStoreProductSelections(site).catch(() => {});
+    }, 350);
+}
+
 function bindStoreProductSelectionControls(site) {
     const panel = document.getElementById(site + "ProductsPanel");
     if (!panel) return;
 
     panel.querySelectorAll("[data-store-product-select]").forEach((input) => {
-        input.addEventListener("change", () => applyStoreProductSelection(site, input));
+        input.addEventListener("change", () => {
+            applyStoreProductSelection(site, input);
+            scheduleStoreProductAutosave(site);
+        });
     });
 
     panel.querySelectorAll("[data-store-product-card]").forEach((card) => {
@@ -3176,38 +3227,9 @@ function bindStoreProductSelectionControls(site) {
             if (!input) return;
             input.checked = !input.checked;
             applyStoreProductSelection(site, input);
+            scheduleStoreProductAutosave(site);
         });
     });
-
-    const saveButton = document.getElementById(site + "ProductSelectionSave");
-    if (saveButton && !saveButton.dataset.bound) {
-        saveButton.dataset.bound = "1";
-        saveButton.addEventListener("click", async () => {
-            const selected = Array.from(storeSelectedProductIds[site] || new Set());
-            const msg = document.getElementById(site + "ProductSelectionMessage");
-            saveButton.disabled = true;
-            if (msg) msg.textContent = "Saving selections...";
-            try {
-                const data = await authJSON(API + "/product-preferences", {
-                    method: "PUT",
-                    body: JSON.stringify({
-                        site,
-                        selected_product_ids: selected
-                    })
-                });
-                if (msg) {
-                    const savedCount = (site === "target" || site === "samsclub" || site === "pokemon") ? countSelectedStoreSkuUnits(site) : selected.length;
-                    const unitLabel = site === "amazon" ? "Amazon item" : (site === "samsclub" ? "Sam's Club SKU" : site === "pokemon" ? "Pokémon Center item" : "Target SKU");
-                    msg.textContent = `Saved ${savedCount} ${unitLabel}${savedCount === 1 ? "" : "s"}.`;
-                }
-                await loadStoreProductsForSite(site);
-            } catch (err) {
-                if (msg) msg.textContent = err.message || "Could not save selections.";
-            } finally {
-                saveButton.disabled = false;
-            }
-        });
-    }
 }
 
 
@@ -3416,9 +3438,10 @@ function applyRecommendedTargetProductIds(productIds = []) {
     const msg = document.getElementById("targetProductSelectionMessage");
     if (msg) {
         msg.textContent = added
-            ? `Applied ${added} product${added === 1 ? "" : "s"} from that list. Save Target Selections to lock them in.`
+            ? `Applied ${added} product${added === 1 ? "" : "s"} from that list. Saving automatically...`
             : "No products were added. They may already be selected.";
     }
+    if (added) scheduleStoreProductAutosave(site);
 }
 
 
@@ -3457,7 +3480,6 @@ async function loadStoreProductsForSite(site) {
                     <div class="store-product-summary">${products.length} product${products.length === 1 ? '' : 's'} available</div>
                     ${selectable ? `<div class="subtle-text" id="${site}SelectionSummary"></div>` : ''}
                 </div>
-                ${selectable ? `<div class="panel-actions"><button class="btn btn-primary" type="button" id="${site}ProductSelectionSave">Save ${site === 'target' ? 'Target' : site === 'samsclub' ? "Sam's Club" : site === 'pokemon' ? 'Pokémon Center' : 'Amazon'} Selections</button></div>` : ''}
             </div>
             <div class="toolbar-row store-product-search-row">
                 <input id="${site}ProductSearch" class="input" type="search" placeholder="Search ${site} products by name, SKU, brand, or category" />
@@ -3956,6 +3978,51 @@ async function loadProductSelectionChanges() {
     }
 }
 
+let productSelectionExportUsersCache = [];
+
+function updateProductSelectionExportStatusBanner() {
+    const banner = document.getElementById("productSelectionExportStatus");
+    const select = document.getElementById("productSelectionExportUser");
+    const siteSelect = document.getElementById("productSelectionExportSite");
+    if (!banner || !select) return;
+
+    const siteLabel = siteSelect?.selectedOptions?.[0]?.textContent || "this store";
+    const userId = select.value || "";
+    banner.className = "export-sync-banner export-sync-banner--neutral";
+
+    if (!productSelectionExportUsersCache.length) {
+        banner.textContent = `No users currently have selected products for ${siteLabel}.`;
+        return;
+    }
+
+    if (!userId) {
+        const pending = productSelectionExportUsersCache.filter((user) => user.changed_since_export).length;
+        const synced = productSelectionExportUsersCache.length - pending;
+        if (pending > 0) {
+            banner.className = "export-sync-banner export-sync-banner--pending";
+            banner.textContent = `Needs attention: ${pending} user${pending === 1 ? "" : "s"} have ${siteLabel} product changes that have not been marked copied. ${synced} synced.`;
+        } else {
+            banner.className = "export-sync-banner export-sync-banner--synced";
+            banner.textContent = `All ${siteLabel} user product exports are synced. Products are running properly.`;
+        }
+        return;
+    }
+
+    const user = productSelectionExportUsersCache.find((row) => row.user_id === userId);
+    if (!user) {
+        banner.textContent = "Choose a user to check export status.";
+        return;
+    }
+
+    if (user.changed_since_export) {
+        banner.className = "export-sync-banner export-sync-banner--pending";
+        banner.textContent = `Needs export update: ${userExportDisplayName(user)} changed ${siteLabel} selections. Copy the updated list, then click Mark Copied.`;
+    } else {
+        banner.className = "export-sync-banner export-sync-banner--synced";
+        banner.textContent = `Export synced: ${userExportDisplayName(user)} has no new ${siteLabel} product changes. All products are running properly.`;
+    }
+}
+
 async function loadProductSelectionExportUsers() {
     const select = document.getElementById("productSelectionExportUser");
     const site = document.getElementById("productSelectionExportSite")?.value || "target";
@@ -3965,15 +4032,20 @@ async function loadProductSelectionExportUsers() {
     try {
         const data = await authJSON(API + "/admin/product-selection-export-users?site=" + encodeURIComponent(site));
         const users = Array.isArray(data.users) ? data.users : [];
+        productSelectionExportUsersCache = users;
         users.forEach((user) => {
             const option = document.createElement("option");
             option.value = user.user_id;
-            option.textContent = `${user.changed_since_export ? "● " : ""}${userExportDisplayName(user)} (${user.selection_count})${user.changed_since_export ? " - changed" : ""}`;
+            option.textContent = `${user.changed_since_export ? "🔴" : "🟢"} ${userExportDisplayName(user)} (${user.selection_count})${user.changed_since_export ? " - needs update" : " - synced"}`;
             option.dataset.changed = user.changed_since_export ? "1" : "0";
             select.appendChild(option);
         });
         if (currentValue && users.some((user) => user.user_id === currentValue)) select.value = currentValue;
-    } catch (_) { }
+        updateProductSelectionExportStatusBanner();
+    } catch (_) {
+        productSelectionExportUsersCache = [];
+        updateProductSelectionExportStatusBanner();
+    }
 }
 
 async function loadProductSelectionExport() {
@@ -3992,6 +4064,7 @@ async function loadProductSelectionExport() {
         if (message) message.textContent = userId
             ? `Loaded ${count} selected product${count === 1 ? "" : "s"} for this user.`
             : `Loaded ${Array.isArray(data.users) ? data.users.length : 0} user export${Array.isArray(data.users) && data.users.length === 1 ? "" : "s"}.`;
+        updateProductSelectionExportStatusBanner();
     } catch (err) {
         if (message) message.textContent = err.message || "Could not load export.";
     }
@@ -4079,12 +4152,18 @@ function initProductSelectionAdminTools() {
         markExported.dataset.bound = "1";
         markExported.addEventListener("click", markProductSelectionExported);
     }
+    const exportUserSelect = document.getElementById("productSelectionExportUser");
+    if (exportUserSelect && !exportUserSelect.dataset.statusBound) {
+        exportUserSelect.dataset.statusBound = "1";
+        exportUserSelect.addEventListener("change", updateProductSelectionExportStatusBanner);
+    }
     if (siteSelect && !siteSelect.dataset.exportUsersBound) {
         siteSelect.dataset.exportUsersBound = "1";
         siteSelect.addEventListener("change", async () => {
             await loadProductSelectionExportUsers();
             const output = document.getElementById("productSelectionExportText");
             if (output) output.value = "";
+            updateProductSelectionExportStatusBanner();
         });
     }
     if (saveName && !saveName.dataset.bound) {

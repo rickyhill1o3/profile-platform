@@ -855,3 +855,36 @@ h1,h2,h3,h4,p{margin:0}
   color: #1e3a8a;
   line-height: 1.45;
 }
+
+.export-sync-banner{
+  margin:10px 0;
+  padding:12px 14px;
+  border-radius:12px;
+  border:1px solid var(--border);
+  font-weight:800;
+  letter-spacing:.01em;
+}
+.export-sync-banner--neutral{
+  background:#f8fafc;
+  color:#334155;
+  border-color:#cbd5e1;
+}
+.export-sync-banner--pending{
+  background:#fee2e2;
+  color:#991b1b;
+  border-color:#ef4444;
+  box-shadow:0 0 0 2px rgba(239,68,68,.12);
+}
+.export-sync-banner--synced{
+  background:#dcfce7;
+  color:#166534;
+  border-color:#22c55e;
+  box-shadow:0 0 0 2px rgba(34,197,94,.12);
+}
+.autosave-pill{
+  display:inline-flex;
+  align-items:center;
+  gap:6px;
+  margin-top:4px;
+  font-weight:700;
+}
