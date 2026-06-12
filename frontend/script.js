@@ -3191,6 +3191,7 @@ async function saveStoreProductSelections(site, options = {}) {
             const unitLabel = getStoreSelectionUnitLabel(site);
             if (msg) msg.innerHTML = `<span class="autosave-pill">Saved automatically: ${savedCount} ${unitLabel}${savedCount === 1 ? "" : "s"} selected.</span>`;
             storeProductAutosaveControllers[site] = null;
+            loadUserProductExportStatus(site).catch(() => {});
         }
     } catch (err) {
         if (err?.name === "AbortError") return;
@@ -3360,6 +3361,42 @@ function bindStoreProductSearch(site) {
 
 
 
+
+function renderUserProductExportStatus(site, status = null, errorMessage = '') {
+    const banner = document.getElementById(site + "UserProductExportStatus");
+    if (!banner) return;
+    const label = site === "samsclub" ? "Sam's Club" : site === "pokemon" ? "Pokémon Center" : site === "amazon" ? "Amazon" : site === "target" ? "Target" : "store";
+    banner.className = "export-sync-banner export-sync-banner--neutral";
+
+    if (errorMessage) {
+        banner.textContent = errorMessage;
+        return;
+    }
+    if (!status || Number(status.selection_count || 0) === 0) {
+        banner.textContent = `No ${label} product selections are waiting to be copied yet.`;
+        return;
+    }
+    if (status.changed_since_export) {
+        banner.className = "export-sync-banner export-sync-banner--pending";
+        banner.textContent = `🔴 Your ${label} product list has new changes. Your admin has not marked the updated list as copied yet.`;
+    } else {
+        banner.className = "export-sync-banner export-sync-banner--synced";
+        banner.textContent = `🟢 Your ${label} product list is updated. Your admin has marked your latest selections as copied.`;
+    }
+}
+
+async function loadUserProductExportStatus(site) {
+    const banner = document.getElementById(site + "UserProductExportStatus");
+    if (!banner) return;
+    renderUserProductExportStatus(site, null);
+    try {
+        const data = await authJSON(API + "/product-selections/export-status?site=" + encodeURIComponent(site));
+        renderUserProductExportStatus(site, data);
+    } catch (err) {
+        renderUserProductExportStatus(site, null, err.message || "Could not load product list update status.");
+    }
+}
+
 async function loadTargetRecommendedLists() {
     const panel = document.getElementById("targetRecommendedListsPanel");
     if (!panel) return;
@@ -3484,7 +3521,7 @@ async function loadStoreProductsForSite(site) {
             <div class="toolbar-row store-product-search-row">
                 <input id="${site}ProductSearch" class="input" type="search" placeholder="Search ${site} products by name, SKU, brand, or category" />
             </div>
-            ${site === 'target' ? `<section class="recommended-lists-section"><div class="panel-header panel-header--compact"><div><h3>Current Running Lists</h3><p class="subtle-text">Apply The Shore Shack list or your admin’s list.</p></div></div><div id="targetRecommendedListsPanel" class="recommended-list-grid"></div></section>` : ''}
+            ${site === 'target' ? `<div id="targetUserProductExportStatus" class="export-sync-banner export-sync-banner--neutral">Loading product list update status...</div><section class="recommended-lists-section"><div class="panel-header panel-header--compact"><div><h3>Current Running Lists</h3><p class="subtle-text">Apply The Shore Shack list or your admin’s list.</p></div></div><div id="targetRecommendedListsPanel" class="recommended-list-grid"></div></section>` : ''}
             ${selectable ? `<div class="banner banner-soft"><strong>${escapeHTML(limitText)}</strong><p class="subtle-text">You can pick your own products even if they are not currently recommended. Exports will still be split into 29-SKU batches for the bot.</p><div id="${site}ProductSelectionMessage" class="subtle-text"></div></div>` : ''}
             <div class="store-product-scroll">
                 <div id="${site}ProductGridWrap">
@@ -3496,6 +3533,7 @@ async function loadStoreProductsForSite(site) {
         bindStoreProductSearch(site);
         bindStoreProductSelectionControls(site);
         if (site === 'target') {
+            try { await loadUserProductExportStatus(site); } catch (_) { }
             try { await loadTargetRecommendedLists(); } catch (_) { }
         }
     } catch (err) {

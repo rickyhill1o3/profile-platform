@@ -1391,6 +1391,79 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
         }
     });
 
+
+    app.get('/product-selections/export-status', auth, async (req, res) => {
+        try {
+            await ensureUserNotRevoked(req.user_id);
+            const currentUser = await getCurrentUser(req);
+            const site = req.query.site ? normalizeSite(req.query.site) : 'target';
+            const userId = currentUser.id;
+            let ownerAdminId = currentUser?.owner_admin_id || (['admin', 'super_admin'].includes(currentUser?.role) ? currentUser.id : null);
+
+            if (!ownerAdminId) {
+                const superAdmin = await getFirstSuperAdminUser();
+                ownerAdminId = superAdmin?.id || null;
+            }
+
+            let query = supabase
+                .from('user_product_preferences')
+                .select(`user_id, selected, max_price, updated_at, catalog_products!inner ( id, site, sku, product_name, default_max_price )`)
+                .eq('user_id', userId)
+                .eq('selected', true)
+                .eq('catalog_products.site', site);
+
+            const { data, error } = await query;
+            if (error) return res.status(500).json({ error: error.message });
+
+            const { data: allCatalogProducts } = await supabase
+                .from('catalog_products')
+                .select('id, site, sku, product_name, default_max_price')
+                .eq('site', site);
+
+            const groupedProducts = (allCatalogProducts || []).filter((product) => parseMultiSkuValue(product.sku).length > 1);
+            const seenProducts = new Set();
+            let latestChangeAt = null;
+            let selectionCount = 0;
+
+            (data || []).forEach((row) => {
+                const currentProduct = row.catalog_products || {};
+                const currentSkus = parseMultiSkuValue(currentProduct.sku);
+                const groupedReplacement = groupedProducts.find((product) => {
+                    const groupedSkus = parseMultiSkuValue(product.sku);
+                    return currentSkus.some((sku) => groupedSkus.includes(sku));
+                });
+                const resolvedRow = groupedReplacement
+                    ? { ...row, max_price: groupedReplacement.default_max_price ?? row.max_price, catalog_products: groupedReplacement }
+                    : row;
+                const product = resolvedRow.catalog_products || {};
+                const canonicalSkuKey = parseMultiSkuValue(product.sku).sort().join(',') || String(product.id || resolvedRow.catalog_product_id || '');
+                if (canonicalSkuKey && seenProducts.has(canonicalSkuKey)) return;
+                if (canonicalSkuKey) seenProducts.add(canonicalSkuKey);
+                selectionCount += productSelectionLines(resolvedRow).length;
+                if (row.updated_at && (!latestChangeAt || new Date(row.updated_at) > new Date(latestChangeAt))) latestChangeAt = row.updated_at;
+            });
+
+            let lastExportedAt = null;
+            if (ownerAdminId) {
+                const exportState = await getCatalogAppSetting(supabase, `product_selection_export_state:${site}:${ownerAdminId}`, {});
+                lastExportedAt = exportState?.[userId] || null;
+            }
+            const changedSinceExport = !!(selectionCount > 0 && (!lastExportedAt || (latestChangeAt && new Date(latestChangeAt) > new Date(lastExportedAt))));
+
+            res.json({
+                site,
+                user_id: userId,
+                owner_admin_id: ownerAdminId,
+                selection_count: selectionCount,
+                latest_change_at: latestChangeAt,
+                last_exported_at: lastExportedAt,
+                changed_since_export: changedSinceExport
+            });
+        } catch (err) {
+            res.status(500).json({ error: err.message });
+        }
+    });
+
     app.get('/admin/product-selection-export-users', auth, admin, async (req, res) => {
         try {
             const currentUser = await getCurrentUser(req);
