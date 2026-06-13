@@ -7198,6 +7198,30 @@ function cardTypeForNumber(cardNumber) {
 }
 
 
+function fourDigitYear(value) {
+    const text = String(value || "").trim();
+    if (!text) return "";
+    return text.length === 2 ? `20${text}` : text;
+}
+
+function shikariMonth(value) {
+    const text = String(value || "").trim();
+    if (!text) return "";
+    const parsed = parseInt(text, 10);
+    return Number.isFinite(parsed) ? String(parsed) : text;
+}
+
+function csvCell(value) {
+    const text = String(value ?? "");
+    if (/[",\r\n]/.test(text)) return `"${text.replace(/"/g, '""')}"`;
+    return text;
+}
+
+function csvLine(values) {
+    return values.map(csvCell).join(",");
+}
+
+
 app.get("/admin/export/profiles-stellar-json", auth, admin, async (req, res) => {
     try {
         const currentUser = await getCurrentUser(req);
@@ -7311,6 +7335,114 @@ app.get("/admin/export/profiles-stellar-json", auth, admin, async (req, res) => 
     }
 });
 
+
+
+app.get("/admin/export/profiles-shikari-csv", auth, admin, async (req, res) => {
+    try {
+        const currentUser = await getCurrentUser(req);
+        const { user_id, group } = req.query;
+        const filename = (req.query.filename || "shikari-profiles").replace(/[^a-zA-Z0-9-_]/g, "");
+        const activeOnly = String(req.query.active_only || "") === "1";
+
+        let query = supabase
+            .from("profiles")
+            .select(`
+                *,
+                addresses(*),
+                payments(*),
+                accounts(*)
+            `)
+            .order("created_at", { ascending: false });
+
+        if (currentUser.role === "super_admin") {
+            if (user_id) query = query.eq("user_id", user_id);
+        } else {
+            const ownedUserIds = await getScopeUserIdsForAdmin(currentUser);
+
+            if (user_id && !ownedUserIds.includes(user_id)) {
+                return res.status(403).json({ error: "Cannot export that account" });
+            }
+
+            query = query.in("user_id", safeIn(ownedUserIds));
+
+            if (user_id) query = query.eq("user_id", user_id);
+        }
+
+        const { data: profiles, error } = await query;
+
+        if (error) {
+            return res.status(500).json({ error: error.message });
+        }
+
+        let exportProfiles = await attachAndFilterProfilesByStore(profiles || [], group || "");
+        exportProfiles = await filterProfilesByActiveRunStatus(exportProfiles, group || "", activeOnly);
+
+        const headers = [
+            "profile_name", "first_name", "last_name", "email", "phone_num",
+            "cc_number", "cc_exp_month", "cc_exp_year", "cc_cvv",
+            "shipping_street", "shipping_street_2", "shipping_city", "shipping_state", "shipping_zip_code", "shipping_country",
+            "billing_first_name", "billing_last_name", "billing_street", "billing_street_2", "billing_city", "billing_state", "billing_zip_code", "billing_country"
+        ];
+
+        const rows = exportProfiles.map((profile) => {
+            const address = profile.addresses?.[0] || {};
+            const payment = profile.payments?.[0] || {};
+
+            let cardNumber = "";
+            let cardCvv = "";
+
+            try {
+                cardNumber = payment.card_encrypted ? decrypt(payment.card_encrypted) : "";
+            } catch { }
+
+            try {
+                cardCvv = payment.cvv_encrypted ? decrypt(payment.cvv_encrypted) : "";
+            } catch { }
+
+            const billingSameAsShipping =
+                !address.billing_first_name &&
+                !address.billing_last_name &&
+                !address.billing_address1 &&
+                !address.billing_city &&
+                !address.billing_state &&
+                !address.billing_zip &&
+                !address.billing_phone;
+
+            return [
+                profile.profile_name || "",
+                address.first_name || "",
+                address.last_name || "",
+                address.email || "",
+                address.phone || "",
+                cardNumber,
+                shikariMonth(payment.exp_month),
+                fourDigitYear(payment.exp_year),
+                cardCvv,
+                address.address1 || "",
+                address.address2 || "",
+                address.city || "",
+                stateForStellar(address.state),
+                address.zip || "",
+                countryForStellar(address.country),
+                billingSameAsShipping ? (address.first_name || "") : (address.billing_first_name || ""),
+                billingSameAsShipping ? (address.last_name || "") : (address.billing_last_name || ""),
+                billingSameAsShipping ? (address.address1 || "") : (address.billing_address1 || ""),
+                billingSameAsShipping ? (address.address2 || "") : (address.billing_address2 || ""),
+                billingSameAsShipping ? (address.city || "") : (address.billing_city || ""),
+                billingSameAsShipping ? stateForStellar(address.state) : stateForStellar(address.billing_state),
+                billingSameAsShipping ? (address.zip || "") : (address.billing_zip || ""),
+                billingSameAsShipping ? countryForStellar(address.country) : countryForStellar(address.billing_country || address.country)
+            ];
+        });
+
+        const csv = [headers, ...rows].map(csvLine).join("\r\n") + "\r\n";
+        res.setHeader("Content-Type", "text/csv; charset=utf-8");
+        res.setHeader("Content-Disposition", `attachment; filename="${filename}.csv"`);
+        res.send(csv);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
 
 app.get("/admin/export/accounts-txt", auth, admin, async (req, res) => {
     try {
