@@ -4825,11 +4825,43 @@ async function getNewCatalogProductsSince(sinceIso) {
     return Array.isArray(data) ? data : [];
 }
 
+const ANNOUNCEMENT_CATALOG_TIMEZONE = 'America/New_York';
+const ANNOUNCEMENT_CATALOG_SEND_HOUR = 15;
+const ANNOUNCEMENT_CATALOG_SEND_MINUTE = 0;
+const ANNOUNCEMENT_CATALOG_SCHEDULER_INTERVAL_MS = 60 * 1000;
+
+function getDatePartsInTimeZone(date = new Date(), timeZone = ANNOUNCEMENT_CATALOG_TIMEZONE) {
+    const parts = new Intl.DateTimeFormat('en-US', {
+        timeZone,
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: false
+    }).formatToParts(date).reduce((acc, part) => {
+        if (part.type !== 'literal') acc[part.type] = part.value;
+        return acc;
+    }, {});
+
+    return {
+        year: Number(parts.year),
+        month: Number(parts.month),
+        day: Number(parts.day),
+        hour: Number(parts.hour),
+        minute: Number(parts.minute),
+        dateKey: `${parts.year}-${parts.month}-${parts.day}`
+    };
+}
+
 async function sendDailyCatalogAnnouncement({ force = false } = {}) {
     const now = new Date();
-    const yyyyMmDd = now.toISOString().slice(0, 10);
+    const easternNow = getDatePartsInTimeZone(now);
     const settings = await getAppSetting('announcement_catalog_update', {});
-    if (!force && settings?.last_sent_date === yyyyMmDd) return { skipped: true, reason: 'already_sent_today', sent: 0, failed: 0, product_count: 0 };
+    if (!force && settings?.last_sent_date === easternNow.dateKey) {
+        return { skipped: true, reason: 'already_sent_today', sent: 0, failed: 0, product_count: 0 };
+    }
+
     const since = new Date(now.getTime() - 24 * 60 * 60 * 1000).toISOString();
     const products = await getNewCatalogProductsSince(since);
     const lines = products.map(formatAnnouncementProductLine).filter(Boolean);
@@ -4837,21 +4869,28 @@ async function sendDailyCatalogAnnouncement({ force = false } = {}) {
         ? `**The Shore Shack Catalog Update**\nNew products added in the last 24 hours (${lines.length}):\n${lines.join('\n')}`
         : `**The Shore Shack Catalog Update**\nNo new products were added to the catalog in the last 24 hours.`;
     const result = await sendAnnouncementToAllWebhooks(message);
-    await setAppSetting('announcement_catalog_update', { ...(settings || {}), last_sent_at: now.toISOString(), last_sent_date: yyyyMmDd, last_product_count: lines.length });
+    await setAppSetting('announcement_catalog_update', {
+        ...(settings || {}),
+        last_sent_at: now.toISOString(),
+        last_sent_date: easternNow.dateKey,
+        last_sent_timezone: ANNOUNCEMENT_CATALOG_TIMEZONE,
+        last_product_count: lines.length
+    });
     return { ...result, product_count: lines.length };
 }
 
+function shouldRunAnnouncementCatalogUpdate(date = new Date()) {
+    const easternNow = getDatePartsInTimeZone(date);
+    return easternNow.hour === ANNOUNCEMENT_CATALOG_SEND_HOUR && easternNow.minute === ANNOUNCEMENT_CATALOG_SEND_MINUTE;
+}
+
 function startAnnouncementCatalogScheduler() {
+    console.log(`Announcement catalog scheduler enabled: daily at 3:00 PM ${ANNOUNCEMENT_CATALOG_TIMEZONE} / 12:00 PM Pacific.`);
     setInterval(() => {
-        const now = new Date();
-        // 3 PM Eastern is 19:00 UTC during daylight time and 20:00 UTC during standard time.
-        // The server checks both UTC windows once per day so the job still fires after DST changes.
-        const utcHour = now.getUTCHours();
-        const minute = now.getUTCMinutes();
-        if ((utcHour === 19 || utcHour === 20) && minute < 5) {
+        if (shouldRunAnnouncementCatalogUpdate(new Date())) {
             sendDailyCatalogAnnouncement().catch((err) => console.error('Daily announcement catalog update failed:', err));
         }
-    }, 5 * 60 * 1000);
+    }, ANNOUNCEMENT_CATALOG_SCHEDULER_INTERVAL_MS);
 }
 
 app.get('/admin/announcements/settings', auth, admin, async (req, res) => {
