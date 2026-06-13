@@ -789,6 +789,21 @@ placeholder="Enter one SKU per line&#10;12345678&#10;87654321"></textarea>
                 <input class="input" id="announcementWebhookUrl" placeholder="https://discord.com/api/webhooks/..." />
                 <div class="subtle-text">Create a Discord webhook in your announcements channel and paste it here.</div>
               </div>
+              <div class="field">
+                <label for="announcementPingMode">Announcement Ping Mode</label>
+                <select class="input" id="announcementPingMode">
+                  <option value="none">None</option>
+                  <option value="everyone">@everyone</option>
+                  <option value="role">Role</option>
+                </select>
+              </div>
+              <div class="field">
+                <label for="announcementRoleMention">Announcement Role Mention</label>
+                <input class="input" id="announcementRoleMention" placeholder="<@&123456789012345678>" />
+              </div>
+              <div class="field field--full">
+                <div class="subtle-text">Use Role mode with a Discord role mention like &lt;@&amp;123456789012345678&gt;. This ping is added to manual announcements and catalog update announcements.</div>
+              </div>
               <div class="field field--full panel-actions">
                 <button class="btn btn-primary" type="button" onclick="saveAnnouncementWebhookSettings()">Save Announcement Webhook</button>
               </div>

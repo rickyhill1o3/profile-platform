@@ -4712,6 +4712,25 @@ function chunkDiscordText(text, maxLength = 1800) {
     return chunks;
 }
 
+function normalizeAnnouncementConfig(raw) {
+    const value = raw && typeof raw === 'object' ? raw : {};
+    const pingMode = ['none', 'everyone', 'role'].includes(String(value.announcement_ping_mode || value.ping_mode || '').trim().toLowerCase())
+        ? String(value.announcement_ping_mode || value.ping_mode || '').trim().toLowerCase()
+        : 'none';
+    return {
+        webhook_url: String(value.announcement_webhook_url || value.webhook_url || '').trim(),
+        ping_mode: pingMode,
+        role_mention: String(value.announcement_role_mention || value.role_mention || '').trim()
+    };
+}
+
+function getAnnouncementMentionText(routeConfig) {
+    const config = normalizeAnnouncementConfig(routeConfig);
+    if (config.ping_mode === 'everyone') return '@everyone';
+    if (config.ping_mode === 'role' && config.role_mention) return config.role_mention;
+    return '';
+}
+
 async function postAnnouncementDiscordWebhook(webhookUrl, content, embeds = null) {
     const trimmed = String(webhookUrl || '').trim();
     if (!trimmed) return { success: false, error: 'Webhook URL is missing' };
@@ -4738,10 +4757,15 @@ async function getAnnouncementRoutes() {
     if (error) throw new Error(error.message);
     const seen = new Set();
     return (Array.isArray(data) ? data : [])
-        .map((row) => ({
-            key: row.key,
-            webhook_url: String(row.value_json?.announcement_webhook_url || '').trim()
-        }))
+        .map((row) => {
+            const cfg = normalizeAnnouncementConfig(row.value_json || {});
+            return {
+                key: row.key,
+                webhook_url: cfg.webhook_url,
+                ping_mode: cfg.ping_mode,
+                role_mention: cfg.role_mention
+            };
+        })
         .filter((row) => {
             if (!row.webhook_url || seen.has(row.webhook_url)) return false;
             seen.add(row.webhook_url);
@@ -4758,8 +4782,11 @@ async function sendAnnouncementToAllWebhooks(message, embeds = null) {
     const results = [];
     for (const route of routes) {
         let routeOk = true;
+        const mentionText = getAnnouncementMentionText(route);
         for (let i = 0; i < payloadChunks.length; i += 1) {
-            const result = await postAnnouncementDiscordWebhook(route.webhook_url, payloadChunks[i], i === 0 ? embeds : null).catch((err) => ({ success: false, error: err.message || String(err) }));
+            const chunkContent = i === 0 && mentionText ? `${mentionText}
+${payloadChunks[i] || ''}`.trim() : payloadChunks[i];
+            const result = await postAnnouncementDiscordWebhook(route.webhook_url, chunkContent, i === 0 ? embeds : null).catch((err) => ({ success: false, error: err.message || String(err) }));
             if (!result.success) routeOk = false;
             results.push({ user_id: route.user_id, webhook_type: route.webhook_type, success: !!result.success, error: result.error || '', status: result.status || null });
         }
@@ -4833,6 +4860,8 @@ app.get('/admin/announcements/settings', auth, admin, async (req, res) => {
         const adminSettings = await getAdminWebhookSettings(currentUser.id).catch(() => ({}));
         res.json({
             announcement_webhook_url: String(adminSettings?.announcement_webhook_url || ''),
+            announcement_ping_mode: normalizeAnnouncementConfig(adminSettings).ping_mode,
+            announcement_role_mention: normalizeAnnouncementConfig(adminSettings).role_mention,
             is_super_admin: currentUser.role === 'super_admin'
         });
     } catch (err) {
@@ -4844,9 +4873,18 @@ app.post('/admin/announcements/settings', auth, admin, async (req, res) => {
     try {
         const currentUser = await getCurrentUser(req);
         const announcementWebhookUrl = String(req.body?.announcement_webhook_url || '').trim();
+        const announcementPingMode = ['none', 'everyone', 'role'].includes(String(req.body?.announcement_ping_mode || '').trim().toLowerCase())
+            ? String(req.body?.announcement_ping_mode || '').trim().toLowerCase()
+            : 'none';
+        const announcementRoleMention = String(req.body?.announcement_role_mention || '').trim();
         const existing = await getAdminWebhookSettings(currentUser.id).catch(() => ({}));
-        await setAdminWebhookSettings(currentUser.id, { ...(existing || {}), announcement_webhook_url: announcementWebhookUrl });
-        res.json({ success: true, announcement_webhook_url: announcementWebhookUrl });
+        await setAdminWebhookSettings(currentUser.id, {
+            ...(existing || {}),
+            announcement_webhook_url: announcementWebhookUrl,
+            announcement_ping_mode: announcementPingMode,
+            announcement_role_mention: announcementRoleMention
+        });
+        res.json({ success: true, announcement_webhook_url: announcementWebhookUrl, announcement_ping_mode: announcementPingMode, announcement_role_mention: announcementRoleMention });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }

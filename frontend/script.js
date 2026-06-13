@@ -2588,11 +2588,15 @@ function initAdminSidebar() {
 
 async function loadAnnouncementSettings() {
     const input = document.getElementById('announcementWebhookUrl');
+    const pingMode = document.getElementById('announcementPingMode');
+    const roleMention = document.getElementById('announcementRoleMention');
     if (!input || !token()) return;
     const msg = document.getElementById('announcementSettingsMessage');
     try {
         const data = await authJSON(API + '/admin/announcements/settings');
         input.value = data.announcement_webhook_url || '';
+        if (pingMode) pingMode.value = data.announcement_ping_mode || 'none';
+        if (roleMention) roleMention.value = data.announcement_role_mention || '';
         const panel = document.getElementById('superAdminAnnouncementPanel');
         if (panel) panel.style.display = data.is_super_admin ? '' : 'none';
         if (msg) msg.textContent = data.announcement_webhook_url ? 'Announcement webhook loaded.' : 'No announcement webhook saved yet.';
@@ -2603,13 +2607,19 @@ async function loadAnnouncementSettings() {
 
 async function saveAnnouncementWebhookSettings() {
     const input = document.getElementById('announcementWebhookUrl');
+    const pingMode = document.getElementById('announcementPingMode');
+    const roleMention = document.getElementById('announcementRoleMention');
     const msg = document.getElementById('announcementSettingsMessage');
     if (!input) return;
     try {
         if (msg) msg.textContent = 'Saving announcement webhook...';
         await authJSON(API + '/admin/announcements/settings', {
             method: 'POST',
-            body: JSON.stringify({ announcement_webhook_url: input.value || '' })
+            body: JSON.stringify({
+                announcement_webhook_url: input.value || '',
+                announcement_ping_mode: pingMode ? pingMode.value : 'none',
+                announcement_role_mention: roleMention ? roleMention.value : ''
+            })
         });
         if (msg) msg.textContent = 'Announcement webhook saved.';
     } catch (err) {
