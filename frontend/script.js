@@ -2502,24 +2502,44 @@ async function initCatalogTools() {
     if (exportForm) {
         exportForm.addEventListener('submit', async (event) => {
             event.preventDefault();
+            const format = event.submitter?.dataset?.catalogExportFormat || 'stellar';
             if (exportResults) exportResults.innerHTML = '<div class="subtle-text">Building export batches...</div>';
             try {
                 const site = document.getElementById('catalogExportSite').value;
                 const batchSize = document.getElementById('catalogExportBatchSize').value || '29';
                 const qs = new URLSearchParams({ site, batchSize });
                 const data = await authJSON(API + '/admin/catalog-products/export-lines?' + qs.toString());
-                const batches = Array.isArray(data.batches) ? data.batches : [];
+                let batches = Array.isArray(data.batches) ? data.batches : [];
+                if (format === 'shikari') {
+                    batches = batches.map((batch) => {
+                        const skus = String(batch.text || '')
+                            .split(/\n+/)
+                            .map((line) => line.split(';')[0].trim())
+                            .filter(Boolean);
+                        return { ...batch, text: skus.join(', '), count: skus.length };
+                    });
+                }
                 if (!batches.length) {
                     if (exportResults) exportResults.innerHTML = '<div class="subtle-text">No products found to export.</div>';
                     return;
                 }
                 if (exportResults) {
-                    exportResults.innerHTML = batches.map((batch) => `
+                    exportResults.innerHTML = batches.map((batch, idx) => {
+                        const title = format === 'shikari' ? `${site.toUpperCase()} Shikari Batch ${batch.index}` : `${site.toUpperCase()} Stellar Batch ${batch.index}`;
+                        return `
                         <section class="panel panel--inner">
-                          <div class="panel-header"><div><h3>${escapeHTML(site.toUpperCase())} Batch ${batch.index}</h3><p class="subtle-text">${batch.count} products</p></div></div>
-                          <textarea class="input" rows="${Math.min(14, Math.max(6, batch.count + 1))}" readonly>${escapeHTML(batch.text)}</textarea>
-                        </section>
-                    `).join('');
+                          <div class="panel-header"><div><h3>${escapeHTML(title)}</h3><p class="subtle-text">${batch.count} SKU${batch.count === 1 ? '' : 's'}</p></div><div class="panel-actions"><button class="btn" type="button" data-copy-catalog-export="${idx}">Copy Batch</button></div></div>
+                          <textarea class="input" rows="${format === 'shikari' ? 4 : Math.min(14, Math.max(6, batch.count + 1))}" readonly>${escapeHTML(batch.text)}</textarea>
+                        </section>`;
+                    }).join('');
+                    exportResults.querySelectorAll('[data-copy-catalog-export]').forEach((button) => {
+                        button.addEventListener('click', async () => {
+                            const batch = batches[Number(button.dataset.copyCatalogExport)];
+                            await copyTextToClipboard(batch?.text || '');
+                            button.textContent = 'Copied';
+                            setTimeout(() => { button.textContent = 'Copy Batch'; }, 1200);
+                        });
+                    });
                 }
             } catch (err) {
                 if (exportResults) exportResults.innerHTML = `<div class="subtle-text">${escapeHTML(err.message)}</div>`;
@@ -3988,6 +4008,75 @@ async function loadCreditsAdminPane() {
 
 
 
+
+async function copyTextToClipboard(text) {
+    const value = String(text || '');
+    try {
+        await navigator.clipboard.writeText(value);
+    } catch (_) {
+        const temp = document.createElement('textarea');
+        temp.value = value;
+        temp.setAttribute('readonly', '');
+        temp.style.position = 'fixed';
+        temp.style.left = '-9999px';
+        document.body.appendChild(temp);
+        temp.select();
+        document.execCommand('copy');
+        document.body.removeChild(temp);
+    }
+}
+
+function skusFromProductSelectionLines(lines = []) {
+    return [...new Set((Array.isArray(lines) ? lines : [])
+        .flatMap((line) => String(line || '').split(/\n+/))
+        .map((line) => line.split(';')[0].trim())
+        .filter(Boolean))];
+}
+
+function renderProductSelectionExportBoxes(users = [], format = 'stellar') {
+    const results = document.getElementById('productSelectionExportResults');
+    if (!results) return;
+    const boxes = [];
+    users.forEach((user) => {
+        const display = user.user_display || user.user_email || 'User';
+        if (format === 'shikari') {
+            const text = skusFromProductSelectionLines(user.lines).join(', ');
+            if (text) boxes.push({ title: `${display} - Shikari SKUs`, text, count: skusFromProductSelectionLines(user.lines).length });
+            return;
+        }
+        const batches = Array.isArray(user.batches) && user.batches.length ? user.batches : chunkArray(Array.isArray(user.lines) ? user.lines : [], 29);
+        batches.forEach((batch, index) => {
+            boxes.push({ title: `${display} - Stellar Batch ${index + 1}`, text: batch.join('\n'), count: batch.length });
+        });
+    });
+    if (!boxes.length) {
+        results.innerHTML = '';
+        return;
+    }
+    results.innerHTML = boxes.map((box, idx) => `
+        <section class="panel panel--inner">
+          <div class="panel-header"><div><h3>${escapeHTML(box.title)}</h3><p class="subtle-text">${box.count} SKU${box.count === 1 ? '' : 's'}</p></div><div class="panel-actions"><button class="btn" type="button" data-copy-selection-box="${idx}">Copy ${format === 'shikari' ? 'Shikari List' : 'Batch'}</button></div></div>
+          <textarea class="input" rows="${format === 'shikari' ? 4 : Math.min(14, Math.max(6, box.count + 1))}" readonly>${escapeHTML(box.text)}</textarea>
+        </section>
+    `).join('');
+    results.querySelectorAll('[data-copy-selection-box]').forEach((button) => {
+        button.addEventListener('click', async () => {
+            const box = boxes[Number(button.dataset.copySelectionBox)];
+            await copyTextToClipboard(box?.text || '');
+            const original = button.textContent;
+            button.textContent = 'Copied';
+            setTimeout(() => { button.textContent = original; }, 1200);
+        });
+    });
+}
+
+function chunkArray(items = [], size = 29) {
+    const out = [];
+    const n = Math.max(1, Number(size) || 29);
+    for (let i = 0; i < items.length; i += n) out.push(items.slice(i, i + n));
+    return out;
+}
+
 async function clearProductSelectionsForSelectedStore() {
     const site = document.getElementById("productSelectionExportSite")?.value || "target";
     const message = document.getElementById("productSelectionExportMessage");
@@ -4102,40 +4191,48 @@ async function loadProductSelectionExportUsers() {
     }
 }
 
-async function loadProductSelectionExport() {
+async function loadProductSelectionExport(format = 'stellar') {
     const site = document.getElementById("productSelectionExportSite")?.value || "target";
     const userId = document.getElementById("productSelectionExportUser")?.value || "";
     const output = document.getElementById("productSelectionExportText");
+    const results = document.getElementById("productSelectionExportResults");
     const message = document.getElementById("productSelectionExportMessage");
     if (!output) return;
-    if (message) message.textContent = "Loading export...";
+    if (message) message.textContent = format === 'shikari' ? "Loading Shikari export..." : "Loading Stellar export...";
     try {
         const qs = new URLSearchParams({ site });
         if (userId) qs.set("user_id", userId);
         const data = await authJSON(API + "/admin/product-selections/export?" + qs.toString());
-        output.value = data.text || "";
-        const count = userId ? (data.users?.[0]?.lines?.length || 0) : (Array.isArray(data.users) ? data.users.length : 0);
+        const users = Array.isArray(data.users) ? data.users : [];
+        if (format === 'shikari') {
+            const shikariText = users.map((user) => skusFromProductSelectionLines(user.lines).join(', ')).filter(Boolean).join('\n\n');
+            output.value = shikariText;
+            renderProductSelectionExportBoxes(users, 'shikari');
+        } else {
+            output.value = data.text || "";
+            renderProductSelectionExportBoxes(users, 'stellar');
+        }
+        const count = userId ? (users[0]?.lines?.length || 0) : users.length;
         if (message) message.textContent = userId
             ? `Loaded ${count} selected product${count === 1 ? "" : "s"} for this user.`
-            : `Loaded ${Array.isArray(data.users) ? data.users.length : 0} user export${Array.isArray(data.users) && data.users.length === 1 ? "" : "s"}.`;
+            : `Loaded ${users.length} user export${users.length === 1 ? "" : "s"}.`;
         updateProductSelectionExportStatusBanner();
     } catch (err) {
+        if (results) results.innerHTML = '';
         if (message) message.textContent = err.message || "Could not load export.";
     }
+}
+
+async function loadProductSelectionShikariExport() {
+    return loadProductSelectionExport('shikari');
 }
 
 async function copyProductSelectionExport() {
     const output = document.getElementById("productSelectionExportText");
     const message = document.getElementById("productSelectionExportMessage");
     if (!output) return;
-    try {
-        await navigator.clipboard.writeText(output.value || "");
-        if (message) message.textContent = "Copied export to clipboard.";
-    } catch (_) {
-        output.select();
-        document.execCommand("copy");
-        if (message) message.textContent = "Copied export to clipboard.";
-    }
+    await copyTextToClipboard(output.value || "");
+    if (message) message.textContent = "Copied export to clipboard.";
 }
 
 async function markProductSelectionExported() {
@@ -4186,6 +4283,7 @@ function initProductSelectionAdminTools() {
     const refresh = document.getElementById("refreshProductSelectionChangesButton");
     const loadExport = document.getElementById("loadProductSelectionExportButton");
     const copyExport = document.getElementById("copyProductSelectionExportButton");
+    const shikariExport = document.getElementById("loadProductSelectionShikariExportButton");
     const markExported = document.getElementById("markProductSelectionExportedButton");
     const siteSelect = document.getElementById("productSelectionExportSite");
     const saveName = document.getElementById("saveTargetRecommendedListNameButton");
@@ -4196,11 +4294,15 @@ function initProductSelectionAdminTools() {
     }
     if (loadExport && !loadExport.dataset.bound) {
         loadExport.dataset.bound = "1";
-        loadExport.addEventListener("click", loadProductSelectionExport);
+        loadExport.addEventListener("click", () => loadProductSelectionExport('stellar'));
     }
     if (copyExport && !copyExport.dataset.bound) {
         copyExport.dataset.bound = "1";
         copyExport.addEventListener("click", copyProductSelectionExport);
+    }
+    if (shikariExport && !shikariExport.dataset.bound) {
+        shikariExport.dataset.bound = "1";
+        shikariExport.addEventListener("click", loadProductSelectionShikariExport);
     }
     if (markExported && !markExported.dataset.bound) {
         markExported.dataset.bound = "1";
@@ -4216,7 +4318,9 @@ function initProductSelectionAdminTools() {
         siteSelect.addEventListener("change", async () => {
             await loadProductSelectionExportUsers();
             const output = document.getElementById("productSelectionExportText");
+            const results = document.getElementById("productSelectionExportResults");
             if (output) output.value = "";
+            if (results) results.innerHTML = "";
             updateProductSelectionExportStatusBanner();
         });
     }

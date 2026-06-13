@@ -248,8 +248,8 @@ placeholder="Enter one SKU per line&#10;12345678&#10;87654321"></textarea>
                 <div class="field"><label for="catalogBulkImportFile">JSON File</label><input class="input" id="catalogBulkImportFile" type="file" accept="application/json,.json" /></div>
                 <div class="field field--full panel-actions"><button class="btn btn-primary" type="submit">Import Product List</button></div>
               </form>
-              <div class="banner banner-soft"><strong>Export for Stellar</strong>
-                <p class="subtle-text">Export Amazon or Target products in batches of 29 using <code>sku;title;price</code>.</p>
+              <div class="banner banner-soft"><strong>Catalog Exports</strong>
+                <p class="subtle-text">Export Amazon or Target products for Stellar in 29-item <code>sku;title;price</code> batches, or Shikari in 29-SKU comma-separated batches.</p>
               </div>
               <form id="catalogExportForm" class="form-grid">
                 <div class="field"><label for="catalogExportSite">Export Site</label><select class="input" id="catalogExportSite">
@@ -257,7 +257,10 @@ placeholder="Enter one SKU per line&#10;12345678&#10;87654321"></textarea>
                     <option value="target">Target</option>
                   </select></div>
                 <div class="field"><label for="catalogExportBatchSize">Batch Size</label><input class="input" id="catalogExportBatchSize" type="number" min="1" max="200" step="1" value="29" /></div>
-                <div class="field field--full panel-actions"><button class="btn" type="submit">Build Export Batches</button></div>
+                <div class="field field--full panel-actions">
+                  <button class="btn" type="submit" data-catalog-export-format="stellar">Build Stellar Export Batches</button>
+                  <button class="btn" type="submit" data-catalog-export-format="shikari">Build Shikari Export Batches</button>
+                </div>
               </form>
               <div id="catalogExportResults" class="stack-list"></div>
             </div>
@@ -488,7 +491,8 @@ placeholder="Enter one SKU per line&#10;12345678&#10;87654321"></textarea>
                 <select class="input input--sm" id="productSelectionExportUser">
                   <option value="">All users</option>
                 </select>
-                <button class="btn btn-primary" type="button" id="loadProductSelectionExportButton">Load Export</button>
+                <button class="btn btn-primary" type="button" id="loadProductSelectionExportButton">Load Stellar Export</button>
+                <button class="btn" type="button" id="loadProductSelectionShikariExportButton">Export Shikari</button>
                 <button class="btn" type="button" id="copyProductSelectionExportButton">Copy Export</button>
                 <button class="btn" type="button" id="markProductSelectionExportedButton">Mark Copied</button>
                 <button class="btn btn-danger" type="button" id="clearProductSelectionsButton">Clear Selected Store</button>
@@ -497,6 +501,7 @@ placeholder="Enter one SKU per line&#10;12345678&#10;87654321"></textarea>
             </div>
             <div id="productSelectionExportStatus" class="export-sync-banner export-sync-banner--neutral">Choose a store and user to check export status.</div>
             <textarea class="input" id="productSelectionExportText" rows="10" placeholder="Export will appear here..." readonly></textarea>
+            <div id="productSelectionExportResults" class="stack-list"></div>
             <div class="panel-header panel-header--nested">
               <div>
                 <h3>Recent Product Selection Changes</h3>
