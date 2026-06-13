@@ -48,6 +48,7 @@
         <button class="admin-nav-button" type="button" data-admin-nav="run-status">Store Run Status</button>
         <button class="admin-nav-button" type="button" data-admin-nav="credits">Credits + Orders</button>
         <button class="admin-nav-button" type="button" data-admin-nav="webhooks">Webhooks</button>
+        <button class="admin-nav-button" type="button" data-admin-nav="announcements">Announcements</button>
       </aside>
 
       <div class="admin-content-stack">
@@ -770,6 +771,47 @@ placeholder="Enter one SKU per line&#10;12345678&#10;87654321"></textarea>
               </table>
             </div>
             <div class="panel-actions" id="usersPagination" style="display:none"></div>
+          </section>
+        </section>
+
+
+        <section class="admin-pane" data-admin-pane="announcements">
+          <section class="panel">
+            <div class="panel-header">
+              <div>
+                <h2>Announcement Webhook</h2>
+                <p class="subtle-text">Admins can save a Discord announcement webhook. Super admin can broadcast announcements to every saved admin announcement webhook.</p>
+              </div>
+            </div>
+            <div class="form-grid">
+              <div class="field field--full">
+                <label for="announcementWebhookUrl">Your Discord Announcement Webhook URL</label>
+                <input class="input" id="announcementWebhookUrl" placeholder="https://discord.com/api/webhooks/..." />
+                <div class="subtle-text">Create a Discord webhook in your announcements channel and paste it here.</div>
+              </div>
+              <div class="field field--full panel-actions">
+                <button class="btn btn-primary" type="button" onclick="saveAnnouncementWebhookSettings()">Save Announcement Webhook</button>
+              </div>
+            </div>
+            <div id="announcementSettingsMessage" class="subtle-text"></div>
+          </section>
+
+          <section class="panel" id="superAdminAnnouncementPanel" style="display:none; margin-top:16px;">
+            <div class="panel-header">
+              <div>
+                <h2>Send Announcement</h2>
+                <p class="subtle-text">Only super admin can send manual announcements or product catalog updates.</p>
+              </div>
+            </div>
+            <div class="field field--full">
+              <label for="announcementMessageText">Announcement Message</label>
+              <textarea class="input" id="announcementMessageText" rows="8" placeholder="Type the announcement to send to every admin announcement webhook..."></textarea>
+            </div>
+            <div class="panel-actions">
+              <button class="btn btn-primary" type="button" onclick="sendAnnouncementMessage()">Send Announcement</button>
+              <button class="btn" type="button" onclick="sendAnnouncementCatalogUpdate()">Send New Catalog Items From Last 24 Hours</button>
+            </div>
+            <div id="announcementSendMessage" class="subtle-text"></div>
           </section>
         </section>
 

@@ -2584,6 +2584,71 @@ function initAdminSidebar() {
     const active = document.querySelector('[data-admin-nav].is-active')?.dataset.adminNav || buttons[0].dataset.adminNav;
     activate(active);
 }
+
+
+async function loadAnnouncementSettings() {
+    const input = document.getElementById('announcementWebhookUrl');
+    if (!input || !token()) return;
+    const msg = document.getElementById('announcementSettingsMessage');
+    try {
+        const data = await authJSON(API + '/admin/announcements/settings');
+        input.value = data.announcement_webhook_url || '';
+        const panel = document.getElementById('superAdminAnnouncementPanel');
+        if (panel) panel.style.display = data.is_super_admin ? '' : 'none';
+        if (msg) msg.textContent = data.announcement_webhook_url ? 'Announcement webhook loaded.' : 'No announcement webhook saved yet.';
+    } catch (err) {
+        if (msg) msg.textContent = err.message || 'Failed to load announcement settings.';
+    }
+}
+
+async function saveAnnouncementWebhookSettings() {
+    const input = document.getElementById('announcementWebhookUrl');
+    const msg = document.getElementById('announcementSettingsMessage');
+    if (!input) return;
+    try {
+        if (msg) msg.textContent = 'Saving announcement webhook...';
+        await authJSON(API + '/admin/announcements/settings', {
+            method: 'POST',
+            body: JSON.stringify({ announcement_webhook_url: input.value || '' })
+        });
+        if (msg) msg.textContent = 'Announcement webhook saved.';
+    } catch (err) {
+        if (msg) msg.textContent = err.message || 'Failed to save announcement webhook.';
+    }
+}
+
+async function sendAnnouncementMessage() {
+    const input = document.getElementById('announcementMessageText');
+    const msg = document.getElementById('announcementSendMessage');
+    const message = String(input?.value || '').trim();
+    if (!message) {
+        if (msg) msg.textContent = 'Type an announcement message first.';
+        return;
+    }
+    try {
+        if (msg) msg.textContent = 'Sending announcement...';
+        const data = await authJSON(API + '/admin/announcements/send', {
+            method: 'POST',
+            body: JSON.stringify({ message })
+        });
+        if (msg) msg.textContent = `Announcement sent to ${data.sent || 0} webhook(s). ${data.failed || 0} failed.`;
+        if (input) input.value = '';
+    } catch (err) {
+        if (msg) msg.textContent = err.message || 'Failed to send announcement.';
+    }
+}
+
+async function sendAnnouncementCatalogUpdate() {
+    const msg = document.getElementById('announcementSendMessage');
+    try {
+        if (msg) msg.textContent = 'Sending catalog update...';
+        const data = await authJSON(API + '/admin/announcements/catalog-update/send', { method: 'POST' });
+        if (msg) msg.textContent = `Catalog update sent to ${data.sent || 0} webhook(s). ${data.product_count || 0} new product(s). ${data.failed || 0} failed.`;
+    } catch (err) {
+        if (msg) msg.textContent = err.message || 'Failed to send catalog update.';
+    }
+}
+
 /* ================= PAGE LOAD ================= */
 
 
@@ -4654,6 +4719,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         try { initTargetCheckoutListAdmin(); } catch (_) { }
         try { await loadCreditsAdminPane(); } catch (_) { }
         try { await loadWebhookSettings(); } catch (_) { }
+        try { await loadAnnouncementSettings(); } catch (_) { }
         try { await initAdminStoreRunStatus(); } catch (_) { }
     }
     if (document.getElementById('userDiscordHandle')) {

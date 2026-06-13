@@ -4695,6 +4695,187 @@ app.post('/admin/webhooks/logs/:id/recheck-credits', auth, admin, async (req, re
     }
 });
 
+
+
+function chunkDiscordText(text, maxLength = 1800) {
+    const raw = String(text || '').trim();
+    if (!raw) return [];
+    const chunks = [];
+    let remaining = raw;
+    while (remaining.length > maxLength) {
+        let cut = remaining.lastIndexOf('\n', maxLength);
+        if (cut < 400) cut = maxLength;
+        chunks.push(remaining.slice(0, cut).trim());
+        remaining = remaining.slice(cut).trim();
+    }
+    if (remaining) chunks.push(remaining);
+    return chunks;
+}
+
+async function postAnnouncementDiscordWebhook(webhookUrl, content, embeds = null) {
+    const trimmed = String(webhookUrl || '').trim();
+    if (!trimmed) return { success: false, error: 'Webhook URL is missing' };
+    const payload = { username: 'The Shore Shack Announcements' };
+    if (content) payload.content = String(content).slice(0, 2000);
+    if (Array.isArray(embeds) && embeds.length) payload.embeds = embeds.slice(0, 10);
+    const response = await globalThis.fetch(trimmed, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+    });
+    if (!response.ok) {
+        const body = await response.text().catch(() => '');
+        return { success: false, status: response.status, error: body || response.statusText };
+    }
+    return { success: true, status: response.status };
+}
+
+async function getAnnouncementRoutes() {
+    const { data, error } = await supabase
+        .from('app_settings')
+        .select('key,value_json')
+        .ilike('key', 'admin_webhook_settings:%');
+    if (error) throw new Error(error.message);
+    const seen = new Set();
+    return (Array.isArray(data) ? data : [])
+        .map((row) => ({
+            key: row.key,
+            webhook_url: String(row.value_json?.announcement_webhook_url || '').trim()
+        }))
+        .filter((row) => {
+            if (!row.webhook_url || seen.has(row.webhook_url)) return false;
+            seen.add(row.webhook_url);
+            return true;
+        });
+}
+
+async function sendAnnouncementToAllWebhooks(message, embeds = null) {
+    const routes = await getAnnouncementRoutes();
+    const chunks = chunkDiscordText(message || '');
+    const payloadChunks = chunks.length ? chunks : [''];
+    let sent = 0;
+    let failed = 0;
+    const results = [];
+    for (const route of routes) {
+        let routeOk = true;
+        for (let i = 0; i < payloadChunks.length; i += 1) {
+            const result = await postAnnouncementDiscordWebhook(route.webhook_url, payloadChunks[i], i === 0 ? embeds : null).catch((err) => ({ success: false, error: err.message || String(err) }));
+            if (!result.success) routeOk = false;
+            results.push({ user_id: route.user_id, webhook_type: route.webhook_type, success: !!result.success, error: result.error || '', status: result.status || null });
+        }
+        if (routeOk) sent += 1; else failed += 1;
+    }
+    return { sent, failed, target_count: routes.length, results };
+}
+
+function formatAnnouncementProductLine(product) {
+    const sku = String(product.sku || '').trim();
+    const name = String(product.product_name || product.name || product.title || '').trim();
+    const site = String(product.site || product.store || '').trim();
+    const priceRaw = product.default_max_price ?? product.price ?? '';
+    const price = priceRaw === null || priceRaw === undefined || priceRaw === '' ? '' : ` - $${Number(priceRaw).toFixed(2)}`;
+    return `${sku}${name ? ` - ${name}` : ''}${site ? ` (${site})` : ''}${price}`.trim();
+}
+
+async function getNewCatalogProductsSince(sinceIso) {
+    const selectCols = 'sku,product_name,site,default_max_price,created_at,updated_at';
+    let { data, error } = await supabase
+        .from('catalog_products')
+        .select(selectCols)
+        .gte('created_at', sinceIso)
+        .order('created_at', { ascending: false })
+        .limit(200);
+    if (error) {
+        const fallback = await supabase
+            .from('catalog_products')
+            .select(selectCols)
+            .gte('updated_at', sinceIso)
+            .order('updated_at', { ascending: false })
+            .limit(200);
+        if (fallback.error) throw new Error(fallback.error.message);
+        data = fallback.data || [];
+    }
+    return Array.isArray(data) ? data : [];
+}
+
+async function sendDailyCatalogAnnouncement({ force = false } = {}) {
+    const now = new Date();
+    const yyyyMmDd = now.toISOString().slice(0, 10);
+    const settings = await getAppSetting('announcement_catalog_update', {});
+    if (!force && settings?.last_sent_date === yyyyMmDd) return { skipped: true, reason: 'already_sent_today', sent: 0, failed: 0, product_count: 0 };
+    const since = new Date(now.getTime() - 24 * 60 * 60 * 1000).toISOString();
+    const products = await getNewCatalogProductsSince(since);
+    const lines = products.map(formatAnnouncementProductLine).filter(Boolean);
+    const message = lines.length
+        ? `**The Shore Shack Catalog Update**\nNew products added in the last 24 hours (${lines.length}):\n${lines.join('\n')}`
+        : `**The Shore Shack Catalog Update**\nNo new products were added to the catalog in the last 24 hours.`;
+    const result = await sendAnnouncementToAllWebhooks(message);
+    await setAppSetting('announcement_catalog_update', { ...(settings || {}), last_sent_at: now.toISOString(), last_sent_date: yyyyMmDd, last_product_count: lines.length });
+    return { ...result, product_count: lines.length };
+}
+
+function startAnnouncementCatalogScheduler() {
+    setInterval(() => {
+        const now = new Date();
+        // 3 PM Eastern is 19:00 UTC during daylight time and 20:00 UTC during standard time.
+        // The server checks both UTC windows once per day so the job still fires after DST changes.
+        const utcHour = now.getUTCHours();
+        const minute = now.getUTCMinutes();
+        if ((utcHour === 19 || utcHour === 20) && minute < 5) {
+            sendDailyCatalogAnnouncement().catch((err) => console.error('Daily announcement catalog update failed:', err));
+        }
+    }, 5 * 60 * 1000);
+}
+
+app.get('/admin/announcements/settings', auth, admin, async (req, res) => {
+    try {
+        const currentUser = await getCurrentUser(req);
+        const adminSettings = await getAdminWebhookSettings(currentUser.id).catch(() => ({}));
+        res.json({
+            announcement_webhook_url: String(adminSettings?.announcement_webhook_url || ''),
+            is_super_admin: currentUser.role === 'super_admin'
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.post('/admin/announcements/settings', auth, admin, async (req, res) => {
+    try {
+        const currentUser = await getCurrentUser(req);
+        const announcementWebhookUrl = String(req.body?.announcement_webhook_url || '').trim();
+        const existing = await getAdminWebhookSettings(currentUser.id).catch(() => ({}));
+        await setAdminWebhookSettings(currentUser.id, { ...(existing || {}), announcement_webhook_url: announcementWebhookUrl });
+        res.json({ success: true, announcement_webhook_url: announcementWebhookUrl });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.post('/admin/announcements/send', auth, admin, async (req, res) => {
+    try {
+        const currentUser = await getCurrentUser(req);
+        if (currentUser.role !== 'super_admin') return res.status(403).json({ error: 'Only super admin can send announcements.' });
+        const message = String(req.body?.message || '').trim();
+        if (!message) return res.status(400).json({ error: 'Announcement message is required.' });
+        const result = await sendAnnouncementToAllWebhooks(message);
+        res.json({ success: true, ...result });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.post('/admin/announcements/catalog-update/send', auth, admin, async (req, res) => {
+    try {
+        const currentUser = await getCurrentUser(req);
+        if (currentUser.role !== 'super_admin') return res.status(403).json({ error: 'Only super admin can send catalog announcements.' });
+        const result = await sendDailyCatalogAnnouncement({ force: true });
+        res.json({ success: true, ...result });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
 app.post('/admin/webhooks/incoming/create', auth, admin, async (req, res) => {
     try {
         const currentUser = await getCurrentUser(req);
@@ -4718,7 +4899,9 @@ app.post('/admin/webhooks/settings', auth, admin, async (req, res) => {
         const adminBrandLabel = String(req.body?.admin_brand_label || '').trim();
 
         if (currentUser.role !== 'super_admin') {
+            const currentAdminSettings = await getAdminWebhookSettings(currentUser.id).catch(() => ({}));
             await setAdminWebhookSettings(currentUser.id, {
+                ...(currentAdminSettings || {}),
                 discord_webhook_url: adminDiscordWebhookUrl,
                 checkout_error_webhook_url: adminErrorDiscordWebhookUrl,
                 brand_label: adminBrandLabel,
@@ -7658,6 +7841,7 @@ setInterval(() => {
 setTimeout(() => {
     replayWebhookFailoverQueue().catch((err) => console.error('Initial failover queue replay failed:', err));
 }, 15000);
+startAnnouncementCatalogScheduler();
 
 const PORT = process.env.PORT || 3000;
 
