@@ -27,6 +27,26 @@ const crypto = require("crypto");
 
 const SUPPORTED_SITES = new Set(["amazon", "target", "walmart", "samsclub", "crunchyroll", "general", "supreme", "pokemon"]);
 const REQUESTABLE_SITES = new Set(["amazon", "target", "walmart", "samsclub", "crunchyroll", "general", "supreme", "pokemon"]);
+
+// Legacy auto-created virtual products such as TARGET-NEXT-DROP are now disabled.
+// Keep these values only so the API can hide/ignore old rows that may still exist in Supabase.
+const LEGACY_NEXT_DROP_SKUS = new Set([
+    "AMAZON-NEXT-DROP",
+    "TARGET-NEXT-DROP",
+    "WALMART-NEXT-DROP",
+    "SAMSCLUB-NEXT-DROP",
+    "CRUNCHYROLL-NEXT-DROP",
+    "SUPREME-NEXT-DROP",
+    "POKEMON-NEXT-DROP",
+    "GENERAL-NEXT-DROP"
+]);
+
+function isLegacyNextDropProduct(row = {}) {
+    const sku = String(row.sku || "").trim().toUpperCase();
+    const metadata = row.metadata || {};
+    return LEGACY_NEXT_DROP_SKUS.has(sku) || metadata.release_type === "next_drop" || metadata.release_type === "general_drop";
+}
+
 const VIRTUAL_SITE_DEFAULTS = {
     amazon: {
         catalogName: "Amazon next drop",
@@ -229,8 +249,9 @@ async function ensureVirtualCatalogForSite(supabase, site) {
 }
 
 async function getActiveCatalog(supabase, site) {
-    if (VIRTUAL_SITE_DEFAULTS[site]) await ensureVirtualCatalogForSite(supabase, site);
-    else await ensureActiveCatalogForSite(supabase, site);
+    // Do not auto-create NEXT-DROP placeholder products anymore.
+    // This only makes sure each store has an active catalog container.
+    await ensureActiveCatalogForSite(supabase, site);
     const { data, error } = await supabase
         .from("product_catalogs")
         .select("id, site, name, export_date")
@@ -896,7 +917,7 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
                     preference_id: pref?.id || null,
                     metadata: row.metadata || {}
                 };
-            }).filter((row) => !selectedOnly || row.selected).sort((a, b) => {
+            }).filter((row) => !isLegacyNextDropProduct(row)).filter((row) => !selectedOnly || row.selected).sort((a, b) => {
                 const av = a.metadata && a.metadata.virtual ? 1 : 0;
                 const bv = b.metadata && b.metadata.virtual ? 1 : 0;
                 if (av !== bv) return bv - av;
@@ -1189,7 +1210,7 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
                 .eq('is_enabled', true)
                 .order('product_name', { ascending: true });
             if (error) throw new Error(error.message);
-            const rows = (data || []).filter((row) => !(row.metadata && row.metadata.virtual)).map((row) => {
+            const rows = (data || []).filter((row) => !isLegacyNextDropProduct(row) && !(row.metadata && row.metadata.virtual)).map((row) => {
                 const price = row.default_max_price === null || row.default_max_price === undefined ? '' : Number(row.default_max_price).toFixed(2).replace(/\.00$/, '.00');
                 return `${escapeExportField(row.sku)};${escapeExportField(row.product_name)};${price}`;
             });
@@ -1218,7 +1239,9 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
             if (search) query = query.or(`sku.ilike.%${search}%,product_name.ilike.%${search}%`);
             const { data, error } = await query;
             if (error) return res.status(500).json({ error: error.message });
-            const items = (data || []).sort((a, b) => { const av = a.metadata && a.metadata.virtual ? 1 : 0; const bv = b.metadata && b.metadata.virtual ? 1 : 0; if (av !== bv) return bv - av; return String(a.product_name || a.sku || '').localeCompare(String(b.product_name || b.sku || '')); });
+            const items = (data || [])
+                .filter((row) => !isLegacyNextDropProduct(row))
+                .sort((a, b) => String(a.product_name || a.sku || '').localeCompare(String(b.product_name || b.sku || '')));
             res.json({ items });
         } catch (err) {
             res.status(500).json({ error: err.message });
