@@ -3,8 +3,8 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-let ImapFlow = null;
-try { ImapFlow = require('imapflow').ImapFlow; } catch (_) {}
+let Imap = null;
+try { Imap = require('imap'); } catch (_) {}
 
 function clean(v) { return String(v || '').replace(/^\|\|/, '').replace(/\|\|$/, '').trim(); }
 function norm(v) { return clean(v).toLowerCase(); }
@@ -129,29 +129,64 @@ module.exports = function createOrderRechecker(deps) {
 
   async function fetchOtpFromImap({ email, appPassword, sinceMs = 12 * 60 * 1000, debug }) {
     if (!email || !appPassword) return '';
-    if (!ImapFlow) throw new Error('IMAP OTP requested, but imapflow is not installed. Add imapflow to backend/package.json and redeploy.');
+    if (!Imap) throw new Error('IMAP OTP requested, but the imap package is not installed. Redeploy after npm install completes.');
     const host = process.env.IMAP_HOST || (email.toLowerCase().includes('@gmail.com') ? 'imap.gmail.com' : 'imap.gmail.com');
-    const client = new ImapFlow({ host, port: Number(process.env.IMAP_PORT || 993), secure: true, auth: { user: email, pass: appPassword }, logger: false });
-    await client.connect();
-    try {
-      const lock = await client.getMailboxLock('INBOX');
-      try {
-        const since = new Date(Date.now() - sinceMs);
-        const uids = await client.search({ since });
-        const latest = uids.slice(-20).reverse();
-        for await (const msg of client.fetch(latest, { envelope: true, source: true })) {
-          const subject = msg.envelope?.subject || '';
-          const from = (msg.envelope?.from || []).map((x) => x.address || x.name || '').join(' ');
-          const source = msg.source ? msg.source.toString('utf8') : '';
-          const hay = `${subject}\n${from}\n${source}`;
-          if (!/target|verification|security|code|passcode|login|sign/i.test(hay)) continue;
-          const code = maybeOtp(hay);
-          if (code) return code;
-        }
-      } finally { lock.release(); }
-    } finally { await client.logout().catch(() => {}); }
-    if (debug) debug.write('imap-no-code.txt', `No Target OTP code found for ${email}`);
-    return '';
+    const since = new Date(Date.now() - sinceMs);
+    const sinceImap = since.toUTCString().replace(/, /, '-').replace(/ .*$/, '');
+
+    return await new Promise((resolve, reject) => {
+      let settled = false;
+      const finish = (err, code) => {
+        if (settled) return;
+        settled = true;
+        try { client.end(); } catch (_) {}
+        if (err) reject(err); else resolve(code || '');
+      };
+      const client = new Imap({
+        user: email,
+        password: appPassword,
+        host,
+        port: Number(process.env.IMAP_PORT || 993),
+        tls: true,
+        tlsOptions: { rejectUnauthorized: false },
+        connTimeout: 20000,
+        authTimeout: 20000
+      });
+      const timer = setTimeout(() => finish(null, ''), 45000);
+      client.once('ready', () => {
+        client.openBox('INBOX', true, (openErr) => {
+          if (openErr) { clearTimeout(timer); return finish(openErr); }
+          client.search([['SINCE', sinceImap]], (searchErr, results) => {
+            if (searchErr) { clearTimeout(timer); return finish(searchErr); }
+            const ids = (results || []).slice(-25).reverse();
+            if (!ids.length) { clearTimeout(timer); if (debug) debug.write('imap-no-messages.txt', `No recent IMAP messages for ${email}`); return finish(null, ''); }
+            const fetcher = client.fetch(ids, { bodies: '', struct: false });
+            let pendingText = [];
+            fetcher.on('message', (msg) => {
+              let chunks = [];
+              msg.on('body', (stream) => {
+                stream.on('data', (chunk) => chunks.push(Buffer.from(chunk)));
+              });
+              msg.once('end', () => pendingText.push(Buffer.concat(chunks).toString('utf8')));
+            });
+            fetcher.once('error', (err) => { clearTimeout(timer); finish(err); });
+            fetcher.once('end', () => {
+              clearTimeout(timer);
+              for (const raw of pendingText) {
+                if (!/target|verification|security|code|passcode|login|sign/i.test(raw)) continue;
+                const code = maybeOtp(raw);
+                if (code) return finish(null, code);
+              }
+              if (debug) debug.write('imap-no-code.txt', `No Target OTP code found for ${email}. Checked ${pendingText.length} recent emails.`);
+              finish(null, '');
+            });
+          });
+        });
+      });
+      client.once('error', (err) => { clearTimeout(timer); finish(err); });
+      client.once('end', () => {});
+      client.connect();
+    });
   }
 
   async function enterOtpIfNeeded(page, credential, debug) {
