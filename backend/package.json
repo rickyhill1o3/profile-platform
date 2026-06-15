@@ -6,9 +6,10 @@
   "scripts": {
     "start": "node server.js",
     "test": "echo \"Error: no test specified\" && exit 1",
-    "playwright:install": "npx playwright@1.49.1 install chromium",
-    "playwright:install-deps": "npx playwright@1.49.1 install --with-deps chromium",
-    "render-build": "npx playwright@1.49.1 install chromium"
+    "render-build": "npx playwright install chromium",
+    "render-build-deps": "npx playwright install --with-deps chromium",
+    "playwright:install": "npx playwright install chromium",
+    "playwright:install-deps": "npx playwright install --with-deps chromium"
   },
   "keywords": [],
   "author": "",
@@ -30,7 +31,7 @@
     "uuid": "^13.0.0",
     "imapflow": "^1.1.0",
     "mailparser": "^3.7.4",
-    "playwright-core": "1.49.1"
+    "playwright": "1.49.1"
   },
   "engines": {
     "node": "20.x",

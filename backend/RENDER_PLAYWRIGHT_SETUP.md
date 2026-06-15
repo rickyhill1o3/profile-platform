@@ -1,39 +1,34 @@
 # Render Playwright setup
 
-This build removes the Playwright browser download from `npm install` so Render can get past dependency installation.
+This build uses the full `playwright` package, not `playwright-core`, so `npx playwright install chromium` works correctly.
 
 Render settings:
 
 Root Directory:
-```
+```bash
 backend
 ```
 
 Build Command:
-```
-npm install
-```
-
-Start Command:
-```
-npm start
-```
-
-For local Chromium on Render, use this only after `npm install` is passing:
-```
+```bash
 npm install && npm run render-build
 ```
 
-If the Chromium install fails on Render Starter, use Browserless instead and set one of these environment variables:
-
-```
-BROWSERLESS_WS_ENDPOINT=wss://...
-```
-
-or
-
-```
-BROWSERLESS_URL=wss://...
+Start Command:
+```bash
+npm start
 ```
 
-The app now uses `playwright-core`, so `npm install` will not download browsers automatically.
+If Chromium launches but complains about missing Linux packages, change Build Command to:
+
+```bash
+npm install && npm run render-build-deps
+```
+
+Live viewing note: Render cannot display a headed Chrome window in your local desktop. For local live viewing, run the backend on your PC with:
+
+```bash
+ORDER_RECHECK_HEADLESS=false npm start
+```
+
+For Render debugging, use the debug screenshots/video/trace that the Recheck Order flow saves.

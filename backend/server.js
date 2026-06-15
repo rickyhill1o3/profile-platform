@@ -4307,7 +4307,7 @@ async function maybeHandleTargetOtp(page, login, debug) {
 }
 
 async function checkTargetOrderWithBrowser({ order, normalized, payload, debugMode = false }) {
-    const { chromium } = require('playwright-core');
+    const { chromium } = require('playwright');
     const { fields } = buildFieldMapFromEmbeds(payload || {});
     const proxyValue = unwrapSecretValue(fields['proxy'] || payload?.proxy || payload?.proxy_used || '');
     const proxy = parseRetailProxy(proxyValue);

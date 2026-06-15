@@ -1,4 +1,4 @@
-const { chromium } = require('playwright-core');
+const { chromium } = require('playwright');
 const { spawnSync } = require('child_process');
 
 function hasChromium() {

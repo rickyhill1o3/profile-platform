@@ -26,7 +26,7 @@ require("dotenv").config();
 
 const { createClient } = require("@supabase/supabase-js");
 const cheerio = require("cheerio");
-const { chromium } = require('playwright-core');
+const { chromium } = require('playwright');
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
