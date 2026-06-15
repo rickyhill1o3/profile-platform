@@ -6,7 +6,8 @@
   "scripts": {
     "start": "node server.js",
     "test": "echo \"Error: no test specified\" && exit 1",
-    "preinstall": "node scripts/clean-render-cache.js"
+    "preinstall": "node scripts/clean-render-cache.js",
+    "postinstall": "node scripts/verify-install.js"
   },
   "keywords": [],
   "author": "",

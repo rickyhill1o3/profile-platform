@@ -1,7 +1,14 @@
 const fs = require('fs');
 const path = require('path');
 const { chromium } = require('playwright');
-const { ImapFlow } = require('imapflow');
+
+function loadImapFlow() {
+  try {
+    return require('imapflow').ImapFlow;
+  } catch (err) {
+    throw new Error('IMAP package is not installed on the server. Render did not install imapflow. Redeploy with a clean build cache or run: npm install imapflow --package-lock=false');
+  }
+}
 
 const DEBUG_ROOT = path.join(__dirname, 'order-recheck-debug');
 const SESSION_ROOT = path.join(__dirname, 'order-recheck-sessions');
@@ -103,6 +110,7 @@ async function clickByText(page, patterns, timeout = 1500) {
 
 async function getTargetOtpFromImap({ email, appPassword, sinceMs = Date.now() - 10 * 60 * 1000, timeoutMs = 90000, log = () => {} }) {
   if (!email || !appPassword) return '';
+  const ImapFlow = loadImapFlow();
   const password = String(appPassword).replace(/\s+/g, '');
   const started = Date.now();
   while (Date.now() - started < timeoutMs) {
@@ -260,6 +268,7 @@ async function recheckTargetOrder({ supabase, order, currentUser, helpers }) {
   const logs = [];
   const log = (line) => { logs.push(`[${new Date().toISOString()}] ${line}`); console.log('[order-recheck]', line); };
   let browser;
+  let context;
   try {
     log(`Rechecking order ${normalized.orderNumber || order.id}`);
     const credentials = await findCredentialsForOrder({ supabase, order, normalized });
@@ -275,7 +284,7 @@ async function recheckTargetOrder({ supabase, order, currentUser, helpers }) {
       recordVideo: launched.remote ? undefined : { dir: debug.dir, size: { width: 1365, height: 900 } }
     };
     if (fs.existsSync(sessionPath)) contextOptions.storageState = sessionPath;
-    const context = await browser.newContext(contextOptions);
+    context = await browser.newContext(contextOptions);
     await context.tracing.start({ screenshots: true, snapshots: true, sources: false }).catch(() => null);
     const page = await context.newPage();
     await loginTargetIfNeeded({ page, credentials, debug, log });
@@ -303,6 +312,21 @@ async function recheckTargetOrder({ supabase, order, currentUser, helpers }) {
     return { ok: true, ...check, refunded, refundAmount, message: check.itemFound ? 'Expected Target item was found on the order.' : (refunded ? `Expected item was missing. Refunded ${refundAmount} credits.` : 'Expected item was missing. No credits were refunded because this order had no charged credits.'), artifacts: debug.artifacts };
   } catch (err) {
     log(`ERROR: ${err.message || err}`);
+    try {
+      if (context) {
+        const tracePath = path.join(debug.dir, 'trace-error.zip');
+        await context.tracing.stop({ path: tracePath }).catch(() => null);
+        if (fs.existsSync(tracePath)) debug.artifacts.push({ type: 'trace', label: 'Playwright Error Trace', url: publicDebugPath(tracePath) });
+        await context.close().catch(() => null);
+      }
+    } catch (_) {}
+    try {
+      const videos = fs.readdirSync(debug.dir).filter((f) => f.endsWith('.webm'));
+      videos.forEach((file) => {
+        const url = publicDebugPath(path.join(debug.dir, file));
+        if (!debug.artifacts.some((a) => a.url === url)) debug.artifacts.push({ type: 'video', label: 'Browser Error Video', url });
+      });
+    } catch (_) {}
     debug.writeLog(logs);
     try { if (browser) await browser.close(); } catch (_) {}
     err.artifacts = debug.artifacts;
