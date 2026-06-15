@@ -2790,36 +2790,6 @@ async function recheckWebhookCredits(id, button) {
 }
 
 
-
-async function recheckTargetOrder(id, button) {
-    const oldText = button ? button.textContent : '';
-    try {
-        if (button) {
-            button.disabled = true;
-            button.textContent = 'Checking...';
-        }
-        const data = await authJSON(API + `/admin/orders/${encodeURIComponent(id)}/recheck-order`, { method: 'POST' });
-        const debug = Array.isArray(data.debugFiles) && data.debugFiles.length ? `
-
-Debug files:
-${data.debugFiles.join('
-')}` : '';
-        if (data.itemFound) {
-            alert(`Order recheck passed. Expected item was found in Target order ${data.orderNumber || ''}.${debug}`);
-        } else {
-            alert(`Order recheck failed. Expected item was NOT found. Refunded credits: ${data.refundedCredits || 0}.${debug}`);
-        }
-        if (typeof loadCreditsAdminPane === 'function') await loadCreditsAdminPane();
-    } catch (err) {
-        alert((err && err.message) || 'Failed to recheck order.');
-    } finally {
-        if (button) {
-            button.disabled = false;
-            button.textContent = oldText || 'Recheck Order';
-        }
-    }
-}
-
 async function recheckOrderCredits(id, button) {
     if (!id) return;
     const originalText = button ? button.textContent : '';
@@ -4080,19 +4050,12 @@ async function loadCreditsAdminPane() {
               <td><div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;">
                 ${Number(item.credits_charged || 0) > 0 ? `<button class="btn" type="button" data-refund-order="${escapeHTML(item.id)}" data-refund-amount="${escapeHTML(String(item.credits_charged || 0))}">Refund Credits</button>` : '<span class="subtle-text">No charge</span>'}
                 <button class="btn secondary" type="button" data-recheck-order="${escapeHTML(item.id)}">Recheck Credits</button>
-                <button class="btn secondary" type="button" data-target-order-recheck="${escapeHTML(item.id)}">Recheck Order</button>
               </div></td>
             </tr>`).join('') : '<tr><td colspan="8">No orders found yet.</td></tr>';
 
         ordersBody.querySelectorAll('[data-recheck-order]').forEach((button) => {
             button.addEventListener('click', async () => {
                 await recheckOrderCredits(button.dataset.recheckOrder, button);
-            });
-        });
-
-        ordersBody.querySelectorAll('[data-target-order-recheck]').forEach((button) => {
-            button.addEventListener('click', async () => {
-                await recheckTargetOrder(button.dataset.targetOrderRecheck, button);
             });
         });
 
