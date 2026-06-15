@@ -312,7 +312,22 @@ async function launchBrowser({ normalized, debug, log }) {
   const launchOptions = {
     headless: !headed,
     slowMo: Number(process.env.ORDER_RECHECK_SLOWMO_MS || (headed ? 250 : 0)),
-    args: ['--disable-blink-features=AutomationControlled', '--no-sandbox', '--disable-dev-shm-usage']
+    args: [
+      '--disable-blink-features=AutomationControlled',
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-gpu',
+      '--disable-extensions',
+      '--disable-background-networking',
+      '--disable-background-timer-throttling',
+      '--disable-renderer-backgrounding',
+      '--disable-features=Translate,BackForwardCache,AcceptCHFrame,MediaRouter,OptimizationHints',
+      '--no-first-run',
+      '--no-default-browser-check',
+      '--mute-audio',
+      '--hide-scrollbars'
+    ]
   };
   if (proxy) launchOptions.proxy = proxy;
 
@@ -350,9 +365,12 @@ async function loginTargetIfNeeded({ page, credentials, debug, log }) {
   await page.waitForTimeout(3000);
   await debug.shot(page, 'after-email-submit');
 
-  let passInput = await firstVisible(page, ['input[type="password"]', 'input[name="password"]', 'input[id*="password"]'], 15000);
+  let passInput = await firstVisible(page, ['input[type="password"]', 'input[name="password"]', 'input[id*="password"]'], 12000);
   if (!passInput) {
     const bodyNow = await page.locator('body').innerText({ timeout: 5000 }).catch(() => '');
+    if (/something went wrong|try again later|blocked|verify you are human|captcha/i.test(bodyNow)) {
+      throw new Error(`Target blocked or changed the login flow before password. This is usually proxy/browser-fingerprint related. Use Browserless live mode or a cleaner proxy. Page text: ${bodyNow.slice(0, 700)}`);
+    }
     throw new Error(`Target password field did not appear. Page text: ${bodyNow.slice(0, 700)}`);
   }
   await passInput.fill(credentials.loginPassword);
@@ -435,17 +453,29 @@ async function recheckTargetOrder({ supabase, order, currentUser, helpers }) {
     browser = launched.browser;
     const sessionPath = path.join(SESSION_ROOT, `${safeName(credentials.loginEmail)}-target.json`);
     ensureDir(SESSION_ROOT);
+    const shouldRecordVideo = String(process.env.ORDER_RECHECK_RECORD_VIDEO || '').toLowerCase() === 'true';
     const contextOptions = {
-      viewport: { width: 1365, height: 900 },
+      viewport: { width: 1280, height: 800 },
       userAgent: process.env.ORDER_RECHECK_USER_AGENT || undefined,
-      recordVideo: launched.remote ? undefined : { dir: debug.dir, size: { width: 1365, height: 900 } }
+      // Video recording uses a lot of memory on Render Starter. Keep it opt-in.
+      recordVideo: shouldRecordVideo && !launched.remote ? { dir: debug.dir, size: { width: 1280, height: 800 } } : undefined
     };
     if (fs.existsSync(sessionPath)) contextOptions.storageState = sessionPath;
     context = await browser.newContext(contextOptions);
-    await context.tracing.start({ screenshots: true, snapshots: true, sources: false }).catch(() => null);
+    const shouldTrace = String(process.env.ORDER_RECHECK_TRACE || '').toLowerCase() === 'true';
+    if (shouldTrace) await context.tracing.start({ screenshots: true, snapshots: true, sources: false }).catch(() => null);
     const page = await context.newPage();
-    page.setDefaultTimeout(Number(process.env.ORDER_RECHECK_STEP_TIMEOUT_MS || 30000));
-    page.setDefaultNavigationTimeout(Number(process.env.ORDER_RECHECK_NAV_TIMEOUT_MS || 60000));
+    page.setDefaultTimeout(Number(process.env.ORDER_RECHECK_STEP_TIMEOUT_MS || 20000));
+    page.setDefaultNavigationTimeout(Number(process.env.ORDER_RECHECK_NAV_TIMEOUT_MS || 45000));
+
+    // Keep Render memory low. Target's text/order pages do not require images/fonts/media.
+    if (String(process.env.ORDER_RECHECK_BLOCK_HEAVY_ASSETS || 'true').toLowerCase() !== 'false') {
+      await page.route('**/*', (route) => {
+        const type = route.request().resourceType();
+        if (['image', 'media', 'font'].includes(type)) return route.abort().catch(() => null);
+        return route.continue().catch(() => null);
+      }).catch(() => null);
+    }
     await loginTargetIfNeeded({ page, credentials, debug, log });
     await context.storageState({ path: sessionPath }).catch(() => null);
     const check = await verifyTargetOrder({ page, normalized, debug, log });
@@ -462,7 +492,7 @@ async function recheckTargetOrder({ supabase, order, currentUser, helpers }) {
       await supabase.from('orders').update({ metadata: { ...(order.metadata || {}), order_recheck: { checked_at: new Date().toISOString(), item_found: true, artifacts: debug.artifacts } } }).eq('id', order.id);
     }
     const tracePath = path.join(debug.dir, 'trace.zip');
-    await context.tracing.stop({ path: tracePath }).catch(() => null);
+    if (shouldTrace) await context.tracing.stop({ path: tracePath }).catch(() => null);
     if (fs.existsSync(tracePath)) debug.artifacts.push({ type: 'trace', label: 'Playwright Trace', url: publicDebugPath(tracePath) });
     await context.close().catch(() => null);
     const videos = fs.readdirSync(debug.dir).filter((f) => f.endsWith('.webm'));
@@ -474,7 +504,7 @@ async function recheckTargetOrder({ supabase, order, currentUser, helpers }) {
     try {
       if (context) {
         const tracePath = path.join(debug.dir, 'trace-error.zip');
-        await context.tracing.stop({ path: tracePath }).catch(() => null);
+        if (shouldTrace) await context.tracing.stop({ path: tracePath }).catch(() => null);
         if (fs.existsSync(tracePath)) debug.artifacts.push({ type: 'trace', label: 'Playwright Error Trace', url: publicDebugPath(tracePath) });
         await context.close().catch(() => null);
       }
