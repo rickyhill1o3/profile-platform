@@ -2794,6 +2794,152 @@ async function recheckWebhookCredits(id, button) {
 }
 
 
+
+function buildOrderRecheckDebugLinks(artifacts) {
+    const debugToken = encodeURIComponent(localStorage.token || '');
+    if (!Array.isArray(artifacts)) return [];
+    return artifacts
+        .filter((a) => a && a.url)
+        .map((a) => {
+            const rawUrl = String(a.url || '');
+            const sep = rawUrl.includes('?') ? '&' : '?';
+            return {
+                label: a.label || a.type || 'Debug file',
+                url: `${API}${rawUrl}${sep}token=${debugToken}`
+            };
+        });
+}
+
+function showOrderRecheckResult(title, message, artifacts) {
+    const links = buildOrderRecheckDebugLinks(artifacts);
+    const existing = document.getElementById('orderRecheckResultOverlay');
+    if (existing) existing.remove();
+
+    const overlay = document.createElement('div');
+    overlay.id = 'orderRecheckResultOverlay';
+    overlay.style.position = 'fixed';
+    overlay.style.inset = '0';
+    overlay.style.background = 'rgba(15, 23, 42, 0.55)';
+    overlay.style.zIndex = '99999';
+    overlay.style.display = 'flex';
+    overlay.style.alignItems = 'center';
+    overlay.style.justifyContent = 'center';
+    overlay.style.padding = '24px';
+
+    const modal = document.createElement('div');
+    modal.style.width = 'min(760px, 96vw)';
+    modal.style.maxHeight = '86vh';
+    modal.style.overflow = 'auto';
+    modal.style.background = '#fff';
+    modal.style.borderRadius = '16px';
+    modal.style.boxShadow = '0 24px 80px rgba(15, 23, 42, 0.35)';
+    modal.style.padding = '22px';
+    modal.style.fontFamily = 'Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+
+    const header = document.createElement('div');
+    header.style.display = 'flex';
+    header.style.alignItems = 'center';
+    header.style.justifyContent = 'space-between';
+    header.style.gap = '16px';
+
+    const h = document.createElement('h3');
+    h.textContent = title || 'Order recheck result';
+    h.style.margin = '0';
+    h.style.fontSize = '18px';
+
+    const close = document.createElement('button');
+    close.textContent = 'Close';
+    close.type = 'button';
+    close.style.border = '1px solid #cbd5e1';
+    close.style.borderRadius = '10px';
+    close.style.background = '#f8fafc';
+    close.style.padding = '8px 12px';
+    close.style.cursor = 'pointer';
+    close.onclick = () => overlay.remove();
+
+    header.appendChild(h);
+    header.appendChild(close);
+    modal.appendChild(header);
+
+    const body = document.createElement('p');
+    body.textContent = message || '';
+    body.style.whiteSpace = 'pre-wrap';
+    body.style.lineHeight = '1.45';
+    body.style.margin = '16px 0';
+    modal.appendChild(body);
+
+    if (links.length) {
+        const label = document.createElement('div');
+        label.textContent = 'Debug files';
+        label.style.fontWeight = '700';
+        label.style.margin = '12px 0 8px';
+        modal.appendChild(label);
+
+        const list = document.createElement('div');
+        list.style.display = 'grid';
+        list.style.gap = '8px';
+
+        links.forEach((item) => {
+            const row = document.createElement('div');
+            row.style.display = 'flex';
+            row.style.alignItems = 'center';
+            row.style.justifyContent = 'space-between';
+            row.style.gap = '10px';
+            row.style.border = '1px solid #e2e8f0';
+            row.style.borderRadius = '10px';
+            row.style.padding = '10px 12px';
+
+            const a = document.createElement('a');
+            a.href = item.url;
+            a.target = '_blank';
+            a.rel = 'noopener noreferrer';
+            a.textContent = item.label;
+            a.style.color = '#2563eb';
+            a.style.fontWeight = '600';
+            a.style.textDecoration = 'none';
+
+            const copy = document.createElement('button');
+            copy.type = 'button';
+            copy.textContent = 'Copy link';
+            copy.style.border = '1px solid #cbd5e1';
+            copy.style.borderRadius = '8px';
+            copy.style.background = '#fff';
+            copy.style.padding = '6px 10px';
+            copy.style.cursor = 'pointer';
+            copy.onclick = async () => {
+                try {
+                    await navigator.clipboard.writeText(item.url);
+                    copy.textContent = 'Copied';
+                    setTimeout(() => { copy.textContent = 'Copy link'; }, 1400);
+                } catch (_) {
+                    window.prompt('Copy this debug link:', item.url);
+                }
+            };
+
+            row.appendChild(a);
+            row.appendChild(copy);
+            list.appendChild(row);
+        });
+
+        modal.appendChild(list);
+    }
+
+    const hint = document.createElement('p');
+    hint.textContent = 'Tip: open the live log first, then run another order check to watch each step update.';
+    hint.style.fontSize = '13px';
+    hint.style.color = '#64748b';
+    hint.style.margin = '14px 0 0';
+    modal.appendChild(hint);
+
+    overlay.addEventListener('click', (event) => {
+        if (event.target === overlay) overlay.remove();
+    });
+
+    overlay.appendChild(modal);
+    document.body.appendChild(overlay);
+}
+
+
 async function recheckOrderItem(id, button) {
     if (!id) return;
     const original = button ? button.textContent : '';
@@ -2806,24 +2952,10 @@ async function recheckOrderItem(id, button) {
         const timeout = setTimeout(() => controller.abort(), 150000);
         const data = await authJSON(API + `/admin/orders/${encodeURIComponent(id)}/recheck-item`, { method: 'POST', signal: controller.signal });
         clearTimeout(timeout);
-        const debugToken = encodeURIComponent(localStorage.token || '');
-        const links = Array.isArray(data.artifacts) && data.artifacts.length
-            ? '\n\nDebug files:\n' + data.artifacts.map((a) => {
-                const sep = String(a.url || '').includes('?') ? '&' : '?';
-                return `${a.label || a.type}: ${API}${a.url}${sep}token=${debugToken}`;
-            }).join('\n')
-            : '';
-        alert((data.message || 'Order item recheck completed.') + links);
+        showOrderRecheckResult('Order recheck completed', data.message || 'Order item recheck completed.', data.artifacts);
         await loadCreditsAdminPane();
     } catch (err) {
-        const debugToken = encodeURIComponent(localStorage.token || '');
-        const links = Array.isArray(err.artifacts) && err.artifacts.length
-            ? '\n\nDebug files:\n' + err.artifacts.map((a) => {
-                const sep = String(a.url || '').includes('?') ? '&' : '?';
-                return `${a.label || a.type}: ${API}${a.url}${sep}token=${debugToken}`;
-            }).join('\n')
-            : '';
-        alert((err.message || 'Order item recheck failed.') + links);
+        showOrderRecheckResult('Order recheck failed', err.message || 'Order item recheck failed.', err.artifacts);
     } finally {
         if (button) {
             button.disabled = false;
