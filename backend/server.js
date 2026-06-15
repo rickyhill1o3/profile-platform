@@ -7936,12 +7936,16 @@ app.post('/admin/orders/:id/recheck-item', auth, admin, async (req, res) => {
         if (!(await canManageTarget(currentUser, targetUser))) {
             return res.status(403).json({ error: 'You do not have access to this order.' });
         }
-        const result = await recheckTargetOrder({
-            supabase,
-            order,
-            currentUser,
-            helpers: { adjustUserCredits }
-        });
+        const timeoutMs = Number(process.env.ORDER_RECHECK_TOTAL_TIMEOUT_MS || 240000);
+        const result = await Promise.race([
+            recheckTargetOrder({
+                supabase,
+                order,
+                currentUser,
+                helpers: { adjustUserCredits }
+            }),
+            new Promise((_, reject) => setTimeout(() => reject(new Error(`Order item recheck timed out after ${Math.round(timeoutMs / 1000)} seconds. Check debug files/logs or use Browserless live sessions.`)), timeoutMs))
+        ]);
         res.json(result);
     } catch (err) {
         res.status(err.status || 500).json({

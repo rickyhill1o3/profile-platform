@@ -56,6 +56,7 @@ function normalizeOrderPayload(order) {
     orderNumber: text(order?.external_order_id || getDiscordField(payload, 'Order ID') || payload.external_order_id || payload.order_id || payload.order_number),
     productName: text(order?.product_name || getDiscordField(payload, 'Product') || payload.product_name || payload.product),
     sku: text(order?.sku || getDiscordField(payload, 'SKU') || payload.sku),
+    expectedQuantity: Number(order?.quantity || getDiscordField(payload, 'Quantity') || payload.quantity || 0) || 0,
     accountEmail: text((accountPair && accountPair.email) || accountRaw),
     accountPassword: text((accountPair && accountPair.password) || payload.account_password || payload.password || getDiscordField(payload, 'Password')),
     proxy: stripDiscordSpoiler(order?.proxy || payload.proxy || getDiscordField(payload, 'Proxy')),
@@ -131,7 +132,7 @@ async function clickByText(page, patterns, timeout = 1500) {
   return false;
 }
 
-async function getTargetOtpFromImap({ email, appPassword, sinceMs = Date.now() - 10 * 60 * 1000, timeoutMs = 90000, log = () => {} }) {
+async function getTargetOtpFromImap({ email, appPassword, sinceMs = Date.now() - 10 * 60 * 1000, timeoutMs = Number(process.env.ORDER_RECHECK_OTP_TIMEOUT_MS || 60000), log = () => {} }) {
   if (!email || !appPassword) return '';
   const ImapFlow = loadImapFlow();
   const password = String(appPassword).replace(/\s+/g, '');
@@ -321,7 +322,7 @@ async function launchBrowser({ normalized, debug, log }) {
     const msg = String(err && err.message || err);
     if (/Executable doesn't exist|Please run.*playwright install|browserType\.launch/i.test(msg)) {
       throw new Error(
-        'Chromium is not installed on this Render instance. Either set BROWSERLESS_CDP_ENDPOINT / BROWSERLESS_WS_ENDPOINT for Browserless mode, or run `npx playwright install chromium` in Render after npm install. Original error: ' + msg.slice(0, 800)
+        'Chromium is not installed on this Render instance. Either set BROWSERLESS_CDP_ENDPOINT / BROWSERLESS_WS_ENDPOINT for Browserless mode, or use Render build command `npm install` with this package postinstall, or manually run `npx playwright install chromium` in Render after npm install. Original error: ' + msg.slice(0, 800)
       );
     }
     throw err;
@@ -396,7 +397,25 @@ async function verifyTargetOrder({ page, normalized, debug, log }) {
   const nameNeedle = lc(expectedName).replace(/\s+/g, ' ').slice(0, 80);
   const nameFound = !!nameNeedle && textLower.includes(nameNeedle.slice(0, Math.min(nameNeedle.length, 35)));
   const orderFound = !!orderNumber && pageText.includes(orderNumber);
-  return { orderFound, skuFound, nameFound, itemFound: skuFound || nameFound, pageTextSample: pageText.slice(0, 1200) };
+  const expectedQuantity = Number(normalized.expectedQuantity || 0) || 0;
+  let quantityFound = null;
+  let quantityMatches = null;
+  if (expectedQuantity > 0 && (skuFound || nameFound)) {
+    const anchor = expectedSku && pageText.includes(expectedSku) ? expectedSku : (expectedName || '').slice(0, 40);
+    const idx = anchor ? lc(pageText).indexOf(lc(anchor)) : -1;
+    const nearby = idx >= 0 ? pageText.slice(Math.max(0, idx - 800), idx + 1600) : pageText;
+    const qtyPatterns = [
+      /qty\s*[:#-]?\s*(\d+)/i,
+      /quantity\s*[:#-]?\s*(\d+)/i,
+      /\b(\d+)\s+items?\b/i
+    ];
+    for (const pat of qtyPatterns) {
+      const m = nearby.match(pat);
+      if (m) { quantityFound = Number(m[1]); break; }
+    }
+    quantityMatches = quantityFound === null ? null : quantityFound >= expectedQuantity;
+  }
+  return { orderFound, skuFound, nameFound, itemFound: skuFound || nameFound, expectedQuantity, quantityFound, quantityMatches, pageTextSample: pageText.slice(0, 1200) };
 }
 
 async function recheckTargetOrder({ supabase, order, currentUser, helpers }) {
@@ -424,6 +443,8 @@ async function recheckTargetOrder({ supabase, order, currentUser, helpers }) {
     context = await browser.newContext(contextOptions);
     await context.tracing.start({ screenshots: true, snapshots: true, sources: false }).catch(() => null);
     const page = await context.newPage();
+    page.setDefaultTimeout(Number(process.env.ORDER_RECHECK_STEP_TIMEOUT_MS || 30000));
+    page.setDefaultNavigationTimeout(Number(process.env.ORDER_RECHECK_NAV_TIMEOUT_MS || 60000));
     await loginTargetIfNeeded({ page, credentials, debug, log });
     await context.storageState({ path: sessionPath }).catch(() => null);
     const check = await verifyTargetOrder({ page, normalized, debug, log });
@@ -446,7 +467,7 @@ async function recheckTargetOrder({ supabase, order, currentUser, helpers }) {
     const videos = fs.readdirSync(debug.dir).filter((f) => f.endsWith('.webm'));
     videos.forEach((file) => debug.artifacts.push({ type: 'video', label: 'Browser Video', url: publicDebugPath(path.join(debug.dir, file)) }));
     debug.writeLog(logs);
-    return { ok: true, ...check, refunded, refundAmount, message: check.itemFound ? 'Expected Target item was found on the order.' : (refunded ? `Expected item was missing. Refunded ${refundAmount} credits.` : 'Expected item was missing. No credits were refunded because this order had no charged credits.'), artifacts: debug.artifacts };
+    return { ok: true, ...check, refunded, refundAmount, message: check.itemFound ? (`Expected Target item was found on the order.` + (check.expectedQuantity ? ` Expected qty: ${check.expectedQuantity}. Detected qty: ${check.quantityFound ?? 'not detected'}.` : '') + (check.quantityMatches === false ? ' Quantity appears lower than expected.' : '')) : (refunded ? `Expected item was missing. Refunded ${refundAmount} credits.` : 'Expected item was missing. No credits were refunded because this order had no charged credits.'), artifacts: debug.artifacts };
   } catch (err) {
     log(`ERROR: ${err.message || err}`);
     try {
