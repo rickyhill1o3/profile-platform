@@ -432,7 +432,7 @@ async function verifyTargetOrder({ page, normalized, debug, log }) {
       const m = nearby.match(pat);
       if (m) { quantityFound = Number(m[1]); break; }
     }
-    quantityMatches = quantityFound === null ? null : quantityFound >= expectedQuantity;
+    quantityMatches = quantityFound === null ? null : quantityFound === expectedQuantity;
   }
   return { orderFound, skuFound, nameFound, itemFound: skuFound || nameFound, expectedQuantity, quantityFound, quantityMatches, pageTextSample: pageText.slice(0, 1200) };
 }
@@ -498,7 +498,7 @@ async function recheckTargetOrder({ supabase, order, currentUser, helpers }) {
     const videos = fs.readdirSync(debug.dir).filter((f) => f.endsWith('.webm'));
     videos.forEach((file) => debug.artifacts.push({ type: 'video', label: 'Browser Video', url: publicDebugPath(path.join(debug.dir, file)) }));
     debug.writeLog(logs);
-    return { ok: true, ...check, refunded, refundAmount, message: check.itemFound ? (`Expected Target item was found on the order.` + (check.expectedQuantity ? ` Expected qty: ${check.expectedQuantity}. Detected qty: ${check.quantityFound ?? 'not detected'}.` : '') + (check.quantityMatches === false ? ' Quantity appears lower than expected.' : '')) : (refunded ? `Expected item was missing. Refunded ${refundAmount} credits.` : 'Expected item was missing. No credits were refunded because this order had no charged credits.'), artifacts: debug.artifacts };
+    return { ok: true, ...check, refunded, refundAmount, message: check.itemFound ? (`Expected Target item was found on the order.` + (check.expectedQuantity ? ` Expected qty: ${check.expectedQuantity}. Detected qty: ${check.quantityFound ?? 'not detected'}.` : '') + (check.quantityMatches === false ? ' Quantity mismatch detected, but no refund was issued because credits are charged per checkout, not per quantity.' : '')) : (refunded ? `Expected item was missing. Refunded ${refundAmount} credits.` : 'Expected item was missing. No credits were refunded because this order had no charged credits.'), artifacts: debug.artifacts };
   } catch (err) {
     log(`ERROR: ${err.message || err}`);
     try {

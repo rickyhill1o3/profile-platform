@@ -131,3 +131,35 @@ When an error happens, the admin alert will include links to:
 - video when using local Playwright recording
 
 Browserless/live view is handled from the Browserless side.
+
+
+## Browserless endpoint examples
+
+Set one of these Render environment variables if you want the order checker to use Browserless instead of local Render Chromium:
+
+```bash
+BROWSERLESS_CDP_ENDPOINT=wss://production-sfo.browserless.io?token=YOUR_BROWSERLESS_API_TOKEN
+```
+
+or, depending on your Browserless dashboard region:
+
+```bash
+BROWSERLESS_CDP_ENDPOINT=wss://production-ams.browserless.io?token=YOUR_BROWSERLESS_API_TOKEN
+BROWSERLESS_CDP_ENDPOINT=wss://production-lon.browserless.io?token=YOUR_BROWSERLESS_API_TOKEN
+```
+
+Use the exact WebSocket/CDP URL from your Browserless dashboard if it differs.
+
+## Headless setting
+
+For Render, keep headless enabled:
+
+```bash
+ORDER_RECHECK_HEADLESS=true
+```
+
+Set this to `false` only when running the backend locally on your Windows/Mac computer, because Render has no visible desktop.
+
+## Quantity behavior
+
+The checker compares the expected webhook quantity to the detected Target order quantity, but it only refunds when the expected item is completely missing. Quantity mismatches are reported in the check result and debug log; they do not trigger credit refunds.
