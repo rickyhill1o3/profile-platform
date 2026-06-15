@@ -69,13 +69,100 @@ function normalizeOrderPayload(order) {
 function parseProxy(proxyRaw) {
   const value = text(proxyRaw).replace(/^\|\|/, '').replace(/\|\|$/, '');
   if (!value) return null;
-  if (/^https?:\/\//i.test(value) || /^socks/i.test(value)) return { server: value };
+  if (/^https?:\/\//i.test(value) || /^socks/i.test(value)) {
+    try {
+      const u = new URL(value);
+      return {
+        server: `${u.protocol}//${u.hostname}${u.port ? ':' + u.port : ''}`,
+        username: decodeURIComponent(u.username || ''),
+        password: decodeURIComponent(u.password || '')
+      };
+    } catch (_) {
+      return { server: value };
+    }
+  }
   const parts = value.split(':');
   if (parts.length >= 4) {
     return { server: `http://${parts[0]}:${parts[1]}`, username: parts[2], password: parts.slice(3).join(':') };
   }
   if (parts.length >= 2) return { server: `http://${parts[0]}:${parts[1]}` };
   return null;
+}
+
+function proxyServerForChrome(proxy) {
+  if (!proxy?.server) return '';
+  // Chrome's --proxy-server flag wants scheme://host:port, without auth.
+  try {
+    const u = new URL(proxy.server);
+    return `${u.protocol}//${u.hostname}${u.port ? ':' + u.port : ''}`;
+  } catch (_) {
+    return proxy.server;
+  }
+}
+
+function browserlessEndpointWithLaunchOptions(endpoint, normalized, proxy, log = () => {}) {
+  const base = text(endpoint);
+  if (!base) return base;
+  const args = [
+    '--window-size=1280,800',
+    '--disable-blink-features=AutomationControlled',
+    '--disable-dev-shm-usage',
+    '--no-first-run',
+    '--no-default-browser-check',
+    '--lang=en-US'
+  ];
+  const proxyServer = proxyServerForChrome(proxy);
+  if (proxyServer) {
+    args.push(`--proxy-server=${proxyServer}`);
+    log(`Browserless launch will use order proxy server: ${proxyServer}`);
+  } else {
+    log('No order proxy found for Browserless launch; Target may see the Browserless datacenter IP.');
+  }
+
+  const launch = {
+    headless: String(process.env.ORDER_RECHECK_HEADLESS || 'true').toLowerCase() !== 'false',
+    stealth: String(process.env.ORDER_RECHECK_BROWSERLESS_STEALTH || 'true').toLowerCase() !== 'false',
+    args
+  };
+  const encoded = Buffer.from(JSON.stringify(launch), 'utf8').toString('base64');
+  const sep = base.includes('?') ? '&' : '?';
+  const extra = [
+    `launch=${encodeURIComponent(encoded)}`,
+    `timeout=${encodeURIComponent(String(process.env.ORDER_RECHECK_BROWSERLESS_TIMEOUT_MS || process.env.ORDER_RECHECK_TOTAL_TIMEOUT_MS || 120000))}`,
+    `stealth=${encodeURIComponent(String(process.env.ORDER_RECHECK_BROWSERLESS_STEALTH || 'true'))}`,
+    `headless=${encodeURIComponent(String(process.env.ORDER_RECHECK_HEADLESS || 'true'))}`
+  ];
+  if (String(process.env.ORDER_RECHECK_BROWSERLESS_HUMANLIKE || 'true').toLowerCase() !== 'false') extra.push('humanlike=true');
+  if (String(process.env.ORDER_RECHECK_BROWSERLESS_BLOCK_ADS || 'true').toLowerCase() !== 'false') extra.push('blockAds=true');
+  return `${base}${sep}${extra.join('&')}`;
+}
+
+async function attachProxyAuthIfNeeded(page, proxy, log = () => {}) {
+  if (!proxy?.username || !proxy?.password) return;
+  try {
+    const client = await page.context().newCDPSession(page);
+    await client.send('Fetch.enable', { handleAuthRequests: true });
+    client.on('Fetch.authRequired', async (event) => {
+      try {
+        await client.send('Fetch.continueWithAuth', {
+          requestId: event.requestId,
+          authChallengeResponse: {
+            response: 'ProvideCredentials',
+            username: proxy.username,
+            password: proxy.password
+          }
+        });
+      } catch (_) {}
+    });
+    client.on('Fetch.requestPaused', async (event) => {
+      try { await client.send('Fetch.continueRequest', { requestId: event.requestId }); } catch (_) {}
+    });
+    const basic = Buffer.from(`${proxy.username}:${proxy.password}`, 'utf8').toString('base64');
+    await page.setExtraHTTPHeaders({ 'Proxy-Authorization': `Basic ${basic}` }).catch(() => null);
+    log('Proxy authentication handler attached for this browser page.');
+  } catch (err) {
+    log(`Could not attach proxy authentication handler: ${err.message || err}`);
+  }
 }
 
 function publicDebugPath(abs) {
@@ -196,7 +283,7 @@ function rowToCredential(row, source = 'unknown') {
   ]);
   const store = pickValue(row, ['store', 'provider', 'account_type', 'site']);
   if (!loginEmail && !loginPassword && !gmailAppPassword) return null;
-  return { loginEmail, loginPassword, gmailAppPassword, store, source, raw: row };
+  return { loginEmail, loginPassword, gmailAppPassword, store, source, profileId: text(row.profile_id || row.profileId || row.id || ''), accountId: text(row.account_id || row.accountId || row.id || ''), userId: text(row.user_id || row.userId || ''), raw: row };
 }
 
 function credentialMatchesTarget(cred, accountEmail) {
@@ -230,7 +317,9 @@ async function findCredentialsForOrder({ supabase, order, normalized, log = () =
       loginPassword: normalized.accountPassword,
       gmailAppPassword: '',
       store: 'target',
-      source: 'discord_webhook_account_password'
+      source: 'discord_webhook_account_password',
+      profileId: text(order?.profile_id || order?.profileId || ''),
+      accountId: text(order?.account_id || order?.accountId || '')
     });
   }
 
@@ -298,7 +387,9 @@ async function findCredentialsForOrder({ supabase, order, normalized, log = () =
       loginEmail: text(target.loginEmail),
       loginPassword: text(target.loginPassword),
       gmailAppPassword: text(target.gmailAppPassword),
-      source: target.source
+      source: target.source,
+      profileId: text(target.profileId || order?.profile_id || order?.profileId || ''),
+      accountId: text(target.accountId || order?.account_id || order?.accountId || '')
     };
   }
 
@@ -308,14 +399,16 @@ async function findCredentialsForOrder({ supabase, order, normalized, log = () =
 
 async function launchBrowser({ normalized, debug, log }) {
   const endpoint = text(process.env.BROWSERLESS_WS_ENDPOINT || process.env.BROWSERLESS_CDP_ENDPOINT || process.env.PLAYWRIGHT_WS_ENDPOINT);
+  const proxy = parseProxy(normalized.proxy);
   if (endpoint) {
+    const endpointWithLaunch = browserlessEndpointWithLaunchOptions(endpoint, normalized, proxy, log);
     log('Connecting to Browserless / remote Chromium endpoint.');
-    const browser = await chromium.connectOverCDP(endpoint);
-    return { browser, remote: true };
+    if (proxy?.username) log(`Order proxy authentication will be applied for proxy user: ${proxy.username}`);
+    const browser = await chromium.connectOverCDP(endpointWithLaunch);
+    return { browser, remote: true, proxy };
   }
 
   const headed = String(process.env.ORDER_RECHECK_HEADLESS || '').toLowerCase() === 'false';
-  const proxy = parseProxy(normalized.proxy);
   const launchOptions = {
     headless: !headed,
     slowMo: Number(process.env.ORDER_RECHECK_SLOWMO_MS || (headed ? 250 : 0)),
@@ -336,11 +429,16 @@ async function launchBrowser({ normalized, debug, log }) {
       '--hide-scrollbars'
     ]
   };
-  if (proxy) launchOptions.proxy = proxy;
+  if (proxy) {
+    launchOptions.proxy = proxy;
+    log(`Local Chromium will use order proxy: ${proxy.server}${proxy.username ? ' with auth' : ''}`);
+  } else {
+    log('No order proxy found for local Chromium; Target may see Render datacenter IP.');
+  }
 
   log(`Launching local Chromium. headless=${launchOptions.headless}`);
   try {
-    return { browser: await chromium.launch(launchOptions), remote: false };
+    return { browser: await chromium.launch(launchOptions), remote: false, proxy };
   } catch (err) {
     const msg = String(err && err.message || err);
     if (/Executable doesn't exist|Please run.*playwright install|browserType\.launch/i.test(msg)) {
@@ -351,6 +449,56 @@ async function launchBrowser({ normalized, debug, log }) {
     throw err;
   }
 }
+
+function sessionKeyForOrder({ order, normalized, credentials }) {
+  const profilePart = safeName(credentials.profileId || order?.profile_id || order?.profileId || 'no_profile');
+  const accountPart = safeName(credentials.accountId || normalized.accountEmail || credentials.loginEmail || 'no_account');
+  const userPart = safeName(order?.user_id || credentials.userId || 'no_user');
+  return `${userPart}__${profilePart}__${accountPart}__target`;
+}
+
+async function loadStoredTargetSession({ supabase, sessionKey, filePath, log = () => {} }) {
+  try {
+    const { data, error } = await supabase.from('target_login_sessions').select('storage_state').eq('session_key', sessionKey).maybeSingle();
+    if (!error && data?.storage_state) {
+      log(`Loaded Target login session from Supabase key ${sessionKey}.`);
+      return typeof data.storage_state === 'string' ? JSON.parse(data.storage_state) : data.storage_state;
+    }
+  } catch (_) {}
+  try {
+    if (fs.existsSync(filePath)) {
+      log(`Loaded Target login session from local file key ${sessionKey}.`);
+      return JSON.parse(fs.readFileSync(filePath, 'utf8'));
+    }
+  } catch (_) {}
+  return null;
+}
+
+async function saveStoredTargetSession({ supabase, sessionKey, storageState, credentials, order, filePath, log = () => {} }) {
+  try {
+    ensureDir(path.dirname(filePath));
+    fs.writeFileSync(filePath, JSON.stringify(storageState), 'utf8');
+    log(`Saved Target login session to local file key ${sessionKey}.`);
+  } catch (err) {
+    log(`Could not save local Target login session: ${err.message || err}`);
+  }
+  try {
+    await supabase.from('target_login_sessions').upsert({
+      session_key: sessionKey,
+      user_id: order?.user_id || null,
+      profile_id: credentials.profileId || order?.profile_id || null,
+      account_id: credentials.accountId || order?.account_id || null,
+      login_email: credentials.loginEmail || null,
+      store: 'target',
+      storage_state: storageState,
+      updated_at: new Date().toISOString()
+    }, { onConflict: 'session_key' });
+    log(`Saved Target login session to Supabase key ${sessionKey}.`);
+  } catch (_) {
+    // Optional table may not exist yet. Local file fallback still works until redeploy.
+  }
+}
+
 
 async function loginTargetIfNeeded({ page, credentials, debug, log }) {
   await page.goto('https://www.target.com/orders', { waitUntil: 'domcontentloaded', timeout: 60000 });
@@ -365,7 +513,13 @@ async function loginTargetIfNeeded({ page, credentials, debug, log }) {
   await debug.shot(page, 'signin-opened');
 
   const emailInput = await firstVisible(page, ['input[type="email"]', 'input[name="username"]', 'input[name="email"]', 'input[id*="username"]', 'input[id*="email"]', 'input[type="text"]'], 8000);
-  if (!emailInput) throw new Error('Target email field did not appear. Check debug screenshots.');
+  if (!emailInput) {
+    const bodyNow = await page.locator('body').innerText({ timeout: 5000 }).catch(() => '');
+    if (/accessDenied-CheckVPN|CheckVPN|VPN|access denied/i.test(bodyNow)) {
+      throw new Error(`Target blocked the browser/proxy before the email field. Page text: ${bodyNow.slice(0, 700)}`);
+    }
+    throw new Error('Target email field did not appear. Check debug screenshots.');
+  }
   await emailInput.fill(credentials.loginEmail);
   await debug.shot(page, 'email-filled');
   await clickByText(page, [/continue/i, /next/i, /sign in/i]);
@@ -463,7 +617,8 @@ async function recheckTargetOrder({ supabase, order, currentUser, helpers }) {
     if (!credentials.gmailAppPassword) log('No Gmail app password saved; OTP automation may fail if Target asks for a code.');
     const launched = await launchBrowser({ normalized, debug, log });
     browser = launched.browser;
-    const sessionPath = path.join(SESSION_ROOT, `${safeName(credentials.loginEmail)}-target.json`);
+    const sessionKey = sessionKeyForOrder({ order, normalized, credentials });
+    const sessionPath = path.join(SESSION_ROOT, `${sessionKey}.json`);
     ensureDir(SESSION_ROOT);
     const shouldRecordVideo = String(process.env.ORDER_RECHECK_RECORD_VIDEO || '').toLowerCase() === 'true';
     const contextOptions = {
@@ -472,11 +627,13 @@ async function recheckTargetOrder({ supabase, order, currentUser, helpers }) {
       // Video recording uses a lot of memory on Render Starter. Keep it opt-in.
       recordVideo: shouldRecordVideo && !launched.remote ? { dir: debug.dir, size: { width: 1280, height: 800 } } : undefined
     };
-    if (fs.existsSync(sessionPath)) contextOptions.storageState = sessionPath;
+    const storedSession = await loadStoredTargetSession({ supabase, sessionKey, filePath: sessionPath, log });
+    if (storedSession) contextOptions.storageState = storedSession;
     context = await browser.newContext(contextOptions);
     const shouldTrace = String(process.env.ORDER_RECHECK_TRACE || '').toLowerCase() === 'true';
     if (shouldTrace) await context.tracing.start({ screenshots: true, snapshots: true, sources: false }).catch(() => null);
     const page = await context.newPage();
+    await attachProxyAuthIfNeeded(page, launched.proxy, log);
     page.setDefaultTimeout(Number(process.env.ORDER_RECHECK_STEP_TIMEOUT_MS || 20000));
     page.setDefaultNavigationTimeout(Number(process.env.ORDER_RECHECK_NAV_TIMEOUT_MS || 45000));
 
@@ -491,7 +648,8 @@ async function recheckTargetOrder({ supabase, order, currentUser, helpers }) {
     log('Starting Target login/session check.');
     await loginTargetIfNeeded({ page, credentials, debug, log });
     log('Target login/session check completed.');
-    await context.storageState({ path: sessionPath }).catch(() => null);
+    const storageState = await context.storageState().catch(() => null);
+    if (storageState) await saveStoredTargetSession({ supabase, sessionKey, storageState, credentials, order, filePath: sessionPath, log });
     log('Starting Target order item/quantity verification.');
     const check = await verifyTargetOrder({ page, normalized, debug, log });
     log(`Order verification result: itemFound=${check.itemFound}, expectedQty=${check.expectedQuantity}, detectedQty=${check.quantityFound ?? 'not detected'}, quantityMatches=${check.quantityMatches}`);
