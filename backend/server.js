@@ -87,6 +87,7 @@ const { v4: uuidv4 } = require("uuid");
 const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
+const { DEBUG_ROOT: ORDER_RECHECK_DEBUG_ROOT, recheckTargetOrder } = require("./order-recheck-service");
 const nodemailer = require("nodemailer");
 const bodyParser = require("body-parser");
 const Stripe = require("stripe");
@@ -7919,6 +7920,38 @@ setTimeout(() => {
     replayWebhookFailoverQueue().catch((err) => console.error('Initial failover queue replay failed:', err));
 }, 15000);
 startAnnouncementCatalogScheduler();
+
+// Target order item recheck: launches Chromium/Browserless, logs into Target, verifies expected SKU/product, and auto-refunds when missing.
+try {
+    app.use('/admin/order-recheck-debug', auth, admin, express.static(ORDER_RECHECK_DEBUG_ROOT));
+} catch (_) {}
+
+app.post('/admin/orders/:id/recheck-item', auth, admin, async (req, res) => {
+    try {
+        const currentUser = await getCurrentUser(req);
+        const { data: order, error } = await supabase.from('orders').select('*').eq('id', req.params.id).maybeSingle();
+        if (error) return res.status(500).json({ error: error.message });
+        if (!order?.id) return res.status(404).json({ error: 'Order not found' });
+        const targetUser = await getUserById(order.user_id);
+        if (!(await canManageTarget(currentUser, targetUser))) {
+            return res.status(403).json({ error: 'You do not have access to this order.' });
+        }
+        const result = await recheckTargetOrder({
+            supabase,
+            order,
+            currentUser,
+            helpers: { adjustUserCredits }
+        });
+        res.json(result);
+    } catch (err) {
+        res.status(err.status || 500).json({
+            error: err.message || String(err),
+            debugRunId: err.debugRunId || null,
+            artifacts: err.artifacts || []
+        });
+    }
+});
+
 
 const PORT = process.env.PORT || 3000;
 

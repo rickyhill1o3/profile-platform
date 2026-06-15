@@ -2138,7 +2138,11 @@ async function authJSON(url, options = {}) {
     const headers = Object.assign({ 'Content-Type': 'application/json' }, options.headers || {}, token() ? { Authorization: 'Bearer ' + token() } : {});
     const res = await fetch(url, { ...options, headers });
     const data = await res.json().catch(() => ({}));
-    if (!res.ok || data.error) throw new Error(data.error || 'Request failed');
+    if (!res.ok || data.error) {
+        const err = new Error(data.error || 'Request failed');
+        Object.assign(err, data || {});
+        throw err;
+    }
     return data;
 }
 
@@ -2789,6 +2793,33 @@ async function recheckWebhookCredits(id, button) {
     }
 }
 
+
+async function recheckOrderItem(id, button) {
+    if (!id) return;
+    const original = button ? button.textContent : '';
+    if (button) {
+        button.disabled = true;
+        button.textContent = 'Checking item...';
+    }
+    try {
+        const data = await authJSON(API + `/admin/orders/${encodeURIComponent(id)}/recheck-item`, { method: 'POST' });
+        const links = Array.isArray(data.artifacts) && data.artifacts.length
+            ? '\n\nDebug files:\n' + data.artifacts.map((a) => `${a.label || a.type}: ${location.origin}${a.url}`).join('\n')
+            : '';
+        alert((data.message || 'Order item recheck completed.') + links);
+        await loadCreditsAdminPane();
+    } catch (err) {
+        const links = Array.isArray(err.artifacts) && err.artifacts.length
+            ? '\n\nDebug files:\n' + err.artifacts.map((a) => `${a.label || a.type}: ${location.origin}${a.url}`).join('\n')
+            : '';
+        alert((err.message || 'Order item recheck failed.') + links);
+    } finally {
+        if (button) {
+            button.disabled = false;
+            button.textContent = original || 'Check Order For Item';
+        }
+    }
+}
 
 async function recheckOrderCredits(id, button) {
     if (!id) return;
@@ -4050,12 +4081,19 @@ async function loadCreditsAdminPane() {
               <td><div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;">
                 ${Number(item.credits_charged || 0) > 0 ? `<button class="btn" type="button" data-refund-order="${escapeHTML(item.id)}" data-refund-amount="${escapeHTML(String(item.credits_charged || 0))}">Refund Credits</button>` : '<span class="subtle-text">No charge</span>'}
                 <button class="btn secondary" type="button" data-recheck-order="${escapeHTML(item.id)}">Recheck Credits</button>
+                <button class="btn secondary" type="button" data-recheck-item-order="${escapeHTML(item.id)}">Check Order For Item</button>
               </div></td>
             </tr>`).join('') : '<tr><td colspan="8">No orders found yet.</td></tr>';
 
         ordersBody.querySelectorAll('[data-recheck-order]').forEach((button) => {
             button.addEventListener('click', async () => {
                 await recheckOrderCredits(button.dataset.recheckOrder, button);
+            });
+        });
+
+        ordersBody.querySelectorAll('[data-recheck-item-order]').forEach((button) => {
+            button.addEventListener('click', async () => {
+                await recheckOrderItem(button.dataset.recheckItemOrder, button);
             });
         });
 

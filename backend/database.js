@@ -23,6 +23,7 @@ function countEffectiveSkus(product) {
 }
 
 const { createClient } = require("@supabase/supabase-js");
+try { if (!global.WebSocket) global.WebSocket = require("ws"); } catch (_) {}
 
 require("dotenv").config();
 
