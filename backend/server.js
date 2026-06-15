@@ -7923,8 +7923,31 @@ setTimeout(() => {
 startAnnouncementCatalogScheduler();
 
 // Target order item recheck: launches Chromium/Browserless, logs into Target, verifies expected SKU/product, and auto-refunds when missing.
+// Debug files are opened from normal browser tabs, so Authorization headers are not available.
+// Allow a JWT token query parameter only for this debug-file route.
+async function orderRecheckDebugAuth(req, res, next) {
+    try {
+        const header = req.headers.authorization || '';
+        const token = (header.startsWith('Bearer ') ? header.split(' ')[1] : '') || String(req.query.token || '');
+        if (!token) return res.status(401).send('Missing debug token');
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+        const { data: user, error } = await supabase
+            .from('users')
+            .select('*')
+            .eq('id', decoded.user_id)
+            .single();
+        if (error || !user) return res.status(401).send('Invalid debug token');
+        if (user.role !== 'admin' && user.role !== 'super_admin') return res.status(403).send('Admin only');
+        req.user_id = user.id;
+        req.role = user.role;
+        req.currentUser = user;
+        next();
+    } catch (err) {
+        return res.status(401).send('Invalid debug token');
+    }
+}
 try {
-    app.use('/admin/order-recheck-debug', auth, admin, express.static(ORDER_RECHECK_DEBUG_ROOT));
+    app.use('/admin/order-recheck-debug', orderRecheckDebugAuth, express.static(ORDER_RECHECK_DEBUG_ROOT, { fallthrough: false }));
 } catch (_) {}
 
 app.post('/admin/orders/:id/recheck-item', auth, admin, async (req, res) => {

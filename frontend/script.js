@@ -2806,14 +2806,22 @@ async function recheckOrderItem(id, button) {
         const timeout = setTimeout(() => controller.abort(), 150000);
         const data = await authJSON(API + `/admin/orders/${encodeURIComponent(id)}/recheck-item`, { method: 'POST', signal: controller.signal });
         clearTimeout(timeout);
+        const debugToken = encodeURIComponent(localStorage.token || '');
         const links = Array.isArray(data.artifacts) && data.artifacts.length
-            ? '\n\nDebug files:\n' + data.artifacts.map((a) => `${a.label || a.type}: ${location.origin}${a.url}`).join('\n')
+            ? '\n\nDebug files:\n' + data.artifacts.map((a) => {
+                const sep = String(a.url || '').includes('?') ? '&' : '?';
+                return `${a.label || a.type}: ${API}${a.url}${sep}token=${debugToken}`;
+            }).join('\n')
             : '';
         alert((data.message || 'Order item recheck completed.') + links);
         await loadCreditsAdminPane();
     } catch (err) {
+        const debugToken = encodeURIComponent(localStorage.token || '');
         const links = Array.isArray(err.artifacts) && err.artifacts.length
-            ? '\n\nDebug files:\n' + err.artifacts.map((a) => `${a.label || a.type}: ${location.origin}${a.url}`).join('\n')
+            ? '\n\nDebug files:\n' + err.artifacts.map((a) => {
+                const sep = String(a.url || '').includes('?') ? '&' : '?';
+                return `${a.label || a.type}: ${API}${a.url}${sep}token=${debugToken}`;
+            }).join('\n')
             : '';
         alert((err.message || 'Order item recheck failed.') + links);
     } finally {

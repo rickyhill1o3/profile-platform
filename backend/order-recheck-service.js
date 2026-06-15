@@ -105,7 +105,14 @@ function makeDebug(orderNumber) {
     writeLog(lines) {
       const file = path.join(dir, 'log.txt');
       fs.writeFileSync(file, lines.join('\n'), 'utf8');
-      artifacts.push({ type: 'log', label: 'Log', url: publicDebugPath(file) });
+      const url = publicDebugPath(file);
+      if (!artifacts.some((a) => a.url === url)) artifacts.push({ type: 'log', label: 'Log', url });
+    },
+    appendLog(line) {
+      const file = path.join(dir, 'log.txt');
+      fs.appendFileSync(file, line + '\n', 'utf8');
+      const url = publicDebugPath(file);
+      if (!artifacts.some((a) => a.url === url)) artifacts.push({ type: 'log', label: 'Live Log', url });
     }
   };
 }
@@ -441,7 +448,12 @@ async function recheckTargetOrder({ supabase, order, currentUser, helpers }) {
   const normalized = normalizeOrderPayload(order);
   const debug = makeDebug(normalized.orderNumber || order.id);
   const logs = [];
-  const log = (line) => { logs.push(`[${new Date().toISOString()}] ${line}`); console.log('[order-recheck]', line); };
+  const log = (line) => {
+    const stamped = `[${new Date().toISOString()}] ${line}`;
+    logs.push(stamped);
+    try { debug.appendLog(stamped); } catch (_) {}
+    console.log('[order-recheck]', line);
+  };
   let browser;
   let context;
   try {
@@ -476,9 +488,13 @@ async function recheckTargetOrder({ supabase, order, currentUser, helpers }) {
         return route.continue().catch(() => null);
       }).catch(() => null);
     }
+    log('Starting Target login/session check.');
     await loginTargetIfNeeded({ page, credentials, debug, log });
+    log('Target login/session check completed.');
     await context.storageState({ path: sessionPath }).catch(() => null);
+    log('Starting Target order item/quantity verification.');
     const check = await verifyTargetOrder({ page, normalized, debug, log });
+    log(`Order verification result: itemFound=${check.itemFound}, expectedQty=${check.expectedQuantity}, detectedQty=${check.quantityFound ?? 'not detected'}, quantityMatches=${check.quantityMatches}`);
     let refunded = false;
     let refundAmount = 0;
     if (!check.itemFound) {
