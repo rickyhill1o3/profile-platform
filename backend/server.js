@@ -4136,7 +4136,7 @@ function normalizeCancellationImages(images) {
         .map((img) => ({
             name: String(img?.name || 'upload').slice(0, 160),
             type: String(img?.type || 'image/jpeg').slice(0, 80),
-            dataUrl: String(img?.dataUrl || '').slice(0, 900000)
+            dataUrl: String(img?.dataUrl || '').slice(0, 2600000)
         }))
         .filter((img) => /^data:image\//i.test(img.dataUrl));
 }
@@ -4257,11 +4257,22 @@ app.get('/admin/cancellation-requests', auth, admin, async (req, res) => {
     try {
         const currentUser = await getCurrentUser(req);
         const scopeIds = await getScopeUserIdsForAdmin(currentUser);
-        let query = supabase.from('cancellation_requests').select('*, users(email, role)').order('created_at', { ascending: false }).limit(250);
+        // Do not embed users here. Supabase sees both user_id and reviewed_by foreign keys
+        // to users, which can make `users(...)` ambiguous. Fetch users separately so the
+        // admin cancellation table loads reliably on every database.
+        let query = supabase.from('cancellation_requests').select('*').order('created_at', { ascending: false }).limit(250);
         if (scopeIds) query = query.in('user_id', scopeIds);
         const { data, error } = await query;
         if (error) throw new Error(error.message);
-        res.json({ items: data || [] });
+        const items = data || [];
+        const userIds = Array.from(new Set(items.map((item) => item.user_id).filter(Boolean)));
+        let usersById = {};
+        if (userIds.length) {
+            const { data: users, error: usersError } = await supabase.from('users').select('id,email,role,owner_admin_id').in('id', userIds);
+            if (usersError) throw new Error(usersError.message);
+            usersById = Object.fromEntries((users || []).map((user) => [user.id, user]));
+        }
+        res.json({ items: items.map((item) => ({ ...item, users: usersById[item.user_id] || null, user_email: usersById[item.user_id]?.email || '' })) });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
@@ -4270,10 +4281,12 @@ app.get('/admin/cancellation-requests', auth, admin, async (req, res) => {
 app.post('/admin/cancellation-requests/:id/deny', auth, admin, async (req, res) => {
     try {
         const currentUser = await getCurrentUser(req);
-        const { data: request, error } = await supabase.from('cancellation_requests').select('*, users(*)').eq('id', req.params.id).maybeSingle();
+        const { data: request, error } = await supabase.from('cancellation_requests').select('*').eq('id', req.params.id).maybeSingle();
         if (error) throw new Error(error.message);
         if (!request?.id) return res.status(404).json({ error: 'Request not found.' });
-        if (!(await canManageTarget(currentUser, request.users))) return res.status(403).json({ error: 'You do not have access to this request.' });
+        const { data: requestUser, error: requestUserError } = await supabase.from('users').select('*').eq('id', request.user_id).maybeSingle();
+        if (requestUserError) throw new Error(requestUserError.message);
+        if (!(await canManageTarget(currentUser, requestUser))) return res.status(403).json({ error: 'You do not have access to this request.' });
         const { data, error: updateError } = await supabase.from('cancellation_requests').update({
             status: 'denied',
             admin_note: String(req.body?.note || '').trim(),
@@ -4290,10 +4303,12 @@ app.post('/admin/cancellation-requests/:id/deny', auth, admin, async (req, res) 
 app.post('/admin/cancellation-requests/:id/approve', auth, admin, async (req, res) => {
     try {
         const currentUser = await getCurrentUser(req);
-        const { data: request, error } = await supabase.from('cancellation_requests').select('*, users(*)').eq('id', req.params.id).maybeSingle();
+        const { data: request, error } = await supabase.from('cancellation_requests').select('*').eq('id', req.params.id).maybeSingle();
         if (error) throw new Error(error.message);
         if (!request?.id) return res.status(404).json({ error: 'Request not found.' });
-        if (!(await canManageTarget(currentUser, request.users))) return res.status(403).json({ error: 'You do not have access to this request.' });
+        const { data: requestUser, error: requestUserError } = await supabase.from('users').select('*').eq('id', request.user_id).maybeSingle();
+        if (requestUserError) throw new Error(requestUserError.message);
+        if (!(await canManageTarget(currentUser, requestUser))) return res.status(403).json({ error: 'You do not have access to this request.' });
         if (String(request.status || '') === 'approved') return res.status(409).json({ error: 'This request has already been approved.' });
         if (!request.order_id) return res.status(400).json({ error: 'No linked order found. Deny this request or refund the order manually from Credits + Orders.' });
 

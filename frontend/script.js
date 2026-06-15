@@ -4716,8 +4716,8 @@ async function collectCancellationImages() {
     const images = [];
     for (const file of files) {
         if (!String(file.type || '').startsWith('image/')) continue;
-        if (file.size > 850000) {
-            throw new Error(`${file.name} is too large. Please upload screenshots under about 850KB each.`);
+        if (file.size > 2500000) {
+            throw new Error(`${file.name} is too large. Please upload screenshots under about 2.5MB each. Crop only unrelated borders, but keep the order number, product names, status, and total visible.`);
         }
         images.push({ name: file.name, type: file.type, dataUrl: await fileToDataUrl(file) });
     }
