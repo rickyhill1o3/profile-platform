@@ -100,9 +100,23 @@ function proxyServerForChrome(proxy) {
   }
 }
 
+function browserlessExternalProxyParam(proxy) {
+  if (!proxy?.server) return '';
+  try {
+    const u = new URL(proxy.server);
+    const user = proxy.username ? encodeURIComponent(proxy.username) : '';
+    const pass = proxy.password ? encodeURIComponent(proxy.password) : '';
+    const auth = user ? `${user}:${pass}@` : '';
+    return `${u.protocol}//${auth}${u.hostname}${u.port ? ':' + u.port : ''}`;
+  } catch (_) {
+    return proxy.server;
+  }
+}
+
 function browserlessEndpointWithLaunchOptions(endpoint, normalized, proxy, log = () => {}) {
   const base = text(endpoint);
   if (!base) return base;
+
   const args = [
     '--window-size=1280,800',
     '--disable-blink-features=AutomationControlled',
@@ -111,27 +125,23 @@ function browserlessEndpointWithLaunchOptions(endpoint, normalized, proxy, log =
     '--no-default-browser-check',
     '--lang=en-US'
   ];
-  const proxyServer = proxyServerForChrome(proxy);
-  if (proxyServer) {
-    args.push(`--proxy-server=${proxyServer}`);
-    log(`Browserless launch will use order proxy server: ${proxyServer}`);
+
+  // Browserless hosted BaaS v2 does not reliably honor --proxy-server inside
+  // launch.args for external authenticated proxies. Use Browserless' documented
+  // externalProxyServer query parameter so Browserless routes the session before
+  // the first navigation. Credentials are embedded in that parameter.
+  const externalProxyServer = browserlessExternalProxyParam(proxy);
+  if (externalProxyServer) {
+    log(`Browserless externalProxyServer will use order proxy: ${proxy.server}${proxy.username ? ' with auth' : ''}`);
   } else {
     log('No order proxy found for Browserless launch; Target may see the Browserless datacenter IP.');
   }
 
-  // Keep Browserless query params minimal. Some hosted Browserless plans reject
-  // extra top-level params such as humanlike/blockAds/stealth/headless with:
-  // "Query-parameter validation failed: must NOT have additional properties".
-  // Put browser launch settings inside the supported launch JSON only.
   const launch = {
     headless: String(process.env.ORDER_RECHECK_HEADLESS || 'true').toLowerCase() !== 'false',
     args
   };
-  const encodedLaunch = encodeURIComponent(JSON.stringify(launch));
-  const sep = base.includes('?') ? '&' : '?';
 
-  // Browserless timeout is a connection/session URL param. Keep it inside the
-  // shared hosted limit. The env name says _MS, and Browserless expects ms.
   const rawBrowserlessTimeout =
     process.env.ORDER_RECHECK_BROWSERLESS_TIMEOUT_MS ||
     process.env.ORDER_RECHECK_TIMEOUT_MS ||
@@ -142,7 +152,16 @@ function browserlessEndpointWithLaunchOptions(endpoint, normalized, proxy, log =
   if (browserlessTimeout > 60000) browserlessTimeout = 60000;
   log(`Browserless connect timeout parameter: ${browserlessTimeout}`);
 
-  return `${base}${sep}timeout=${encodeURIComponent(String(browserlessTimeout))}&launch=${encodedLaunch}`;
+  const url = new URL(base);
+  // Preserve the user's token from BROWSERLESS_CDP_ENDPOINT, but remove stale
+  // params from previous deploys that caused Browserless 400 responses.
+  const keepToken = url.searchParams.get('token');
+  url.search = '';
+  if (keepToken) url.searchParams.set('token', keepToken);
+  url.searchParams.set('timeout', String(browserlessTimeout));
+  url.searchParams.set('launch', JSON.stringify(launch));
+  if (externalProxyServer) url.searchParams.set('externalProxyServer', externalProxyServer);
+  return url.toString();
 }
 
 async function attachProxyAuthIfNeeded(page, proxy, log = () => {}) {
