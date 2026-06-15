@@ -1328,29 +1328,6 @@ async function findUserForWebhook(payload) {
     return null;
 }
 
-
-function getOrderRefundCredits(order) {
-    const meta = order?.metadata || {};
-    return asWholeCredits(meta.refund_credits ?? meta.refunded_credits ?? 0, 0);
-}
-
-function isOrderRefunded(order) {
-    const status = String(order?.status || '').toLowerCase();
-    return status === 'refunded' || Boolean(order?.metadata?.refunded_at) || getOrderRefundCredits(order) > 0;
-}
-
-function presentOrderForAdmin(row) {
-    const refunded = isOrderRefunded(row);
-    const refundCredits = getOrderRefundCredits(row);
-    return {
-        ...row,
-        is_refunded: refunded,
-        refunded_credits: refundCredits,
-        display_status: refunded ? 'refunded' : (row.status || 'success'),
-        display_credits_charged: refunded ? 0 : asWholeCredits(row.credits_charged, 0)
-    };
-}
-
 async function createOrderRecord(payload) {
     const insertPayload = {
         user_id: payload.user_id,
@@ -4077,7 +4054,7 @@ app.get("/admin/users/:id/credits/history", auth, admin, async (req, res) => {
             lifetime_credits_spent: asWholeCredits(balanceRow.lifetime_credits_spent, 0),
             needs_removal: asSignedCredits(balanceRow.balance, 0) < 0,
             transactions: txRows,
-            orders: (orderRows || []).map(presentOrderForAdmin)
+            orders: orderRows
         });
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -4104,7 +4081,7 @@ app.get("/admin/orders", auth, admin, async (req, res) => {
         }
 
         res.json({
-            items: (orders || []).map((row) => presentOrderForAdmin({
+            items: (orders || []).map((row) => ({
                 ...row,
                 user_email: userMap.get(row.user_id) || row.user_id
             }))
@@ -4127,251 +4104,6 @@ app.post("/admin/orders/:id/recheck-credits", auth, admin, async (req, res) => {
     }
 });
 
-
-/* ================= CANCELLATION / MISSING ITEM REQUESTS ================= */
-
-function normalizeCancellationImages(images) {
-    return (Array.isArray(images) ? images : [])
-        .slice(0, 5)
-        .map((img) => ({
-            name: String(img?.name || 'upload').slice(0, 160),
-            type: String(img?.type || 'image/jpeg').slice(0, 80),
-            dataUrl: String(img?.dataUrl || '').slice(0, 2600000)
-        }))
-        .filter((img) => /^data:image\//i.test(img.dataUrl));
-}
-
-function analyzeCancellationRequest({ order, reason, evidenceType, notes }) {
-    const combined = `${reason || ''} ${evidenceType || ''} ${notes || ''}`.toLowerCase();
-    const refunded = order && isOrderRefunded(order);
-    const credits = order ? orderDisplayCreditsForServer(order) : 0;
-    const saysCanceled = /cancel|cancelled|canceled|refund|missing|not.*included|wrong item|sold out|0\.00|not in order/.test(combined);
-    const saysSuccess = /preparing|ship|arrives|delivered|ordered|order placed|success/.test(combined);
-    let recommendation = 'manual_review';
-    let confidence = 55;
-    let summary = 'Needs admin review.';
-
-    if (!order?.id) {
-        recommendation = 'deny';
-        confidence = 70;
-        summary = 'No matching charged order was found for this user/order number.';
-    } else if (refunded) {
-        recommendation = 'deny';
-        confidence = 95;
-        summary = 'This order is already refunded, so it should not be refunded again.';
-    } else if (credits <= 0) {
-        recommendation = 'deny';
-        confidence = 90;
-        summary = 'This order has 0 credits charged, so no refund is needed.';
-    } else if (saysCanceled && !saysSuccess) {
-        recommendation = 'approve_refund';
-        confidence = 80;
-        summary = 'The user marked the evidence as canceled/missing and the order has charged credits.';
-    } else if (saysCanceled && saysSuccess) {
-        recommendation = 'manual_review';
-        confidence = 60;
-        summary = 'The evidence text has both cancellation/missing and successful-shipping language. Admin should review the image.';
-    } else if (saysSuccess) {
-        recommendation = 'deny';
-        confidence = 70;
-        summary = 'The evidence description looks like a successful order, not a cancellation.';
-    }
-
-    return { recommendation, confidence, summary };
-}
-
-function orderDisplayCreditsForServer(order) {
-    if (isOrderRefunded(order)) return 0;
-    return asWholeCredits(order?.display_credits_charged ?? order?.credits_charged ?? 0, 0);
-}
-
-async function findUserOrderForCancellation(userId, orderIdentifier) {
-    const key = String(orderIdentifier || '').trim();
-    if (!key) return null;
-    let query = supabase.from('orders').select('*').eq('user_id', userId).limit(1);
-    if (/^[0-9a-fA-F-]{20,}$/.test(key)) query = query.eq('id', key);
-    else query = query.eq('external_order_id', key);
-    const { data, error } = await query.maybeSingle();
-    if (error) throw new Error(error.message);
-    return data || null;
-}
-
-app.get('/cancellation-requests', auth, async (req, res) => {
-    try {
-        const { data, error } = await maybeMany('cancellation_requests', (qb) =>
-            qb.select('*').eq('user_id', req.user_id).order('created_at', { ascending: false }).limit(100)
-        );
-        if (error) throw new Error(error.message);
-        res.json({ items: data || [] });
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
-});
-
-app.post('/cancellation-requests', auth, async (req, res) => {
-    try {
-        const orderIdentifier = String(req.body?.order_id || req.body?.order_number || '').trim();
-        const productName = String(req.body?.product_name || '').trim();
-        const sku = String(req.body?.sku || '').trim();
-        const evidenceType = String(req.body?.evidence_type || '').trim();
-        const notes = String(req.body?.notes || '').trim();
-        if (!orderIdentifier) return res.status(400).json({ error: 'Order number is required.' });
-        if (!productName && !sku) return res.status(400).json({ error: 'Product name or SKU is required.' });
-
-        const order = await findUserOrderForCancellation(req.user_id, orderIdentifier);
-        if (order?.id) {
-            const { data: existing, error: existingError } = await maybeMany('cancellation_requests', (qb) =>
-                qb.select('id,status').eq('order_id', order.id).in('status', ['pending','approved']).limit(1)
-            );
-            if (existingError) throw new Error(existingError.message);
-            if (existing?.length) return res.status(409).json({ error: 'A pending or approved refund request already exists for this order.' });
-        }
-
-        const images = normalizeCancellationImages(req.body?.images);
-        const analysis = analyzeCancellationRequest({ order, reason: evidenceType, evidenceType, notes });
-        const payload = {
-            user_id: req.user_id,
-            order_id: order?.id || null,
-            external_order_id: order?.external_order_id || orderIdentifier,
-            product_name: productName || order?.product_name || '',
-            sku: sku || order?.sku || '',
-            evidence_type: evidenceType,
-            notes,
-            status: 'pending',
-            ai_recommendation: analysis.recommendation,
-            ai_confidence: analysis.confidence,
-            ai_summary: analysis.summary,
-            requested_credits: orderDisplayCreditsForServer(order),
-            images,
-            metadata: { order_lookup_matched: Boolean(order?.id), submitted_from: 'user_dashboard' }
-        };
-        const { data, error } = await supabase.from('cancellation_requests').insert(payload).select('*').single();
-        if (error) throw new Error(error.message);
-        res.json({ success: true, request: data });
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
-});
-
-app.get('/admin/cancellation-requests', auth, admin, async (req, res) => {
-    try {
-        const currentUser = await getCurrentUser(req);
-        const scopeIds = await getScopeUserIdsForAdmin(currentUser);
-        // Do not embed users here. Supabase sees both user_id and reviewed_by foreign keys
-        // to users, which can make `users(...)` ambiguous. Fetch users separately so the
-        // admin cancellation table loads reliably on every database.
-        let query = supabase.from('cancellation_requests').select('*').order('created_at', { ascending: false }).limit(250);
-        if (scopeIds) query = query.in('user_id', scopeIds);
-        const { data, error } = await query;
-        if (error) throw new Error(error.message);
-        const items = data || [];
-        const userIds = Array.from(new Set(items.map((item) => item.user_id).filter(Boolean)));
-        let usersById = {};
-        if (userIds.length) {
-            const { data: users, error: usersError } = await supabase.from('users').select('id,email,role,owner_admin_id').in('id', userIds);
-            if (usersError) throw new Error(usersError.message);
-            usersById = Object.fromEntries((users || []).map((user) => [user.id, user]));
-        }
-        res.json({ items: items.map((item) => ({ ...item, users: usersById[item.user_id] || null, user_email: usersById[item.user_id]?.email || '' })) });
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
-});
-
-app.post('/admin/cancellation-requests/:id/deny', auth, admin, async (req, res) => {
-    try {
-        const currentUser = await getCurrentUser(req);
-        const { data: request, error } = await supabase.from('cancellation_requests').select('*').eq('id', req.params.id).maybeSingle();
-        if (error) throw new Error(error.message);
-        if (!request?.id) return res.status(404).json({ error: 'Request not found.' });
-        const { data: requestUser, error: requestUserError } = await supabase.from('users').select('*').eq('id', request.user_id).maybeSingle();
-        if (requestUserError) throw new Error(requestUserError.message);
-        if (!(await canManageTarget(currentUser, requestUser))) return res.status(403).json({ error: 'You do not have access to this request.' });
-        const { data, error: updateError } = await supabase.from('cancellation_requests').update({
-            status: 'denied',
-            admin_note: String(req.body?.note || '').trim(),
-            reviewed_by: currentUser.id,
-            reviewed_at: new Date().toISOString()
-        }).eq('id', request.id).select('*').single();
-        if (updateError) throw new Error(updateError.message);
-        res.json({ success: true, request: data });
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
-});
-
-app.post('/admin/cancellation-requests/:id/approve', auth, admin, async (req, res) => {
-    try {
-        const currentUser = await getCurrentUser(req);
-        const { data: request, error } = await supabase.from('cancellation_requests').select('*').eq('id', req.params.id).maybeSingle();
-        if (error) throw new Error(error.message);
-        if (!request?.id) return res.status(404).json({ error: 'Request not found.' });
-        const { data: requestUser, error: requestUserError } = await supabase.from('users').select('*').eq('id', request.user_id).maybeSingle();
-        if (requestUserError) throw new Error(requestUserError.message);
-        if (!(await canManageTarget(currentUser, requestUser))) return res.status(403).json({ error: 'You do not have access to this request.' });
-        if (String(request.status || '') === 'approved') return res.status(409).json({ error: 'This request has already been approved.' });
-        if (!request.order_id) return res.status(400).json({ error: 'No linked order found. Deny this request or refund the order manually from Credits + Orders.' });
-
-        const { data: order, error: orderError } = await supabase.from('orders').select('*').eq('id', request.order_id).maybeSingle();
-        if (orderError) throw new Error(orderError.message);
-        if (!order?.id) return res.status(404).json({ error: 'Linked order not found.' });
-        if (isOrderRefunded(order)) {
-            const { data } = await supabase.from('cancellation_requests').update({
-                status: 'approved',
-                admin_note: 'Approved, but linked order had already been refunded.',
-                reviewed_by: currentUser.id,
-                reviewed_at: new Date().toISOString()
-            }).eq('id', request.id).select('*').single();
-            return res.json({ success: true, already_refunded: true, request: data, order: presentOrderForAdmin(order) });
-        }
-
-        const originalCredits = asWholeCredits(order.credits_charged || 0, 0);
-        const amount = asWholeCredits(req.body?.amount, originalCredits);
-        if (amount <= 0) return res.status(400).json({ error: 'Refund amount must be greater than 0.' });
-
-        const balance = await adjustUserCredits({
-            userId: order.user_id,
-            delta: amount,
-            reason: 'cancellation_refund_credit',
-            note: String(req.body?.note || `Cancellation request approved for order ${order.external_order_id || order.id}`).trim(),
-            metadata: { order_id: order.id, cancellation_request_id: request.id, external_order_id: order.external_order_id, refunded_by: currentUser.email, original_credits_charged: originalCredits },
-            createdBy: currentUser.id,
-            orderId: order.id
-        });
-
-        const refundedAt = new Date().toISOString();
-        const updatedMetadata = {
-            ...(order.metadata || {}),
-            refund_credits: amount,
-            refunded_credits: amount,
-            original_credits_charged: originalCredits,
-            refund_note: String(req.body?.note || 'Cancellation request approved').trim(),
-            refunded_at: refundedAt,
-            refunded_by: currentUser.email,
-            cancellation_request_id: request.id
-        };
-        const { data: updatedOrder, error: updateOrderError } = await supabase.from('orders').update({
-            metadata: updatedMetadata,
-            credits_charged: 0,
-            status: 'refunded'
-        }).eq('id', order.id).select('*').maybeSingle();
-        if (updateOrderError) throw new Error(updateOrderError.message);
-
-        const { data: updatedRequest, error: updateRequestError } = await supabase.from('cancellation_requests').update({
-            status: 'approved',
-            approved_credits: amount,
-            admin_note: String(req.body?.note || '').trim(),
-            reviewed_by: currentUser.id,
-            reviewed_at: refundedAt
-        }).eq('id', request.id).select('*').single();
-        if (updateRequestError) throw new Error(updateRequestError.message);
-
-        res.json({ success: true, balance, request: updatedRequest, order: presentOrderForAdmin(updatedOrder || { ...order, metadata: updatedMetadata, credits_charged: 0, status: 'refunded' }) });
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
-});
-
 app.post("/admin/orders/:id/refund-credits", auth, admin, async (req, res) => {
     try {
         const currentUser = await getCurrentUser(req);
@@ -4384,13 +4116,7 @@ app.post("/admin/orders/:id/refund-credits", auth, admin, async (req, res) => {
             return res.status(403).json({ error: "You do not have access to this user." });
         }
 
-        if (isOrderRefunded(order)) {
-            const currentBalance = await ensureUserCreditBalance(order.user_id);
-            return res.json({ success: true, already_refunded: true, balance: currentBalance, order: presentOrderForAdmin(order) });
-        }
-
-        const originalCredits = asWholeCredits(order.credits_charged || 0, 0);
-        const amount = asWholeCredits(req.body?.amount, originalCredits);
+        const amount = asWholeCredits(req.body?.amount, order.credits_charged || 0);
         if (amount <= 0) return res.status(400).json({ error: "Refund amount must be greater than 0" });
 
         const balance = await adjustUserCredits({
@@ -4398,29 +4124,18 @@ app.post("/admin/orders/:id/refund-credits", auth, admin, async (req, res) => {
             delta: amount,
             reason: "order_refund_credit",
             note: String(req.body?.note || "Manual credit refund").trim(),
-            metadata: { order_id: order.id, external_order_id: order.external_order_id, refunded_by: currentUser.email, original_credits_charged: originalCredits },
+            metadata: { order_id: order.id, external_order_id: order.external_order_id, refunded_by: currentUser.email },
             createdBy: currentUser.id,
             orderId: order.id
         });
 
-        const refundedAt = new Date().toISOString();
-        const updatedMetadata = {
-            ...(order.metadata || {}),
-            refund_credits: amount,
-            refunded_credits: amount,
-            original_credits_charged: originalCredits,
-            refund_note: String(req.body?.note || "").trim(),
-            refunded_at: refundedAt,
-            refunded_by: currentUser.email
-        };
-        const { data: updatedOrder, error: updateError } = await supabase.from("orders").update({
-            metadata: updatedMetadata,
-            credits_charged: 0,
-            status: "refunded"
-        }).eq("id", order.id).select("*").maybeSingle();
+        const { error: updateError } = await supabase.from("orders").update({
+            metadata: { ...(order.metadata || {}), refund_credits: amount, refund_note: String(req.body?.note || "").trim() },
+            status: order.status === "refunded" ? "refunded" : `${order.status || "success"}_credited`
+        }).eq("id", order.id);
         if (updateError) return res.status(500).json({ error: updateError.message });
 
-        res.json({ success: true, balance, order: presentOrderForAdmin(updatedOrder || { ...order, metadata: updatedMetadata, credits_charged: 0, status: 'refunded' }) });
+        res.json({ success: true, balance });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
@@ -5654,7 +5369,7 @@ app.get("/user/activity", auth, async (req, res) => {
             lifetime_credits_spent: asWholeCredits(balanceRow.lifetime_credits_spent, 0),
             needs_removal: asSignedCredits(balanceRow.balance, 0) < 0,
             transactions: txRows,
-            orders: (orderRows || []).map(presentOrderForAdmin)
+            orders: orderRows
         });
     } catch (err) {
         res.status(500).json({ error: err.message });

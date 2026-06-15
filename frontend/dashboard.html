@@ -50,7 +50,6 @@
         <button class="admin-nav-button" type="button" data-user-nav="selections">Countdowns</button>
         <button class="admin-nav-button" type="button" data-user-nav="credits">Buy Credits</button>
         <button class="admin-nav-button" type="button" data-user-nav="history">Order History</button>
-        <button class="admin-nav-button" type="button" data-user-nav="cancellations">Cancellations</button>
         <button class="admin-nav-button" type="button" data-user-nav="discord">Discord Settings</button>
       </aside>
 
@@ -396,51 +395,6 @@
                   </table>
                 </div>
               </div>
-            </div>
-          </section>
-        </section>
-
-
-
-        <section class="admin-pane" data-user-pane="cancellations">
-          <section class="panel">
-            <div class="panel-header">
-              <div>
-                <h2>Cancellation / Missing Item Requests</h2>
-                <p class="subtle-text">Upload screenshots when the checked-out item is missing, canceled, or the main SKU did not actually make it into the order. Admin will approve or deny the credit refund.</p>
-                <div class="notice-box" style="margin-top:10px;">
-                  <strong>What your screenshots must show:</strong>
-                  <ul style="margin:8px 0 0 18px; padding:0;">
-                    <li>The Target order number at the top of the order screen or email.</li>
-                    <li>The product title/name that was supposed to checkout. SKU is helpful, but the product title is usually enough if the SKU is not visible.</li>
-                    <li>The order status area, such as Canceled, Preparing to ship, Arrives, Delivered, or Start a return.</li>
-                    <li>The order total. A $0.00 total usually means nothing was successfully charged; a paid total may mean some items checked out.</li>
-                    <li>If it was a partial checkout, include screenshots showing every item in the order so admin can see whether the requested product is missing.</li>
-                    <li>If the item was canceled, include the cancellation reason/message when visible.</li>
-                  </ul>
-                  <p class="subtle-text" style="margin-top:8px;">Refunds are based on whether the product from the success webhook/order request is actually present in the order. Do not crop out the order number, product names, status, or total.</p>
-                </div>
-              </div>
-            </div>
-            <div class="form-grid">
-              <div class="field field--full">
-                <label for="cancelOrderSelect">Select the order that needs review</label>
-                <select class="input" id="cancelOrderSelect" onchange="handleCancellationOrderSelect()">
-                  <option value="">Loading your recent orders...</option>
-                </select>
-                <p class="subtle-text" id="cancelSelectedOrderSummary" style="margin-top:6px;">Choose one of your previous successful checkout orders. The order number, product name, and SKU will fill in automatically.</p>
-              </div>
-              <input type="hidden" id="cancelOrderId" />
-              <div class="field"><label for="cancelOrderNumber">Order Number</label><input class="input" id="cancelOrderNumber" placeholder="Auto-filled after selecting an order" readonly /></div>
-              <div class="field"><label for="cancelSku">SKU</label><input class="input" id="cancelSku" placeholder="Auto-filled after selecting an order" readonly /></div>
-              <div class="field field--full"><label for="cancelProductName">Product Name</label><input class="input" id="cancelProductName" placeholder="Auto-filled after selecting an order" readonly /></div>
-              <div class="field"><label for="cancelEvidenceType">What does your screenshot show?</label><select class="input" id="cancelEvidenceType"><option value="missing_main_item_or_canceled">Main item missing / canceled</option><option value="successful_order">Successful order / item present</option><option value="partial_order_wrong_item">Partial order / wrong item</option><option value="other">Other / admin review</option></select></div>
-              <div class="field"><label for="cancelImages">Screenshots</label><input class="input" id="cancelImages" type="file" accept="image/*" multiple /></div>
-              <div class="field field--full"><label for="cancelNotes">Notes</label><textarea class="input" id="cancelNotes" rows="4" placeholder="Explain what item was missing or canceled."></textarea></div>
-            </div>
-            <div class="panel-actions"><button class="btn btn-primary" type="button" onclick="submitCancellationRequest()">Submit Cancellation Request</button><button class="btn" type="button" onclick="loadCancellationRequests()">Refresh Requests</button><span class="subtle-text" id="cancelRequestMessage"></span></div>
-            <div class="table-wrap table-wrap--admin-scroll" style="margin-top:12px;">
-              <table class="admin-table"><thead><tr><th>When</th><th>Order</th><th>Product</th><th>AI Assist</th><th>Status</th><th>Admin Note</th></tr></thead><tbody id="cancelRequestsBody"><tr><td colspan="6">Loading requests...</td></tr></tbody></table>
             </div>
           </section>
         </section>

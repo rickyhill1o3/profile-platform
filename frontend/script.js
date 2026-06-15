@@ -3927,9 +3927,8 @@ async function loadUserActivity() {
         const balance = Number(data.balance || 0);
         summary.textContent = `Current balance: ${balance} credits • Lifetime granted: ${Number(data.lifetime_credits_granted || 0)} • Lifetime spent: ${Number(data.lifetime_credits_spent || 0)}${data.needs_removal ? ' • Flagged for removal until positive balance is restored' : ''}`;
         const orders = Array.isArray(data.orders) ? data.orders : [];
-        renderCancellationOrderOptions(orders);
         ordersBody.innerHTML = orders.length ? orders.map((order) => `
-            <tr><td>${escapeHTML(formatDateTime(order.created_at))}</td><td>${escapeHTML(order.site || '-')}</td><td>${escapeHTML(order.product_name || '-')}</td><td>${orderStatusBadge(order)}</td><td>${escapeHTML(String(orderDisplayCredits(order)))}</td></tr>
+            <tr><td>${escapeHTML(formatDateTime(order.created_at))}</td><td>${escapeHTML(order.site || '-')}</td><td>${escapeHTML(order.product_name || '-')}</td><td>${escapeHTML(order.status || '-')}</td><td>${escapeHTML(String(order.credits_charged || 0))}</td></tr>
         `).join('') : '<tr><td colspan="5">No orders yet.</td></tr>';
         const txs = Array.isArray(data.transactions) ? data.transactions : [];
         txBody.innerHTML = txs.length ? txs.map((tx) => `
@@ -3978,7 +3977,7 @@ async function loadUserCreditReceipt(userId) {
               <td>${escapeHTML(item.site || '-')}</td>
               <td>${escapeHTML(item.product_name || item.sku || '-')}</td>
               <td>${String(item.status || '') === 'insufficient_credits' ? '<span class="status-tag status-tag--danger">Insufficient Credits</span>' : '<span class="status-tag status-tag--success">Charged</span>'}</td>
-              <td>${escapeHTML(String(orderDisplayCredits(item)))}</td>
+              <td>${escapeHTML(String(item.credits_charged || 0))}</td>
               <td>${escapeHTML(item.external_order_id || '-')}</td>
             </tr>`).join('') : '<tr><td colspan="6">No linked orders found.</td></tr>';
     } catch (err) {
@@ -3986,24 +3985,6 @@ async function loadUserCreditReceipt(userId) {
         txBody.innerHTML = `<tr><td colspan="5">${escapeHTML(err.message)}</td></tr>`;
         ordersBody.innerHTML = `<tr><td colspan="6">${escapeHTML(err.message)}</td></tr>`;
     }
-}
-
-function orderDisplayStatus(item) {
-    const status = String(item?.display_status || item?.status || '').toLowerCase();
-    if (item?.is_refunded || status === 'refunded' || item?.metadata?.refunded_at) return 'refunded';
-    return status || 'success';
-}
-
-function orderDisplayCredits(item) {
-    if (orderDisplayStatus(item) === 'refunded') return 0;
-    return Number(item?.display_credits_charged ?? item?.credits_charged ?? 0) || 0;
-}
-
-function orderStatusBadge(item) {
-    const status = orderDisplayStatus(item);
-    if (status === 'refunded') return '<span class="status-tag status-tag--danger">Refunded</span>';
-    if (status === 'insufficient_credits') return '<span class="status-tag status-tag--danger">Insufficient Credits</span>';
-    return '<span class="status-tag status-tag--success">Charged</span>';
 }
 
 async function loadCreditsAdminPane() {
@@ -4064,10 +4045,10 @@ async function loadCreditsAdminPane() {
               <td>${escapeHTML(item.source || '-')}</td>
               <td>${escapeHTML(item.product_name || item.sku || '-')}</td>
               <td>${String(item.status || '') === 'insufficient_credits' ? '<span class="status-tag status-tag--danger">Insufficient Credits</span>' : '<span class="status-tag status-tag--success">Charged</span>'}</td>
-              <td>${escapeHTML(String(orderDisplayCredits(item)))}</td>
+              <td>${escapeHTML(String(item.credits_charged || 0))}</td>
               <td>${escapeHTML(item.external_order_id || '-')}</td>
               <td><div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;">
-                ${orderDisplayStatus(item) === 'refunded' ? '<span class="status-tag status-tag--danger">Already Refunded</span>' : (orderDisplayCredits(item) > 0 ? `<button class="btn" type="button" data-refund-order="${escapeHTML(item.id)}" data-refund-amount="${escapeHTML(String(orderDisplayCredits(item)))}">Refund Credits</button>` : '<span class="subtle-text">No charge</span>')}
+                ${Number(item.credits_charged || 0) > 0 ? `<button class="btn" type="button" data-refund-order="${escapeHTML(item.id)}" data-refund-amount="${escapeHTML(String(item.credits_charged || 0))}">Refund Credits</button>` : '<span class="subtle-text">No charge</span>'}
                 <button class="btn secondary" type="button" data-recheck-order="${escapeHTML(item.id)}">Recheck Credits</button>
               </div></td>
             </tr>`).join('') : '<tr><td colspan="8">No orders found yet.</td></tr>';
@@ -4701,281 +4682,6 @@ async function initAdminStoreRunStatus() {
 }
 
 
-let cancellationOrderOptions = [];
-
-function orderIdentifierForCancellation(order) {
-    return String(order?.external_order_id || order?.order_id || order?.id || '').trim();
-}
-
-function orderOptionLabel(order) {
-    const when = formatDateTime(order?.created_at || '');
-    const orderNumber = orderIdentifierForCancellation(order) || 'No order number';
-    const product = String(order?.product_name || 'Unknown product');
-    const sku = String(order?.sku || '').trim();
-    const site = String(order?.site || '').trim();
-    const credits = orderDisplayCredits(order);
-    return `${when} • ${orderNumber} • ${site || 'site'} • ${product}${sku ? ` • SKU ${sku}` : ''} • ${credits} credit${Number(credits) === 1 ? '' : 's'}`;
-}
-
-function renderCancellationOrderOptions(orders) {
-    cancellationOrderOptions = Array.isArray(orders) ? orders.filter((order) => {
-        const refunded = Boolean(order?.is_refunded) || String(order?.display_status || order?.status || '').toLowerCase() === 'refunded';
-        return !refunded && orderIdentifierForCancellation(order);
-    }) : [];
-
-    const select = document.getElementById('cancelOrderSelect');
-    if (!select) return;
-
-    if (!cancellationOrderOptions.length) {
-        select.innerHTML = '<option value="">No refundable orders found yet</option>';
-        handleCancellationOrderSelect();
-        return;
-    }
-
-    select.innerHTML = '<option value="">Select one of your previous orders...</option>' + cancellationOrderOptions.map((order) => {
-        const id = String(order?.id || orderIdentifierForCancellation(order));
-        return `<option value="${escapeHTML(id)}">${escapeHTML(orderOptionLabel(order))}</option>`;
-    }).join('');
-    handleCancellationOrderSelect();
-}
-
-function selectedCancellationOrder() {
-    const select = document.getElementById('cancelOrderSelect');
-    const selectedId = String(select?.value || '').trim();
-    if (!selectedId) return null;
-    return cancellationOrderOptions.find((order) => String(order?.id || orderIdentifierForCancellation(order)) === selectedId) || null;
-}
-
-function handleCancellationOrderSelect() {
-    const order = selectedCancellationOrder();
-    const idInput = document.getElementById('cancelOrderId');
-    const orderInput = document.getElementById('cancelOrderNumber');
-    const skuInput = document.getElementById('cancelSku');
-    const productInput = document.getElementById('cancelProductName');
-    const summary = document.getElementById('cancelSelectedOrderSummary');
-
-    if (idInput) idInput.value = order?.id || '';
-    if (orderInput) orderInput.value = orderIdentifierForCancellation(order);
-    if (skuInput) skuInput.value = order?.sku || '';
-    if (productInput) productInput.value = order?.product_name || '';
-
-    if (summary) {
-        if (!order) {
-            summary.textContent = 'Choose one of your previous successful checkout orders. The order number, product name, and SKU will fill in automatically.';
-        } else {
-            summary.textContent = `Selected: ${orderIdentifierForCancellation(order)} • ${order.site || 'site'} • ${order.product_name || 'product'}${order.sku ? ` • SKU ${order.sku}` : ''}. Upload screenshots that prove this selected product is missing or canceled.`;
-        }
-    }
-}
-
-
-
-async function fileToDataUrl(file) {
-    return new Promise((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = () => resolve(String(reader.result || ''));
-        reader.onerror = () => reject(reader.error || new Error('Could not read image.'));
-        reader.readAsDataURL(file);
-    });
-}
-
-async function collectCancellationImages() {
-    const input = document.getElementById('cancelImages');
-    const files = Array.from(input?.files || []).slice(0, 5);
-    const images = [];
-    for (const file of files) {
-        if (!String(file.type || '').startsWith('image/')) continue;
-        if (file.size > 2500000) {
-            throw new Error(`${file.name} is too large. Please upload screenshots under about 2.5MB each. Crop only unrelated borders, but keep the order number, product names, status, and total visible.`);
-        }
-        images.push({ name: file.name, type: file.type, dataUrl: await fileToDataUrl(file) });
-    }
-    return images;
-}
-
-function cancellationStatusBadge(status) {
-    const value = String(status || 'pending').toLowerCase();
-    if (value === 'approved') return '<span class="status-tag status-tag--success">Approved / Refunded</span>';
-    if (value === 'denied') return '<span class="status-tag status-tag--danger">Denied</span>';
-    return '<span class="status-tag">Pending Review</span>';
-}
-
-function aiRecommendationBadge(item) {
-    const rec = String(item?.ai_recommendation || 'manual_review');
-    const confidence = item?.ai_confidence ? ` (${item.ai_confidence}%)` : '';
-    const label = rec === 'approve_refund' ? 'Recommend refund' : rec === 'deny' ? 'Recommend deny' : 'Manual review';
-    const cls = rec === 'approve_refund' ? 'status-tag--success' : rec === 'deny' ? 'status-tag--danger' : '';
-    return `<span class="status-tag ${cls}">${escapeHTML(label + confidence)}</span><div class="subtle-text">${escapeHTML(item?.ai_summary || '')}</div>`;
-}
-
-async function submitCancellationRequest() {
-    const message = document.getElementById('cancelRequestMessage');
-    if (message) message.textContent = 'Submitting request...';
-    try {
-        const selectedOrder = selectedCancellationOrder();
-        if (!selectedOrder) throw new Error('Please select the previous order that needs to be reviewed.');
-        const images = await collectCancellationImages();
-        const payload = {
-            order_id: selectedOrder.id || '',
-            order_number: orderIdentifierForCancellation(selectedOrder),
-            sku: selectedOrder.sku || '',
-            product_name: selectedOrder.product_name || '',
-            evidence_type: document.getElementById('cancelEvidenceType')?.value || '',
-            notes: document.getElementById('cancelNotes')?.value || '',
-            images
-        };
-        await authJSON(API + '/cancellation-requests', { method: 'POST', body: JSON.stringify(payload) });
-        if (message) message.textContent = 'Cancellation request submitted for admin review.';
-        ['cancelOrderId','cancelOrderNumber','cancelSku','cancelProductName','cancelNotes'].forEach((id) => { const el = document.getElementById(id); if (el) el.value = ''; });
-        const orderSelect = document.getElementById('cancelOrderSelect');
-        if (orderSelect) orderSelect.value = '';
-        handleCancellationOrderSelect();
-        const fileInput = document.getElementById('cancelImages');
-        if (fileInput) fileInput.value = '';
-        await loadCancellationRequests();
-    } catch (err) {
-        if (message) message.textContent = err.message;
-    }
-}
-
-async function loadCancellationRequests() {
-    const body = document.getElementById('cancelRequestsBody');
-    if (!body) return;
-    body.innerHTML = '<tr><td colspan="6">Loading requests...</td></tr>';
-    try {
-        const data = await authJSON(API + '/cancellation-requests');
-        const items = Array.isArray(data.items) ? data.items : [];
-        body.innerHTML = items.length ? items.map((item) => `
-            <tr>
-              <td>${escapeHTML(formatEasternTime(item.created_at || ''))} ET</td>
-              <td>${escapeHTML(item.external_order_id || '-')}</td>
-              <td>${escapeHTML(item.product_name || item.sku || '-')}</td>
-              <td>${aiRecommendationBadge(item)}</td>
-              <td>${cancellationStatusBadge(item.status)}</td>
-              <td>${escapeHTML(item.admin_note || '-')}</td>
-            </tr>
-        `).join('') : '<tr><td colspan="6">No cancellation requests yet.</td></tr>';
-    } catch (err) {
-        body.innerHTML = `<tr><td colspan="6">${escapeHTML(err.message)}</td></tr>`;
-    }
-}
-
-window.__cancellationImageStore = window.__cancellationImageStore || {};
-
-function openCancellationImagePreview(imageKey) {
-    const img = window.__cancellationImageStore?.[imageKey];
-    if (!img?.dataUrl) {
-        alert('This screenshot could not be loaded. Ask the user to re-upload it under 2.5MB.');
-        return;
-    }
-    let modal = document.getElementById('cancellationImagePreviewModal');
-    if (!modal) {
-        modal = document.createElement('div');
-        modal.id = 'cancellationImagePreviewModal';
-        modal.style.cssText = 'position:fixed;inset:0;z-index:9999;background:rgba(15,23,42,.78);display:none;align-items:center;justify-content:center;padding:24px;';
-        modal.innerHTML = `
-            <div style="background:#fff;border-radius:14px;max-width:min(1100px,96vw);max-height:94vh;width:100%;padding:14px;box-shadow:0 20px 60px rgba(0,0,0,.35);display:flex;flex-direction:column;gap:10px;">
-                <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;">
-                    <strong id="cancellationImagePreviewTitle">Cancellation screenshot</strong>
-                    <div style="display:flex;gap:8px;">
-                        <a class="btn" id="cancellationImageDownloadLink" download="cancellation-screenshot.jpg">Download</a>
-                        <button class="btn btn-danger" type="button" id="cancellationImagePreviewClose">Close</button>
-                    </div>
-                </div>
-                <div style="overflow:auto;text-align:center;border:1px solid #d8e1f0;border-radius:12px;background:#f8fafc;">
-                    <img id="cancellationImagePreviewImg" alt="Cancellation screenshot" style="max-width:100%;height:auto;display:block;margin:0 auto;" />
-                </div>
-            </div>`;
-        document.body.appendChild(modal);
-        modal.addEventListener('click', (event) => { if (event.target === modal) modal.style.display = 'none'; });
-        document.getElementById('cancellationImagePreviewClose')?.addEventListener('click', () => { modal.style.display = 'none'; });
-    }
-    const imageEl = document.getElementById('cancellationImagePreviewImg');
-    const titleEl = document.getElementById('cancellationImagePreviewTitle');
-    const downloadEl = document.getElementById('cancellationImageDownloadLink');
-    if (imageEl) imageEl.src = img.dataUrl;
-    if (titleEl) titleEl.textContent = img.name || 'Cancellation screenshot';
-    if (downloadEl) {
-        downloadEl.href = img.dataUrl;
-        downloadEl.download = img.name || 'cancellation-screenshot.jpg';
-    }
-    modal.style.display = 'flex';
-}
-
-function renderCancellationImages(item) {
-    const images = Array.isArray(item.images) ? item.images : [];
-    if (!images.length) return '<span class="subtle-text">No images</span>';
-    return images.map((img, index) => {
-        const key = `cancel-${item.id || 'request'}-${index}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-        window.__cancellationImageStore[key] = img;
-        return `<button class="btn" type="button" data-cancel-image-key="${escapeHTML(key)}">Image ${index + 1}</button>`;
-    }).join(' ');
-}
-
-async function loadAdminCancellationRequests() {
-    const body = document.getElementById('adminCancellationRequestsBody');
-    const message = document.getElementById('adminCancellationMessage');
-    if (!body) return;
-    body.innerHTML = '<tr><td colspan="8">Loading requests...</td></tr>';
-    try {
-        const data = await authJSON(API + '/admin/cancellation-requests');
-        const items = Array.isArray(data.items) ? data.items : [];
-        body.innerHTML = items.length ? items.map((item) => {
-            const pending = String(item.status || 'pending') === 'pending';
-            return `
-            <tr>
-              <td>${escapeHTML(formatEasternTime(item.created_at || ''))} ET</td>
-              <td>${escapeHTML(item.users?.email || item.user_email || '-')}</td>
-              <td>${escapeHTML(item.external_order_id || '-')}</td>
-              <td>${escapeHTML(item.product_name || item.sku || '-')}</td>
-              <td>${aiRecommendationBadge(item)}</td>
-              <td>${cancellationStatusBadge(item.status)}</td>
-              <td>${renderCancellationImages(item)}</td>
-              <td><div style="display:flex;gap:6px;flex-wrap:wrap;">
-                ${pending ? `<button class="btn" type="button" data-approve-cancel="${escapeHTML(item.id)}" data-refund-amount="${escapeHTML(String(item.requested_credits || 0))}">Approve Refund</button><button class="btn btn-danger" type="button" data-deny-cancel="${escapeHTML(item.id)}">Deny</button>` : '<span class="subtle-text">Reviewed</span>'}
-              </div></td>
-            </tr>`;
-        }).join('') : '<tr><td colspan="8">No cancellation requests found.</td></tr>';
-
-        body.querySelectorAll('[data-cancel-image-key]').forEach((button) => {
-            button.addEventListener('click', () => openCancellationImagePreview(button.dataset.cancelImageKey));
-        });
-        body.querySelectorAll('[data-approve-cancel]').forEach((button) => {
-            button.addEventListener('click', async () => {
-                const amountText = window.prompt('Refund how many credits?', button.dataset.refundAmount || '0');
-                if (amountText === null) return;
-                const amount = Math.round(Number(amountText || 0));
-                if (!Number.isFinite(amount) || amount <= 0) return;
-                const note = window.prompt('Approval note', 'Cancellation/missing-item proof approved') || '';
-                try {
-                    await authJSON(API + '/admin/cancellation-requests/' + encodeURIComponent(button.dataset.approveCancel) + '/approve', { method: 'POST', body: JSON.stringify({ amount, note }) });
-                    if (message) message.textContent = 'Request approved and credits refunded.';
-                    await loadAdminCancellationRequests();
-                    try { await loadCreditsAdminPane(); } catch (_) { }
-        try { await loadAdminCancellationRequests(); } catch (_) { }
-                } catch (err) {
-                    if (message) message.textContent = err.message;
-                }
-            });
-        });
-        body.querySelectorAll('[data-deny-cancel]').forEach((button) => {
-            button.addEventListener('click', async () => {
-                const note = window.prompt('Denial note', 'Proof does not show a canceled/missing main item') || '';
-                try {
-                    await authJSON(API + '/admin/cancellation-requests/' + encodeURIComponent(button.dataset.denyCancel) + '/deny', { method: 'POST', body: JSON.stringify({ note }) });
-                    if (message) message.textContent = 'Request denied.';
-                    await loadAdminCancellationRequests();
-                } catch (err) {
-                    if (message) message.textContent = err.message;
-                }
-            });
-        });
-    } catch (err) {
-        body.innerHTML = `<tr><td colspan="8">${escapeHTML(err.message)}</td></tr>`;
-    }
-}
-
-
 document.addEventListener("DOMContentLoaded", async () => {
     if (!requireAuthForPrivatePages()) return;
     try {
@@ -5000,7 +4706,6 @@ document.addEventListener("DOMContentLoaded", async () => {
         try { await loadTargetCheckoutListsForUser(); } catch (err) { console.error("Target checkout lists failed:", err); }
         try { await loadCreditsBalance(); } catch (_) { }
         try { await loadUserActivity(); } catch (_) { }
-        try { await loadCancellationRequests(); } catch (_) { }
     }
 
     if (document.getElementById("profileForm")) {
