@@ -4109,6 +4109,23 @@ function unwrapSecretValue(value = '') {
     return String(value || '').replace(/^\|\||\|\|$/g, '').trim();
 }
 
+const ORDER_RECHECK_DEBUG_DIR = process.env.ORDER_RECHECK_DEBUG_DIR || '/tmp/order-recheck-debug';
+function safeDebugFileName(value = '') {
+    return String(value || '').replace(/[^a-zA-Z0-9_.-]+/g, '_').slice(0, 180);
+}
+async function saveOrderRecheckDebug(page, debug, label) {
+    if (!debug?.enabled || !page) return;
+    try {
+        const fs = require('fs');
+        const path = require('path');
+        fs.mkdirSync(ORDER_RECHECK_DEBUG_DIR, { recursive: true });
+        const file = `${Date.now()}-${safeDebugFileName(debug.orderNumber || 'order')}-${safeDebugFileName(label)}.png`;
+        const fullPath = path.join(ORDER_RECHECK_DEBUG_DIR, file);
+        await page.screenshot({ path: fullPath, fullPage: true, timeout: 15000 }).catch(() => null);
+        debug.screenshots.push(`/admin/order-recheck-debug/${encodeURIComponent(file)}`);
+    } catch (_) { }
+}
+
 function textContainsNeedle(haystack = '', needle = '') {
     const h = String(haystack || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ');
     const n = String(needle || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
@@ -4189,7 +4206,7 @@ async function findRetailLoginForOrder(order, normalized) {
     return { loginEmail, loginPassword, profileId: profile?.id || credential?.profile_id || null, profileName: profile?.profile_name || profileName };
 }
 
-async function checkTargetOrderWithBrowser({ order, normalized, payload }) {
+async function checkTargetOrderWithBrowser({ order, normalized, payload, debugMode = false }) {
     const { chromium } = require('playwright');
     const { fields } = buildFieldMapFromEmbeds(payload || {});
     const proxyValue = unwrapSecretValue(fields['proxy'] || payload?.proxy || payload?.proxy_used || '');
@@ -4200,26 +4217,57 @@ async function checkTargetOrderWithBrowser({ order, normalized, payload }) {
     const orderNumber = String(normalized.order_number || order.external_order_id || '').trim();
     if (!orderNumber) throw new Error('No order number is available to recheck.');
     if (!expectedSku && !expectedProduct) throw new Error('No expected SKU or product name is available to compare.');
+    const debug = { enabled: !!debugMode, orderNumber, logs: [], screenshots: [] };
+    const log = (msg) => { if (debug.enabled) debug.logs.push(`${new Date().toISOString()} ${msg}`); };
 
     let browser;
     try {
-        browser = await chromium.launch({ headless: true, proxy: proxy || undefined });
+        browser = await chromium.launch({ headless: process.env.ORDER_RECHECK_HEADLESS === 'false' ? false : true, proxy: proxy || undefined, slowMo: debug.enabled ? 250 : 0 });
         const context = await browser.newContext({ viewport: { width: 1365, height: 900 } });
         const page = await context.newPage();
         page.setDefaultTimeout(45000);
 
+        log('Opening Target orders page.');
         await page.goto('https://www.target.com/account/orders', { waitUntil: 'domcontentloaded', timeout: 60000 });
-        const loginInput = page.locator('input[type="email"], input[name="username"], input#username').first();
+        await saveOrderRecheckDebug(page, debug, '01-orders-page');
+
+        let loginInput = page.locator('input[type="email"], input[name="username"], input#username, input[autocomplete="username"]').first();
+        if (!(await loginInput.isVisible().catch(() => false))) {
+            log('Email field was not visible; trying to click a sign-in control.');
+            await page.getByRole('button', { name: /sign in|account/i }).first().click({ timeout: 7000 }).catch(() => null);
+            await page.getByRole('link', { name: /sign in|account/i }).first().click({ timeout: 7000 }).catch(() => null);
+            await page.waitForTimeout(2500);
+            await saveOrderRecheckDebug(page, debug, '02-after-signin-click');
+            loginInput = page.locator('input[type="email"], input[name="username"], input#username, input[autocomplete="username"]').first();
+        }
+
         if (await loginInput.isVisible().catch(() => false)) {
+            log('Filling Target login email.');
             await loginInput.fill(login.loginEmail);
-            const continueButton = page.getByRole('button', { name: /continue|sign in/i }).first();
+            await saveOrderRecheckDebug(page, debug, '03-email-filled');
+            const continueButton = page.getByRole('button', { name: /continue|sign in|next/i }).first();
             if (await continueButton.isVisible().catch(() => false)) await continueButton.click().catch(() => null);
-            const passwordInput = page.locator('input[type="password"], input[name="password"], input#password').first();
-            await passwordInput.waitFor({ state: 'visible', timeout: 45000 });
+            await page.waitForTimeout(2500);
+            await saveOrderRecheckDebug(page, debug, '04-after-email-submit');
+
+            const passwordInput = page.locator('input[type="password"], input[name="password"], input#password, input[autocomplete="current-password"]').first();
+            try {
+                await passwordInput.waitFor({ state: 'visible', timeout: 45000 });
+            } catch (err) {
+                await saveOrderRecheckDebug(page, debug, 'error-password-not-visible');
+                const pageText = await page.locator('body').innerText({ timeout: 5000 }).catch(() => '');
+                throw new Error(`Target password field did not appear. This usually means Target showed a challenge, OTP, blocked the proxy, or changed the login page. Debug screenshots: ${debug.screenshots.join(' , ')}. Page text: ${pageText.slice(0, 500)}`);
+            }
+            log('Filling Target login password.');
             await passwordInput.fill(login.loginPassword);
+            await saveOrderRecheckDebug(page, debug, '05-password-filled');
             const signInButton = page.getByRole('button', { name: /sign in|login|continue/i }).first();
             await signInButton.click();
             await page.waitForLoadState('domcontentloaded', { timeout: 60000 }).catch(() => null);
+            await page.waitForTimeout(3000);
+            await saveOrderRecheckDebug(page, debug, '06-after-password-submit');
+        } else {
+            log('No Target login email field appeared; continuing in case session was already authenticated.');
         }
 
         const possibleUrls = [
@@ -4233,6 +4281,7 @@ async function checkTargetOrderWithBrowser({ order, normalized, payload }) {
             await page.waitForTimeout(3500);
             const bodyText = await page.locator('body').innerText({ timeout: 15000 }).catch(() => '');
             fullText += '\n' + bodyText;
+            await saveOrderRecheckDebug(page, debug, `order-url-${possibleUrls.indexOf(url) + 1}`);
             if (bodyText.includes(orderNumber)) break;
         }
 
@@ -4250,7 +4299,11 @@ async function checkTargetOrderWithBrowser({ order, normalized, payload }) {
         const skuFound = expectedSku ? textContainsNeedle(fullText, expectedSku) : false;
         const productFound = expectedProduct ? textContainsNeedle(fullText, expectedProduct) : false;
         const expectedItemFound = skuFound || productFound;
-        return { orderFound, expectedItemFound, skuFound, productFound, expectedSku, expectedProduct, orderNumber };
+        await saveOrderRecheckDebug(page, debug, 'final');
+        return { orderFound, expectedItemFound, skuFound, productFound, expectedSku, expectedProduct, orderNumber, debug: debug.enabled ? debug : undefined };
+    } catch (err) {
+        if (debug.enabled) err.message = `${err.message} Debug screenshots: ${debug.screenshots.join(' , ')} Logs: ${debug.logs.join(' | ')}`;
+        throw err;
     } finally {
         if (browser) await browser.close().catch(() => null);
     }
@@ -4270,6 +4323,17 @@ app.post("/admin/orders/:id/recheck-credits", auth, admin, async (req, res) => {
 });
 
 
+app.get('/admin/order-recheck-debug/:file', auth, admin, async (req, res) => {
+    try {
+        const path = require('path');
+        const file = safeDebugFileName(req.params.file || '');
+        if (!file) return res.status(404).end();
+        res.sendFile(path.join(ORDER_RECHECK_DEBUG_DIR, file));
+    } catch (err) {
+        res.status(404).end();
+    }
+});
+
 app.post("/admin/orders/:id/recheck-order", auth, admin, async (req, res) => {
     try {
         const currentUser = await getCurrentUser(req);
@@ -4284,7 +4348,7 @@ app.post("/admin/orders/:id/recheck-order", auth, admin, async (req, res) => {
         const siteText = String(order.site || normalized.site || order.source || '').toLowerCase();
         if (!siteText.includes('target')) return res.status(400).json({ error: "Automated order recheck is currently implemented for Target orders only." });
 
-        const check = await checkTargetOrderWithBrowser({ order, normalized, payload });
+        const check = await checkTargetOrderWithBrowser({ order, normalized, payload, debugMode: !!req.body?.debug });
         let refunded = false;
         let balance = null;
         const shouldRefund = req.body?.refundIfMissing !== false;

@@ -2796,7 +2796,11 @@ async function recheckRetailOrder(id, button) {
     const original = button ? button.textContent : '';
     try {
         if (button) { button.disabled = true; button.textContent = 'Checking...'; }
-        const data = await authJSON(API + `/admin/orders/${encodeURIComponent(id)}/recheck-order`, { method: 'POST', body: JSON.stringify({ refundIfMissing: true }) });
+        const data = await authJSON(API + `/admin/orders/${encodeURIComponent(id)}/recheck-order`, { method: 'POST', body: JSON.stringify({ refundIfMissing: true, debug: true }) });
+        if (data.debug?.screenshots?.length) {
+            console.log('Order recheck debug:', data.debug);
+            window.open(data.debug.screenshots[data.debug.screenshots.length - 1], '_blank');
+        }
         if (data.expectedItemFound) {
             alert(`Order recheck OK. Expected item was found on order ${data.orderNumber}.`);
         } else if (data.orderFound && data.refunded) {
@@ -2808,7 +2812,7 @@ async function recheckRetailOrder(id, button) {
         }
         if (typeof loadCreditsAdminPane === 'function') await loadCreditsAdminPane();
     } catch (err) {
-        alert(err.message || 'Failed to recheck order.');
+        alert((err.message || 'Failed to recheck order.') + '\n\nDebug screenshots, if created, are shown in the error text and server logs.');
     } finally {
         if (button) { button.disabled = false; button.textContent = original || 'Recheck Order'; }
     }
