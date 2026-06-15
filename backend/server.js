@@ -4091,6 +4091,129 @@ app.get("/admin/orders", auth, admin, async (req, res) => {
     }
 });
 
+
+function parseRetailProxy(proxyValue = '') {
+    const raw = String(proxyValue || '').trim().replace(/^\|\||\|\|$/g, '');
+    if (!raw) return null;
+    try {
+        const u = raw.includes('://') ? new URL(raw) : null;
+        if (u) return { server: `${u.protocol}//${u.hostname}:${u.port}`, username: decodeURIComponent(u.username || ''), password: decodeURIComponent(u.password || '') };
+    } catch (_) { }
+    const parts = raw.split(':');
+    if (parts.length >= 4) return { server: `http://${parts[0]}:${parts[1]}`, username: parts[2], password: parts.slice(3).join(':') };
+    if (parts.length >= 2) return { server: `http://${parts[0]}:${parts[1]}` };
+    return null;
+}
+
+function unwrapSecretValue(value = '') {
+    return String(value || '').replace(/^\|\||\|\|$/g, '').trim();
+}
+
+function textContainsNeedle(haystack = '', needle = '') {
+    const h = String(haystack || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ');
+    const n = String(needle || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+    if (!h || !n) return false;
+    if (h.includes(n)) return true;
+    const words = n.split(/\s+/).filter(w => w.length > 2 && !['the','and','for','with','colors','color','may','vary'].includes(w));
+    return words.length >= 2 && words.every(w => h.includes(w));
+}
+
+async function findRetailLoginForOrder(order, normalized) {
+    const email = unwrapSecretValue(normalized.account_email || '');
+    const profileName = unwrapSecretValue(normalized.profile_name || '');
+    let query = supabase.from('profiles').select('id,user_id,profile_name,account_type,login_email,login_password').eq('user_id', order.user_id).order('created_at', { ascending: false }).limit(10);
+    if (email) query = query.ilike('login_email', email);
+    else if (profileName) query = query.ilike('profile_name', profileName);
+    const { data, error } = await query;
+    if (error) throw new Error(error.message);
+    let profile = (data || [])[0];
+
+    if (!profile && email) {
+        const { data: accounts, error: accountError } = await supabase
+            .from('accounts')
+            .select('profile_id, login_email, login_password, profiles(id,user_id,profile_name)')
+            .ilike('login_email', email)
+            .order('created_at', { ascending: false })
+            .limit(10);
+        if (!accountError) {
+            const match = (accounts || []).find(a => String(a.profiles?.user_id || '') === String(order.user_id)) || (accounts || [])[0];
+            if (match) profile = { id: match.profile_id, user_id: match.profiles?.user_id || order.user_id, profile_name: match.profiles?.profile_name || '', login_email: match.login_email, login_password: match.login_password };
+        }
+    }
+
+    const loginEmail = unwrapSecretValue(profile?.login_email || email);
+    const loginPassword = unwrapSecretValue(profile?.login_password || '');
+    if (!loginEmail || !loginPassword) throw new Error('No saved Target login email/password was found for this order profile/account.');
+    return { loginEmail, loginPassword, profileId: profile?.id || null, profileName: profile?.profile_name || profileName };
+}
+
+async function checkTargetOrderWithBrowser({ order, normalized, payload }) {
+    const { chromium } = require('playwright');
+    const { fields } = buildFieldMapFromEmbeds(payload || {});
+    const proxyValue = unwrapSecretValue(fields['proxy'] || payload?.proxy || payload?.proxy_used || '');
+    const proxy = parseRetailProxy(proxyValue);
+    const login = await findRetailLoginForOrder(order, normalized);
+    const expectedSku = String(normalized.sku || '').trim();
+    const expectedProduct = String(normalized.product_name || order.product_name || '').trim();
+    const orderNumber = String(normalized.order_number || order.external_order_id || '').trim();
+    if (!orderNumber) throw new Error('No order number is available to recheck.');
+    if (!expectedSku && !expectedProduct) throw new Error('No expected SKU or product name is available to compare.');
+
+    let browser;
+    try {
+        browser = await chromium.launch({ headless: true, proxy: proxy || undefined });
+        const context = await browser.newContext({ viewport: { width: 1365, height: 900 } });
+        const page = await context.newPage();
+        page.setDefaultTimeout(45000);
+
+        await page.goto('https://www.target.com/account/orders', { waitUntil: 'domcontentloaded', timeout: 60000 });
+        const loginInput = page.locator('input[type="email"], input[name="username"], input#username').first();
+        if (await loginInput.isVisible().catch(() => false)) {
+            await loginInput.fill(login.loginEmail);
+            const continueButton = page.getByRole('button', { name: /continue|sign in/i }).first();
+            if (await continueButton.isVisible().catch(() => false)) await continueButton.click().catch(() => null);
+            const passwordInput = page.locator('input[type="password"], input[name="password"], input#password').first();
+            await passwordInput.waitFor({ state: 'visible', timeout: 45000 });
+            await passwordInput.fill(login.loginPassword);
+            const signInButton = page.getByRole('button', { name: /sign in|login|continue/i }).first();
+            await signInButton.click();
+            await page.waitForLoadState('domcontentloaded', { timeout: 60000 }).catch(() => null);
+        }
+
+        const possibleUrls = [
+            `https://www.target.com/orders/${encodeURIComponent(orderNumber)}`,
+            `https://www.target.com/account/orders/${encodeURIComponent(orderNumber)}`,
+            'https://www.target.com/account/orders'
+        ];
+        let fullText = '';
+        for (const url of possibleUrls) {
+            await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => null);
+            await page.waitForTimeout(3500);
+            const bodyText = await page.locator('body').innerText({ timeout: 15000 }).catch(() => '');
+            fullText += '\n' + bodyText;
+            if (bodyText.includes(orderNumber)) break;
+        }
+
+        if (!fullText.includes(orderNumber)) {
+            const searchBox = page.locator('input[type="search"], input[placeholder*="Search" i], input[name="searchTerm"]').first();
+            if (await searchBox.isVisible().catch(() => false)) {
+                await searchBox.fill(orderNumber);
+                await searchBox.press('Enter');
+                await page.waitForTimeout(3500);
+                fullText += '\n' + await page.locator('body').innerText({ timeout: 15000 }).catch(() => '');
+            }
+        }
+
+        const orderFound = fullText.includes(orderNumber);
+        const skuFound = expectedSku ? textContainsNeedle(fullText, expectedSku) : false;
+        const productFound = expectedProduct ? textContainsNeedle(fullText, expectedProduct) : false;
+        const expectedItemFound = skuFound || productFound;
+        return { orderFound, expectedItemFound, skuFound, productFound, expectedSku, expectedProduct, orderNumber };
+    } finally {
+        if (browser) await browser.close().catch(() => null);
+    }
+}
+
 app.post("/admin/orders/:id/recheck-credits", auth, admin, async (req, res) => {
     try {
         const currentUser = await getCurrentUser(req);
@@ -4099,6 +4222,53 @@ app.post("/admin/orders/:id/recheck-credits", auth, admin, async (req, res) => {
         if (!order?.id) return res.status(404).json({ error: "Order not found" });
         const result = await recheckSuccessfulOrderCredits({ currentUser, order, resendDiscord: true });
         res.json(result);
+    } catch (err) {
+        res.status(err.status || 500).json({ error: err.message || String(err) });
+    }
+});
+
+
+app.post("/admin/orders/:id/recheck-order", auth, admin, async (req, res) => {
+    try {
+        const currentUser = await getCurrentUser(req);
+        const { data: order, error } = await supabase.from("orders").select("*").eq("id", req.params.id).maybeSingle();
+        if (error) return res.status(500).json({ error: error.message });
+        if (!order?.id) return res.status(404).json({ error: "Order not found" });
+
+        const targetUser = await getUserById(order.user_id);
+        if (!(await canManageTarget(currentUser, targetUser))) return res.status(403).json({ error: "You do not have access to this order." });
+        const payload = order.raw_payload || {};
+        const normalized = normalizeIncomingOrderPayload(payload);
+        const siteText = String(order.site || normalized.site || order.source || '').toLowerCase();
+        if (!siteText.includes('target')) return res.status(400).json({ error: "Automated order recheck is currently implemented for Target orders only." });
+
+        const check = await checkTargetOrderWithBrowser({ order, normalized, payload });
+        let refunded = false;
+        let balance = null;
+        const shouldRefund = req.body?.refundIfMissing !== false;
+        const amount = asWholeCredits(order.credits_charged || 0, 0);
+        if (check.orderFound && !check.expectedItemFound && shouldRefund && amount > 0) {
+            balance = await adjustUserCredits({
+                userId: order.user_id,
+                delta: amount,
+                reason: "order_item_recheck_refund",
+                note: `Automated order recheck did not find expected item on Target order ${check.orderNumber}.`,
+                metadata: { order_id: order.id, external_order_id: order.external_order_id, expected_sku: check.expectedSku, expected_product: check.expectedProduct, refunded_by: currentUser.email },
+                createdBy: currentUser.id,
+                orderId: order.id
+            });
+            await supabase.from("orders").update({
+                status: `${order.status || "success"}_item_missing_refunded`,
+                metadata: { ...(order.metadata || {}), order_rechecked_at: new Date().toISOString(), order_recheck: check, refund_credits: amount, refund_reason: 'Expected item missing from retailer order page' }
+            }).eq("id", order.id);
+            refunded = true;
+        } else {
+            await supabase.from("orders").update({
+                metadata: { ...(order.metadata || {}), order_rechecked_at: new Date().toISOString(), order_recheck: check }
+            }).eq("id", order.id);
+        }
+
+        res.json({ ok: true, ...check, refunded, refundedCredits: refunded ? amount : 0, balance });
     } catch (err) {
         res.status(err.status || 500).json({ error: err.message || String(err) });
     }
