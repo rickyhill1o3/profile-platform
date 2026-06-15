@@ -165,8 +165,6 @@ async function attachProxyAuthIfNeeded(page, proxy, log = () => {}) {
     client.on('Fetch.requestPaused', async (event) => {
       try { await client.send('Fetch.continueRequest', { requestId: event.requestId }); } catch (_) {}
     });
-    const basic = Buffer.from(`${proxy.username}:${proxy.password}`, 'utf8').toString('base64');
-    await page.setExtraHTTPHeaders({ 'Proxy-Authorization': `Basic ${basic}` }).catch(() => null);
     log('Proxy authentication handler attached for this browser page.');
   } catch (err) {
     log(`Could not attach proxy authentication handler: ${err.message || err}`);
@@ -405,6 +403,57 @@ async function findCredentialsForOrder({ supabase, order, normalized, log = () =
   return null;
 }
 
+
+async function pickFallbackProxyFromPool({ supabase, log = () => {} }) {
+  if (!supabase) return null;
+  try {
+    const { data, error } = await supabase
+      .from('target_recheck_proxies')
+      .select('*')
+      .eq('active', true)
+      .order('failure_count', { ascending: true })
+      .order('last_success_at', { ascending: false, nullsFirst: false })
+      .limit(1);
+    if (error || !data || !data.length) return null;
+    const row = data[0];
+    const proxy = row.proxy || (row.host && row.port ? `${row.host}:${row.port}${row.username ? ':' + row.username + ':' + (row.password || '') : ''}` : '');
+    if (!proxy) return null;
+    log(`Using fallback proxy from target_recheck_proxies: ${row.host || proxy.split(':')[0]}:${row.port || proxy.split(':')[1]}`);
+    return { proxy, proxyPoolId: row.id };
+  } catch (err) {
+    log(`Proxy pool lookup failed: ${err.message || err}`);
+    return null;
+  }
+}
+
+async function markProxyPoolResult({ supabase, proxyPoolId, ok, errorText = '', log = () => {} }) {
+  if (!supabase || !proxyPoolId) return;
+  try {
+    if (ok) {
+      await supabase.from('target_recheck_proxies').update({
+        last_success_at: new Date().toISOString(),
+        failure_count: 0,
+        last_error: null,
+        active: true,
+        updated_at: new Date().toISOString()
+      }).eq('id', proxyPoolId);
+      return;
+    }
+    const { data } = await supabase.from('target_recheck_proxies').select('failure_count').eq('id', proxyPoolId).maybeSingle();
+    const nextCount = Number(data?.failure_count || 0) + 1;
+    await supabase.from('target_recheck_proxies').update({
+      last_failure_at: new Date().toISOString(),
+      failure_count: nextCount,
+      last_error: String(errorText || '').slice(0, 500),
+      active: nextCount < Number(process.env.ORDER_RECHECK_PROXY_MAX_FAILURES || 3),
+      updated_at: new Date().toISOString()
+    }).eq('id', proxyPoolId);
+    log(`Marked proxy pool failure count=${nextCount}${nextCount >= Number(process.env.ORDER_RECHECK_PROXY_MAX_FAILURES || 3) ? ' and disabled proxy' : ''}.`);
+  } catch (err) {
+    log(`Proxy pool update failed: ${err.message || err}`);
+  }
+}
+
 async function launchBrowser({ normalized, debug, log }) {
   const endpoint = text(process.env.BROWSERLESS_WS_ENDPOINT || process.env.BROWSERLESS_CDP_ENDPOINT || process.env.PLAYWRIGHT_WS_ENDPOINT);
   const proxy = parseProxy(normalized.proxy);
@@ -618,8 +667,16 @@ async function recheckTargetOrder({ supabase, order, currentUser, helpers }) {
   };
   let browser;
   let context;
+  let proxyPoolId = '';
   try {
     log(`Rechecking order ${normalized.orderNumber || order.id}`);
+    if (!normalized.proxy) {
+      const fallbackProxy = await pickFallbackProxyFromPool({ supabase, log });
+      if (fallbackProxy?.proxy) {
+        normalized.proxy = fallbackProxy.proxy;
+        proxyPoolId = fallbackProxy.proxyPoolId || '';
+      }
+    }
     const credentials = await findCredentialsForOrder({ supabase, order, normalized, log });
     if (!credentials?.loginEmail || !credentials?.loginPassword) throw new Error('No Target login credentials found for this order/profile. Make sure the matching profile has Target login email/password saved.');
     if (!credentials.gmailAppPassword) log('No Gmail app password saved; OTP automation may fail if Target asks for a code.');
@@ -661,6 +718,7 @@ async function recheckTargetOrder({ supabase, order, currentUser, helpers }) {
     log('Starting Target order item/quantity verification.');
     const check = await verifyTargetOrder({ page, normalized, debug, log });
     log(`Order verification result: itemFound=${check.itemFound}, expectedQty=${check.expectedQuantity}, detectedQty=${check.quantityFound ?? 'not detected'}, quantityMatches=${check.quantityMatches}`);
+    if (proxyPoolId) await markProxyPoolResult({ supabase, proxyPoolId, ok: true, log });
     let refunded = false;
     let refundAmount = 0;
     if (!check.itemFound) {
@@ -683,6 +741,7 @@ async function recheckTargetOrder({ supabase, order, currentUser, helpers }) {
     return { ok: true, ...check, refunded, refundAmount, message: check.itemFound ? (`Expected Target item was found on the order.` + (check.expectedQuantity ? ` Expected qty: ${check.expectedQuantity}. Detected qty: ${check.quantityFound ?? 'not detected'}.` : '') + (check.quantityMatches === false ? ' Quantity mismatch detected, but no refund was issued because credits are charged per checkout, not per quantity.' : '')) : (refunded ? `Expected item was missing. Refunded ${refundAmount} credits.` : 'Expected item was missing. No credits were refunded because this order had no charged credits.'), artifacts: debug.artifacts };
   } catch (err) {
     log(`ERROR: ${err.message || err}`);
+    if (proxyPoolId) await markProxyPoolResult({ supabase, proxyPoolId, ok: false, errorText: err.message || err, log });
     try {
       if (context) {
         const tracePath = path.join(debug.dir, 'trace-error.zip');
