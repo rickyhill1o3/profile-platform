@@ -4121,30 +4121,72 @@ function textContainsNeedle(haystack = '', needle = '') {
 async function findRetailLoginForOrder(order, normalized) {
     const email = unwrapSecretValue(normalized.account_email || '');
     const profileName = unwrapSecretValue(normalized.profile_name || '');
-    let query = supabase.from('profiles').select('id,user_id,profile_name,account_type,login_email,login_password').eq('user_id', order.user_id).order('created_at', { ascending: false }).limit(10);
-    if (email) query = query.ilike('login_email', email);
-    else if (profileName) query = query.ilike('profile_name', profileName);
-    const { data, error } = await query;
-    if (error) throw new Error(error.message);
-    let profile = (data || [])[0];
+    const targetStoreNames = ['target', 'targetgo'];
 
-    if (!profile && email) {
-        const { data: accounts, error: accountError } = await supabase
-            .from('accounts')
-            .select('profile_id, login_email, login_password, profiles(id,user_id,profile_name)')
-            .ilike('login_email', email)
+    let profile = null;
+    let profileIds = [];
+
+    // Profiles in this project do not always have login_email/login_password columns.
+    // First find the profile by user/profile name, then load credentials from profile_store_credentials or accounts.
+    try {
+        let profileQuery = supabase
+            .from('profiles')
+            .select('id,user_id,profile_name,account_type')
+            .eq('user_id', order.user_id)
             .order('created_at', { ascending: false })
-            .limit(10);
-        if (!accountError) {
-            const match = (accounts || []).find(a => String(a.profiles?.user_id || '') === String(order.user_id)) || (accounts || [])[0];
-            if (match) profile = { id: match.profile_id, user_id: match.profiles?.user_id || order.user_id, profile_name: match.profiles?.profile_name || '', login_email: match.login_email, login_password: match.login_password };
+            .limit(25);
+        if (profileName) profileQuery = profileQuery.ilike('profile_name', profileName);
+        const { data, error } = await profileQuery;
+        if (!error && Array.isArray(data)) {
+            profile = data[0] || null;
+            profileIds = data.map(p => p.id).filter(Boolean);
         }
+    } catch (_) { }
+
+    let credential = null;
+
+    // Prefer the legacy/current accounts table when the checkout embed has the account email.
+    if (email) {
+        try {
+            let accountQuery = supabase
+                .from('accounts')
+                .select('profile_id, login_email, login_password, profiles(id,user_id,profile_name)')
+                .ilike('login_email', email)
+                .order('created_at', { ascending: false })
+                .limit(25);
+            const { data: accounts, error: accountError } = await accountQuery;
+            if (!accountError && Array.isArray(accounts)) {
+                const match = accounts.find(a => String(a.profiles?.user_id || '') === String(order.user_id)) || accounts[0];
+                if (match) {
+                    credential = match;
+                    profile = {
+                        id: match.profile_id,
+                        user_id: match.profiles?.user_id || order.user_id,
+                        profile_name: match.profiles?.profile_name || profile?.profile_name || ''
+                    };
+                }
+            }
+        } catch (_) { }
     }
 
-    const loginEmail = unwrapSecretValue(profile?.login_email || email);
-    const loginPassword = unwrapSecretValue(profile?.login_password || '');
-    if (!loginEmail || !loginPassword) throw new Error('No saved Target login email/password was found for this order profile/account.');
-    return { loginEmail, loginPassword, profileId: profile?.id || null, profileName: profile?.profile_name || profileName };
+    // Newer profile imports store per-store Target credentials here.
+    if (!credential && profileIds.length) {
+        try {
+            const { data: storeCreds, error: storeCredsError } = await supabase
+                .from('profile_store_credentials')
+                .select('*')
+                .in('profile_id', profileIds);
+            if (!storeCredsError && Array.isArray(storeCreds)) {
+                credential = storeCreds.find(c => targetStoreNames.includes(normalizeProfileAccountType(c.store)))
+                    || storeCreds.find(c => String(c.login_email || '').trim());
+            }
+        } catch (_) { }
+    }
+
+    const loginEmail = unwrapSecretValue(credential?.login_email || email);
+    const loginPassword = unwrapSecretValue(credential?.login_password || '');
+    if (!loginEmail || !loginPassword) throw new Error('No saved Target login email/password was found for this order profile/account. Add the Target login on the profile/account first, then recheck the order.');
+    return { loginEmail, loginPassword, profileId: profile?.id || credential?.profile_id || null, profileName: profile?.profile_name || profileName };
 }
 
 async function checkTargetOrderWithBrowser({ order, normalized, payload }) {
