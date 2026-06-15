@@ -5,7 +5,9 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "preinstall": "node scripts/clean-render-cache.js",
+    "postinstall": "node scripts/install-playwright.js"
   },
   "keywords": [],
   "author": "",
@@ -26,6 +28,7 @@
     "pg": "^8.20.0",
     "playwright": "^1.58.2",
     "stripe": "^18.1.1",
-    "uuid": "^13.0.0"
+    "uuid": "^13.0.0",
+    "imap": "^0.8.19"
   }
 }
