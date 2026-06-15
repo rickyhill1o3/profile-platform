@@ -93,7 +93,6 @@ const Stripe = require("stripe");
 const cheerio = require("cheerio");
 const registerProductCatalogRoutes = require("./product-catalog-routes");
 const registerShopRoutes = require("./shop-routes");
-const createOrderRechecker = require("./order-rechecker");
 
 const supabase = require("./database");
 const { encrypt, decrypt } = require("./encryption");
@@ -7909,19 +7908,6 @@ shopRoutes = registerShopRoutes({
     sendEmail,
     SUPER_ADMIN_EMAIL,
     validateDiscountCode
-});
-
-createOrderRechecker({
-    app,
-    express,
-    auth,
-    admin,
-    supabase,
-    getCurrentUser,
-    getUserById,
-    canManageTarget,
-    adjustUserCredits,
-    asWholeCredits
 });
 
 

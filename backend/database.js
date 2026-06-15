@@ -1,3 +1,4 @@
+
 function parseMultiSkuValue(rawValue) {
     if (!rawValue) return [];
 
@@ -22,18 +23,12 @@ function countEffectiveSkus(product) {
 }
 
 const { createClient } = require("@supabase/supabase-js");
-const WebSocket = require("ws");
 
 require("dotenv").config();
 
 const supabase = createClient(
     process.env.SUPABASE_URL,
-    process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_KEY,
-    {
-        realtime: {
-            transport: WebSocket
-        }
-    }
+    process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_KEY
 );
 
 module.exports = supabase;
