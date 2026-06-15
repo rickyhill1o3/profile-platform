@@ -4860,10 +4860,56 @@ async function loadCancellationRequests() {
     }
 }
 
+window.__cancellationImageStore = window.__cancellationImageStore || {};
+
+function openCancellationImagePreview(imageKey) {
+    const img = window.__cancellationImageStore?.[imageKey];
+    if (!img?.dataUrl) {
+        alert('This screenshot could not be loaded. Ask the user to re-upload it under 2.5MB.');
+        return;
+    }
+    let modal = document.getElementById('cancellationImagePreviewModal');
+    if (!modal) {
+        modal = document.createElement('div');
+        modal.id = 'cancellationImagePreviewModal';
+        modal.style.cssText = 'position:fixed;inset:0;z-index:9999;background:rgba(15,23,42,.78);display:none;align-items:center;justify-content:center;padding:24px;';
+        modal.innerHTML = `
+            <div style="background:#fff;border-radius:14px;max-width:min(1100px,96vw);max-height:94vh;width:100%;padding:14px;box-shadow:0 20px 60px rgba(0,0,0,.35);display:flex;flex-direction:column;gap:10px;">
+                <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;">
+                    <strong id="cancellationImagePreviewTitle">Cancellation screenshot</strong>
+                    <div style="display:flex;gap:8px;">
+                        <a class="btn" id="cancellationImageDownloadLink" download="cancellation-screenshot.jpg">Download</a>
+                        <button class="btn btn-danger" type="button" id="cancellationImagePreviewClose">Close</button>
+                    </div>
+                </div>
+                <div style="overflow:auto;text-align:center;border:1px solid #d8e1f0;border-radius:12px;background:#f8fafc;">
+                    <img id="cancellationImagePreviewImg" alt="Cancellation screenshot" style="max-width:100%;height:auto;display:block;margin:0 auto;" />
+                </div>
+            </div>`;
+        document.body.appendChild(modal);
+        modal.addEventListener('click', (event) => { if (event.target === modal) modal.style.display = 'none'; });
+        document.getElementById('cancellationImagePreviewClose')?.addEventListener('click', () => { modal.style.display = 'none'; });
+    }
+    const imageEl = document.getElementById('cancellationImagePreviewImg');
+    const titleEl = document.getElementById('cancellationImagePreviewTitle');
+    const downloadEl = document.getElementById('cancellationImageDownloadLink');
+    if (imageEl) imageEl.src = img.dataUrl;
+    if (titleEl) titleEl.textContent = img.name || 'Cancellation screenshot';
+    if (downloadEl) {
+        downloadEl.href = img.dataUrl;
+        downloadEl.download = img.name || 'cancellation-screenshot.jpg';
+    }
+    modal.style.display = 'flex';
+}
+
 function renderCancellationImages(item) {
     const images = Array.isArray(item.images) ? item.images : [];
     if (!images.length) return '<span class="subtle-text">No images</span>';
-    return images.map((img, index) => `<a class="btn" href="${escapeHTML(img.dataUrl || '#')}" target="_blank" rel="noopener">Image ${index + 1}</a>`).join(' ');
+    return images.map((img, index) => {
+        const key = `cancel-${item.id || 'request'}-${index}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+        window.__cancellationImageStore[key] = img;
+        return `<button class="btn" type="button" data-cancel-image-key="${escapeHTML(key)}">Image ${index + 1}</button>`;
+    }).join(' ');
 }
 
 async function loadAdminCancellationRequests() {
@@ -4891,6 +4937,9 @@ async function loadAdminCancellationRequests() {
             </tr>`;
         }).join('') : '<tr><td colspan="8">No cancellation requests found.</td></tr>';
 
+        body.querySelectorAll('[data-cancel-image-key]').forEach((button) => {
+            button.addEventListener('click', () => openCancellationImagePreview(button.dataset.cancelImageKey));
+        });
         body.querySelectorAll('[data-approve-cancel]').forEach((button) => {
             button.addEventListener('click', async () => {
                 const amountText = window.prompt('Refund how many credits?', button.dataset.refundAmount || '0');
