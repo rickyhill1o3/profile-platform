@@ -29,15 +29,38 @@ function getDiscordField(payload, name) {
   return '';
 }
 
+function stripDiscordSpoiler(value) {
+  return text(value).replace(/^\|\|/, '').replace(/\|\|$/, '').trim();
+}
+
+function payloadToString(payload) {
+  try { return JSON.stringify(payload || {}); } catch (_) { return ''; }
+}
+
+function extractEmailPasswordFromString(value) {
+  const raw = stripDiscordSpoiler(value);
+  if (!raw) return null;
+  // Most bot webhooks show account as email:password. Passwords may contain punctuation,
+  // so only split on the first separator after a valid email address.
+  const match = raw.match(/([A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,})\s*(?::|\||,|\s+)\s*([^\s|,]+(?:[^\n\r|,]*[^\s|,])?)/i);
+  if (!match) return null;
+  return { email: text(match[1]), password: text(match[2]).replace(/^\|\|/, '').replace(/\|\|$/, '').trim() };
+}
+
 function normalizeOrderPayload(order) {
   const payload = order?.raw_payload && typeof order.raw_payload === 'object' ? order.raw_payload : {};
+  const accountRaw = stripDiscordSpoiler(getDiscordField(payload, 'Account') || payload.account_email || payload.account || payload.email || order?.user_email);
+  const accountPair = extractEmailPasswordFromString(accountRaw) || extractEmailPasswordFromString(payloadToString(payload));
+
   return {
     orderNumber: text(order?.external_order_id || getDiscordField(payload, 'Order ID') || payload.external_order_id || payload.order_id || payload.order_number),
     productName: text(order?.product_name || getDiscordField(payload, 'Product') || payload.product_name || payload.product),
     sku: text(order?.sku || getDiscordField(payload, 'SKU') || payload.sku),
-    accountEmail: text(getDiscordField(payload, 'Account') || payload.account_email || payload.account || payload.email || order?.user_email),
-    proxy: text(order?.proxy || payload.proxy || getDiscordField(payload, 'Proxy')),
-    site: lc(order?.source || getDiscordField(payload, 'Site') || payload.site || payload.source)
+    accountEmail: text((accountPair && accountPair.email) || accountRaw),
+    accountPassword: text((accountPair && accountPair.password) || payload.account_password || payload.password || getDiscordField(payload, 'Password')),
+    proxy: stripDiscordSpoiler(order?.proxy || payload.proxy || getDiscordField(payload, 'Proxy')),
+    site: lc(order?.source || getDiscordField(payload, 'Site') || payload.site || payload.source),
+    rawAccount: accountRaw
   };
 }
 
@@ -144,32 +167,134 @@ async function getTargetOtpFromImap({ email, appPassword, sinceMs = Date.now() -
   return '';
 }
 
-async function findCredentialsForOrder({ supabase, order, normalized }) {
+function pickValue(row, keys) {
+  for (const key of keys) {
+    if (row && row[key] !== undefined && row[key] !== null && text(row[key])) return text(row[key]);
+  }
+  return '';
+}
+
+function rowToCredential(row, source = 'unknown') {
+  if (!row) return null;
+  const loginEmail = pickValue(row, [
+    'login_email', 'account_login_email', 'target_login_email', 'email', 'username', 'account_email'
+  ]);
+  const loginPassword = pickValue(row, [
+    'login_password', 'account_login_password', 'target_login_password', 'password', 'account_password'
+  ]);
+  const gmailAppPassword = pickValue(row, [
+    'gmail_app_password', 'imap_password', 'gmail_imap_password', 'imap_app_password', 'app_password'
+  ]);
+  const store = pickValue(row, ['store', 'provider', 'account_type', 'site']);
+  if (!loginEmail && !loginPassword && !gmailAppPassword) return null;
+  return { loginEmail, loginPassword, gmailAppPassword, store, source, raw: row };
+}
+
+function credentialMatchesTarget(cred, accountEmail) {
+  if (!cred) return false;
+  const store = lc(cred.store || '');
+  const storeOk = !store || store.includes('target') || store.includes('general') || store.includes('stellar') || store.includes('shikari') || store.includes('bot');
+  const emailOk = !accountEmail || lc(cred.loginEmail) === lc(accountEmail);
+  return storeOk && emailOk && cred.loginEmail && cred.loginPassword;
+}
+
+async function safeSelect(supabase, table, select, apply) {
+  try {
+    let q = supabase.from(table).select(select);
+    q = apply(q);
+    const { data, error } = await q;
+    if (error) return [];
+    return data || [];
+  } catch (_) {
+    return [];
+  }
+}
+
+async function findCredentialsForOrder({ supabase, order, normalized, log = () => {} }) {
   const accountEmail = lc(normalized.accountEmail);
+  const candidates = [];
+
+  // Highest priority: bot webhook account field like email:password.
+  if (normalized.accountEmail && normalized.accountPassword) {
+    candidates.push({
+      loginEmail: normalized.accountEmail,
+      loginPassword: normalized.accountPassword,
+      gmailAppPassword: '',
+      store: 'target',
+      source: 'discord_webhook_account_password'
+    });
+  }
+
   let profiles = [];
   if (order?.user_id) {
-    const { data } = await supabase.from('profiles').select('id,user_id,profile_name,account_type').eq('user_id', order.user_id).limit(100);
-    profiles = data || [];
+    profiles = await safeSelect(supabase, 'profiles', '*', (q) => q.eq('user_id', order.user_id).limit(200));
+    for (const p of profiles) {
+      const c = rowToCredential(p, 'profiles_row');
+      if (c) candidates.push(c);
+      // Some dashboards save account data as JSON.
+      for (const key of ['accounts', 'store_credentials', 'credentials']) {
+        const value = p[key];
+        if (Array.isArray(value)) value.forEach((row) => { const c2 = rowToCredential(row, `profiles.${key}`); if (c2) candidates.push(c2); });
+        else if (value && typeof value === 'object') Object.entries(value).forEach(([store, row]) => { const c2 = rowToCredential({ ...(row || {}), store }, `profiles.${key}.${store}`); if (c2) candidates.push(c2); });
+      }
+    }
   }
+
   const profileIds = profiles.map((p) => p.id).filter(Boolean);
-  const candidates = [];
   if (profileIds.length) {
-    const { data } = await supabase.from('profile_store_credentials').select('*').in('profile_id', profileIds);
-    (data || []).forEach((row) => candidates.push({ ...row, source: 'profile_store_credentials' }));
-    const { data: accs } = await supabase.from('accounts').select('*').in('profile_id', profileIds);
-    (accs || []).forEach((row) => candidates.push({ ...row, store: row.provider || 'target', source: 'accounts' }));
+    (await safeSelect(supabase, 'profile_store_credentials', '*', (q) => q.in('profile_id', profileIds))).forEach((row) => {
+      const c = rowToCredential(row, 'profile_store_credentials');
+      if (c) candidates.push(c);
+    });
+    (await safeSelect(supabase, 'accounts', '*', (q) => q.in('profile_id', profileIds))).forEach((row) => {
+      const c = rowToCredential(row, 'accounts_by_profile_id');
+      if (c) candidates.push(c);
+    });
   }
+
+  if (order?.user_id) {
+    // Some schemas attach accounts directly to user_id instead of profile_id.
+    (await safeSelect(supabase, 'accounts', '*', (q) => q.eq('user_id', order.user_id).limit(200))).forEach((row) => {
+      const c = rowToCredential(row, 'accounts_by_user_id');
+      if (c) candidates.push(c);
+    });
+  }
+
   if (accountEmail) {
-    const { data } = await supabase.from('profile_store_credentials').select('*').ilike('login_email', accountEmail).limit(10);
-    (data || []).forEach((row) => candidates.push({ ...row, source: 'profile_store_credentials_email' }));
-    const { data: accs } = await supabase.from('accounts').select('*').ilike('login_email', accountEmail).limit(10);
-    (accs || []).forEach((row) => candidates.push({ ...row, store: row.provider || 'target', source: 'accounts_email' }));
+    // These may fail if the column does not exist; safeSelect intentionally ignores that.
+    (await safeSelect(supabase, 'profile_store_credentials', '*', (q) => q.ilike('login_email', accountEmail).limit(20))).forEach((row) => {
+      const c = rowToCredential(row, 'profile_store_credentials_by_email');
+      if (c) candidates.push(c);
+    });
+    (await safeSelect(supabase, 'accounts', '*', (q) => q.ilike('login_email', accountEmail).limit(20))).forEach((row) => {
+      const c = rowToCredential(row, 'accounts_by_login_email');
+      if (c) candidates.push(c);
+    });
   }
-  const target = candidates.find((c) => lc(c.store || c.provider).includes('target') && (accountEmail ? lc(c.login_email) === accountEmail : c.login_email))
-    || candidates.find((c) => c.login_email && c.login_password)
-    || null;
-  if (!target) return null;
-  return { loginEmail: text(target.login_email), loginPassword: text(target.login_password), gmailAppPassword: text(target.gmail_app_password), source: target.source };
+
+  const target =
+    candidates.find((c) => credentialMatchesTarget(c, accountEmail)) ||
+    candidates.find((c) => c.loginEmail && c.loginPassword && (!accountEmail || lc(c.loginEmail) === accountEmail)) ||
+    candidates.find((c) => c.loginEmail && c.loginPassword) ||
+    null;
+
+  if (target) {
+    // If Target account came from webhook but IMAP is saved on the dashboard profile, merge it in.
+    if (!target.gmailAppPassword) {
+      const imapSource = candidates.find((c) => c.gmailAppPassword && (!accountEmail || lc(c.loginEmail) === accountEmail));
+      if (imapSource) target.gmailAppPassword = imapSource.gmailAppPassword;
+    }
+    log(`Using Target credentials from ${target.source}: ${target.loginEmail}`);
+    return {
+      loginEmail: text(target.loginEmail),
+      loginPassword: text(target.loginPassword),
+      gmailAppPassword: text(target.gmailAppPassword),
+      source: target.source
+    };
+  }
+
+  log(`No credentials found. normalized.accountEmail=${normalized.accountEmail || '-'} profileCount=${profiles.length} candidates=${candidates.length}`);
+  return null;
 }
 
 async function launchBrowser({ normalized, debug, log }) {
@@ -179,6 +304,7 @@ async function launchBrowser({ normalized, debug, log }) {
     const browser = await chromium.connectOverCDP(endpoint);
     return { browser, remote: true };
   }
+
   const headed = String(process.env.ORDER_RECHECK_HEADLESS || '').toLowerCase() === 'false';
   const proxy = parseProxy(normalized.proxy);
   const launchOptions = {
@@ -187,8 +313,19 @@ async function launchBrowser({ normalized, debug, log }) {
     args: ['--disable-blink-features=AutomationControlled', '--no-sandbox', '--disable-dev-shm-usage']
   };
   if (proxy) launchOptions.proxy = proxy;
+
   log(`Launching local Chromium. headless=${launchOptions.headless}`);
-  return { browser: await chromium.launch(launchOptions), remote: false };
+  try {
+    return { browser: await chromium.launch(launchOptions), remote: false };
+  } catch (err) {
+    const msg = String(err && err.message || err);
+    if (/Executable doesn't exist|Please run.*playwright install|browserType\.launch/i.test(msg)) {
+      throw new Error(
+        'Chromium is not installed on this Render instance. Either set BROWSERLESS_CDP_ENDPOINT / BROWSERLESS_WS_ENDPOINT for Browserless mode, or run `npx playwright install chromium` in Render after npm install. Original error: ' + msg.slice(0, 800)
+      );
+    }
+    throw err;
+  }
 }
 
 async function loginTargetIfNeeded({ page, credentials, debug, log }) {
@@ -271,7 +408,7 @@ async function recheckTargetOrder({ supabase, order, currentUser, helpers }) {
   let context;
   try {
     log(`Rechecking order ${normalized.orderNumber || order.id}`);
-    const credentials = await findCredentialsForOrder({ supabase, order, normalized });
+    const credentials = await findCredentialsForOrder({ supabase, order, normalized, log });
     if (!credentials?.loginEmail || !credentials?.loginPassword) throw new Error('No Target login credentials found for this order/profile. Make sure the matching profile has Target login email/password saved.');
     if (!credentials.gmailAppPassword) log('No Gmail app password saved; OTP automation may fail if Target asks for a code.');
     const launched = await launchBrowser({ normalized, debug, log });

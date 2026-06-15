@@ -1,26 +1,54 @@
-# Target Order Checker + Browserless + IMAP Setup
+# Target Order Recheck + Browserless Setup
 
-This build starts from the working project and adds the Target order item checker from scratch.
+This build adds the **Check Order For Item** button in Admin → Credits + Orders.
 
-## What was added
+## What it does
 
-- Admin button: **Check Order For Item**
-- Backend route: `POST /admin/orders/:id/recheck-item`
-- Browserless / remote Chromium support
-- Local Chromium fallback for development
-- Target login with saved profile credentials
-- IMAP OTP reader using the profile's Gmail app password / IMAP password
-- Session/token reuse using Playwright `storageState`
-- Debug screenshots, page HTML, logs, trace ZIP, and video when available
-- Auto-refund of charged credits when the expected SKU/product is missing
+1. Reads the order's raw webhook payload.
+2. Finds the Target account login in this order:
+   - first from webhook `Account` if it is formatted like `email:password`
+   - then from the user's dashboard profile credentials
+   - then from `profile_store_credentials`
+   - then from `accounts`
+3. Reuses a saved Target browser session when available.
+4. If the saved session is expired, logs in again.
+5. If Target asks for OTP, it uses the Gmail/IMAP app password saved on the profile/account.
+6. Checks the Target order page for the expected SKU or item name.
+7. If the expected item is missing, it refunds the charged credits.
+8. Saves debug files under `/admin/order-recheck-debug/...`.
 
-## Important: visible browser on Render
+## Target login token/session reuse
 
-Render cannot open a desktop browser window that you can watch directly. To watch live, use Browserless or run the backend locally with headed Chromium.
+The checker saves Playwright `storageState` cookies/localStorage in:
 
-The Render/Browserless mode records debug artifacts and returns links in the admin alert if the check fails.
+```bash
+backend/order-recheck-sessions/
+```
 
-## Render settings
+That is the login token/session cache. On the next recheck for the same Target login email, it loads that saved session first. If Target rejects it or sends the flow back to sign-in, it logs in again and refreshes the saved session.
+
+## Browserless mode on Render
+
+Render cannot show a visible Chrome window on your Windows desktop. Browserless gives you remote Chromium and a dashboard/live session view.
+
+Add this environment variable in Render:
+
+```bash
+BROWSERLESS_CDP_ENDPOINT=wss://YOUR_BROWSERLESS_HOST?token=YOUR_TOKEN
+```
+
+The code also accepts these names:
+
+```bash
+BROWSERLESS_WS_ENDPOINT
+PLAYWRIGHT_WS_ENDPOINT
+```
+
+Use one of them. `BROWSERLESS_CDP_ENDPOINT` is recommended.
+
+Then redeploy.
+
+## Render build/start commands
 
 Root Directory:
 
@@ -40,91 +68,66 @@ Start Command:
 npm start
 ```
 
-Do this once after uploading:
+## If you do NOT use Browserless
 
-```text
-Manual Deploy -> Clear build cache & deploy
-```
-
-This folder includes a preinstall cleaner for Render's stale `node_modules` cache and a postinstall verifier for `imapflow`, `playwright`, and `ws`.
-
-## Browserless mode
-
-Set one of these in Render Environment Variables:
+Then Render must have Playwright Chromium installed. Use this build command instead:
 
 ```bash
-BROWSERLESS_CDP_ENDPOINT=wss://your-browserless-host?token=YOUR_TOKEN
+npm install && npx playwright install chromium
 ```
 
-or:
+If Render complains about Linux dependencies, use:
 
 ```bash
-BROWSERLESS_WS_ENDPOINT=wss://your-browserless-host?token=YOUR_TOKEN
+npm install && npx playwright install --with-deps chromium
 ```
 
-The checker will use Browserless if either env var is present. If neither is present, it falls back to local Playwright Chromium.
+## Local visible Chrome debugging
 
-## Local visible browser mode
-
-On your PC:
+To actually watch Chrome open on your own computer, run the backend locally and set:
 
 ```bash
-cd backend
-npm install
-npx playwright install chromium
-set ORDER_RECHECK_HEADLESS=false
-set ORDER_RECHECK_SLOWMO_MS=300
-npm start
+ORDER_RECHECK_HEADLESS=false
+ORDER_RECHECK_SLOWMO_MS=300
 ```
 
-Then use the admin panel from that local backend. Chromium will open visibly on your machine.
+Then click **Check Order For Item** from your local site.
 
-## Login token/session reuse
+## IMAP / OTP
 
-The checker saves a Playwright login session per Target account here:
-
-```text
-backend/order-recheck-sessions/<email>-target.json
-```
-
-On the next check, it loads that session first. If Target still asks for sign-in or the token is expired, the checker logs in again using the saved Target email/password and IMAP OTP.
-
-On Render, this session persists while the instance filesystem persists. It can reset after deploys/restarts. Browserless can also maintain profile persistence depending on your Browserless provider/settings.
-
-## IMAP requirements
-
-The profile needs Target store credentials saved:
+For Gmail OTP, the account/profile needs:
 
 - Target login email
-- Target account password
+- Target login password
 - Gmail app password / IMAP password
 
-The IMAP reader defaults to Gmail:
+The checker searches for these fields:
+
+```bash
+login_email
+login_password
+gmail_app_password
+imap_password
+gmail_imap_password
+imap_app_password
+app_password
+```
+
+Target OTP polling defaults:
 
 ```bash
 ORDER_RECHECK_IMAP_HOST=imap.gmail.com
 ORDER_RECHECK_IMAP_PORT=993
 ```
 
-If the account uses another mail provider, set those env vars.
-
 ## Debug files
 
-Debug files are served under:
+When an error happens, the admin alert will include links to:
 
-```text
-/admin/order-recheck-debug/<run-id>/
-```
-
-When the recheck fails, the alert will include direct links to:
 - screenshots
-- final HTML
+- HTML dump
 - log.txt
-- trace-error.zip
-- video `.webm` when available
+- Playwright trace when available
+- video when using local Playwright recording
 
-Open trace files with:
-
-```bash
-npx playwright show-trace trace-error.zip
-```
+Browserless/live view is handled from the Browserless side.

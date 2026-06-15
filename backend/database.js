@@ -23,13 +23,19 @@ function countEffectiveSkus(product) {
 }
 
 const { createClient } = require("@supabase/supabase-js");
-try { if (!global.WebSocket) global.WebSocket = require("ws"); } catch (_) {}
+let WebSocketTransport = null;
+try {
+    WebSocketTransport = require("ws");
+    if (!global.WebSocket) global.WebSocket = WebSocketTransport;
+} catch (_) {}
 
 require("dotenv").config();
 
+const supabaseOptions = WebSocketTransport ? { realtime: { transport: WebSocketTransport } } : undefined;
 const supabase = createClient(
     process.env.SUPABASE_URL,
-    process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_KEY
+    process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_KEY,
+    supabaseOptions
 );
 
 module.exports = supabase;
