@@ -2790,40 +2790,6 @@ async function recheckWebhookCredits(id, button) {
 }
 
 
-
-async function recheckRetailOrder(id, button) {
-    if (!window.confirm('Recheck this retailer order now? If the Target order is found but the expected SKU/product is missing, the charged credits will be refunded automatically.')) return;
-    const original = button ? button.textContent : '';
-    try {
-        if (button) { button.disabled = true; button.textContent = 'Checking...'; }
-        const data = await authJSON(API + `/admin/orders/${encodeURIComponent(id)}/recheck-order`, { method: 'POST', body: JSON.stringify({ refundIfMissing: true, debug: true }) });
-        if (data.debug?.screenshots?.length || data.debug?.video || data.debug?.trace) {
-            console.log('Order recheck debug:', data.debug);
-            const links = [];
-            if (data.debug.screenshots?.length) links.push(`Latest screenshot: ${data.debug.screenshots[data.debug.screenshots.length - 1]}`);
-            if (data.debug.video) links.push(`Video: ${data.debug.video}`);
-            if (data.debug.trace) links.push(`Trace: ${data.debug.trace}`);
-            if (data.debug.screenshots?.length) window.open(data.debug.screenshots[data.debug.screenshots.length - 1], '_blank');
-            if (data.debug.video) window.open(data.debug.video, '_blank');
-            console.log('Order recheck debug links:', links.join('\n'));
-        }
-        if (data.expectedItemFound) {
-            alert(`Order recheck OK. Expected item was found on order ${data.orderNumber}.`);
-        } else if (data.orderFound && data.refunded) {
-            alert(`Order recheck found the order, but not the expected item. Refunded ${data.refundedCredits} credit(s).`);
-        } else if (data.orderFound) {
-            alert('Order was found, but the expected item was not found. No credits were refunded.');
-        } else {
-            alert('The Target order page could not be matched to this order number. No refund was made.');
-        }
-        if (typeof loadCreditsAdminPane === 'function') await loadCreditsAdminPane();
-    } catch (err) {
-        alert((err.message || 'Failed to recheck order.') + '\n\nDebug screenshots, if created, are shown in the error text and server logs.');
-    } finally {
-        if (button) { button.disabled = false; button.textContent = original || 'Recheck Order'; }
-    }
-}
-
 async function recheckOrderCredits(id, button) {
     if (!id) return;
     const originalText = button ? button.textContent : '';
@@ -2846,6 +2812,34 @@ async function recheckOrderCredits(id, button) {
         if (button) {
             button.disabled = false;
             button.textContent = originalText || 'Recheck Credits';
+        }
+    }
+}
+
+
+async function recheckTargetOrderItem(id, button) {
+    if (!id) return;
+    const originalText = button ? button.textContent : '';
+    try {
+        if (button) {
+            button.disabled = true;
+            button.textContent = 'Checking...';
+        }
+        const data = await authJSON(API + `/admin/orders/${encodeURIComponent(id)}/recheck-order`, { method: 'POST' });
+        const files = Array.isArray(data.debugFiles) && data.debugFiles.length ? `\n\nDebug files:\n${data.debugFiles.join('\n')}` : '';
+        if (data.itemFound) {
+            alert(`Order recheck passed. Expected item was found in Target order ${data.orderNumber || ''}.${files}`);
+        } else {
+            alert(`Order recheck failed. Expected item was NOT found. Refunded credits: ${data.refundedCredits || 0}.${files}`);
+        }
+        await loadCreditsAdminPane();
+        return data;
+    } catch (err) {
+        alert(err.message || 'Failed to recheck Target order.');
+    } finally {
+        if (button) {
+            button.disabled = false;
+            button.textContent = originalText || 'Recheck Order';
         }
     }
 }
@@ -4084,19 +4078,19 @@ async function loadCreditsAdminPane() {
               <td><div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;">
                 ${Number(item.credits_charged || 0) > 0 ? `<button class="btn" type="button" data-refund-order="${escapeHTML(item.id)}" data-refund-amount="${escapeHTML(String(item.credits_charged || 0))}">Refund Credits</button>` : '<span class="subtle-text">No charge</span>'}
                 <button class="btn secondary" type="button" data-recheck-order="${escapeHTML(item.id)}">Recheck Credits</button>
-                <button class="btn secondary" type="button" data-recheck-retail-order="${escapeHTML(item.id)}">Recheck Order</button>
+                <button class="btn secondary" type="button" data-recheck-target-order="${escapeHTML(item.id)}">Recheck Order</button>
               </div></td>
             </tr>`).join('') : '<tr><td colspan="8">No orders found yet.</td></tr>';
-
-        ordersBody.querySelectorAll('[data-recheck-retail-order]').forEach((button) => {
-            button.addEventListener('click', async () => {
-                await recheckRetailOrder(button.dataset.recheckRetailOrder, button);
-            });
-        });
 
         ordersBody.querySelectorAll('[data-recheck-order]').forEach((button) => {
             button.addEventListener('click', async () => {
                 await recheckOrderCredits(button.dataset.recheckOrder, button);
+            });
+        });
+
+        ordersBody.querySelectorAll('[data-recheck-target-order]').forEach((button) => {
+            button.addEventListener('click', async () => {
+                await recheckTargetOrderItem(button.dataset.recheckTargetOrder, button);
             });
         });
 
