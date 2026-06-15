@@ -193,6 +193,40 @@ async function canAdminAccessUser(supabase, currentUser, targetUserId) {
     return data.owner_admin_id === currentUser.id;
 }
 
+
+async function ensureActiveCatalogForSite(supabase, site) {
+    // Keep an active catalog container available without recreating legacy NEXT-DROP products.
+    // The previous code path called ensureActiveCatalogForSite(), but that helper was missing
+    // after the NEXT-DROP removal, which caused the user dashboard error:
+    // "ensureActiveCatalogForSite is not defined".
+    let { data: activeCatalog, error: catalogError } = await supabase
+        .from("product_catalogs")
+        .select("id, site, name, export_date")
+        .eq("site", site)
+        .eq("is_active", true)
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+    if (catalogError) throw new Error(catalogError.message);
+    if (activeCatalog?.id) return activeCatalog;
+
+    const label = site === "samsclub" ? "Sam's Club" : site === "pokemon" ? "Pokemon Center" : site.charAt(0).toUpperCase() + site.slice(1);
+    const { data: createdCatalog, error: createCatalogError } = await supabase
+        .from("product_catalogs")
+        .insert({
+            site,
+            name: `${label} catalog`,
+            is_active: true,
+            export_date: new Date().toISOString()
+        })
+        .select("id, site, name, export_date")
+        .single();
+
+    if (createCatalogError) throw new Error(createCatalogError.message);
+    return createdCatalog;
+}
+
 async function ensureVirtualCatalogForSite(supabase, site) {
     const config = VIRTUAL_SITE_DEFAULTS[site];
     if (!config) return null;
