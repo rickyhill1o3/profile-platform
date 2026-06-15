@@ -47,6 +47,7 @@
         <button class="admin-nav-button" type="button" data-admin-nav="users">Current Users</button>
         <button class="admin-nav-button" type="button" data-admin-nav="run-status">Store Run Status</button>
         <button class="admin-nav-button" type="button" data-admin-nav="credits">Credits + Orders</button>
+        <button class="admin-nav-button" type="button" data-admin-nav="cancellations">Cancellations</button>
         <button class="admin-nav-button" type="button" data-admin-nav="webhooks">Webhooks</button>
         <button class="admin-nav-button" type="button" data-admin-nav="announcements">Announcements</button>
       </aside>
@@ -725,6 +726,19 @@ placeholder="Enter one SKU per line&#10;12345678&#10;87654321"></textarea>
                   </tr>
                 </tbody>
               </table>
+            </div>
+          </section>
+        </section>
+
+
+
+        <section class="admin-pane" data-admin-pane="cancellations">
+          <section class="panel">
+            <div class="panel-header"><div><h2>Cancellation Refund Requests</h2><p class="subtle-text">Review user-uploaded cancellation/missing-item screenshots. Approving a request refunds credits, marks the linked order as refunded, and blocks duplicate refunds.</p></div></div>
+            <div class="toolbar-row toolbar-row--spread"><span class="subtle-text">AI Assist is a recommendation only until you trust the workflow.</span><button class="btn btn-primary" type="button" onclick="loadAdminCancellationRequests()">Refresh Cancellation Requests</button></div>
+            <div id="adminCancellationMessage" class="subtle-text"></div>
+            <div class="table-wrap table-wrap--admin-scroll" style="margin-top:12px;">
+              <table class="admin-table"><thead><tr><th>When</th><th>User</th><th>Order</th><th>Product</th><th>AI Assist</th><th>Status</th><th>Images</th><th>Action</th></tr></thead><tbody id="adminCancellationRequestsBody"><tr><td colspan="8">Loading requests...</td></tr></tbody></table>
             </div>
           </section>
         </section>

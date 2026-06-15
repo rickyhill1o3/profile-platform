@@ -3928,7 +3928,7 @@ async function loadUserActivity() {
         summary.textContent = `Current balance: ${balance} credits • Lifetime granted: ${Number(data.lifetime_credits_granted || 0)} • Lifetime spent: ${Number(data.lifetime_credits_spent || 0)}${data.needs_removal ? ' • Flagged for removal until positive balance is restored' : ''}`;
         const orders = Array.isArray(data.orders) ? data.orders : [];
         ordersBody.innerHTML = orders.length ? orders.map((order) => `
-            <tr><td>${escapeHTML(formatDateTime(order.created_at))}</td><td>${escapeHTML(order.site || '-')}</td><td>${escapeHTML(order.product_name || '-')}</td><td>${escapeHTML(order.status || '-')}</td><td>${escapeHTML(String(order.credits_charged || 0))}</td></tr>
+            <tr><td>${escapeHTML(formatDateTime(order.created_at))}</td><td>${escapeHTML(order.site || '-')}</td><td>${escapeHTML(order.product_name || '-')}</td><td>${orderStatusBadge(order)}</td><td>${escapeHTML(String(orderDisplayCredits(order)))}</td></tr>
         `).join('') : '<tr><td colspan="5">No orders yet.</td></tr>';
         const txs = Array.isArray(data.transactions) ? data.transactions : [];
         txBody.innerHTML = txs.length ? txs.map((tx) => `
@@ -3977,7 +3977,7 @@ async function loadUserCreditReceipt(userId) {
               <td>${escapeHTML(item.site || '-')}</td>
               <td>${escapeHTML(item.product_name || item.sku || '-')}</td>
               <td>${String(item.status || '') === 'insufficient_credits' ? '<span class="status-tag status-tag--danger">Insufficient Credits</span>' : '<span class="status-tag status-tag--success">Charged</span>'}</td>
-              <td>${escapeHTML(String(item.credits_charged || 0))}</td>
+              <td>${escapeHTML(String(orderDisplayCredits(item)))}</td>
               <td>${escapeHTML(item.external_order_id || '-')}</td>
             </tr>`).join('') : '<tr><td colspan="6">No linked orders found.</td></tr>';
     } catch (err) {
@@ -3985,6 +3985,24 @@ async function loadUserCreditReceipt(userId) {
         txBody.innerHTML = `<tr><td colspan="5">${escapeHTML(err.message)}</td></tr>`;
         ordersBody.innerHTML = `<tr><td colspan="6">${escapeHTML(err.message)}</td></tr>`;
     }
+}
+
+function orderDisplayStatus(item) {
+    const status = String(item?.display_status || item?.status || '').toLowerCase();
+    if (item?.is_refunded || status === 'refunded' || item?.metadata?.refunded_at) return 'refunded';
+    return status || 'success';
+}
+
+function orderDisplayCredits(item) {
+    if (orderDisplayStatus(item) === 'refunded') return 0;
+    return Number(item?.display_credits_charged ?? item?.credits_charged ?? 0) || 0;
+}
+
+function orderStatusBadge(item) {
+    const status = orderDisplayStatus(item);
+    if (status === 'refunded') return '<span class="status-tag status-tag--danger">Refunded</span>';
+    if (status === 'insufficient_credits') return '<span class="status-tag status-tag--danger">Insufficient Credits</span>';
+    return '<span class="status-tag status-tag--success">Charged</span>';
 }
 
 async function loadCreditsAdminPane() {
@@ -4045,10 +4063,10 @@ async function loadCreditsAdminPane() {
               <td>${escapeHTML(item.source || '-')}</td>
               <td>${escapeHTML(item.product_name || item.sku || '-')}</td>
               <td>${String(item.status || '') === 'insufficient_credits' ? '<span class="status-tag status-tag--danger">Insufficient Credits</span>' : '<span class="status-tag status-tag--success">Charged</span>'}</td>
-              <td>${escapeHTML(String(item.credits_charged || 0))}</td>
+              <td>${escapeHTML(String(orderDisplayCredits(item)))}</td>
               <td>${escapeHTML(item.external_order_id || '-')}</td>
               <td><div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;">
-                ${Number(item.credits_charged || 0) > 0 ? `<button class="btn" type="button" data-refund-order="${escapeHTML(item.id)}" data-refund-amount="${escapeHTML(String(item.credits_charged || 0))}">Refund Credits</button>` : '<span class="subtle-text">No charge</span>'}
+                ${orderDisplayStatus(item) === 'refunded' ? '<span class="status-tag status-tag--danger">Already Refunded</span>' : (orderDisplayCredits(item) > 0 ? `<button class="btn" type="button" data-refund-order="${escapeHTML(item.id)}" data-refund-amount="${escapeHTML(String(orderDisplayCredits(item)))}">Refund Credits</button>` : '<span class="subtle-text">No charge</span>')}
                 <button class="btn secondary" type="button" data-recheck-order="${escapeHTML(item.id)}">Recheck Credits</button>
               </div></td>
             </tr>`).join('') : '<tr><td colspan="8">No orders found yet.</td></tr>';
@@ -4682,6 +4700,158 @@ async function initAdminStoreRunStatus() {
 }
 
 
+
+async function fileToDataUrl(file) {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result || ''));
+        reader.onerror = () => reject(reader.error || new Error('Could not read image.'));
+        reader.readAsDataURL(file);
+    });
+}
+
+async function collectCancellationImages() {
+    const input = document.getElementById('cancelImages');
+    const files = Array.from(input?.files || []).slice(0, 5);
+    const images = [];
+    for (const file of files) {
+        if (!String(file.type || '').startsWith('image/')) continue;
+        if (file.size > 850000) {
+            throw new Error(`${file.name} is too large. Please upload screenshots under about 850KB each.`);
+        }
+        images.push({ name: file.name, type: file.type, dataUrl: await fileToDataUrl(file) });
+    }
+    return images;
+}
+
+function cancellationStatusBadge(status) {
+    const value = String(status || 'pending').toLowerCase();
+    if (value === 'approved') return '<span class="status-tag status-tag--success">Approved / Refunded</span>';
+    if (value === 'denied') return '<span class="status-tag status-tag--danger">Denied</span>';
+    return '<span class="status-tag">Pending Review</span>';
+}
+
+function aiRecommendationBadge(item) {
+    const rec = String(item?.ai_recommendation || 'manual_review');
+    const confidence = item?.ai_confidence ? ` (${item.ai_confidence}%)` : '';
+    const label = rec === 'approve_refund' ? 'Recommend refund' : rec === 'deny' ? 'Recommend deny' : 'Manual review';
+    const cls = rec === 'approve_refund' ? 'status-tag--success' : rec === 'deny' ? 'status-tag--danger' : '';
+    return `<span class="status-tag ${cls}">${escapeHTML(label + confidence)}</span><div class="subtle-text">${escapeHTML(item?.ai_summary || '')}</div>`;
+}
+
+async function submitCancellationRequest() {
+    const message = document.getElementById('cancelRequestMessage');
+    if (message) message.textContent = 'Submitting request...';
+    try {
+        const images = await collectCancellationImages();
+        const payload = {
+            order_number: document.getElementById('cancelOrderNumber')?.value || '',
+            sku: document.getElementById('cancelSku')?.value || '',
+            product_name: document.getElementById('cancelProductName')?.value || '',
+            evidence_type: document.getElementById('cancelEvidenceType')?.value || '',
+            notes: document.getElementById('cancelNotes')?.value || '',
+            images
+        };
+        await authJSON(API + '/cancellation-requests', { method: 'POST', body: JSON.stringify(payload) });
+        if (message) message.textContent = 'Cancellation request submitted for admin review.';
+        ['cancelOrderNumber','cancelSku','cancelProductName','cancelNotes'].forEach((id) => { const el = document.getElementById(id); if (el) el.value = ''; });
+        const fileInput = document.getElementById('cancelImages');
+        if (fileInput) fileInput.value = '';
+        await loadCancellationRequests();
+    } catch (err) {
+        if (message) message.textContent = err.message;
+    }
+}
+
+async function loadCancellationRequests() {
+    const body = document.getElementById('cancelRequestsBody');
+    if (!body) return;
+    body.innerHTML = '<tr><td colspan="6">Loading requests...</td></tr>';
+    try {
+        const data = await authJSON(API + '/cancellation-requests');
+        const items = Array.isArray(data.items) ? data.items : [];
+        body.innerHTML = items.length ? items.map((item) => `
+            <tr>
+              <td>${escapeHTML(formatEasternTime(item.created_at || ''))} ET</td>
+              <td>${escapeHTML(item.external_order_id || '-')}</td>
+              <td>${escapeHTML(item.product_name || item.sku || '-')}</td>
+              <td>${aiRecommendationBadge(item)}</td>
+              <td>${cancellationStatusBadge(item.status)}</td>
+              <td>${escapeHTML(item.admin_note || '-')}</td>
+            </tr>
+        `).join('') : '<tr><td colspan="6">No cancellation requests yet.</td></tr>';
+    } catch (err) {
+        body.innerHTML = `<tr><td colspan="6">${escapeHTML(err.message)}</td></tr>`;
+    }
+}
+
+function renderCancellationImages(item) {
+    const images = Array.isArray(item.images) ? item.images : [];
+    if (!images.length) return '<span class="subtle-text">No images</span>';
+    return images.map((img, index) => `<a class="btn" href="${escapeHTML(img.dataUrl || '#')}" target="_blank" rel="noopener">Image ${index + 1}</a>`).join(' ');
+}
+
+async function loadAdminCancellationRequests() {
+    const body = document.getElementById('adminCancellationRequestsBody');
+    const message = document.getElementById('adminCancellationMessage');
+    if (!body) return;
+    body.innerHTML = '<tr><td colspan="8">Loading requests...</td></tr>';
+    try {
+        const data = await authJSON(API + '/admin/cancellation-requests');
+        const items = Array.isArray(data.items) ? data.items : [];
+        body.innerHTML = items.length ? items.map((item) => {
+            const pending = String(item.status || 'pending') === 'pending';
+            return `
+            <tr>
+              <td>${escapeHTML(formatEasternTime(item.created_at || ''))} ET</td>
+              <td>${escapeHTML(item.users?.email || item.user_email || '-')}</td>
+              <td>${escapeHTML(item.external_order_id || '-')}</td>
+              <td>${escapeHTML(item.product_name || item.sku || '-')}</td>
+              <td>${aiRecommendationBadge(item)}</td>
+              <td>${cancellationStatusBadge(item.status)}</td>
+              <td>${renderCancellationImages(item)}</td>
+              <td><div style="display:flex;gap:6px;flex-wrap:wrap;">
+                ${pending ? `<button class="btn" type="button" data-approve-cancel="${escapeHTML(item.id)}" data-refund-amount="${escapeHTML(String(item.requested_credits || 0))}">Approve Refund</button><button class="btn btn-danger" type="button" data-deny-cancel="${escapeHTML(item.id)}">Deny</button>` : '<span class="subtle-text">Reviewed</span>'}
+              </div></td>
+            </tr>`;
+        }).join('') : '<tr><td colspan="8">No cancellation requests found.</td></tr>';
+
+        body.querySelectorAll('[data-approve-cancel]').forEach((button) => {
+            button.addEventListener('click', async () => {
+                const amountText = window.prompt('Refund how many credits?', button.dataset.refundAmount || '0');
+                if (amountText === null) return;
+                const amount = Math.round(Number(amountText || 0));
+                if (!Number.isFinite(amount) || amount <= 0) return;
+                const note = window.prompt('Approval note', 'Cancellation/missing-item proof approved') || '';
+                try {
+                    await authJSON(API + '/admin/cancellation-requests/' + encodeURIComponent(button.dataset.approveCancel) + '/approve', { method: 'POST', body: JSON.stringify({ amount, note }) });
+                    if (message) message.textContent = 'Request approved and credits refunded.';
+                    await loadAdminCancellationRequests();
+                    try { await loadCreditsAdminPane(); } catch (_) { }
+        try { await loadAdminCancellationRequests(); } catch (_) { }
+                } catch (err) {
+                    if (message) message.textContent = err.message;
+                }
+            });
+        });
+        body.querySelectorAll('[data-deny-cancel]').forEach((button) => {
+            button.addEventListener('click', async () => {
+                const note = window.prompt('Denial note', 'Proof does not show a canceled/missing main item') || '';
+                try {
+                    await authJSON(API + '/admin/cancellation-requests/' + encodeURIComponent(button.dataset.denyCancel) + '/deny', { method: 'POST', body: JSON.stringify({ note }) });
+                    if (message) message.textContent = 'Request denied.';
+                    await loadAdminCancellationRequests();
+                } catch (err) {
+                    if (message) message.textContent = err.message;
+                }
+            });
+        });
+    } catch (err) {
+        body.innerHTML = `<tr><td colspan="8">${escapeHTML(err.message)}</td></tr>`;
+    }
+}
+
+
 document.addEventListener("DOMContentLoaded", async () => {
     if (!requireAuthForPrivatePages()) return;
     try {
@@ -4706,6 +4876,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         try { await loadTargetCheckoutListsForUser(); } catch (err) { console.error("Target checkout lists failed:", err); }
         try { await loadCreditsBalance(); } catch (_) { }
         try { await loadUserActivity(); } catch (_) { }
+        try { await loadCancellationRequests(); } catch (_) { }
     }
 
     if (document.getElementById("profileForm")) {
