@@ -1,8 +1,6 @@
 # Render Playwright setup
 
-This build uses the full `playwright` package, not `playwright-core`, so `npx playwright install chromium` works correctly.
-
-Render settings:
+Use these Render settings:
 
 Root Directory:
 ```bash
@@ -19,16 +17,8 @@ Start Command:
 npm start
 ```
 
-If Chromium launches but complains about missing Linux packages, change Build Command to:
+If Render still restores a bad dependency cache and fails with `ENOTEMPTY`, clear the Render build cache once:
 
-```bash
-npm install && npm run render-build-deps
-```
+Manual Deploy → Clear build cache & deploy
 
-Live viewing note: Render cannot display a headed Chrome window in your local desktop. For local live viewing, run the backend on your PC with:
-
-```bash
-ORDER_RECHECK_HEADLESS=false npm start
-```
-
-For Render debugging, use the debug screenshots/video/trace that the Recheck Order flow saves.
+This folder also includes `preinstall-clean.js`, which removes stale cached `imapflow`, `mailparser`, and Playwright folders before dependency installation.
