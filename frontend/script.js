@@ -3927,6 +3927,7 @@ async function loadUserActivity() {
         const balance = Number(data.balance || 0);
         summary.textContent = `Current balance: ${balance} credits • Lifetime granted: ${Number(data.lifetime_credits_granted || 0)} • Lifetime spent: ${Number(data.lifetime_credits_spent || 0)}${data.needs_removal ? ' • Flagged for removal until positive balance is restored' : ''}`;
         const orders = Array.isArray(data.orders) ? data.orders : [];
+        renderCancellationOrderOptions(orders);
         ordersBody.innerHTML = orders.length ? orders.map((order) => `
             <tr><td>${escapeHTML(formatDateTime(order.created_at))}</td><td>${escapeHTML(order.site || '-')}</td><td>${escapeHTML(order.product_name || '-')}</td><td>${orderStatusBadge(order)}</td><td>${escapeHTML(String(orderDisplayCredits(order)))}</td></tr>
         `).join('') : '<tr><td colspan="5">No orders yet.</td></tr>';
@@ -4700,6 +4701,74 @@ async function initAdminStoreRunStatus() {
 }
 
 
+let cancellationOrderOptions = [];
+
+function orderIdentifierForCancellation(order) {
+    return String(order?.external_order_id || order?.order_id || order?.id || '').trim();
+}
+
+function orderOptionLabel(order) {
+    const when = formatDateTime(order?.created_at || '');
+    const orderNumber = orderIdentifierForCancellation(order) || 'No order number';
+    const product = String(order?.product_name || 'Unknown product');
+    const sku = String(order?.sku || '').trim();
+    const site = String(order?.site || '').trim();
+    const credits = orderDisplayCredits(order);
+    return `${when} • ${orderNumber} • ${site || 'site'} • ${product}${sku ? ` • SKU ${sku}` : ''} • ${credits} credit${Number(credits) === 1 ? '' : 's'}`;
+}
+
+function renderCancellationOrderOptions(orders) {
+    cancellationOrderOptions = Array.isArray(orders) ? orders.filter((order) => {
+        const refunded = Boolean(order?.is_refunded) || String(order?.display_status || order?.status || '').toLowerCase() === 'refunded';
+        return !refunded && orderIdentifierForCancellation(order);
+    }) : [];
+
+    const select = document.getElementById('cancelOrderSelect');
+    if (!select) return;
+
+    if (!cancellationOrderOptions.length) {
+        select.innerHTML = '<option value="">No refundable orders found yet</option>';
+        handleCancellationOrderSelect();
+        return;
+    }
+
+    select.innerHTML = '<option value="">Select one of your previous orders...</option>' + cancellationOrderOptions.map((order) => {
+        const id = String(order?.id || orderIdentifierForCancellation(order));
+        return `<option value="${escapeHTML(id)}">${escapeHTML(orderOptionLabel(order))}</option>`;
+    }).join('');
+    handleCancellationOrderSelect();
+}
+
+function selectedCancellationOrder() {
+    const select = document.getElementById('cancelOrderSelect');
+    const selectedId = String(select?.value || '').trim();
+    if (!selectedId) return null;
+    return cancellationOrderOptions.find((order) => String(order?.id || orderIdentifierForCancellation(order)) === selectedId) || null;
+}
+
+function handleCancellationOrderSelect() {
+    const order = selectedCancellationOrder();
+    const idInput = document.getElementById('cancelOrderId');
+    const orderInput = document.getElementById('cancelOrderNumber');
+    const skuInput = document.getElementById('cancelSku');
+    const productInput = document.getElementById('cancelProductName');
+    const summary = document.getElementById('cancelSelectedOrderSummary');
+
+    if (idInput) idInput.value = order?.id || '';
+    if (orderInput) orderInput.value = orderIdentifierForCancellation(order);
+    if (skuInput) skuInput.value = order?.sku || '';
+    if (productInput) productInput.value = order?.product_name || '';
+
+    if (summary) {
+        if (!order) {
+            summary.textContent = 'Choose one of your previous successful checkout orders. The order number, product name, and SKU will fill in automatically.';
+        } else {
+            summary.textContent = `Selected: ${orderIdentifierForCancellation(order)} • ${order.site || 'site'} • ${order.product_name || 'product'}${order.sku ? ` • SKU ${order.sku}` : ''}. Upload screenshots that prove this selected product is missing or canceled.`;
+        }
+    }
+}
+
+
 
 async function fileToDataUrl(file) {
     return new Promise((resolve, reject) => {
@@ -4743,18 +4812,24 @@ async function submitCancellationRequest() {
     const message = document.getElementById('cancelRequestMessage');
     if (message) message.textContent = 'Submitting request...';
     try {
+        const selectedOrder = selectedCancellationOrder();
+        if (!selectedOrder) throw new Error('Please select the previous order that needs to be reviewed.');
         const images = await collectCancellationImages();
         const payload = {
-            order_number: document.getElementById('cancelOrderNumber')?.value || '',
-            sku: document.getElementById('cancelSku')?.value || '',
-            product_name: document.getElementById('cancelProductName')?.value || '',
+            order_id: selectedOrder.id || '',
+            order_number: orderIdentifierForCancellation(selectedOrder),
+            sku: selectedOrder.sku || '',
+            product_name: selectedOrder.product_name || '',
             evidence_type: document.getElementById('cancelEvidenceType')?.value || '',
             notes: document.getElementById('cancelNotes')?.value || '',
             images
         };
         await authJSON(API + '/cancellation-requests', { method: 'POST', body: JSON.stringify(payload) });
         if (message) message.textContent = 'Cancellation request submitted for admin review.';
-        ['cancelOrderNumber','cancelSku','cancelProductName','cancelNotes'].forEach((id) => { const el = document.getElementById(id); if (el) el.value = ''; });
+        ['cancelOrderId','cancelOrderNumber','cancelSku','cancelProductName','cancelNotes'].forEach((id) => { const el = document.getElementById(id); if (el) el.value = ''; });
+        const orderSelect = document.getElementById('cancelOrderSelect');
+        if (orderSelect) orderSelect.value = '';
+        handleCancellationOrderSelect();
         const fileInput = document.getElementById('cancelImages');
         if (fileInput) fileInput.value = '';
         await loadCancellationRequests();
