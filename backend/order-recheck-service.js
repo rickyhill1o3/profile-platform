@@ -1,3 +1,4 @@
+process.env.PLAYWRIGHT_BROWSERS_PATH = process.env.PLAYWRIGHT_BROWSERS_PATH || '0';
 const fs = require('fs');
 const path = require('path');
 const { chromium } = require('playwright');
@@ -322,7 +323,7 @@ async function launchBrowser({ normalized, debug, log }) {
     const msg = String(err && err.message || err);
     if (/Executable doesn't exist|Please run.*playwright install|browserType\.launch/i.test(msg)) {
       throw new Error(
-        'Chromium is not installed on this Render instance. Either set BROWSERLESS_CDP_ENDPOINT / BROWSERLESS_WS_ENDPOINT for Browserless mode, or use Render build command `npm install` with this package postinstall, or manually run `npx playwright install chromium` in Render after npm install. Original error: ' + msg.slice(0, 800)
+        'Chromium is not installed on this Render instance. Either set BROWSERLESS_CDP_ENDPOINT / BROWSERLESS_WS_ENDPOINT for Browserless mode, or use Render build command `npm install` with this package postinstall, or the included postinstall should install Chromium into node_modules; redeploy with Clear Build Cache. Original error: ' + msg.slice(0, 800)
       );
     }
     throw err;

@@ -11,31 +11,46 @@ const root = path.join(__dirname, '..');
 const bin = process.platform === 'win32'
   ? path.join(root, 'node_modules', '.bin', 'playwright.cmd')
   : path.join(root, 'node_modules', '.bin', 'playwright');
-const cli = path.join(root, 'node_modules', 'playwright', 'cli.js');
+
+// CRITICAL FOR RENDER:
+// Put Playwright browsers inside node_modules so they are included in Render's build artifact.
+// Installing to /opt/render/.cache can disappear between build/runtime or between instances.
+const env = {
+  ...process.env,
+  PLAYWRIGHT_BROWSERS_PATH: '0'
+};
 
 function run(cmd, args) {
-  execFileSync(cmd, args, { stdio: 'inherit', env: { ...process.env } });
+  console.log('[postinstall] running:', cmd, args.join(' '));
+  execFileSync(cmd, args, { stdio: 'inherit', cwd: root, env });
 }
 
 try {
   require.resolve('playwright');
 } catch (err) {
-  console.warn('[postinstall] playwright package is not available; skipping Chromium install.');
-  process.exit(0);
+  console.error('[postinstall] playwright package is not available. npm install did not finish correctly.');
+  process.exit(1);
 }
 
-console.log('[postinstall] installing Playwright Chromium browser for Render...');
+console.log('[postinstall] installing Playwright Chromium browser into node_modules for Render...');
 try {
   if (fs.existsSync(bin)) {
     run(bin, ['install', 'chromium']);
-  } else if (fs.existsSync(cli)) {
-    run(process.execPath, [cli, 'install', 'chromium']);
   } else {
     run('npx', ['playwright', 'install', 'chromium']);
   }
+
+  const localBrowsers = path.join(root, 'node_modules', 'playwright-core', '.local-browsers');
+  if (fs.existsSync(localBrowsers)) {
+    console.log('[postinstall] local browser folder:', localBrowsers);
+    console.log('[postinstall] installed:', fs.readdirSync(localBrowsers).join(', '));
+  } else {
+    console.warn('[postinstall] browser install finished, but .local-browsers was not found at:', localBrowsers);
+  }
+
   console.log('[postinstall] Playwright Chromium install complete.');
 } catch (err) {
   console.error('[postinstall] Playwright Chromium install failed.');
-  console.error(err && err.message ? err.message : err);
+  console.error(err && err.stack ? err.stack : err);
   process.exit(1);
 }
