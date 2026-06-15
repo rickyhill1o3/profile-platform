@@ -7,7 +7,7 @@ const nodeModules = path.join(root, 'node_modules');
 function rm(target) {
   try {
     if (fs.existsSync(target)) {
-      fs.rmSync(target, { recursive: true, force: true, maxRetries: 3, retryDelay: 500 });
+      fs.rmSync(target, { recursive: true, force: true, maxRetries: 5, retryDelay: 500 });
       console.log('[preinstall] removed stale cache path:', target);
     }
   } catch (err) {
@@ -15,17 +15,14 @@ function rm(target) {
   }
 }
 
-// Render sometimes restores a partially-written node_modules cache. Removing only one
-// package can confuse npm's installer, so remove the whole folder before npm starts.
-if (process.env.RENDER || process.env.FORCE_CLEAN_NODE_MODULES === '1') {
-  rm(nodeModules);
-} else {
-  rm(path.join(nodeModules, 'imapflow'));
-  try {
-    if (fs.existsSync(nodeModules)) {
-      for (const name of fs.readdirSync(nodeModules)) {
-        if (name.startsWith('.imapflow-')) rm(path.join(nodeModules, name));
-      }
+// Do NOT delete the whole node_modules folder inside npm's own lifecycle.
+// That can make npm think packages were installed while the folder was removed.
+// This only clears the corrupted imapflow folders that previously caused ENOTEMPTY.
+rm(path.join(nodeModules, 'imapflow'));
+try {
+  if (fs.existsSync(nodeModules)) {
+    for (const name of fs.readdirSync(nodeModules)) {
+      if (name.startsWith('.imapflow-')) rm(path.join(nodeModules, name));
     }
-  } catch (_) {}
-}
+  }
+} catch (_) {}

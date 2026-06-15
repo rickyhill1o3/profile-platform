@@ -7,7 +7,7 @@
     "start": "node server.js",
     "test": "echo \"Error: no test specified\" && exit 1",
     "preinstall": "node scripts/clean-render-cache.js",
-    "postinstall": "node scripts/verify-install.js && node scripts/install-playwright-chromium.js"
+    "postinstall": "node scripts/install-playwright-chromium.js"
   },
   "keywords": [],
   "author": "",

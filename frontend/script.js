@@ -2802,7 +2802,10 @@ async function recheckOrderItem(id, button) {
         button.textContent = 'Checking item...';
     }
     try {
-        const data = await authJSON(API + `/admin/orders/${encodeURIComponent(id)}/recheck-item`, { method: 'POST' });
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 150000);
+        const data = await authJSON(API + `/admin/orders/${encodeURIComponent(id)}/recheck-item`, { method: 'POST', signal: controller.signal });
+        clearTimeout(timeout);
         const links = Array.isArray(data.artifacts) && data.artifacts.length
             ? '\n\nDebug files:\n' + data.artifacts.map((a) => `${a.label || a.type}: ${location.origin}${a.url}`).join('\n')
             : '';
