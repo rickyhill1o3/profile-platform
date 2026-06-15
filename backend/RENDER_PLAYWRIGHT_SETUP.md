@@ -1,27 +1,39 @@
 # Render Playwright setup
 
-This build removes the `postinstall` hook that was causing Render/npm to fail with `Exit handler never called`.
+This build removes the Playwright browser download from `npm install` so Render can get past dependency installation.
 
-Use this Render setup:
+Render settings:
 
-- Root Directory: `backend`
-- Build Command: `npm install && npm run render-build`
-- Start Command: `npm start`
+Root Directory:
+```
+backend
+```
 
-The start command also runs `ensure-playwright.js`, so if Chromium is missing it will try to install it before starting the server.
+Build Command:
+```
+npm install
+```
 
-If Render still has trouble installing local Chromium, use Browserless instead and set one of these environment variables:
+Start Command:
+```
+npm start
+```
+
+For local Chromium on Render, use this only after `npm install` is passing:
+```
+npm install && npm run render-build
+```
+
+If the Chromium install fails on Render Starter, use Browserless instead and set one of these environment variables:
 
 ```
 BROWSERLESS_WS_ENDPOINT=wss://...
-# or
+```
+
+or
+
+```
 BROWSERLESS_URL=wss://...
 ```
 
-If you need to skip the local Chromium install because you are using Browserless, set:
-
-```
-SKIP_PLAYWRIGHT_INSTALL=1
-```
-
-Recommended Node version is pinned in `package.json` to Node 20.x because the Render log showed an npm internal failure on Node 22 while running install scripts.
+The app now uses `playwright-core`, so `npm install` will not download browsers automatically.
