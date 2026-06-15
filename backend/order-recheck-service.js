@@ -119,22 +119,30 @@ function browserlessEndpointWithLaunchOptions(endpoint, normalized, proxy, log =
     log('No order proxy found for Browserless launch; Target may see the Browserless datacenter IP.');
   }
 
+  // Keep Browserless query params minimal. Some hosted Browserless plans reject
+  // extra top-level params such as humanlike/blockAds/stealth/headless with:
+  // "Query-parameter validation failed: must NOT have additional properties".
+  // Put browser launch settings inside the supported launch JSON only.
   const launch = {
     headless: String(process.env.ORDER_RECHECK_HEADLESS || 'true').toLowerCase() !== 'false',
-    stealth: String(process.env.ORDER_RECHECK_BROWSERLESS_STEALTH || 'true').toLowerCase() !== 'false',
     args
   };
-  const encoded = Buffer.from(JSON.stringify(launch), 'utf8').toString('base64');
+  const encodedLaunch = encodeURIComponent(JSON.stringify(launch));
   const sep = base.includes('?') ? '&' : '?';
-  const extra = [
-    `launch=${encodeURIComponent(encoded)}`,
-    `timeout=${encodeURIComponent(String(process.env.ORDER_RECHECK_BROWSERLESS_TIMEOUT_MS || process.env.ORDER_RECHECK_TOTAL_TIMEOUT_MS || 120000))}`,
-    `stealth=${encodeURIComponent(String(process.env.ORDER_RECHECK_BROWSERLESS_STEALTH || 'true'))}`,
-    `headless=${encodeURIComponent(String(process.env.ORDER_RECHECK_HEADLESS || 'true'))}`
-  ];
-  if (String(process.env.ORDER_RECHECK_BROWSERLESS_HUMANLIKE || 'true').toLowerCase() !== 'false') extra.push('humanlike=true');
-  if (String(process.env.ORDER_RECHECK_BROWSERLESS_BLOCK_ADS || 'true').toLowerCase() !== 'false') extra.push('blockAds=true');
-  return `${base}${sep}${extra.join('&')}`;
+
+  // Browserless timeout is a connection/session URL param. Keep it inside the
+  // shared hosted limit. The env name says _MS, and Browserless expects ms.
+  const rawBrowserlessTimeout =
+    process.env.ORDER_RECHECK_BROWSERLESS_TIMEOUT_MS ||
+    process.env.ORDER_RECHECK_TIMEOUT_MS ||
+    process.env.ORDER_RECHECK_TOTAL_TIMEOUT_MS ||
+    '60000';
+  let browserlessTimeout = Number.parseInt(String(rawBrowserlessTimeout), 10);
+  if (!Number.isFinite(browserlessTimeout) || browserlessTimeout < 1) browserlessTimeout = 60000;
+  if (browserlessTimeout > 60000) browserlessTimeout = 60000;
+  log(`Browserless connect timeout parameter: ${browserlessTimeout}`);
+
+  return `${base}${sep}timeout=${encodeURIComponent(String(browserlessTimeout))}&launch=${encodedLaunch}`;
 }
 
 async function attachProxyAuthIfNeeded(page, proxy, log = () => {}) {
