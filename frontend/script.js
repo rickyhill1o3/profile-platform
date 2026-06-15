@@ -2797,9 +2797,15 @@ async function recheckRetailOrder(id, button) {
     try {
         if (button) { button.disabled = true; button.textContent = 'Checking...'; }
         const data = await authJSON(API + `/admin/orders/${encodeURIComponent(id)}/recheck-order`, { method: 'POST', body: JSON.stringify({ refundIfMissing: true, debug: true }) });
-        if (data.debug?.screenshots?.length) {
+        if (data.debug?.screenshots?.length || data.debug?.video || data.debug?.trace) {
             console.log('Order recheck debug:', data.debug);
-            window.open(data.debug.screenshots[data.debug.screenshots.length - 1], '_blank');
+            const links = [];
+            if (data.debug.screenshots?.length) links.push(`Latest screenshot: ${data.debug.screenshots[data.debug.screenshots.length - 1]}`);
+            if (data.debug.video) links.push(`Video: ${data.debug.video}`);
+            if (data.debug.trace) links.push(`Trace: ${data.debug.trace}`);
+            if (data.debug.screenshots?.length) window.open(data.debug.screenshots[data.debug.screenshots.length - 1], '_blank');
+            if (data.debug.video) window.open(data.debug.video, '_blank');
+            console.log('Order recheck debug links:', links.join('\n'));
         }
         if (data.expectedItemFound) {
             alert(`Order recheck OK. Expected item was found on order ${data.orderNumber}.`);

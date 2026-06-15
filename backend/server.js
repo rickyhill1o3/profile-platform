@@ -4110,6 +4110,7 @@ function unwrapSecretValue(value = '') {
 }
 
 const ORDER_RECHECK_DEBUG_DIR = process.env.ORDER_RECHECK_DEBUG_DIR || '/tmp/order-recheck-debug';
+const ORDER_RECHECK_SESSION_DIR = process.env.ORDER_RECHECK_SESSION_DIR || '/tmp/order-recheck-sessions';
 function safeDebugFileName(value = '') {
     return String(value || '').replace(/[^a-zA-Z0-9_.-]+/g, '_').slice(0, 180);
 }
@@ -4202,8 +4203,107 @@ async function findRetailLoginForOrder(order, normalized) {
 
     const loginEmail = unwrapSecretValue(credential?.login_email || email);
     const loginPassword = unwrapSecretValue(credential?.login_password || '');
+    const gmailAppPassword = unwrapSecretValue(credential?.gmail_app_password || credential?.imap_password || credential?.app_password || '');
     if (!loginEmail || !loginPassword) throw new Error('No saved Target login email/password was found for this order profile/account. Add the Target login on the profile/account first, then recheck the order.');
-    return { loginEmail, loginPassword, profileId: profile?.id || credential?.profile_id || null, profileName: profile?.profile_name || profileName };
+    return { loginEmail, loginPassword, gmailAppPassword, profileId: profile?.id || credential?.profile_id || null, profileName: profile?.profile_name || profileName };
+}
+
+function guessImapHost(email = '') {
+    const domain = String(email || '').split('@').pop().toLowerCase();
+    if (!domain) return 'imap.gmail.com';
+    if (domain === 'gmail.com' || domain === 'googlemail.com') return 'imap.gmail.com';
+    if (domain.includes('yahoo')) return 'imap.mail.yahoo.com';
+    if (domain.includes('outlook') || domain.includes('hotmail') || domain.includes('live.com')) return 'outlook.office365.com';
+    if (domain.includes('icloud')) return 'imap.mail.me.com';
+    return `imap.${domain}`;
+}
+
+function extractOtpFromText(text = '') {
+    const clean = String(text || '').replace(/\s+/g, ' ');
+    const patterns = [
+        /(?:target|verification|security|passcode|code)[^0-9]{0,80}([0-9]{6})/i,
+        /([0-9]{6})[^0-9]{0,80}(?:target|verification|security|passcode|code)/i,
+        /\b([0-9]{6})\b/
+    ];
+    for (const pattern of patterns) {
+        const m = clean.match(pattern);
+        if (m?.[1]) return m[1];
+    }
+    return '';
+}
+
+async function fetchTargetOtpFromImap({ email, appPassword, sinceDate = new Date(Date.now() - 10 * 60 * 1000), debug, timeoutMs = 90000 }) {
+    const loginEmail = unwrapSecretValue(email);
+    const password = unwrapSecretValue(appPassword);
+    if (!loginEmail || !password) return '';
+    const { ImapFlow } = require('imapflow');
+    const { simpleParser } = require('mailparser');
+    const host = process.env.ORDER_RECHECK_IMAP_HOST || guessImapHost(loginEmail);
+    const client = new ImapFlow({
+        host,
+        port: Number(process.env.ORDER_RECHECK_IMAP_PORT || 993),
+        secure: String(process.env.ORDER_RECHECK_IMAP_SECURE || 'true') !== 'false',
+        auth: { user: loginEmail, pass: password },
+        logger: false
+    });
+    const deadline = Date.now() + timeoutMs;
+    const log = (msg) => { if (debug?.enabled) debug.logs.push(`${new Date().toISOString()} ${msg}`); };
+    await client.connect();
+    try {
+        while (Date.now() < deadline) {
+            const lock = await client.getMailboxLock('INBOX');
+            try {
+                const search = await client.search({ since: sinceDate }).catch(() => []);
+                const uids = (search || []).slice(-30).reverse();
+                log(`IMAP searched ${host}; candidate messages: ${uids.length}.`);
+                for (const uid of uids) {
+                    const msg = await client.fetchOne(uid, { source: true, envelope: true, internalDate: true }, { uid: true }).catch(() => null);
+                    if (!msg?.source) continue;
+                    const parsed = await simpleParser(msg.source).catch(() => null);
+                    const text = `${parsed?.subject || ''}\n${parsed?.text || ''}\n${parsed?.html || ''}`;
+                    const otp = extractOtpFromText(text);
+                    if (otp) {
+                        log(`IMAP found Target OTP from message ${uid}.`);
+                        return otp;
+                    }
+                }
+            } finally {
+                lock.release();
+            }
+            await new Promise(r => setTimeout(r, 5000));
+        }
+        return '';
+    } finally {
+        await client.logout().catch(() => null);
+    }
+}
+
+function orderRecheckSessionPath(login, orderNumber = '') {
+    const crypto = require('crypto');
+    const fs = require('fs');
+    const path = require('path');
+    fs.mkdirSync(ORDER_RECHECK_SESSION_DIR, { recursive: true });
+    const key = crypto.createHash('sha256').update(`${login.profileId || ''}|${login.loginEmail || ''}`).digest('hex').slice(0, 32);
+    return path.join(ORDER_RECHECK_SESSION_DIR, `target-${key}.json`);
+}
+
+async function maybeHandleTargetOtp(page, login, debug) {
+    const bodyText = await page.locator('body').innerText({ timeout: 10000 }).catch(() => '');
+    const needsOtp = /verification code|security code|one.time code|passcode|enter code|verify it'?s you|check your email/i.test(bodyText);
+    if (!needsOtp) return false;
+    if (!login.gmailAppPassword) throw new Error('Target requested an OTP/security code, but this Target profile does not have a Gmail App Password / IMAP password saved. Add it to the profile Target login section, then recheck again.');
+    if (debug?.enabled) debug.logs.push(`${new Date().toISOString()} Target requested OTP; checking IMAP.`);
+    const otp = await fetchTargetOtpFromImap({ email: login.loginEmail, appPassword: login.gmailAppPassword, sinceDate: new Date(Date.now() - 15 * 60 * 1000), debug });
+    if (!otp) throw new Error('Target requested an OTP/security code, but no recent Target code was found by IMAP. Check the profile Gmail App Password / IMAP value and mailbox provider.');
+    const otpInput = page.locator('input[inputmode="numeric"], input[autocomplete="one-time-code"], input[name*="code" i], input[id*="code" i], input[type="tel"], input[type="text"]').first();
+    await otpInput.waitFor({ state: 'visible', timeout: 30000 });
+    await otpInput.fill(otp);
+    await saveOrderRecheckDebug(page, debug, 'otp-filled');
+    await page.getByRole('button', { name: /verify|continue|submit|sign in|next/i }).first().click({ timeout: 15000 }).catch(async () => { await otpInput.press('Enter').catch(() => null); });
+    await page.waitForLoadState('domcontentloaded', { timeout: 60000 }).catch(() => null);
+    await page.waitForTimeout(3500);
+    await saveOrderRecheckDebug(page, debug, 'after-otp-submit');
+    return true;
 }
 
 async function checkTargetOrderWithBrowser({ order, normalized, payload, debugMode = false }) {
@@ -4220,11 +4320,31 @@ async function checkTargetOrderWithBrowser({ order, normalized, payload, debugMo
     const debug = { enabled: !!debugMode, orderNumber, logs: [], screenshots: [] };
     const log = (msg) => { if (debug.enabled) debug.logs.push(`${new Date().toISOString()} ${msg}`); };
 
-    let browser;
+    let browser, context, page;
     try {
-        browser = await chromium.launch({ headless: process.env.ORDER_RECHECK_HEADLESS === 'false' ? false : true, proxy: proxy || undefined, slowMo: debug.enabled ? 250 : 0 });
-        const context = await browser.newContext({ viewport: { width: 1365, height: 900 } });
-        const page = await context.newPage();
+        const fs = require('fs');
+        const path = require('path');
+        fs.mkdirSync(ORDER_RECHECK_DEBUG_DIR, { recursive: true });
+        const sessionPath = orderRecheckSessionPath(login, orderNumber);
+        const useSavedSession = String(process.env.ORDER_RECHECK_USE_SESSION || 'true') !== 'false' && fs.existsSync(sessionPath);
+        const connectWs = process.env.BROWSERLESS_WS_ENDPOINT || process.env.ORDER_RECHECK_CDP_ENDPOINT || '';
+        if (connectWs) {
+            log('Connecting to remote browser endpoint.');
+            browser = await chromium.connectOverCDP(connectWs);
+        } else {
+            browser = await chromium.launch({ headless: process.env.ORDER_RECHECK_HEADLESS === 'false' ? false : true, proxy: proxy || undefined, slowMo: debug.enabled ? 250 : 0 });
+        }
+        const contextOptions = { viewport: { width: 1365, height: 900 } };
+        if (useSavedSession) {
+            contextOptions.storageState = sessionPath;
+            log(`Using saved Target browser session for ${login.loginEmail}.`);
+        }
+        if (debug.enabled) {
+            contextOptions.recordVideo = { dir: ORDER_RECHECK_DEBUG_DIR, size: { width: 1365, height: 900 } };
+        }
+        context = await browser.newContext(contextOptions);
+        if (debug.enabled) await context.tracing.start({ screenshots: true, snapshots: true, sources: false }).catch(() => null);
+        page = await context.newPage();
         page.setDefaultTimeout(45000);
 
         log('Opening Target orders page.');
@@ -4266,9 +4386,17 @@ async function checkTargetOrderWithBrowser({ order, normalized, payload, debugMo
             await page.waitForLoadState('domcontentloaded', { timeout: 60000 }).catch(() => null);
             await page.waitForTimeout(3000);
             await saveOrderRecheckDebug(page, debug, '06-after-password-submit');
+            await maybeHandleTargetOtp(page, login, debug);
+            if (String(process.env.ORDER_RECHECK_SAVE_SESSION || 'true') !== 'false') {
+                await context.storageState({ path: sessionPath }).catch(() => null);
+                log(`Saved Target browser session for future checks.`);
+            }
         } else {
             log('No Target login email field appeared; continuing in case session was already authenticated.');
         }
+
+        // Target can sometimes send users into OTP after a saved session or delayed redirect.
+        await maybeHandleTargetOtp(page, login, debug).catch((err) => { throw err; });
 
         const possibleUrls = [
             `https://www.target.com/orders/${encodeURIComponent(orderNumber)}`,
@@ -4300,9 +4428,22 @@ async function checkTargetOrderWithBrowser({ order, normalized, payload, debugMo
         const productFound = expectedProduct ? textContainsNeedle(fullText, expectedProduct) : false;
         const expectedItemFound = skuFound || productFound;
         await saveOrderRecheckDebug(page, debug, 'final');
-        return { orderFound, expectedItemFound, skuFound, productFound, expectedSku, expectedProduct, orderNumber, debug: debug.enabled ? debug : undefined };
+        if (debug.enabled && typeof context !== 'undefined') {
+            const traceFile = `${Date.now()}-${safeDebugFileName(orderNumber)}-trace.zip`;
+            await context.tracing.stop({ path: path.join(ORDER_RECHECK_DEBUG_DIR, traceFile) }).catch(() => null);
+            debug.trace = `/admin/order-recheck-debug/${encodeURIComponent(traceFile)}`;
+            for (const pg of context.pages()) {
+                const video = pg.video && pg.video();
+                if (video) {
+                    const videoPath = await video.path().catch(() => '');
+                    if (videoPath) debug.video = `/admin/order-recheck-debug/${encodeURIComponent(require('path').basename(videoPath))}`;
+                }
+            }
+        }
+        return { orderFound, expectedItemFound, skuFound, productFound, expectedSku, expectedProduct, orderNumber, usedSavedSession: useSavedSession, profileId: login.profileId, debug: debug.enabled ? debug : undefined };
     } catch (err) {
-        if (debug.enabled) err.message = `${err.message} Debug screenshots: ${debug.screenshots.join(' , ')} Logs: ${debug.logs.join(' | ')}`;
+        try { if (debug.enabled && typeof context !== 'undefined') await context.tracing.stop().catch(() => null); } catch (_) {}
+        if (debug.enabled) err.message = `${err.message} Debug screenshots: ${debug.screenshots.join(' , ')}${debug.video ? ` Video: ${debug.video}` : ''}${debug.trace ? ` Trace: ${debug.trace}` : ''} Logs: ${debug.logs.join(' | ')}`;
         throw err;
     } finally {
         if (browser) await browser.close().catch(() => null);
