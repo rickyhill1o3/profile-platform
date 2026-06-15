@@ -5,9 +5,7 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "test": "echo \"Error: no test specified\" && exit 1",
-    "render-build": "npx playwright install chromium",
-    "postinstall": "npx playwright install chromium"
+    "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
   "author": "",
@@ -26,9 +24,8 @@
     "node-fetch": "^3.3.2",
     "nodemailer": "^6.10.0",
     "pg": "^8.20.0",
-    "playwright": "1.49.1",
+    "playwright": "^1.58.2",
     "stripe": "^18.1.1",
-    "uuid": "^13.0.0",
-    "imap": "^0.8.19"
+    "uuid": "^13.0.0"
   }
 }

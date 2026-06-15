@@ -7920,14 +7920,6 @@ setTimeout(() => {
 }, 15000);
 startAnnouncementCatalogScheduler();
 
-
-// Target order recheck automation: browser login, IMAP OTP, debug screenshots/video, and auto-refund when expected item is missing.
-try {
-    require('./order-rechecker')({ app, express, auth, admin, supabase, getCurrentUser, getUserById, canManageTarget, adjustUserCredits, asWholeCredits });
-} catch (err) {
-    console.error('Order rechecker failed to initialize:', err.message);
-}
-
 const PORT = process.env.PORT || 3000;
 
 app.listen(PORT, () => {
