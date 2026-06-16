@@ -491,7 +491,12 @@ async function launchBrowser({ normalized, debug, log }) {
     return { browser, remote: true, proxy };
   }
 
-  const headed = String(process.env.ORDER_RECHECK_HEADLESS || '').toLowerCase() === 'false';
+  const requestedHeaded = String(process.env.ORDER_RECHECK_HEADLESS || '').toLowerCase() === 'false';
+  const noXServer = process.platform === 'linux' && !process.env.DISPLAY && !process.env.WAYLAND_DISPLAY;
+  const headed = requestedHeaded && !noXServer;
+  if (requestedHeaded && noXServer) {
+    log('ORDER_RECHECK_HEADLESS=false was requested, but this Linux server has no DISPLAY/X server. Forcing headless=true. To watch a browser, run the backend on your Windows PC or use a remote browser provider with live sessions.');
+  }
   const launchOptions = {
     headless: !headed,
     slowMo: Number(process.env.ORDER_RECHECK_SLOWMO_MS || (headed ? 250 : 0)),
