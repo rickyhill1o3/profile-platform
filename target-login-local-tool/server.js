@@ -105,7 +105,7 @@ app.post('/api/capture-existing-chrome', async (req, res) => {
     const currentUrl = page.url();
     write(`Connected. Current tab URL: ${currentUrl}`);
     write('If you are not logged into Target yet, login manually in the existing Chrome window. Then return here and click Save Session After Login.');
-    global.currentCapture = { context, browser, email, file, existingChrome: true };
+    global.currentCapture = { context, browser, email, file, existingChrome: true, cdpUrl: endpoint };
     res.json({ ok: true, message: 'Connected to existing Chrome. Login manually if needed, then click Save Session After Login.', log: `/logs/${path.basename(file)}` });
   } catch (err) {
     write(`ERROR: ${err.stack || err.message}`);
@@ -114,22 +114,46 @@ app.post('/api/capture-existing-chrome', async (req, res) => {
 });
 
 app.post('/api/save-session', async (req, res) => {
+  const body = req.body || {};
   const current = global.currentCapture;
-  if (!current) return res.status(400).json({ ok: false, error: 'No active capture browser. Click Capture Session first.' });
-  const { context, email, file } = current;
+  const email = (current && current.email) || body.email;
+  if (!email) return res.status(400).json({ ok: false, error: 'Email/account is required to save the session.' });
+
+  const existingLogFile = current && current.file;
+  const fallbackLog = existingLogFile ? { file: existingLogFile } : logWriter(`save-${email}`);
+  const file = fallbackLog.file;
   const write = (msg) => fs.appendFileSync(file, `[${new Date().toISOString()}] ${msg}\n`);
+
+  let browserForSave;
   try {
     const statePath = path.join(SESSION_DIR, `${safeKey(email)}.storageState.json`);
-    await context.storageState({ path: statePath });
-    write(`Saved storage state: ${statePath}`);
-    if (current.existingChrome && current.browser) {
-      await current.browser.close().catch(() => {});
+
+    // Existing Chrome is safer if we reconnect at save time. The previous CDP handle can
+    // become stale while the user is logging in or switching tabs.
+    if ((current && current.existingChrome) || body.useExistingChrome) {
+      const endpoint = body.cdpUrl || (current && current.cdpUrl) || 'http://127.0.0.1:9222';
+      write(`Saving from existing Chrome via CDP: ${endpoint}`);
+      browserForSave = await chromium.connectOverCDP(endpoint, { timeout: 15000 });
+      const context = browserForSave.contexts()[0];
+      if (!context) throw new Error('Connected to Chrome, but no browser context was found. Keep the Chrome debug window open.');
+      const targetPages = context.pages().filter(p => /target\.com/i.test(p.url()));
+      write(`Connected for save. Open Target tabs found: ${targetPages.length}.`);
+      await context.storageState({ path: statePath });
+      write(`Saved storage state from existing Chrome: ${statePath}`);
+      await browserForSave.close().catch(() => {});
     } else {
-      await context.close();
+      if (!current || !current.context) return res.status(400).json({ ok: false, error: 'No active capture browser. Click Capture Session first, or use Capture From Existing Chrome.' });
+      const context = current.context;
+      write('Saving from Playwright-launched browser context. Do not close the Chrome window until this completes.');
+      await context.storageState({ path: statePath });
+      write(`Saved storage state: ${statePath}`);
+      await context.close().catch(() => {});
     }
+
     global.currentCapture = null;
     res.json({ ok: true, message: 'Session saved.', statePath, log: `/logs/${path.basename(file)}` });
   } catch (err) {
+    if (browserForSave) await browserForSave.close().catch(() => {});
     write(`ERROR saving session: ${err.stack || err.message}`);
     res.status(500).json({ ok: false, error: err.message, log: `/logs/${path.basename(file)}` });
   }

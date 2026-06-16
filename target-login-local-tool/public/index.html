@@ -29,15 +29,15 @@
 
   <button onclick="capture()">Open Playwright Chrome + Capture Session</button>
   <button onclick="openExistingInstructions()">Show Existing Chrome Setup</button>
-  <button onclick="captureExisting()">Capture From Existing Chrome</button>
-  <button onclick="saveSession()">Save Session After Login</button>
+  <button onclick="captureExisting()">Connect To Existing Chrome</button>
+  <button onclick="saveSession()">Save Session From Existing Chrome After Login</button>
 
   <div id="existingHelp" style="display:none;background:#f6f8fa;border:1px solid #d0d7de;padding:12px;margin-top:12px;">
     <b>Existing Chrome method</b>
     <p>Close every Chrome window, then run this in Command Prompt:</p>
     <textarea rows="3" readonly>taskkill /F /IM chrome.exe
 start chrome.exe --remote-debugging-port=9222 --user-data-dir="%USERPROFILE%\target-login-profile"</textarea>
-    <p>Login to Target normally in that Chrome window. Then click <b>Capture From Existing Chrome</b>.</p>
+    <p>Login to Target normally in that Chrome window and keep the window open. Then click <b>Connect To Existing Chrome</b>, then <b>Save Session From Existing Chrome After Login</b>.</p>
     <label>Chrome debug URL</label>
     <input id="cdpUrl" value="http://127.0.0.1:9222" />
   </div>
@@ -82,7 +82,7 @@ function valsWithCdp(){
 }
 function capture(){ post('/api/capture-session', vals()); }
 function captureExisting(){ post('/api/capture-existing-chrome', valsWithCdp()); }
-function saveSession(){ post('/api/save-session', vals()); }
+function saveSession(){ const v = valsWithCdp(); v.useExistingChrome = true; post('/api/save-session', v); }
 function checkOrder(){ post('/api/check-order', vals()); }
 </script>
 </body>
