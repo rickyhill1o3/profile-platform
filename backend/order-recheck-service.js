@@ -636,6 +636,131 @@ async function loginTargetIfNeeded({ page, credentials, debug, log }) {
   }
 }
 
+
+async function isTargetLoggedIn(page) {
+  try {
+    const body = await page.locator('body').innerText({ timeout: 5000 }).catch(() => '');
+    const lower = lc(body);
+    if (/accessDenied-CheckVPN|CheckVPN|VPN|access denied/i.test(body)) return { loggedIn: false, blocked: true, body };
+    const looksSignedOut = /sign in|email or mobile phone|create account|password/i.test(lower);
+    const looksOrders = /orders|purchase history|order details|recent purchases|your orders/i.test(lower);
+    const loggedIn = looksOrders && !looksSignedOut;
+    return { loggedIn, blocked: false, body };
+  } catch (_) {
+    return { loggedIn: false, blocked: false, body: '' };
+  }
+}
+
+async function captureTargetSessionForOrder({ supabase, order, currentUser }) {
+  const normalized = normalizeOrderPayload(order);
+  const debug = makeDebug(`capture-${normalized.orderNumber || order.id}`);
+  const logs = [];
+  const log = (line) => {
+    const stamped = `[${new Date().toISOString()}] ${line}`;
+    logs.push(stamped);
+    try { debug.appendLog(stamped); } catch (_) {}
+    console.log('[order-session-capture]', line);
+  };
+  let browser;
+  let context;
+  let proxyPoolId = '';
+  try {
+    log(`Starting manual Target session capture for order ${normalized.orderNumber || order.id}`);
+    if (!normalized.proxy) {
+      const fallbackProxy = await pickFallbackProxyFromPool({ supabase, log });
+      if (fallbackProxy?.proxy) {
+        normalized.proxy = fallbackProxy.proxy;
+        proxyPoolId = fallbackProxy.proxyPoolId || '';
+      }
+    }
+    const credentials = await findCredentialsForOrder({ supabase, order, normalized, log });
+    if (!credentials?.loginEmail) throw new Error('No Target login email found for this order/profile.');
+    if (!credentials?.loginPassword) log('No Target password found. Browser will open for manual login only.');
+
+    const launched = await launchBrowser({ normalized, debug, log });
+    browser = launched.browser;
+    const sessionKey = sessionKeyForOrder({ order, normalized, credentials });
+    const sessionPath = path.join(SESSION_ROOT, `${sessionKey}.json`);
+    ensureDir(SESSION_ROOT);
+
+    const storedSession = await loadStoredTargetSession({ supabase, sessionKey, filePath: sessionPath, log });
+    context = await browser.newContext({
+      viewport: { width: 1280, height: 800 },
+      userAgent: process.env.ORDER_RECHECK_USER_AGENT || undefined,
+      storageState: storedSession || undefined
+    });
+    const page = await context.newPage();
+    await attachProxyAuthIfNeeded(page, launched.proxy, log);
+    page.setDefaultTimeout(Number(process.env.ORDER_RECHECK_STEP_TIMEOUT_MS || 20000));
+    page.setDefaultNavigationTimeout(Number(process.env.ORDER_RECHECK_NAV_TIMEOUT_MS || 45000));
+
+    const headless = String(process.env.ORDER_RECHECK_HEADLESS || 'true').toLowerCase() !== 'false';
+    if (headless) {
+      log('WARNING: ORDER_RECHECK_HEADLESS is true. On Render/local headless mode you cannot manually interact with the browser. Set ORDER_RECHECK_HEADLESS=false when running locally to complete manual login.');
+    }
+
+    await page.goto('https://www.target.com/', { waitUntil: 'domcontentloaded', timeout: 60000 }).catch((err) => log(`Target home goto failed: ${err.message || err}`));
+    await debug.shot(page, 'capture-target-home');
+    await page.goto('https://www.target.com/orders', { waitUntil: 'domcontentloaded', timeout: 60000 }).catch((err) => log(`Target orders goto failed: ${err.message || err}`));
+    await page.waitForTimeout(1500);
+    await debug.shot(page, 'capture-orders-page');
+
+    let status = await isTargetLoggedIn(page);
+    if (!status.loggedIn && !status.blocked) {
+      await clickByText(page, [/sign in/i, /sign in or create account/i]).catch(() => null);
+      await page.waitForTimeout(1500);
+      await debug.shot(page, 'capture-signin-opened');
+      const emailInput = await firstVisible(page, ['input[type="email"]', 'input[name="username"]', 'input[name="email"]', 'input[id*="username"]', 'input[id*="email"]', 'input[type="text"]'], 5000);
+      if (emailInput) {
+        await emailInput.fill(credentials.loginEmail).catch(() => null);
+        await debug.shot(page, 'capture-email-prefilled');
+        log('Target email field was prefilled. Complete login manually in the opened browser if running locally/headed.');
+      } else {
+        log('Target email field was not visible during session capture. Check screenshots.');
+      }
+    }
+
+    const captureTimeoutMs = Number(process.env.ORDER_RECHECK_CAPTURE_TIMEOUT_MS || 600000);
+    const started = Date.now();
+    let lastShotAt = 0;
+    log(`Waiting up to ${Math.round(captureTimeoutMs / 1000)} seconds for manual Target login to complete.`);
+    while (Date.now() - started < captureTimeoutMs) {
+      status = await isTargetLoggedIn(page);
+      if (status.blocked) {
+        throw new Error(`Target blocked the proxy/browser during session capture. Page text: ${status.body.slice(0, 700)}`);
+      }
+      if (status.loggedIn) {
+        log('Target appears logged in. Saving session storage state.');
+        await debug.shot(page, 'capture-logged-in');
+        const storageState = await context.storageState();
+        await saveStoredTargetSession({ supabase, sessionKey, storageState, credentials, order, filePath: sessionPath, log });
+        if (proxyPoolId) await markProxyPoolResult({ supabase, proxyPoolId, ok: true, log });
+        debug.writeLog(logs);
+        return { ok: true, message: `Saved Target login session for ${credentials.loginEmail}. Future order checks will try this session before logging in.`, sessionKey, artifacts: debug.artifacts };
+      }
+      if (Date.now() - lastShotAt > Number(process.env.ORDER_RECHECK_CAPTURE_SCREENSHOT_INTERVAL_MS || 10000)) {
+        lastShotAt = Date.now();
+        await debug.shot(page, 'capture-waiting-for-login');
+        log('Still waiting for manual login to complete...');
+      }
+      await sleep(3000);
+    }
+    throw new Error(`Manual Target session capture timed out after ${Math.round(captureTimeoutMs / 1000)} seconds. If running on Render, use Browserless live sessions or run the backend locally with ORDER_RECHECK_HEADLESS=false.`);
+  } catch (err) {
+    log(`ERROR: ${err.message || err}`);
+    if (proxyPoolId) await markProxyPoolResult({ supabase, proxyPoolId, ok: false, errorText: err.message || err, log });
+    debug.writeLog(logs);
+    try { if (context) await context.close(); } catch (_) {}
+    try { if (browser) await browser.close(); } catch (_) {}
+    err.artifacts = debug.artifacts;
+    err.debugRunId = debug.runId;
+    throw err;
+  } finally {
+    try { if (context) await context.close(); } catch (_) {}
+    try { if (browser) await browser.close(); } catch (_) {}
+  }
+}
+
 async function verifyTargetOrder({ page, normalized, debug, log }) {
   const orderNumber = normalized.orderNumber;
   const expectedSku = normalized.sku;
@@ -793,4 +918,4 @@ async function recheckTargetOrder({ supabase, order, currentUser, helpers }) {
   }
 }
 
-module.exports = { DEBUG_ROOT, normalizeOrderPayload, recheckTargetOrder };
+module.exports = { DEBUG_ROOT, normalizeOrderPayload, recheckTargetOrder, captureTargetSessionForOrder };

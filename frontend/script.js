@@ -2964,6 +2964,31 @@ async function recheckOrderItem(id, button) {
     }
 }
 
+
+async function captureTargetSession(id, button) {
+    if (!id) return;
+    const original = button ? button.textContent : '';
+    if (button) {
+        button.disabled = true;
+        button.textContent = 'Capturing session...';
+    }
+    try {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 720000);
+        const data = await authJSON(API + `/admin/orders/${encodeURIComponent(id)}/capture-target-session`, { method: 'POST', signal: controller.signal });
+        clearTimeout(timeout);
+        showOrderRecheckResult('Target session saved', data.message || 'Target login session saved.', data.artifacts);
+        await loadCreditsAdminPane();
+    } catch (err) {
+        showOrderRecheckResult('Target session capture failed', err.message || 'Target session capture failed.', err.artifacts);
+    } finally {
+        if (button) {
+            button.disabled = false;
+            button.textContent = original || 'Capture Target Session';
+        }
+    }
+}
+
 async function recheckOrderCredits(id, button) {
     if (!id) return;
     const originalText = button ? button.textContent : '';
@@ -4225,6 +4250,7 @@ async function loadCreditsAdminPane() {
                 ${Number(item.credits_charged || 0) > 0 ? `<button class="btn" type="button" data-refund-order="${escapeHTML(item.id)}" data-refund-amount="${escapeHTML(String(item.credits_charged || 0))}">Refund Credits</button>` : '<span class="subtle-text">No charge</span>'}
                 <button class="btn secondary" type="button" data-recheck-order="${escapeHTML(item.id)}">Recheck Credits</button>
                 <button class="btn secondary" type="button" data-recheck-item-order="${escapeHTML(item.id)}">Check Order For Item</button>
+                <button class="btn secondary" type="button" data-capture-target-session="${escapeHTML(item.id)}">Capture Target Session</button>
               </div></td>
             </tr>`).join('') : '<tr><td colspan="8">No orders found yet.</td></tr>';
 
@@ -4237,6 +4263,12 @@ async function loadCreditsAdminPane() {
         ordersBody.querySelectorAll('[data-recheck-item-order]').forEach((button) => {
             button.addEventListener('click', async () => {
                 await recheckOrderItem(button.dataset.recheckItemOrder, button);
+            });
+        });
+
+        ordersBody.querySelectorAll('[data-capture-target-session]').forEach((button) => {
+            button.addEventListener('click', async () => {
+                await captureTargetSession(button.dataset.captureTargetSession, button);
             });
         });
 

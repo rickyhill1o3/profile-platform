@@ -88,7 +88,7 @@ const { v4: uuidv4 } = require("uuid");
 const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
-const { DEBUG_ROOT: ORDER_RECHECK_DEBUG_ROOT, recheckTargetOrder } = require("./order-recheck-service");
+const { DEBUG_ROOT: ORDER_RECHECK_DEBUG_ROOT, recheckTargetOrder, captureTargetSessionForOrder } = require("./order-recheck-service");
 const nodemailer = require("nodemailer");
 const bodyParser = require("body-parser");
 const Stripe = require("stripe");
@@ -7969,6 +7969,31 @@ app.post('/admin/orders/:id/recheck-item', auth, admin, async (req, res) => {
                 helpers: { adjustUserCredits }
             }),
             new Promise((_, reject) => setTimeout(() => reject(new Error(`Order item recheck timed out after ${Math.round(timeoutMs / 1000)} seconds. Check debug files/logs or use Browserless live sessions.`)), timeoutMs))
+        ]);
+        res.json(result);
+    } catch (err) {
+        res.status(err.status || 500).json({
+            error: err.message || String(err),
+            debugRunId: err.debugRunId || null,
+            artifacts: err.artifacts || []
+        });
+    }
+});
+
+app.post('/admin/orders/:id/capture-target-session', auth, admin, async (req, res) => {
+    try {
+        const currentUser = await getCurrentUser(req);
+        const { data: order, error } = await supabase.from('orders').select('*').eq('id', req.params.id).maybeSingle();
+        if (error) return res.status(500).json({ error: error.message });
+        if (!order?.id) return res.status(404).json({ error: 'Order not found' });
+        const targetUser = await getUserById(order.user_id);
+        if (!(await canManageTarget(currentUser, targetUser))) {
+            return res.status(403).json({ error: 'You do not have access to this order.' });
+        }
+        const timeoutMs = Number(process.env.ORDER_RECHECK_CAPTURE_TOTAL_TIMEOUT_MS || process.env.ORDER_RECHECK_CAPTURE_TIMEOUT_MS || 660000);
+        const result = await Promise.race([
+            captureTargetSessionForOrder({ supabase, order, currentUser }),
+            new Promise((_, reject) => setTimeout(() => reject(new Error(`Target session capture timed out after ${Math.round(timeoutMs / 1000)} seconds.`)), timeoutMs))
         ]);
         res.json(result);
     } catch (err) {
