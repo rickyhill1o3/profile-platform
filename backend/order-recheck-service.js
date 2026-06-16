@@ -474,8 +474,15 @@ async function markProxyPoolResult({ supabase, proxyPoolId, ok, errorText = '', 
 }
 
 async function launchBrowser({ normalized, debug, log }) {
-  const endpoint = text(process.env.BROWSERLESS_WS_ENDPOINT || process.env.BROWSERLESS_CDP_ENDPOINT || process.env.PLAYWRIGHT_WS_ENDPOINT);
+  const browserMode = String(process.env.ORDER_RECHECK_BROWSER_MODE || '').trim().toLowerCase();
+  const forceLocal = browserMode === 'local' || String(process.env.ORDER_RECHECK_FORCE_LOCAL_CHROMIUM || '').toLowerCase() === 'true';
+  const endpoint = forceLocal ? '' : text(process.env.BROWSERLESS_WS_ENDPOINT || process.env.BROWSERLESS_CDP_ENDPOINT || process.env.PLAYWRIGHT_WS_ENDPOINT);
   const proxy = parseProxy(normalized.proxy);
+
+  if (forceLocal) {
+    log('ORDER_RECHECK_BROWSER_MODE=local / ORDER_RECHECK_FORCE_LOCAL_CHROMIUM=true detected. Ignoring Browserless env and launching local Chromium.');
+  }
+
   if (endpoint) {
     const endpointWithLaunch = browserlessEndpointWithLaunchOptions(endpoint, normalized, proxy, log);
     log('Connecting to Browserless / remote Chromium endpoint.');
