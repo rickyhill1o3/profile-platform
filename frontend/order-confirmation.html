@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>The Shore Shack | Order Confirmation</title>
+  <link rel="stylesheet" href="styles.css" />
+  <style>
+    body { background:#f3f6fb; font-family: Arial, sans-serif; color:#0f172a; }
+    .confirm-wrap { max-width: 980px; margin: 32px auto; padding: 0 16px; }
+    .confirm-card { background:#fff; border:1px solid #dbe2ef; border-radius:24px; padding:24px; box-shadow:0 10px 30px rgba(15,23,42,.05); }
+    .confirm-grid { display:grid; grid-template-columns: 1.5fr 1fr; gap:24px; }
+    .confirm-item { display:flex; gap:16px; padding:16px 0; border-bottom:1px solid #e5e7eb; }
+    .confirm-item img { width:72px; height:72px; object-fit:contain; border:1px solid #e5e7eb; border-radius:12px; background:#fff; }
+    .pill { display:inline-block; padding:6px 10px; border-radius:999px; border:1px solid #c7d2fe; color:#1d4ed8; font-size:12px; margin-bottom:8px; }
+    .totals-row { display:flex; justify-content:space-between; padding:8px 0; }
+    .primary-btn, .secondary-btn { display:inline-flex; align-items:center; justify-content:center; border-radius:14px; padding:12px 18px; text-decoration:none; font-weight:600; }
+    .primary-btn { background:#2563eb; color:#fff; }
+    .secondary-btn { border:1px solid #cbd5e1; color:#0f172a; background:#fff; }
+    .actions { display:flex; gap:12px; margin-top:24px; }
+    @media (max-width: 800px) { .confirm-grid { grid-template-columns:1fr; } }
+  </style>
+</head>
+<body>
+  <div class="confirm-wrap">
+    <div class="confirm-card">
+      <div id="confirmState">Loading your order…</div>
+      <div id="confirmContent" style="display:none">
+        <div class="confirm-grid">
+          <div>
+            <div class="pill">Order confirmed</div>
+            <h1 style="margin:0 0 8px">Thank you for your order.</h1>
+            <p style="margin:0 0 24px; color:#475569">We received your order and emailed your receipt. Your order details are below.</p>
+            <div id="confirmItems"></div>
+          </div>
+          <div>
+            <div style="border:1px solid #e5e7eb; border-radius:20px; padding:20px; background:#f8fafc">
+              <h2 style="margin-top:0">Order summary</h2>
+              <div id="confirmOrderMeta" style="color:#475569; font-size:14px; margin-bottom:16px"></div>
+              <div class="totals-row"><span>Subtotal</span><strong id="sumSubtotal">$0.00</strong></div>
+              <div class="totals-row"><span>Shipping</span><strong id="sumShipping">$0.00</strong></div>
+              <div class="totals-row"><span>Tax</span><strong id="sumTax">$0.00</strong></div>
+              <div class="totals-row" style="font-size:18px; border-top:1px solid #e5e7eb; margin-top:8px; padding-top:16px"><span>Total</span><strong id="sumTotal">$0.00</strong></div>
+              <div id="confirmShipTo" style="margin-top:16px; color:#475569; font-size:14px"></div>
+            </div>
+            <div class="actions">
+              <a class="primary-btn" href="https://theshoreshacktcg.com">Back to main site</a>
+              <a class="secondary-btn" href="https://theshoreshacktcg.com/shop.html">Keep shopping</a>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <script src="order-confirmation.js">
+
+// MULTI SKU HELPERS
+function parseMultiSkuValue(rawValue) {
+    if (!rawValue) return [];
+    return String(rawValue)
+        .split(/[
+,]+/)
+        .map(v => v.trim())
+        .filter(Boolean);
+}
+
+function countEffectiveSkus(product) {
+    if (!product) return 0;
+
+    if (Array.isArray(product.multiSkus) && product.multiSkus.length) {
+        return product.multiSkus.length;
+    }
+
+    if (typeof product.sku === "string") {
+        return parseMultiSkuValue(product.sku).length || 1;
+    }
+
+    return 1;
+}
+
+function removeDuplicateSingleSkuProducts(products) {
+    if (!Array.isArray(products)) return [];
+
+    const groupedSkuSet = new Set();
+
+    products.forEach(product => {
+        const skuList = parseMultiSkuValue(product.sku);
+
+        if (skuList.length > 1) {
+            skuList.forEach(sku => groupedSkuSet.add(String(sku).trim()));
+        }
+    });
+
+    return products.filter(product => {
+        const skuList = parseMultiSkuValue(product.sku);
+
+        // keep grouped item
+        if (skuList.length > 1) return true;
+
+        // remove old single sku duplicates
+        return !groupedSkuSet.has(String(product.sku).trim());
+    });
+}
+
+</script>
+</body>
+</html>

@@ -2138,11 +2138,7 @@ async function authJSON(url, options = {}) {
     const headers = Object.assign({ 'Content-Type': 'application/json' }, options.headers || {}, token() ? { Authorization: 'Bearer ' + token() } : {});
     const res = await fetch(url, { ...options, headers });
     const data = await res.json().catch(() => ({}));
-    if (!res.ok || data.error) {
-        const err = new Error(data.error || 'Request failed');
-        Object.assign(err, data || {});
-        throw err;
-    }
+    if (!res.ok || data.error) throw new Error(data.error || 'Request failed');
     return data;
 }
 
@@ -2793,22 +2789,6 @@ async function recheckWebhookCredits(id, button) {
     }
 }
 
-
-
-function buildOrderRecheckDebugLinks(artifacts) {
-    const debugToken = encodeURIComponent(localStorage.token || '');
-    if (!Array.isArray(artifacts)) return [];
-    return artifacts
-        .filter((a) => a && a.url)
-        .map((a) => {
-            const rawUrl = String(a.url || '');
-            const sep = rawUrl.includes('?') ? '&' : '?';
-            return {
-                label: a.label || a.type || 'Debug file',
-                url: `${API}${rawUrl}${sep}token=${debugToken}`
-            };
-        });
-}
 
 async function recheckOrderCredits(id, button) {
     if (!id) return;
