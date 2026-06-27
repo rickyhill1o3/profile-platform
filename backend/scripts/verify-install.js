@@ -9,7 +9,7 @@ function has(name) {
   }
 }
 
-const missing = ['imapflow', 'playwright', 'ws'].filter((name) => !has(name));
+const missing = ['ws'].filter((name) => !has(name));
 if (!missing.length) {
   console.log('[postinstall] required runtime packages verified.');
   process.exit(0);

@@ -1,5 +1,3 @@
-process.env.PLAYWRIGHT_BROWSERS_PATH = process.env.PLAYWRIGHT_BROWSERS_PATH || '0';
-
 function parseMultiSkuValue(rawValue) {
     if (!rawValue) return [];
 
@@ -88,7 +86,6 @@ const { v4: uuidv4 } = require("uuid");
 const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
-const { DEBUG_ROOT: ORDER_RECHECK_DEBUG_ROOT, recheckTargetOrder, captureTargetSessionForOrder } = require("./order-recheck-service");
 const nodemailer = require("nodemailer");
 const bodyParser = require("body-parser");
 const Stripe = require("stripe");
@@ -7921,90 +7918,6 @@ setTimeout(() => {
     replayWebhookFailoverQueue().catch((err) => console.error('Initial failover queue replay failed:', err));
 }, 15000);
 startAnnouncementCatalogScheduler();
-
-// Target order item recheck: launches Chromium/Browserless, logs into Target, verifies expected SKU/product, and auto-refunds when missing.
-// Debug files are opened from normal browser tabs, so Authorization headers are not available.
-// Allow a JWT token query parameter only for this debug-file route.
-async function orderRecheckDebugAuth(req, res, next) {
-    try {
-        const header = req.headers.authorization || '';
-        const token = (header.startsWith('Bearer ') ? header.split(' ')[1] : '') || String(req.query.token || '');
-        if (!token) return res.status(401).send('Missing debug token');
-        const decoded = jwt.verify(token, process.env.JWT_SECRET);
-        const { data: user, error } = await supabase
-            .from('users')
-            .select('*')
-            .eq('id', decoded.user_id)
-            .single();
-        if (error || !user) return res.status(401).send('Invalid debug token');
-        if (user.role !== 'admin' && user.role !== 'super_admin') return res.status(403).send('Admin only');
-        req.user_id = user.id;
-        req.role = user.role;
-        req.currentUser = user;
-        next();
-    } catch (err) {
-        return res.status(401).send('Invalid debug token');
-    }
-}
-try {
-    app.use('/admin/order-recheck-debug', orderRecheckDebugAuth, express.static(ORDER_RECHECK_DEBUG_ROOT, { fallthrough: false }));
-} catch (_) {}
-
-app.post('/admin/orders/:id/recheck-item', auth, admin, async (req, res) => {
-    try {
-        const currentUser = await getCurrentUser(req);
-        const { data: order, error } = await supabase.from('orders').select('*').eq('id', req.params.id).maybeSingle();
-        if (error) return res.status(500).json({ error: error.message });
-        if (!order?.id) return res.status(404).json({ error: 'Order not found' });
-        const targetUser = await getUserById(order.user_id);
-        if (!(await canManageTarget(currentUser, targetUser))) {
-            return res.status(403).json({ error: 'You do not have access to this order.' });
-        }
-        const timeoutMs = Number(process.env.ORDER_RECHECK_TOTAL_TIMEOUT_MS || 120000);
-        const result = await Promise.race([
-            recheckTargetOrder({
-                supabase,
-                order,
-                currentUser,
-                helpers: { adjustUserCredits }
-            }),
-            new Promise((_, reject) => setTimeout(() => reject(new Error(`Order item recheck timed out after ${Math.round(timeoutMs / 1000)} seconds. Check debug files/logs or use Browserless live sessions.`)), timeoutMs))
-        ]);
-        res.json(result);
-    } catch (err) {
-        res.status(err.status || 500).json({
-            error: err.message || String(err),
-            debugRunId: err.debugRunId || null,
-            artifacts: err.artifacts || []
-        });
-    }
-});
-
-app.post('/admin/orders/:id/capture-target-session', auth, admin, async (req, res) => {
-    try {
-        const currentUser = await getCurrentUser(req);
-        const { data: order, error } = await supabase.from('orders').select('*').eq('id', req.params.id).maybeSingle();
-        if (error) return res.status(500).json({ error: error.message });
-        if (!order?.id) return res.status(404).json({ error: 'Order not found' });
-        const targetUser = await getUserById(order.user_id);
-        if (!(await canManageTarget(currentUser, targetUser))) {
-            return res.status(403).json({ error: 'You do not have access to this order.' });
-        }
-        const timeoutMs = Number(process.env.ORDER_RECHECK_CAPTURE_TOTAL_TIMEOUT_MS || process.env.ORDER_RECHECK_CAPTURE_TIMEOUT_MS || 660000);
-        const result = await Promise.race([
-            captureTargetSessionForOrder({ supabase, order, currentUser }),
-            new Promise((_, reject) => setTimeout(() => reject(new Error(`Target session capture timed out after ${Math.round(timeoutMs / 1000)} seconds.`)), timeoutMs))
-        ]);
-        res.json(result);
-    } catch (err) {
-        res.status(err.status || 500).json({
-            error: err.message || String(err),
-            debugRunId: err.debugRunId || null,
-            artifacts: err.artifacts || []
-        });
-    }
-});
-
 
 const PORT = process.env.PORT || 3000;
 
