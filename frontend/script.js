@@ -2823,10 +2823,18 @@ async function loadWebhookLogs() {
         container.textContent = 'Loading webhook logs...';
         const typeFilter = document.getElementById('webhookLogTypeFilter')?.value || '';
         const siteFilter = document.getElementById('webhookLogSiteFilter')?.value || '';
+        const botFilter = document.getElementById('webhookLogBotFilter')?.value || '';
+        const searchFilter = document.getElementById('webhookLogSearch')?.value || '';
+        const fromFilter = document.getElementById('webhookLogDateFrom')?.value || '';
+        const toFilter = document.getElementById('webhookLogDateTo')?.value || '';
         const params = new URLSearchParams();
         if (typeFilter) params.set('type', typeFilter);
         if (siteFilter) params.set('site', siteFilter);
-        params.set('limit', '500');
+        if (botFilter) params.set('bot', botFilter);
+        if (searchFilter) params.set('q', searchFilter);
+        if (fromFilter) params.set('from', fromFilter);
+        if (toFilter) params.set('to', toFilter);
+        params.set('limit', '1000');
         const data = await authJSON(API + '/admin/webhooks/logs?' + params.toString());
         const items = Array.isArray(data.items) ? data.items : [];
         if (!items.length) {
@@ -2853,6 +2861,7 @@ async function loadWebhookLogs() {
               <td>${escapeHtml(item.type || '-')}</td>
               <td>${escapeHtml(item.status || '-')}</td>
               <td>${escapeHtml(item.site || '-')}</td>
+              <td>${escapeHtml(item.bot || item.payload?.source || '-')}</td>
               <td>${escapeHtml(userLabel)}</td>
               <td>${escapeHtml(creditsLabel)}</td>
               <td>${escapeHtml(item.product_type || '-')}</td>
@@ -2865,7 +2874,7 @@ async function loadWebhookLogs() {
         container.innerHTML = `
             <div style="overflow:auto;">
               <table class="admin-table">
-                <thead><tr><th>Time</th><th>Type</th><th>Status</th><th>Site</th><th>User</th><th>Credits</th><th>Product Type</th><th>Product</th><th>SKU</th><th>Error / Debug</th><th>Actions</th></tr></thead>
+                <thead><tr><th>Time</th><th>Type</th><th>Status</th><th>Site</th><th>Bot</th><th>User</th><th>Credits</th><th>Product Type</th><th>Product</th><th>SKU</th><th>Error / Debug</th><th>Actions</th></tr></thead>
                 <tbody>${rows}</tbody>
               </table>
             </div>`;
@@ -4804,3 +4813,53 @@ document.addEventListener('click', (event) => {
     const helpEl = helpId ? document.getElementById(helpId) : null;
     if (helpEl) helpEl.hidden = !helpEl.hidden;
 });
+
+
+async function loadWebhookParserRules() {
+    const container = document.getElementById('webhookParserRules');
+    if (!container) return;
+    try {
+        container.textContent = 'Loading parser rules...';
+        const data = await authJSON(API + '/admin/webhooks/parser-rules');
+        const items = Array.isArray(data.items) ? data.items : [];
+        if (!items.length) {
+            container.innerHTML = '<div class="subtle-text">No parser rules saved yet.</div>';
+            return;
+        }
+        container.innerHTML = `<div style="overflow:auto;"><table class="admin-table"><thead><tr><th>Label</th><th>Bot</th><th>Store</th><th>Type</th><th>Admin Fields</th><th>Super Admin Fields</th><th>Sample</th><th>Actions</th></tr></thead><tbody>${items.map((item) => `<tr><td>${escapeHtml(item.label || '-')}</td><td>${escapeHtml(item.bot || '-')}</td><td>${escapeHtml(item.site || '-')}</td><td>${escapeHtml(item.event_type || '-')}</td><td>${escapeHtml((item.admin_fields || []).join(', '))}</td><td>${escapeHtml((item.super_admin_fields || []).join(', '))}</td><td><details><summary>Raw sample</summary><pre style="white-space:pre-wrap;max-width:520px;">${escapeHtml(JSON.stringify(item.sample_payload || {}, null, 2))}</pre></details></td><td><button class="secondary" onclick="deleteWebhookParserRule('${escapeHtml(item.id)}')">Delete</button></td></tr>`).join('')}</tbody></table></div>`;
+    } catch (err) {
+        container.textContent = err.message || 'Failed to load parser rules.';
+    }
+}
+
+async function saveWebhookParserRule() {
+    try {
+        const raw = document.getElementById('parserRuleSamplePayload')?.value || '';
+        let sample = null;
+        if (raw.trim()) sample = JSON.parse(raw);
+        const body = {
+            bot: document.getElementById('parserRuleBot')?.value || '',
+            site: document.getElementById('parserRuleSite')?.value || '',
+            event_type: document.getElementById('parserRuleEventType')?.value || 'checkout',
+            label: document.getElementById('parserRuleLabel')?.value || '',
+            admin_fields: String(document.getElementById('parserRuleAdminFields')?.value || '').split(',').map(x => x.trim()).filter(Boolean),
+            super_admin_fields: String(document.getElementById('parserRuleSuperFields')?.value || '').split(',').map(x => x.trim()).filter(Boolean),
+            sample_payload: sample
+        };
+        const data = await authJSON(API + '/admin/webhooks/parser-rules', { method: 'POST', body: JSON.stringify(body) });
+        if (!data.ok) throw new Error(data.error || 'Failed to save parser rule');
+        document.getElementById('parserRuleSamplePayload').value = '';
+        await loadWebhookParserRules();
+        alert('Parser rule saved.');
+    } catch (err) {
+        alert(err.message || 'Failed to save parser rule. Make sure the sample payload is valid JSON.');
+    }
+}
+
+async function deleteWebhookParserRule(id) {
+    if (!confirm('Delete this parser rule?')) return;
+    await authJSON(API + '/admin/webhooks/parser-rules/' + encodeURIComponent(id), { method: 'DELETE' });
+    await loadWebhookParserRules();
+}
+
+window.addEventListener('DOMContentLoaded', () => { try { loadWebhookParserRules(); } catch (_) {} });

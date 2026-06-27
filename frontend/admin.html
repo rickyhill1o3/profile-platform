@@ -977,11 +977,30 @@ placeholder="Enter one SKU per line&#10;12345678&#10;87654321"></textarea>
           <div class="form-grid" style="margin-top:12px;">
             <div class="field"><label for="webhookLogTypeFilter">Webhook type</label><select class="input" id="webhookLogTypeFilter" onchange="loadWebhookLogs()"><option value="">All webhook types</option><option value="checkout">Checkout webhooks</option><option value="monitor">Monitor webhooks</option></select></div>
             <div class="field"><label for="webhookLogSiteFilter">Store</label><select class="input" id="webhookLogSiteFilter" onchange="loadWebhookLogs()"><option value="">All stores</option><option value="target">Target</option><option value="walmart">Walmart</option><option value="samsclub">Sam's Club</option><option value="amazon">Amazon</option><option value="pokemon">Pokémon Center</option><option value="crunchyroll">Crunchyroll</option><option value="general">General</option></select></div>
+            <div class="field"><label for="webhookLogBotFilter">Bot</label><select class="input" id="webhookLogBotFilter" onchange="loadWebhookLogs()"><option value="">All bots</option><option value="stellar">Stellar</option><option value="shikari">Shikari</option><option value="astral">Astral</option><option value="refract">Refract</option><option value="bot">Other / Bot</option></select></div>
+            <div class="field"><label for="webhookLogDateFrom">From date</label><input class="input" id="webhookLogDateFrom" type="date" onchange="loadWebhookLogs()" /></div>
+            <div class="field"><label for="webhookLogDateTo">To date</label><input class="input" id="webhookLogDateTo" type="date" onchange="loadWebhookLogs()" /></div>
+            <div class="field field--full"><label for="webhookLogSearch">Search product / SKU / payload</label><input class="input" id="webhookLogSearch" placeholder="Search by product, SKU, order, account, bot text..." oninput="clearTimeout(window.__webhookSearchTimer); window.__webhookSearchTimer=setTimeout(loadWebhookLogs, 300);" /></div>
           </div>
           <div class="field field--full panel-actions" style="margin-top:12px;">
             <button class="btn" type="button" onclick="loadWebhookLogs()">Refresh Webhook Logs</button>
           </div>
 
+
+          <section class="panel panel--subpanel" style="margin-top:16px;">
+            <div class="panel-header panel-header--nested"><div><h3>Webhook Parser Database</h3><p class="subtle-text">Save examples for Stellar, Shikari, Astral, Refract, Target, Amazon, monitor, and checkout webhook formats. Use this as your in-site database of what each bot sends and which fields should be private.</p></div></div>
+            <div class="form-grid">
+              <div class="field"><label for="parserRuleBot">Bot</label><input class="input" id="parserRuleBot" placeholder="stellar, shikari, astral, refract" /></div>
+              <div class="field"><label for="parserRuleSite">Store</label><input class="input" id="parserRuleSite" placeholder="target, amazon, walmart" /></div>
+              <div class="field"><label for="parserRuleEventType">Type</label><select class="input" id="parserRuleEventType"><option value="checkout">Checkout</option><option value="monitor">Monitor</option><option value="error">Error</option></select></div>
+              <div class="field"><label for="parserRuleLabel">Label</label><input class="input" id="parserRuleLabel" placeholder="Stellar Amazon checkout" /></div>
+              <div class="field field--full"><label for="parserRuleAdminFields">Admin public fields, comma separated</label><input class="input" id="parserRuleAdminFields" placeholder="product, sku, quantity, price, order_id" /></div>
+              <div class="field field--full"><label for="parserRuleSuperFields">Super admin private fields, comma separated</label><input class="input" id="parserRuleSuperFields" placeholder="account, password, proxy, offer_id, purchase_id" /></div>
+              <div class="field field--full"><label for="parserRuleSamplePayload">Sample raw webhook JSON</label><textarea class="input" id="parserRuleSamplePayload" rows="8" placeholder="Paste a raw webhook payload here"></textarea></div>
+            </div>
+            <div class="panel-actions"><button class="btn btn-primary" type="button" onclick="saveWebhookParserRule()">Save Parser Rule</button><button class="btn" type="button" onclick="loadWebhookParserRules()">Refresh Parser Rules</button></div>
+            <div id="webhookParserRules" class="subtle-text" style="margin-top:12px;">Loading parser rules...</div>
+          </section>
           <section class="panel panel--subpanel" style="margin-top:16px;">
             <div class="panel-header panel-header--nested"><div><h3>Webhook Event Log</h3><p class="subtle-text">View received checkout and monitor webhooks to catch anything you missed.</p></div></div>
             <div id="webhookLogs" class="subtle-text">Loading webhook logs...</div>
