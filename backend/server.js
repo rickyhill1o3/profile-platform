@@ -2309,8 +2309,41 @@ function sanitizeWebhookLogRow(row = {}) {
     };
 }
 
+function normalizeWebhookEventDbRow(row = {}) {
+    return sanitizeWebhookLogRow({
+        ...row,
+        // New DB table columns
+        type: row.type || row.webhook_type || row.category,
+        bot: row.bot || row.source,
+        product: row.product || row.product_name,
+        error: row.error || row.error_message,
+        // Keep legacy fields visible for older admin JS and credit recheck logic
+        webhook_type: row.webhook_type || row.type,
+        category: row.category || row.type,
+        source: row.source || row.bot,
+        product_name: row.product_name || row.product,
+        error_message: row.error_message || row.error
+    });
+}
+
+function dedupeWebhookRows(rows = []) {
+    const seen = new Set();
+    const out = [];
+    for (const raw of rows || []) {
+        const row = normalizeWebhookEventDbRow(raw || {});
+        const key = String(row.id || row.fingerprint || `${row.created_at}|${row.type}|${row.site}|${row.sku}|${row.product}`);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        out.push(row);
+    }
+    return out.sort((a, b) => new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime());
+}
+
 async function getWebhookLogEntries(limit = 200) {
     const safeLimit = Math.min(5000, Math.max(1, Number(limit) || 200));
+    const combined = [];
+
+    // New durable database table. This is used for new webhook storage/search.
     if (await useWebhookEventsTable()) {
         try {
             const { data, error } = await supabase
@@ -2318,43 +2351,85 @@ async function getWebhookLogEntries(limit = 200) {
                 .select('*')
                 .order('created_at', { ascending: false })
                 .limit(safeLimit);
-            if (!error && Array.isArray(data)) return data.map(sanitizeWebhookLogRow);
-            if (error) console.warn('[webhook_events] falling back to app_settings log:', error.message);
+            if (!error && Array.isArray(data)) combined.push(...data);
+            if (error) console.warn('[webhook_events] read failed; also checking legacy app_settings log:', error.message);
         } catch (err) {
-            console.warn('[webhook_events] fallback read:', err.message || err);
+            console.warn('[webhook_events] read failed; also checking legacy app_settings log:', err.message || err);
         }
     }
-    const current = await getAppSetting('webhook_event_log', []);
-    const rows = Array.isArray(current) ? current : [];
-    return rows.slice(0, safeLimit).map(sanitizeWebhookLogRow);
+
+    // Legacy folder 11 storage. Do not remove this: older webhook logs were stored here.
+    try {
+        const current = await getAppSetting('webhook_event_log', []);
+        if (Array.isArray(current)) combined.push(...current);
+    } catch (err) {
+        console.warn('[webhook_event_log app_settings] read failed:', err.message || err);
+    }
+
+    return dedupeWebhookRows(combined).slice(0, safeLimit);
 }
 
 async function appendWebhookLogEntry(entry = {}) {
-    const row = sanitizeWebhookLogRow(entry);
+    const row = normalizeWebhookEventDbRow(entry);
+    let savedRow = row;
+
+    // Best effort: write to the new DB table first.
     if (await useWebhookEventsTable()) {
         try {
+            const dbRow = {
+                id: row.id,
+                created_at: row.created_at,
+                webhook_type: row.webhook_type || row.type,
+                type: row.type,
+                source: row.source || row.bot,
+                bot: row.bot,
+                site: row.site,
+                product_type: row.product_type,
+                sku: row.sku,
+                product_name: row.product_name || row.product,
+                product: row.product || row.product_name,
+                status: row.status,
+                external_order_id: row.external_order_id || null,
+                error_message: row.error_message || row.error,
+                error: row.error || row.error_message,
+                payload: row.payload || null,
+                parsed_items: row.parsed_items || [],
+                discord_targets: row.discord_targets || [],
+                fingerprint: row.fingerprint || ''
+            };
             const { data, error } = await supabase
                 .from('webhook_events')
-                .insert(row)
+                .upsert(dbRow, { onConflict: 'id' })
                 .select('*')
                 .single();
-            if (!error && data) return sanitizeWebhookLogRow(data);
-            if (error) console.warn('[webhook_events] insert fallback:', error.message);
+            if (!error && data) savedRow = normalizeWebhookEventDbRow(data);
+            if (error) console.warn('[webhook_events] insert/upsert failed; keeping legacy app_settings log:', error.message);
         } catch (err) {
-            console.warn('[webhook_events] insert fallback:', err.message || err);
+            console.warn('[webhook_events] insert/upsert failed; keeping legacy app_settings log:', err.message || err);
         }
     }
-    const current = await getAppSetting('webhook_event_log', []);
-    const rows = Array.isArray(current) ? current : [];
-    rows.unshift(row);
-    await setAppSetting('webhook_event_log', rows.slice(0, 1000));
-    return row;
+
+    // Always also write to the legacy app_settings log so folder 11 history and the new UI stay in sync.
+    try {
+        const current = await getAppSetting('webhook_event_log', []);
+        const rows = Array.isArray(current) ? current.filter((x) => String(x.id) !== String(savedRow.id)) : [];
+        rows.unshift(savedRow);
+        await setAppSetting('webhook_event_log', rows.slice(0, 1000));
+    } catch (err) {
+        console.warn('[webhook_event_log app_settings] write failed:', err.message || err);
+    }
+    return savedRow;
 }
 
 async function updateWebhookLogEntry(id, patch = {}) {
     if (!id) return null;
     const cleanPatch = { ...patch };
     if (cleanPatch.bot) cleanPatch.bot = String(cleanPatch.bot || '').trim().toLowerCase();
+    if (cleanPatch.type && !cleanPatch.webhook_type) cleanPatch.webhook_type = cleanPatch.type;
+    if (cleanPatch.product && !cleanPatch.product_name) cleanPatch.product_name = cleanPatch.product;
+    if (cleanPatch.error && !cleanPatch.error_message) cleanPatch.error_message = cleanPatch.error;
+
+    let updated = null;
     if (await useWebhookEventsTable()) {
         try {
             const { data, error } = await supabase
@@ -2363,19 +2438,26 @@ async function updateWebhookLogEntry(id, patch = {}) {
                 .eq('id', id)
                 .select('*')
                 .maybeSingle();
-            if (!error && data) return sanitizeWebhookLogRow(data);
-            if (error) console.warn('[webhook_events] update fallback:', error.message);
+            if (!error && data) updated = normalizeWebhookEventDbRow(data);
+            if (error) console.warn('[webhook_events] update failed; also updating legacy app_settings log:', error.message);
         } catch (err) {
-            console.warn('[webhook_events] update fallback:', err.message || err);
+            console.warn('[webhook_events] update failed; also updating legacy app_settings log:', err.message || err);
         }
     }
-    const current = await getAppSetting('webhook_event_log', []);
-    const rows = Array.isArray(current) ? current : [];
-    const idx = rows.findIndex((row) => String(row.id) === String(id));
-    if (idx === -1) return null;
-    rows[idx] = sanitizeWebhookLogRow({ ...rows[idx], ...cleanPatch });
-    await setAppSetting('webhook_event_log', rows.slice(0, 1000));
-    return rows[idx];
+
+    try {
+        const current = await getAppSetting('webhook_event_log', []);
+        const rows = Array.isArray(current) ? current : [];
+        const idx = rows.findIndex((row) => String(row.id) === String(id));
+        if (idx !== -1) {
+            rows[idx] = normalizeWebhookEventDbRow({ ...rows[idx], ...cleanPatch });
+            await setAppSetting('webhook_event_log', rows.slice(0, 1000));
+            updated = updated || rows[idx];
+        }
+    } catch (err) {
+        console.warn('[webhook_event_log app_settings] update failed:', err.message || err);
+    }
+    return updated;
 }
 
 
