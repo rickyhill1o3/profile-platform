@@ -869,6 +869,12 @@ placeholder="Enter one SKU per line&#10;12345678&#10;87654321"></textarea>
               <div class="subtle-text">This receives every successful checkout your site processes.</div>
             </div>
 
+            <div class="field field--full" id="superAdminPublicCheckoutDiscordField">
+              <label for="superAdminPublicCheckoutWebhookUrl">Super Admin Public/User Checkout Webhook</label>
+              <input class="input" id="superAdminPublicCheckoutWebhookUrl" placeholder="https://discord.com/api/webhooks/..." />
+              <div class="subtle-text">Successful checkouts also send here with admin-safe information only: no passwords, proxies, offer IDs, or private order IDs.</div>
+            </div>
+
             <div class="field field--full" id="superAdminErrorDiscordField">
               <label for="checkoutErrorWebhookUrl">Super Admin Failed / Error Checkout Webhook</label>
               <input class="input" id="checkoutErrorWebhookUrl" placeholder="https://discord.com/api/webhooks/..." />

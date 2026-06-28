@@ -2888,6 +2888,7 @@ async function loadWebhookSettings() {
     const urlInput = document.getElementById('websiteWebhookUrl');
     const monitorUrlInput = document.getElementById('monitorWebhookUrl');
     const discordInput = document.getElementById('discordRelayWebhookUrl');
+    const superPublicCheckoutInput = document.getElementById('superAdminPublicCheckoutWebhookUrl');
     const adminDiscordInput = document.getElementById('adminDiscordRelayWebhookUrl');
     const errorDiscordInput = document.getElementById('checkoutErrorWebhookUrl');
     const adminErrorDiscordInput = document.getElementById('adminErrorDiscordRelayWebhookUrl');
@@ -2963,6 +2964,7 @@ async function loadWebhookSettings() {
         urlInput.value = data.inbound_webhook_url || '';
         if (monitorUrlInput) monitorUrlInput.value = data.monitor_webhook_url || '';
         if (discordInput) discordInput.value = data.discord_webhook_url || '';
+        if (superPublicCheckoutInput) superPublicCheckoutInput.value = data.super_admin_public_checkout_webhook_url || '';
         if (errorDiscordInput) errorDiscordInput.value = data.checkout_error_webhook_url || '';
         if (adminDiscordInput) adminDiscordInput.value = data.admin_discord_webhook_url || '';
         if (adminErrorDiscordInput) adminErrorDiscordInput.value = data.admin_error_discord_webhook_url || '';
@@ -2989,6 +2991,8 @@ async function loadWebhookSettings() {
         if (createButton) createButton.style.display = data.can_create_inbound ? '' : 'none';
         if (createMonitorButton) createMonitorButton.style.display = data.can_create_inbound ? '' : 'none';
         if (superAdminField) superAdminField.style.display = data.is_super_admin ? '' : 'none';
+        const superAdminPublicCheckoutField = document.getElementById('superAdminPublicCheckoutDiscordField');
+        if (superAdminPublicCheckoutField) superAdminPublicCheckoutField.style.display = data.is_super_admin ? '' : 'none';
         const superAdminErrorField = document.getElementById('superAdminErrorDiscordField');
         if (superAdminErrorField) superAdminErrorField.style.display = data.is_super_admin ? '' : 'none';
         const adminSuccessField = document.getElementById('adminSuccessDiscordField');
@@ -3043,6 +3047,7 @@ async function createMonitorWebhook() {
 
 async function saveWebhookSettings() {
     const discordInput = document.getElementById('discordRelayWebhookUrl');
+    const superPublicCheckoutInput = document.getElementById('superAdminPublicCheckoutWebhookUrl');
     const adminDiscordInput = document.getElementById('adminDiscordRelayWebhookUrl');
     const errorDiscordInput = document.getElementById('checkoutErrorWebhookUrl');
     const adminErrorDiscordInput = document.getElementById('adminErrorDiscordRelayWebhookUrl');
@@ -3055,6 +3060,7 @@ async function saveWebhookSettings() {
             method: 'POST',
             body: JSON.stringify({
                 discord_webhook_url: discordInput ? discordInput.value : '',
+                super_admin_public_checkout_webhook_url: superPublicCheckoutInput ? superPublicCheckoutInput.value : '',
                 checkout_error_webhook_url: errorDiscordInput ? errorDiscordInput.value : '',
                 admin_discord_webhook_url: adminDiscordInput ? adminDiscordInput.value : '',
                 admin_error_discord_webhook_url: adminErrorDiscordInput ? adminErrorDiscordInput.value : '',

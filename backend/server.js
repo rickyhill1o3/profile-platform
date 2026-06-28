@@ -3462,6 +3462,12 @@ async function sendCheckoutDiscordNotifications(order, user) {
     const globalSettings = await getAppSetting('webhook_settings', {});
     const globalRoute = await getWebhookRouteFromDb({ scope: 'super_admin', webhookType: checkoutType === 'error' ? 'checkout_error' : 'checkout_success', category: 'all' }).catch(() => null);
     const globalWebhookUrl = String((globalRoute?.webhook_url || (checkoutType === 'error' ? globalSettings?.checkout_error_webhook_url : globalSettings?.discord_webhook_url)) || '').trim();
+    const superPublicRoute = checkoutType === 'success'
+        ? await getWebhookRouteFromDb({ scope: 'super_admin_public', webhookType: 'checkout_success', category: 'all' }).catch(() => null)
+        : null;
+    const superPublicWebhookUrl = checkoutType === 'success'
+        ? String((superPublicRoute?.webhook_url || globalSettings?.super_admin_public_checkout_webhook_url || '')).trim()
+        : '';
 
     const destinations = [];
     const seen = new Set();
@@ -3475,6 +3481,11 @@ async function sendCheckoutDiscordNotifications(order, user) {
     }
 
     addDestination('super_admin', globalWebhookUrl, { brandLabel: '', username: 'The Shore Shack' });
+    // Optional super-admin public checkout feed for Discord channels where users can see checkouts.
+    // This uses the same sanitized payload as an admin webhook: no proxy, password, offer ID, or private order ID.
+    if (checkoutType === 'success') {
+        addDestination('super_admin_public', superPublicWebhookUrl, { brandLabel: '', username: 'The Shore Shack' });
+    }
 
     // Admin checkout routing:
     // - top-level admins send their own personal checkouts to their own admin webhook.
@@ -4670,6 +4681,7 @@ app.get('/admin/webhooks/settings', auth, admin, async (req, res) => {
         await migrateWebhookSettingsToSupabase({ currentUser, globalSettings, adminSettings }).catch(() => null);
 
         const superSuccess = await getWebhookRouteFromDb({ scope: 'super_admin', webhookType: 'checkout_success', category: 'all' }).catch(() => null);
+        const superPublicSuccess = await getWebhookRouteFromDb({ scope: 'super_admin_public', webhookType: 'checkout_success', category: 'all' }).catch(() => null);
         const superError = await getWebhookRouteFromDb({ scope: 'super_admin', webhookType: 'checkout_error', category: 'all' }).catch(() => null);
         const adminSuccess = currentUser.role === 'super_admin' ? null : await getWebhookRouteFromDb({ scope: 'admin', userId: currentUser.id, webhookType: 'checkout_success', category: 'all' }).catch(() => null);
         const adminError = currentUser.role === 'super_admin' ? null : await getWebhookRouteFromDb({ scope: 'admin', userId: currentUser.id, webhookType: 'checkout_error', category: 'all' }).catch(() => null);
@@ -4684,6 +4696,7 @@ app.get('/admin/webhooks/settings', auth, admin, async (req, res) => {
             inbound_webhook_url: active?.token ? `${getApiBaseUrl(req)}/webhooks/orders/${active.token}` : '',
             monitor_webhook_url: monitorSettings?.token ? `${getApiBaseUrl(req)}/webhooks/monitor/${monitorSettings.token}` : '',
             discord_webhook_url: String(superSuccess?.webhook_url || globalSettings?.discord_webhook_url || ''),
+            super_admin_public_checkout_webhook_url: String(superPublicSuccess?.webhook_url || globalSettings?.super_admin_public_checkout_webhook_url || ''),
             checkout_error_webhook_url: String(superError?.webhook_url || globalSettings?.checkout_error_webhook_url || ''),
             admin_discord_webhook_url: String(adminSuccess?.webhook_url || adminSettings?.discord_webhook_url || ''),
             admin_error_discord_webhook_url: String(adminError?.webhook_url || adminSettings?.checkout_error_webhook_url || ''),
@@ -5310,23 +5323,27 @@ app.post('/admin/webhooks/settings', auth, admin, async (req, res) => {
 
         if (currentUser.role === 'super_admin') {
             const discordWebhookUrl = String(req.body?.discord_webhook_url || '').trim();
+            const superAdminPublicCheckoutWebhookUrl = String(req.body?.super_admin_public_checkout_webhook_url || '').trim();
             const checkoutErrorWebhookUrl = String(req.body?.checkout_error_webhook_url || '').trim();
             const currentGlobal = await getAppSetting('webhook_settings', {});
             const monitorDedupeWindowSeconds = Math.max(0, Math.min(600, Number(req.body?.monitor_dedupe_window_seconds ?? currentGlobal.monitor_dedupe_window_seconds ?? 90) || 90));
             await setAppSetting('webhook_settings', {
                 ...currentGlobal,
                 discord_webhook_url: discordWebhookUrl,
+                super_admin_public_checkout_webhook_url: superAdminPublicCheckoutWebhookUrl,
                 checkout_error_webhook_url: checkoutErrorWebhookUrl,
                 monitor_groups: req.body?.monitor_groups || currentGlobal.monitor_groups || {},
                 monitor_dedupe_window_seconds: monitorDedupeWindowSeconds
             });
             await upsertDiscordWebhookRoute({ scope: 'super_admin', webhookType: 'checkout_success', category: 'all', webhookUrl: discordWebhookUrl, isActive: !!discordWebhookUrl });
+            await upsertDiscordWebhookRoute({ scope: 'super_admin_public', webhookType: 'checkout_success', category: 'all', webhookUrl: superAdminPublicCheckoutWebhookUrl, isActive: !!superAdminPublicCheckoutWebhookUrl });
             await upsertDiscordWebhookRoute({ scope: 'super_admin', webhookType: 'checkout_error', category: 'all', webhookUrl: checkoutErrorWebhookUrl, isActive: !!checkoutErrorWebhookUrl });
             for (const category of ['pokemon','onepiece','sports','othertcg','lowkey']) {
                 const cfg = normalizeMonitorGroupConfig(req.body?.monitor_groups?.[category]);
                 await upsertDiscordWebhookRoute({ scope: 'super_admin', webhookType: 'monitor', category, webhookUrl: cfg.webhook_url, pingMode: cfg.ping_mode, roleMention: cfg.role_mention, isActive: !!cfg.webhook_url });
             }
             response.discord_webhook_url = discordWebhookUrl;
+            response.super_admin_public_checkout_webhook_url = superAdminPublicCheckoutWebhookUrl;
             response.checkout_error_webhook_url = checkoutErrorWebhookUrl;
             response.monitor_groups = req.body?.monitor_groups || {};
             response.monitor_dedupe_window_seconds = monitorDedupeWindowSeconds;
