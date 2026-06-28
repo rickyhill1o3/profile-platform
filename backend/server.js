@@ -4017,6 +4017,37 @@ app.post(["/webhooks/orders", "/webhooks/orders/:token"], async (req, res) => {
             return res.status(204).end();
         }
 
+
+        // DURABLE INTAKE: save the raw checkout webhook BEFORE any slow processing.
+        // This is what prevents missed checkouts when many bots hit the webhook URL at once.
+        // Discord sending, user matching, credit recording, and parsing happen after the raw row is saved.
+        let durableLogId = null;
+        try {
+            const saved = await appendWebhookLogEntry({
+                type: 'checkout',
+                status: 'received',
+                site: String(normalized.site || payload.site || '').trim(),
+                bot: String(normalized.source || '').trim(),
+                product_type: '',
+                product: String(normalized.product_name || payload.product_name || ''),
+                sku: String(normalized.sku || payload.sku || ''),
+                payload,
+                parsed_items: getIndexedCheckoutItems(payload).map((x) => ({ title: x.product_name, price: x.price, quantity: x.quantity })),
+                fingerprint
+            });
+            durableLogId = saved?.id || null;
+        } catch (intakeErr) {
+            console.error('Durable checkout intake failed before processing:', intakeErr);
+            await queueWebhookForReplay({
+                type: 'checkout',
+                token: String(req.params.token || req.query.token || ''),
+                originalUrl: req.originalUrl,
+                payload,
+                reason: `Durable intake failed: ${intakeErr.message || intakeErr}`
+            }).catch((queueErr) => console.error('Failed to queue checkout webhook after durable intake error:', queueErr));
+            return res.status(204).end();
+        }
+
         const processCheckoutWebhook = async () => {
             let logId = null;
             let checkoutDiscordSent = false;
@@ -4025,18 +4056,10 @@ app.post(["/webhooks/orders", "/webhooks/orders/:token"], async (req, res) => {
                     await queueWebhookForReplay({ type: 'checkout', token: String(req.params.token || req.query.token || ''), originalUrl: req.originalUrl, payload, reason: 'Supabase unavailable before checkout processing' });
                     return;
                 }
-                logId = (await appendWebhookLogEntry({
-                    type: 'checkout',
-                    status: 'received',
-                    site: String(normalized.site || payload.site || '').trim(),
-                    bot: String(normalized.source || '').trim(),
-                    product_type: '',
-                    product: String(normalized.product_name || payload.product_name || ''),
-                    sku: String(normalized.sku || payload.sku || ''),
-                    payload,
-                    parsed_items: getIndexedCheckoutItems(payload).map((x) => ({ title: x.product_name, price: x.price, quantity: x.quantity })),
-                    fingerprint
-                })).id;
+                logId = durableLogId;
+                if (logId) {
+                    await updateWebhookLogEntry(logId, { status: 'processing' }).catch(() => null);
+                }
 
                 if (isPokemonCenterStatusEvent(payload)) {
                     const superAdminOnly = isPokemonCenterLimitEvent(payload);
