@@ -878,6 +878,89 @@ async function getProductCreditCost({ productId = null, site = "", sku = "", pro
     return { credits: 0, product: null };
 }
 
+
+function isPlaceholderCheckoutProductName(value = '') {
+    const text = decodeHtmlEntities(String(value || '')).trim();
+    return !text || /^n\/?a$/i.test(text) || /^amazon item\s+[a-z0-9]{8,}$/i.test(text);
+}
+
+async function lookupStoredProductNameForSku({ site = '', sku = '' } = {}) {
+    const cleanSku = String(sku || '').trim();
+    const cleanSite = String(site || '').trim().toLowerCase();
+    if (!cleanSku) return '';
+
+    const goodName = (value) => {
+        const name = decodeHtmlEntities(String(value || '')).replace(/\*\*/g, '').trim();
+        return isPlaceholderCheckoutProductName(name) ? '' : name;
+    };
+
+    const catalogQueries = [];
+    if (cleanSite) {
+        catalogQueries.push((qb) => qb.select('product_name, sku, site, created_at').eq('site', cleanSite).ilike('sku', cleanSku).order('created_at', { ascending: false }).limit(1));
+    }
+    catalogQueries.push((qb) => qb.select('product_name, sku, site, created_at').ilike('sku', cleanSku).order('created_at', { ascending: false }).limit(1));
+
+    for (const buildQuery of catalogQueries) {
+        try {
+            const { data, error } = await maybeMany('catalog_products', buildQuery);
+            if (!error && Array.isArray(data)) {
+                const match = data.map((row) => goodName(row.product_name)).find(Boolean);
+                if (match) return match;
+            }
+        } catch (_) {}
+    }
+
+    const eventQueries = [];
+    if (cleanSite) {
+        eventQueries.push((qb) => qb.select('product_name, product, sku, site, created_at, type, webhook_type').eq('site', cleanSite).ilike('sku', cleanSku).order('created_at', { ascending: false }).limit(50));
+    }
+    eventQueries.push((qb) => qb.select('product_name, product, sku, site, created_at, type, webhook_type').ilike('sku', cleanSku).order('created_at', { ascending: false }).limit(50));
+
+    for (const buildQuery of eventQueries) {
+        try {
+            const { data, error } = await maybeMany('webhook_events', buildQuery);
+            if (!error && Array.isArray(data)) {
+                const match = data.map((row) => goodName(row.product_name || row.product)).find(Boolean);
+                if (match) return match;
+            }
+        } catch (_) {}
+    }
+
+    const legacyQueries = [];
+    if (cleanSite) {
+        legacyQueries.push((qb) => qb.select('product_name, sku, site, created_at').eq('site', cleanSite).ilike('sku', cleanSku).order('created_at', { ascending: false }).limit(50));
+    }
+    legacyQueries.push((qb) => qb.select('product_name, sku, site, created_at').ilike('sku', cleanSku).order('created_at', { ascending: false }).limit(50));
+
+    for (const buildQuery of legacyQueries) {
+        try {
+            const { data, error } = await maybeMany('webhook_event_log', buildQuery);
+            if (!error && Array.isArray(data)) {
+                const match = data.map((row) => goodName(row.product_name)).find(Boolean);
+                if (match) return match;
+            }
+        } catch (_) {}
+    }
+
+    return '';
+}
+
+async function enrichCheckoutProductFromStoredCatalog(normalized = {}) {
+    const out = { ...(normalized || {}) };
+    const site = String(out.site || '').trim().toLowerCase();
+    const sku = String(out.sku || '').trim();
+    if (!sku) return out;
+    if (!isPlaceholderCheckoutProductName(out.product_name)) return out;
+
+    const storedName = await lookupStoredProductNameForSku({ site, sku }).catch(() => '');
+    if (storedName) {
+        out.product_name = storedName;
+        out.product = storedName;
+        out.catalog_product_name = storedName;
+    }
+    return out;
+}
+
 async function getPokemonCenterMultiItemCreditCost(payload = {}) {
     const { embed, fields } = buildFieldMapFromEmbeds(payload || {});
     if (!isPokemonCenterPayload(payload, embed, fields)) return { credits: 0, items: [] };
@@ -2612,7 +2695,7 @@ async function sendCheckoutDiscordNotificationsForPayload(payload = {}, matchedU
         return sendCheckoutDiscordNotifications(extra.order, matchedUser || null);
     }
 
-    const normalized = normalizeIncomingOrderPayload(payload || {});
+    const normalized = await enrichCheckoutProductFromStoredCatalog(normalizeIncomingOrderPayload(payload || {}));
     const explicitCredits = extra?.credits_charged !== undefined && extra?.credits_charged !== null
         ? asWholeCredits(extra.credits_charged, 0)
         : asWholeCredits(payload?.credits_charged ?? payload?.credits ?? normalized?.credits_charged ?? 0, 0);
@@ -2634,7 +2717,7 @@ async function sendUnmatchedCheckoutDiscordNotification(payload = {}, errorMessa
     const globalSettings = await getAppSetting('webhook_settings', {});
     const webhookUrl = String(globalSettings?.discord_webhook_url || '').trim();
     if (!webhookUrl) return { skipped: 'discord_webhook_not_configured' };
-    const normalized = normalizeIncomingOrderPayload(payload || {});
+    const normalized = await enrichCheckoutProductFromStoredCatalog(normalizeIncomingOrderPayload(payload || {}));
     const body = JSON.stringify({
         username: 'The Shore Shack',
         embeds: [{
@@ -3220,7 +3303,7 @@ async function sendDiscordWebhookToTarget({
     }
 
     const payload = order.raw_payload || {};
-    const normalized = normalizeIncomingOrderPayload(payload);
+    const normalized = await enrichCheckoutProductFromStoredCatalog(normalizeIncomingOrderPayload(payload));
     const checkoutType = classifyCheckoutWebhookType(order);
     const isInsufficient = String(order.status || '') === 'insufficient_credits';
     const mentionText = checkoutType === 'success' ? formatDiscordMention(discordHandle, userEmail) : '';
@@ -3537,7 +3620,7 @@ async function sendCheckoutDiscordNotifications(order, user) {
 }
 
 async function recordSuccessfulCheckout(payload) {
-    const normalized = normalizeIncomingOrderPayload(payload);
+    const normalized = await enrichCheckoutProductFromStoredCatalog(normalizeIncomingOrderPayload(payload));
     const externalOrderId = normalized.external_order_id;
 
     if (!externalOrderId) {
@@ -4076,6 +4159,11 @@ app.post(["/webhooks/orders", "/webhooks/orders/:token"], async (req, res) => {
                 logId = durableLogId;
                 if (logId) {
                     await updateWebhookLogEntry(logId, { status: 'processing' }).catch(() => null);
+                }
+
+                const enrichedNormalizedForLog = await enrichCheckoutProductFromStoredCatalog(normalized).catch(() => normalized);
+                if (logId && enrichedNormalizedForLog?.product_name && enrichedNormalizedForLog.product_name !== normalized.product_name) {
+                    await updateWebhookLogEntry(logId, { product: String(enrichedNormalizedForLog.product_name || ''), sku: String(enrichedNormalizedForLog.sku || normalized.sku || '') }).catch(() => null);
                 }
 
                 if (isPokemonCenterStatusEvent(payload)) {
