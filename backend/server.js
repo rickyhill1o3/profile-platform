@@ -1287,7 +1287,7 @@ function normalizeIncomingOrderPayload(payload = {}) {
     const profileName = cleanFieldValue(payload.profile_name || fields['profile'] || '');
     const sku = cleanFieldValue(payload.sku || payload.product_sku || fields['sku'] || '') || cleanFieldValue(productLink?.url || '').match(/(?:A-|ip\/seort\/|ip\/)(\d{6,})/)?.[1] || '';
     const indexedProductCount = countIndexedFields(fields, 'product');
-    const quantityRaw = payload.quantity ?? fields['quantity'];
+    const quantityRaw = payload.quantity ?? payload.qty ?? fields['quantity'] ?? fields['qty'];
     const pokemonCenterPayload = isPokemonCenterPayload(payload, embed, fields);
     const quantity = pokemonCenterPayload && indexedProductCount > 0
         ? indexedProductCount
