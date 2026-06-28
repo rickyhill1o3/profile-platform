@@ -2339,29 +2339,64 @@ function dedupeWebhookRows(rows = []) {
     return out.sort((a, b) => new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime());
 }
 
-async function getWebhookLogEntries(limit = 200) {
-    const safeLimit = Math.min(5000, Math.max(1, Number(limit) || 200));
+async function getWebhookLogEntries(options = {}) {
+    const opts = typeof options === 'number' ? { limit: options } : (options || {});
+    const safeLimit = Math.min(50000, Math.max(1, Number(opts.limit) || 1000));
+    const safeOffset = Math.max(0, Number(opts.offset) || 0);
+    const type = String(opts.type || '').trim().toLowerCase();
+    const site = String(opts.site || '').trim().toLowerCase();
+    const bot = String(opts.bot || '').trim().toLowerCase();
+    const q = String(opts.q || '').trim().toLowerCase();
+    const dateFrom = String(opts.from || '').trim();
+    const dateTo = String(opts.to || '').trim();
     const combined = [];
 
-    // New durable database table. This is used for new webhook storage/search.
+    const applyFilters = (rows = []) => {
+        let out = Array.isArray(rows) ? rows.map((row) => normalizeWebhookEventDbRow(row || {})) : [];
+        if (type) out = out.filter((row) => String(row.type || '').toLowerCase() === type || String(row.webhook_type || '').toLowerCase() === type || String(row.category || '').toLowerCase() === type);
+        if (site) out = out.filter((row) => String(row.site || '').toLowerCase() === site);
+        if (bot) out = out.filter((row) => String(row.bot || row.source || row.payload?.source || '').toLowerCase().includes(bot));
+        if (q) out = out.filter((row) => JSON.stringify({product:row.product, product_name:row.product_name, sku:row.sku, error:row.error, error_message:row.error_message, payload:row.payload}).toLowerCase().includes(q));
+        if (dateFrom) out = out.filter((row) => new Date(row.created_at || 0).getTime() >= new Date(dateFrom).getTime());
+        if (dateTo) out = out.filter((row) => new Date(row.created_at || 0).getTime() <= new Date(dateTo + 'T23:59:59.999').getTime());
+        return out;
+    };
+
+    // New durable database table. Filters are pushed into Supabase before the limit so old date ranges are reachable.
     if (await useWebhookEventsTable()) {
         try {
-            const { data, error } = await supabase
-                .from('webhook_events')
-                .select('*')
+            let query = supabase.from('webhook_events').select('*');
+            if (dateFrom) query = query.gte('created_at', dateFrom);
+            if (dateTo) query = query.lte('created_at', `${dateTo}T23:59:59.999`);
+            if (type) query = query.or(`type.eq.${type},webhook_type.eq.${type},category.eq.${type}`);
+            if (site) query = query.ilike('site', site);
+            if (bot) query = query.or(`bot.ilike.%${bot}%,source.ilike.%${bot}%`);
+            const { data, error } = await query
                 .order('created_at', { ascending: false })
-                .limit(safeLimit);
-            if (!error && Array.isArray(data)) combined.push(...data);
+                .range(safeOffset, safeOffset + safeLimit - 1);
+            if (!error && Array.isArray(data)) combined.push(...applyFilters(data));
             if (error) console.warn('[webhook_events] read failed; also checking legacy app_settings log:', error.message);
         } catch (err) {
             console.warn('[webhook_events] read failed; also checking legacy app_settings log:', err.message || err);
         }
     }
 
-    // Legacy folder 11 storage. Do not remove this: older webhook logs were stored here.
+    // Legacy database table from older folders, if it exists.
+    try {
+        let query = supabase.from('webhook_event_log').select('*');
+        if (dateFrom) query = query.gte('created_at', dateFrom);
+        if (dateTo) query = query.lte('created_at', `${dateTo}T23:59:59.999`);
+        if (site) query = query.ilike('site', site);
+        const { data, error } = await query.order('created_at', { ascending: false }).range(safeOffset, safeOffset + safeLimit - 1);
+        if (!error && Array.isArray(data)) combined.push(...applyFilters(data));
+    } catch (err) {
+        // Some installs never had the legacy table. Ignore.
+    }
+
+    // Legacy folder 11 storage. This old setting only kept the newest entries, but still include what remains.
     try {
         const current = await getAppSetting('webhook_event_log', []);
-        if (Array.isArray(current)) combined.push(...current);
+        if (Array.isArray(current)) combined.push(...applyFilters(current));
     } catch (err) {
         console.warn('[webhook_event_log app_settings] read failed:', err.message || err);
     }
@@ -4706,7 +4741,21 @@ app.get('/admin/webhooks/logs', auth, admin, async (req, res) => {
     try {
         const currentUser = await getCurrentUser(req);
         if (currentUser.role !== 'super_admin') return res.status(403).json({ error: 'Only super admin can view webhook logs.' });
-        let rows = await getWebhookLogEntries(500);
+        const requestedLimit = Math.min(50000, Math.max(1, Number(req.query.limit) || 1000));
+        const requestedOffset = Math.max(0, Number(req.query.offset) || 0);
+        const type = String(req.query.type || '').trim().toLowerCase();
+        const site = String(req.query.site || '').trim().toLowerCase();
+        const bot = String(req.query.bot || '').trim().toLowerCase();
+        const q = String(req.query.q || '').trim().toLowerCase();
+        const dateFrom = String(req.query.from || '').trim();
+        const dateTo = String(req.query.to || '').trim();
+        let rows = await getWebhookLogEntries({
+            limit: requestedLimit,
+            offset: requestedOffset,
+            type, site, bot, q,
+            from: dateFrom,
+            to: dateTo
+        });
         const orderIds = [];
         const rowOrderIdMap = new Map();
         for (const row of rows) {
@@ -4744,20 +4793,7 @@ app.get('/admin/webhooks/logs', auth, admin, async (req, res) => {
                 user_display: user ? formatDiscordDisplayName(user) : (row.user_display || '')
             };
         });
-        const type = String(req.query.type || '').trim().toLowerCase();
-        const site = String(req.query.site || '').trim().toLowerCase();
-        const bot = String(req.query.bot || '').trim().toLowerCase();
-        const q = String(req.query.q || '').trim().toLowerCase();
-        const dateFrom = String(req.query.from || '').trim();
-        const dateTo = String(req.query.to || '').trim();
-        if (type) rows = rows.filter((row) => String(row.type || '').toLowerCase() === type);
-        if (site) rows = rows.filter((row) => String(row.site || '').toLowerCase() === site);
-        if (bot) rows = rows.filter((row) => String(row.bot || row.payload?.source || '').toLowerCase().includes(bot));
-        if (q) rows = rows.filter((row) => JSON.stringify({product:row.product, sku:row.sku, error:row.error, payload:row.payload}).toLowerCase().includes(q));
-        if (dateFrom) rows = rows.filter((row) => new Date(row.created_at || 0).getTime() >= new Date(dateFrom).getTime());
-        if (dateTo) rows = rows.filter((row) => new Date(row.created_at || 0).getTime() <= new Date(dateTo + 'T23:59:59').getTime());
-        const limit = Math.min(500, Math.max(1, Number(req.query.limit) || 200));
-        res.json({ items: rows.slice(0, limit) });
+        res.json({ items: rows, limit: requestedLimit, offset: requestedOffset });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }

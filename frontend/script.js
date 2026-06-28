@@ -2834,7 +2834,8 @@ async function loadWebhookLogs() {
         if (searchFilter) params.set('q', searchFilter);
         if (fromFilter) params.set('from', fromFilter);
         if (toFilter) params.set('to', toFilter);
-        params.set('limit', '1000');
+        // Load enough rows for date-range history instead of only the newest 100/1000.
+        params.set('limit', '50000');
         const data = await authJSON(API + '/admin/webhooks/logs?' + params.toString());
         const items = Array.isArray(data.items) ? data.items : [];
         if (!items.length) {
