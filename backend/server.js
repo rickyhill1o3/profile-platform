@@ -2299,13 +2299,19 @@ function sanitizeWebhookLogRow(row = {}) {
         site: String(row.site || '').trim(),
         bot: String(row.bot || row.source || '').trim().toLowerCase(),
         product_type: String(row.product_type || '').trim(),
-        product: String(row.product || '').trim(),
+        product: String(row.product || row.product_name || '').trim(),
+        product_name: String(row.product_name || row.product || '').trim(),
         sku: String(row.sku || '').trim(),
-        error: String(row.error || '').trim(),
+        error: String(row.error || row.error_message || '').trim(),
+        error_message: String(row.error_message || row.error || '').trim(),
         payload: row.payload || null,
         parsed_items: Array.isArray(row.parsed_items) ? row.parsed_items : [],
         discord_targets: Array.isArray(row.discord_targets) ? row.discord_targets : [],
-        fingerprint: String(row.fingerprint || '').trim()
+        fingerprint: String(row.fingerprint || '').trim(),
+        external_order_id: String(row.external_order_id || '').trim(),
+        credits_charged: asWholeCredits(row.credits_charged, 0),
+        user_email: String(row.user_email || '').trim(),
+        user_display: String(row.user_display || '').trim()
     };
 }
 
@@ -2609,7 +2615,7 @@ async function sendCheckoutDiscordNotificationsForPayload(payload = {}, matchedU
     const normalized = normalizeIncomingOrderPayload(payload || {});
     const explicitCredits = extra?.credits_charged !== undefined && extra?.credits_charged !== null
         ? asWholeCredits(extra.credits_charged, 0)
-        : 0;
+        : asWholeCredits(payload?.credits_charged ?? payload?.credits ?? normalized?.credits_charged ?? 0, 0);
     const pseudoOrder = {
         raw_payload: payload,
         status: extra.status || 'processed',
@@ -4849,8 +4855,18 @@ app.post('/admin/webhooks/logs/:id/resend', auth, admin, async (req, res) => {
 
         const matchedUser = await findUserForWebhook(row.payload).catch(() => null);
         const checkoutType = classifyCheckoutWebhookType({ raw_payload: row.payload, status: '' });
+        const normalized = normalizeIncomingOrderPayload(row.payload || {});
+        let resendOrder = null;
+        if (normalized.external_order_id) {
+            const { data: existingOrder } = await maybeSingle('orders', (qb) =>
+                qb.select('*').eq('external_order_id', normalized.external_order_id).maybeSingle()
+            ).catch(() => ({ data: null }));
+            if (existingOrder?.id) resendOrder = existingOrder;
+        }
         const results = await sendCheckoutDiscordNotificationsForPayload(row.payload, matchedUser?.id ? matchedUser : null, {
-            status: checkoutType === 'error' ? 'checkout_error' : 'processed'
+            status: checkoutType === 'error' ? 'checkout_error' : 'processed',
+            ...(resendOrder ? { order: resendOrder } : {}),
+            credits_charged: resendOrder ? asWholeCredits(resendOrder.credits_charged, 0) : asWholeCredits(row.credits_charged, 0)
         });
         await updateWebhookLogEntry(row.id, {
             discord_targets: Array.isArray(results) ? results : [],
