@@ -1333,7 +1333,17 @@ function normalizeIncomingOrderPayload(payload = {}) {
     const quantity = pokemonCenterPayload && indexedProductCount > 0
         ? indexedProductCount
         : (Number.isFinite(Number(quantityRaw)) ? Math.max(1, Math.round(Number(quantityRaw))) : 1);
-    const priceRaw = payload.price ?? fields['price'] ?? indexedPriceValue ?? fields['product price'];
+    const priceRaw = [
+        payload.price,
+        fields['price'],
+        fields['product price'],
+        fields['product - price'],
+        fields['item price'],
+        fields['checkout price'],
+        fields['total'],
+        fields['grand total'],
+        indexedPriceValue
+    ].find((value) => value !== undefined && value !== null && String(value).trim() !== '');
     const priceMatch = String(priceRaw || '').replace(/[^0-9.]/g, '');
     const price = priceMatch ? Number(priceMatch) : null;
     const productUrl = String(productLink?.url || payload.product_url || payload.url || fields['input'] || fields['share link'] || '').trim();
