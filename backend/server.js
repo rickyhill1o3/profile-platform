@@ -875,6 +875,47 @@ async function getProductCreditCost({ productId = null, site = "", sku = "", pro
         if (best?.id && bestScore >= 6) return { credits: asWholeCredits(best.credit_cost, 0), product: best };
     }
 
+    // Supreme / Shopify checkout webhooks often do not include a real SKU.
+    // For those stores, allow catalog products saved under General/Supreme/Shopify
+    // to match by product title keywords and by a keyword placed in the catalog SKU field.
+    if (cleanName) {
+        const normalizedSite = String(site || '').toLowerCase();
+        const keywordMatchSites = new Set([normalizedSite, 'supreme', 'shopify', 'general', '']);
+        const shouldUseKeywordFallback = ['supreme', 'shopify', 'general', ''].includes(normalizedSite) || !sku;
+        if (shouldUseKeywordFallback) {
+            const { data, error } = await supabase
+                .from("catalog_products")
+                .select("id, credit_cost, site, sku, product_name")
+                .order("created_at", { ascending: false })
+                .limit(750);
+            if (error) throw new Error(error.message);
+
+            const cleanNeedle = normalizeProductMatchText(cleanName);
+            const candidates = (Array.isArray(data) ? data : []).filter((candidate) => {
+                const candidateSite = String(candidate.site || '').toLowerCase();
+                return keywordMatchSites.has(candidateSite);
+            });
+
+            let best = null;
+            let bestScore = 0;
+            for (const candidate of candidates) {
+                const productScore = productMatchScore(cleanName, candidate.product_name || '');
+                const keyword = normalizeProductMatchText(candidate.sku || '');
+                const keywordScore = keyword && keyword.length >= 4 && cleanNeedle.includes(keyword) ? 12 : 0;
+                const siteBonus = String(candidate.site || '').toLowerCase() === normalizedSite ? 3 : 0;
+                const score = productScore + keywordScore + siteBonus;
+                if (score > bestScore) {
+                    best = candidate;
+                    bestScore = score;
+                }
+            }
+
+            if (best?.id && bestScore >= 8) {
+                return { credits: asWholeCredits(best.credit_cost, 0), product: best };
+            }
+        }
+    }
+
     return { credits: 0, product: null };
 }
 
