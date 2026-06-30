@@ -5093,24 +5093,61 @@ async function recheckSuccessfulOrderCredits({ currentUser, order = null, webhoo
             await sendCreditDepletedNotifications({ user: targetUser, previousBalance, newBalance: balanceAfter, creditsCharged: deltaNeeded, order: targetOrder });
         }
     } else if (deltaNeeded === 0) {
-        message = `Credits were rechecked. The credits were already correct at ${existingCredits}. No charge was made.`;
+        message = `Credits were rechecked. The credits were already correct at ${existingCredits}. No charge or refund was made.`;
     } else {
-        message = `Credits were rechecked. Existing charge ${existingCredits} is higher than recalculated ${expectedCredits}. No automatic refund was applied.`;
-        const err = new Error(message);
-        err.status = 400;
-        throw err;
+        const refundAmount = Math.abs(deltaNeeded);
+        balanceAfter = await adjustUserCredits({
+            userId: targetUser.id,
+            delta: refundAmount,
+            reason: 'successful_checkout_credit_recheck_refund',
+            note: `Credit recheck refunded ${refundAmount} credits for checkout ${targetOrder.external_order_id || normalized.external_order_id}`,
+            metadata: {
+                previous_credits_charged: existingCredits,
+                corrected_credits_charged: expectedCredits,
+                refunded_credits: refundAmount,
+                pokemon_credit_items: resolvedCost.pokemonMultiItemMatch?.items || [],
+                webhook_log_id: webhookLogRow?.id || null
+            },
+            orderId: targetOrder.id,
+            createdBy: currentUser.id
+        });
+        const { error: updateError } = await supabase.from('orders').update({
+            credits_charged: expectedCredits,
+            metadata: {
+                ...(targetOrder.metadata || {}),
+                credit_rechecked_at: new Date().toISOString(),
+                previous_credits_charged: existingCredits,
+                corrected_credits_charged: expectedCredits,
+                refunded_credits: refundAmount,
+                pokemon_credit_items: resolvedCost.pokemonMultiItemMatch?.items || []
+            }
+        }).eq('id', targetOrder.id);
+        if (updateError) throw new Error(updateError.message);
+        targetOrder = { ...targetOrder, credits_charged: expectedCredits, metadata: { ...(targetOrder.metadata || {}), corrected_credits_charged: expectedCredits, refunded_credits: refundAmount } };
+        changed = true;
+        message = `Credits were rechecked. Previous charge: ${existingCredits}. Correct charge: ${expectedCredits}. Refunded ${refundAmount} credits.`;
     }
+
+    const finalCreditsCharged = expectedCredits;
+    const logMessage = deltaNeeded > 0
+        ? `Credit recheck charged missing ${deltaNeeded} credits. Correct total: ${expectedCredits}.`
+        : (deltaNeeded < 0
+            ? `Credit recheck refunded ${Math.abs(deltaNeeded)} credits. Correct total: ${expectedCredits}.`
+            : `Credit recheck OK. Already charged ${existingCredits} credits.`);
 
     let results = [];
     if (resendDiscord) {
         const notificationOrder = {
             ...targetOrder,
             raw_payload: payload,
-            credits_charged: Math.max(existingCredits, expectedCredits),
+            credits_charged: finalCreditsCharged,
             metadata: {
                 ...(targetOrder.metadata || {}),
                 credit_recheck_notice: true,
-                credit_recheck_message: message
+                credit_recheck_message: message,
+                credit_recheck_delta: deltaNeeded,
+                credit_recheck_previous_credits: existingCredits,
+                credit_recheck_correct_credits: expectedCredits
             }
         };
         results = await sendCheckoutDiscordNotifications(notificationOrder, targetUser);
@@ -5118,8 +5155,8 @@ async function recheckSuccessfulOrderCredits({ currentUser, order = null, webhoo
 
     if (webhookLogRow?.id) {
         await updateWebhookLogEntry(webhookLogRow.id, {
-            error: changed ? `Credit recheck charged missing ${deltaNeeded} credits. Correct total: ${expectedCredits}.` : `Credit recheck OK. Already charged ${existingCredits} credits.`,
-            credits_charged: Math.max(existingCredits, expectedCredits),
+            error: logMessage,
+            credits_charged: finalCreditsCharged,
             user_email: targetUser.email || '',
             user_display: formatDiscordDisplayName(targetUser),
             discord_targets: Array.isArray(results) ? results : []
@@ -5134,8 +5171,8 @@ async function recheckSuccessfulOrderCredits({ currentUser, order = null, webhoo
         });
         if (matchingLog?.id) {
             await updateWebhookLogEntry(matchingLog.id, {
-                error: changed ? `Credit recheck charged missing ${deltaNeeded} credits. Correct total: ${expectedCredits}.` : `Credit recheck OK. Already charged ${existingCredits} credits.`,
-                credits_charged: Math.max(existingCredits, expectedCredits),
+                error: logMessage,
+                credits_charged: finalCreditsCharged,
                 user_email: targetUser.email || '',
                 user_display: formatDiscordDisplayName(targetUser),
                 discord_targets: Array.isArray(results) ? results : []
