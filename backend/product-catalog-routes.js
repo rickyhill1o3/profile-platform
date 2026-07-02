@@ -622,14 +622,40 @@ async function upsertCatalogProductManual(supabase, payloadInput) {
     if (!sku) throw new Error('SKU is required.');
 
     const skuParts = parseCatalogSkuParts(sku);
-    const product_name = String(payloadInput.product_name || '').trim() || (isPlaceholder ? `Run Next ${site.charAt(0).toUpperCase() + site.slice(1)} Release` : sku);
-    const default_max_price = normalizeMaxPrice(payloadInput.default_max_price);
-    const brand = String(payloadInput.brand || '').trim() || (site === 'pokemon' ? 'Pokémon Center' : site.charAt(0).toUpperCase() + site.slice(1));
-    const image_url = String(payloadInput.image_url || '').trim();
-    const product_url = String(payloadInput.product_url || '').trim();
-    const metadata = Object.assign({}, payloadInput.metadata || {}, isPlaceholder ? { virtual: true, release_type: 'next_drop' } : {}, skuParts.length > 1 ? { multi_skus: skuParts } : {});
 
-    const existing = await firstRowOrNull(supabase, site, sku);
+    // Preserve the existing product card when adding a second/third SKU to an item.
+    // Example: existing SKU 94300072 has image/url/name, admin saves "94300072, 101250596".
+    // We should keep the original image_url/product_url/product_name instead of blanking the card.
+    let existing = await firstRowOrNull(supabase, site, sku);
+    if (!existing?.id && skuParts.length > 1) {
+        const { data: matchingRows, error: matchError } = await supabase
+            .from('catalog_products')
+            .select('*')
+            .eq('catalog_id', catalog.id)
+            .eq('site', site)
+            .in('sku', skuParts)
+            .order('created_at', { ascending: false })
+            .limit(1);
+        if (matchError) throw new Error(matchError.message);
+        existing = Array.isArray(matchingRows) && matchingRows.length ? matchingRows[0] : existing;
+    }
+
+    const inputProductName = String(payloadInput.product_name || '').trim();
+    const inputBrand = String(payloadInput.brand || '').trim();
+    const inputImageUrl = String(payloadInput.image_url || '').trim();
+    const inputProductUrl = String(payloadInput.product_url || '').trim();
+    const inputPrice = normalizeMaxPrice(payloadInput.default_max_price);
+    const inputCreditCost = payloadInput.credit_cost === '' || payloadInput.credit_cost === null || payloadInput.credit_cost === undefined
+        ? null
+        : normalizeCreditCost(payloadInput.credit_cost);
+
+    const product_name = inputProductName || existing?.product_name || (isPlaceholder ? `Run Next ${site.charAt(0).toUpperCase() + site.slice(1)} Release` : sku);
+    const default_max_price = inputPrice ?? existing?.default_max_price ?? null;
+    const brand = inputBrand || existing?.brand || (site === 'pokemon' ? 'Pokémon Center' : site.charAt(0).toUpperCase() + site.slice(1));
+    const image_url = inputImageUrl || existing?.image_url || '';
+    const product_url = inputProductUrl || existing?.product_url || '';
+    const metadata = Object.assign({}, existing?.metadata || {}, payloadInput.metadata || {}, isPlaceholder ? { virtual: true, release_type: 'next_drop' } : {}, skuParts.length > 1 ? { multi_skus: skuParts } : {});
+
     const payload = {
         catalog_id: catalog.id,
         site,
@@ -639,8 +665,8 @@ async function upsertCatalogProductManual(supabase, payloadInput) {
         image_url,
         product_url,
         default_max_price,
-        credit_cost: normalizeCreditCost(payloadInput.credit_cost),
-        release_mode_default: isPlaceholder ? 'next' : normalizeRunMode(payloadInput.release_mode_default, 'current'),
+        credit_cost: inputCreditCost ?? existing?.credit_cost ?? 0,
+        release_mode_default: isPlaceholder ? 'next' : normalizeRunMode(payloadInput.release_mode_default || existing?.release_mode_default, 'current'),
         is_enabled: true,
         metadata
     };
@@ -1350,7 +1376,9 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
 
     function productSelectionLines(row) {
         const product = row.catalog_products || row.product || {};
-        const price = row.max_price ?? product.default_max_price;
+        // Export must always use the current catalog max price, not the stale max_price
+        // saved on the user's selection when they originally selected the product.
+        const price = product.default_max_price ?? row.max_price;
         const skuParts = parseMultiSkuValue(product.sku);
 
         if (skuParts.length > 1) {
