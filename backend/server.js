@@ -2053,39 +2053,20 @@ async function refreshDatabaseOutageAlertTargets({ force = false } = {}) {
         return outageAlertTargetsCache;
     }
 
-    const { data, error } = await supabase
-        .from('discord_webhook_routes')
-        .select('*')
-        .eq('is_active', true)
-        .in('scope', ['super_admin', 'admin'])
-        .in('webhook_type', ['checkout_error', 'checkout_success']);
+    // Database status notices belong in announcements, not checkout channels.
+    // Cache announcement webhook URLs so outage/recovery alerts can still be sent
+    // if Supabase becomes unavailable later.
+    const announcementRoutes = await getAnnouncementRoutes();
+    const cleaned = (Array.isArray(announcementRoutes) ? announcementRoutes : [])
+        .map((route) => ({
+            scope: 'announcement',
+            user_id: route.user_id || null,
+            webhook_type: 'announcement',
+            webhook_url: String(route.webhook_url || '').trim()
+        }))
+        .filter((route) => route.webhook_url);
 
-    if (error) throw new Error(error.message);
-
-    const rows = Array.isArray(data) ? data.map(normalizeDiscordWebhookRouteRow) : [];
-    const byAccount = new Map();
-
-    for (const row of rows) {
-        const webhookUrl = String(row.webhook_url || '').trim();
-        if (!webhookUrl) continue;
-        const key = `${row.scope}:${row.user_id || SUPER_ADMIN_ROUTE_USER_ID}`;
-        const existing = byAccount.get(key);
-        const currentIsError = row.webhook_type === 'checkout_error';
-        const existingIsError = existing?.webhook_type === 'checkout_error';
-
-        // Prefer each account's checkout_error webhook. If it does not exist,
-        // use checkout_success so the outage still reaches that account's checkout channel.
-        if (!existing || (currentIsError && !existingIsError)) {
-            byAccount.set(key, {
-                scope: row.scope,
-                user_id: row.user_id || null,
-                webhook_type: row.webhook_type,
-                webhook_url: webhookUrl
-            });
-        }
-    }
-
-    return writeDatabaseOutageAlertTargetsCache([...byAccount.values()]);
+    return writeDatabaseOutageAlertTargetsCache(cleaned);
 }
 
 function buildDatabaseStatusAlertPayload(message, { recovered = false } = {}) {
@@ -2129,19 +2110,19 @@ async function sendDatabaseOutageAlert(message, { recovered = false } = {}) {
 
     let targets = outageAlertTargetsCache.length ? outageAlertTargetsCache : readDatabaseOutageAlertTargetsCache();
 
-    // If Supabase is healthy/recovered, refresh the checkout alert target cache before notifying.
+    // If Supabase is healthy/recovered, refresh the announcement alert target cache before notifying.
     // If Supabase is down, this will fail and the saved local cache will be used instead.
     if (recovered || !targets.length) {
         try {
             targets = await refreshDatabaseOutageAlertTargets({ force: true });
         } catch (refreshErr) {
             targets = targets.length ? targets : readDatabaseOutageAlertTargetsCache();
-            console.warn('Using cached checkout webhook outage targets:', refreshErr.message || refreshErr);
+            console.warn('Using cached announcement webhook outage targets:', refreshErr.message || refreshErr);
         }
     }
 
     if (!targets.length) {
-        console.warn('Database outage alert skipped because no cached checkout webhook routes are available yet.');
+        console.warn('Database outage alert skipped because no cached announcement webhook routes are available yet.');
         return;
     }
 
@@ -2166,7 +2147,7 @@ async function sendDatabaseOutageAlert(message, { recovered = false } = {}) {
 
     const failed = results.filter((row) => !row.success);
     if (failed.length) {
-        console.error('Some database outage checkout alerts failed:', failed);
+        console.error('Some database outage announcement alerts failed:', failed);
     }
 }
 
@@ -5372,19 +5353,44 @@ async function sendDailyCatalogAnnouncement({ force = false } = {}) {
     const now = new Date();
     const easternNow = getDatePartsInTimeZone(now);
     const settings = await getAppSetting('announcement_catalog_update', {});
-    if (!force && settings?.last_sent_date === easternNow.dateKey) {
-        return { skipped: true, reason: 'already_sent_today', sent: 0, failed: 0, product_count: 0 };
+    if (!force && settings?.last_checked_date === easternNow.dateKey) {
+        return { skipped: true, reason: 'already_checked_today', sent: 0, failed: 0, product_count: 0 };
     }
 
     const since = new Date(now.getTime() - 24 * 60 * 60 * 1000).toISOString();
     const products = await getNewCatalogProductsSince(since);
     const lines = products.map(formatAnnouncementProductLine).filter(Boolean);
-    const message = lines.length
-        ? `**The Shore Shack Catalog Update**\nNew products added in the last 24 hours (${lines.length}):\n${lines.join('\n')}`
-        : `**The Shore Shack Catalog Update**\nNo new products were added to the catalog in the last 24 hours.`;
+
+    // Do not post daily "no new products" messages. Announcements should only fire
+    // when there are actual catalog additions in the last 24 hours.
+    if (!lines.length) {
+        await setAppSetting('announcement_catalog_update', {
+            ...(settings || {}),
+            last_checked_at: now.toISOString(),
+            last_checked_date: easternNow.dateKey,
+            last_checked_timezone: ANNOUNCEMENT_CATALOG_TIMEZONE,
+            last_product_count: 0
+        });
+        return { skipped: true, reason: 'no_new_products', sent: 0, failed: 0, product_count: 0 };
+    }
+
+    const bySite = new Map();
+    for (const product of products) {
+        const site = String(product.site || product.store || 'Other').trim() || 'Other';
+        const line = formatAnnouncementProductLine(product);
+        if (!line) continue;
+        if (!bySite.has(site)) bySite.set(site, []);
+        bySite.get(site).push(line);
+    }
+    const groupedLines = [...bySite.entries()]
+        .map(([site, siteLines]) => `**${site} (${siteLines.length})**\n${siteLines.join('\n')}`)
+        .join('\n\n');
+    const message = `**The Shore Shack Catalog Update**\n${lines.length} new product${lines.length === 1 ? '' : 's'} added in the last 24 hours.\n\n${groupedLines}`;
     const result = await sendAnnouncementToAllWebhooks(message);
     await setAppSetting('announcement_catalog_update', {
         ...(settings || {}),
+        last_checked_at: now.toISOString(),
+        last_checked_date: easternNow.dateKey,
         last_sent_at: now.toISOString(),
         last_sent_date: easternNow.dateKey,
         last_sent_timezone: ANNOUNCEMENT_CATALOG_TIMEZONE,
