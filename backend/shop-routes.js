@@ -936,8 +936,16 @@ async function allocateCostFIFO({ supabase, storefrontProductId, quantity }) {
   return { allocatedCostCents, allocations };
 }
 
-async function recordStorefrontSaleFromStripeSession({ supabase, session }) {
+async function recordStorefrontSaleFromStripeSession({ supabase, session, stripe }) {
+  try {
+    if (stripe && session?.id) {
+      session = await stripe.checkout.sessions.retrieve(session.id, { expand: ['customer', 'line_items.data.taxes.rate'] });
+    }
+  } catch (err) {
+    console.warn('Could not expand Stripe tax details:', err.message || err);
+  }
   const metadata = session?.metadata || {};
+  const taxVerification = deriveStripeTaxVerification(session);
   if (String(metadata.checkout_type || '') !== 'storefront_purchase') {
     return { skipped: 'not_storefront_checkout' };
   }
@@ -1050,7 +1058,8 @@ async function recordStorefrontSaleFromStripeSession({ supabase, session }) {
           fulfillment_status: 'paid',
           customer_name: session.customer_details?.name || null,
           shipping_name: session.shipping_details?.name || session.customer_details?.name || null,
-          shipping_address: shippingAddress
+          shipping_address: shippingAddress,
+          tax_verification: taxVerification
         },
         sold_at: new Date().toISOString()
       })
@@ -1108,6 +1117,47 @@ function htmlEscape(value = '') {
   return String(value ?? '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
 }
 
+
+function deriveStripeTaxVerification(session = {}) {
+  const customer = (session.customer && typeof session.customer === 'object') ? session.customer : null;
+  const details = session.customer_details || {};
+  const taxExempt = String(details.tax_exempt || customer?.tax_exempt || 'none');
+  const taxIds = Array.isArray(details.tax_ids) ? details.tax_ids : [];
+  const lineItems = Array.isArray(session.line_items?.data) ? session.line_items.data : [];
+  const reasons = [];
+  const rates = [];
+  for (const line of lineItems) {
+    for (const tax of (Array.isArray(line?.taxes) ? line.taxes : [])) {
+      const reason = tax?.taxability_reason || tax?.rate?.taxability_reason || '';
+      if (reason && !reasons.includes(reason)) reasons.push(reason);
+      const rate = tax?.rate || {};
+      if (rate?.id || rate?.display_name || rate?.percentage != null) {
+        rates.push({ id: rate.id || null, display_name: rate.display_name || null, percentage: rate.percentage ?? null, jurisdiction: rate.jurisdiction || null, country: rate.country || null, state: rate.state || null, tax_type: rate.tax_type || null });
+      }
+    }
+  }
+  const amountTax = Number(session.total_details?.amount_tax || 0);
+  let zeroTaxReason = '';
+  if (amountTax > 0) zeroTaxReason = 'tax_collected';
+  else if (taxExempt && taxExempt !== 'none') zeroTaxReason = 'customer_exempt';
+  else if (reasons.length) zeroTaxReason = reasons.join(',');
+  else if (session.automatic_tax?.enabled && session.automatic_tax?.status === 'complete') zeroTaxReason = 'automatic_tax_complete_zero_tax';
+  else if (session.automatic_tax?.enabled) zeroTaxReason = 'automatic_tax_incomplete_or_unknown';
+  else zeroTaxReason = 'automatic_tax_not_enabled';
+  return {
+    automatic_tax_enabled: Boolean(session.automatic_tax?.enabled),
+    automatic_tax_status: session.automatic_tax?.status || null,
+    tax_amount_cents: amountTax,
+    customer_tax_exempt: taxExempt,
+    customer_tax_ids: taxIds,
+    taxability_reasons: reasons,
+    tax_rates: rates,
+    zero_tax_reason: zeroTaxReason,
+    customer_id: typeof session.customer === 'string' ? session.customer : (customer?.id || null),
+    verified_at: new Date().toISOString()
+  };
+}
+
 function mapSalesToOrder(rows = []) {
   if (!Array.isArray(rows) || !rows.length) return null;
   const first = rows[0] || {};
@@ -1139,6 +1189,7 @@ function mapSalesToOrder(rows = []) {
     customer_email_preview: metadata.customer_confirmation_email_preview || '',
     admin_email_subject: metadata.admin_sale_email_subject || '',
     admin_email_preview: metadata.admin_sale_email_preview || '',
+    tax_verification: metadata.tax_verification || {},
     items: rows.map((row) => {
       const quantity = Number(row.quantity || 0);
       const refundedQuantity = Number(row.metadata?.refunded_quantity || 0);
@@ -1809,6 +1860,25 @@ function registerShopRoutes({
     }
   }
 
+  app.post('/admin/store/orders/:sessionId/refresh-tax', auth, admin, async (req, res) => {
+    try {
+      const sessionId = String(req.params.sessionId || '').trim();
+      if (!sessionId) return res.status(400).json({ error: 'Missing Stripe session ID' });
+      const session = await stripe.checkout.sessions.retrieve(sessionId, { expand: ['customer', 'line_items.data.taxes.rate'] });
+      const verification = deriveStripeTaxVerification(session);
+      const sales = await loadHydratedStorefrontOrder(sessionId);
+      if (!sales.length) return res.status(404).json({ error: 'Storefront order not found' });
+      for (const sale of sales) {
+        const nextMetadata = { ...(sale.metadata || {}), tax_verification: verification, raw_session: session };
+        const { error } = await supabase.from('storefront_sales').update({ metadata: nextMetadata }).eq('id', sale.id);
+        if (error) throw new Error(error.message);
+      }
+      res.json({ ok: true, tax_verification: verification });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   app.post('/admin/store/orders/:sessionId/refund', auth, admin, async (req, res) => {
     try {
       if (!stripe) return res.status(400).json({ error: 'Stripe is not configured yet' });
@@ -2270,7 +2340,7 @@ return {
         superAdminEmail: SUPER_ADMIN_EMAIL
       }),
     recordStorefrontSaleFromStripeSession: async (session) =>
-      recordStorefrontSaleFromStripeSession({ supabase, session })
+      recordStorefrontSaleFromStripeSession({ supabase, session, stripe })
   };
 }
 

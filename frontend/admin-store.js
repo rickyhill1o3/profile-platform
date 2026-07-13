@@ -143,7 +143,18 @@ function countEffectiveSkus(product) {
     $('storeReceiptTotal').textContent = money(order.total);
     $('storeReceiptRefunded').textContent = money(order.refunded_total);
     $('storeReceiptRemaining').textContent = money(order.remaining_total);
-    $('storeReceiptTaxNote').textContent = Number(order.tax || 0) > 0 ? 'Stripe calculated and collected sales tax for this order.' : 'No sales tax was collected. Stripe Automatic Tax is enabled, but tax can still be $0 if your Stripe tax registration, customer location, or product tax settings do not require collection.';
+    const taxInfo = order.tax_verification || {};
+    const exempt = String(taxInfo.customer_tax_exempt || 'none');
+    const reasonLabels = { tax_collected: 'Tax collected', customer_exempt: 'Customer marked tax-exempt in Stripe', not_collecting: 'Not registered or transaction treated as non-taxable', product_exempt: 'Product exempt', zero_rated: 'Zero-rated', automatic_tax_complete_zero_tax: 'Automatic Tax completed with $0 tax', automatic_tax_incomplete_or_unknown: 'Automatic Tax incomplete or reason unavailable', automatic_tax_not_enabled: 'Automatic Tax not enabled' };
+    $('storeReceiptAutomaticTax').textContent = taxInfo.automatic_tax_enabled ? 'Enabled' : 'Not enabled';
+    $('storeReceiptTaxStatus').textContent = taxInfo.automatic_tax_status || 'Unknown';
+    $('storeReceiptTaxExempt').textContent = exempt === 'none' ? 'Not marked exempt' : exempt;
+    $('storeReceiptTaxReason').textContent = reasonLabels[taxInfo.zero_tax_reason] || (taxInfo.taxability_reasons || []).join(', ') || 'Unknown';
+    const taxIds = Array.isArray(taxInfo.customer_tax_ids) ? taxInfo.customer_tax_ids : [];
+    $('storeReceiptTaxId').textContent = taxIds.length ? taxIds.map((x) => `${x.type || 'tax ID'}: ${x.value || ''}`).join(', ') : 'None supplied';
+    $('storeReceiptTaxVerifiedAt').textContent = taxInfo.verified_at ? dateTime(taxInfo.verified_at) : 'Not yet verified';
+    $('storeReceiptTaxWarning').textContent = exempt !== 'none' ? 'Stripe marks this customer as tax-exempt. Keep a valid resale or exemption certificate in your records; the Stripe setting alone is not proof of eligibility.' : 'This customer is not marked tax-exempt in Stripe. A $0 tax result may instead mean you are not registered to collect in that jurisdiction or the product/transaction was non-taxable.';
+    $('storeReceiptTaxNote').textContent = Number(order.tax || 0) > 0 ? 'Stripe calculated and collected sales tax for this order.' : `No sales tax was collected. Reason: ${$('storeReceiptTaxReason').textContent}.`;
     $('storeReceiptModal').classList.add('is-open');
   }
   function openTracking(order) {
@@ -222,6 +233,21 @@ function countEffectiveSkus(product) {
     }));
   }
   async function loadProducts() { const data = await authJSON(API + '/admin/store/products'); state.products = Array.isArray(data.products) ? data.products : []; renderProducts(); renderTopStats(); }
+
+  async function refreshActiveOrderTax() {
+    const order = state.activeOrder;
+    if (!order?.session_id) return;
+    const button = $('storeReceiptRefreshTax');
+    const oldText = button.textContent;
+    button.disabled = true; button.textContent = 'Refreshing…';
+    try {
+      const result = await authJSON(`${API}/admin/store/orders/${encodeURIComponent(order.session_id)}/refresh-tax`, { method: 'POST' });
+      order.tax_verification = result.tax_verification || {};
+      openReceipt(order);
+    } catch (err) { alert(err.message || String(err)); }
+    finally { button.disabled = false; button.textContent = oldText; }
+  }
+
   async function loadReceipts() { const data = await authJSON(API + '/admin/store/receipts'); state.receipts = Array.isArray(data.receipts) ? data.receipts : []; renderReceipts(); renderTopStats(); }
   async function loadOverrides() { const data = await authJSON(API + '/admin/store/pricing'); state.overrides = Array.isArray(data.overrides) ? data.overrides : []; renderOverrides(); }
   async function loadOrders() { showMessage('storeOrdersMessage', 'Loading active orders...'); try { const data = await authJSON(API + '/admin/store/orders'); state.orders = Array.isArray(data.orders) ? data.orders : []; renderOrders(); showMessage('storeOrdersMessage', state.orders.length ? `Loaded ${state.orders.length} active order${state.orders.length === 1 ? '' : 's'}.` : 'No active storefront orders right now.'); } catch (error) { state.orders = []; renderOrders(); showMessage('storeOrdersMessage', `Could not load orders: ${error.message || 'Unknown error'}`, true); throw error; } }
@@ -283,6 +309,7 @@ function countEffectiveSkus(product) {
     bindPaneNav(); bindInventoryForm(); bindPricingForm(); bindEditForm(); bindDiscountForm();
     $('refreshStoreDataButton')?.addEventListener('click', refreshAll);
     $('refreshStoreOrdersButton')?.addEventListener('click', () => loadOrders().catch(() => {}));
+    $('storeReceiptRefreshTax')?.addEventListener('click', refreshActiveOrderTax);
     $('discountActive').value = 'true';
     document.querySelectorAll('[data-close-store-modal]').forEach((button) => button.addEventListener('click', () => closeStoreModal(button.dataset.closeStoreModal)));
     $('storeTrackingSave')?.addEventListener('click', async () => {

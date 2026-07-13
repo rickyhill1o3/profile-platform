@@ -441,6 +441,19 @@
         <div><span>Remaining paid amount</span><strong id="storeReceiptRemaining">$0.00</strong></div>
       </div>
       <div class="banner" id="storeReceiptTaxNote"></div>
+      <div class="receipt-tax-status">
+        <h3>Stripe Tax Status</h3>
+        <div class="receipt-totals">
+          <div><span>Automatic Tax</span><strong id="storeReceiptAutomaticTax">—</strong></div>
+          <div><span>Calculation status</span><strong id="storeReceiptTaxStatus">—</strong></div>
+          <div><span>Customer exemption</span><strong id="storeReceiptTaxExempt">—</strong></div>
+          <div><span>Reason / classification</span><strong id="storeReceiptTaxReason">—</strong></div>
+          <div><span>Tax ID</span><strong id="storeReceiptTaxId">—</strong></div>
+          <div><span>Last verified</span><strong id="storeReceiptTaxVerifiedAt">—</strong></div>
+        </div>
+        <p class="subtle-text" id="storeReceiptTaxWarning"></p>
+        <button class="btn" type="button" id="storeReceiptRefreshTax">Refresh tax details from Stripe</button>
+      </div>
     </section>
   </div>
 
