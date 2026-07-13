@@ -965,3 +965,41 @@ h1,h2,h3,h4,p{margin:0}
   .product-card-storefront--compact h3{font-size:13px}
   .shop-buy-row{grid-template-columns:52px minmax(0,1fr)}
 }
+
+/* Amazon multi-product selection */
+.amazon-product-options {
+  display: grid;
+  grid-template-columns: minmax(90px, 120px) 1fr;
+  gap: 8px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border, #dbe4f0);
+}
+.amazon-quantity-field,
+.amazon-primary-field {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12px;
+  font-weight: 700;
+}
+.amazon-quantity-field input {
+  width: 64px;
+  min-height: 32px;
+  padding: 5px 7px;
+  border: 1px solid var(--border, #cfd9e8);
+  border-radius: 8px;
+}
+.amazon-primary-field {
+  padding: 7px 9px;
+  border-radius: 9px;
+  background: #fff7db;
+  color: #725100;
+}
+.amazon-primary-field input:disabled + span,
+.amazon-quantity-field input:disabled {
+  opacity: .5;
+}
+@media (max-width: 700px) {
+  .amazon-product-options { grid-template-columns: 1fr; }
+}

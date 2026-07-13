@@ -3193,9 +3193,11 @@ const storeProductCache = {};
 const storeSelectedProductIds = {};
 const storeProductAutosaveTimers = {};
 const storeProductAutosaveControllers = {};
+const storeProductQuantities = {};
+const storePrimaryProductIds = {};
 
 function getStoreSelectionLimit(site) {
-    if (site === "amazon") return 1;
+    if (site === "amazon") return 9999;
     // Target and Sam's Club are uncapped on the dashboard. Admin exports still batch selected SKUs into 29-SKU lists.
     return 9999;
 }
@@ -3207,10 +3209,20 @@ function renderStoreProductCard(product, site) {
     const credits = formatCredits(product.credit_cost || 0);
     const link = product.product_url ? `<a href="${escapeHTML(product.product_url)}" target="_blank" rel="noopener">Open</a>` : '';
     const selectable = site === 'target' || site === 'samsclub' || site === 'amazon' || site === 'pokemon';
-    const inputType = site === 'amazon' ? 'radio' : 'checkbox';
+    const inputType = 'checkbox';
     const selected = !!product.selected;
+    const amazonOptions = site === 'amazon' ? `
+        <div class="amazon-product-options">
+            <label class="amazon-quantity-field">Qty
+                <input type="number" min="1" max="99" step="1" value="${Number(product.quantity || 1)}" data-amazon-quantity data-product-id="${escapeHTML(product.id)}" ${selected ? '' : 'disabled'} />
+            </label>
+            <label class="amazon-primary-field">
+                <input type="radio" name="amazonPrimaryProduct" data-amazon-primary data-product-id="${escapeHTML(product.id)}" ${product.is_primary ? 'checked' : ''} ${selected ? '' : 'disabled'} />
+                <span>Main item</span>
+            </label>
+        </div>` : '';
     const control = selectable
-        ? `<label class="checkbox-inline store-product-select"><input type="${inputType}" name="${site}ProductSelection" data-store-product-select="${escapeHTML(site)}" data-product-id="${escapeHTML(product.id)}" ${selected ? 'checked' : ''} /><span>${selected ? 'Selected' : 'Select'}</span></label>`
+        ? `<label class="checkbox-inline store-product-select"><input type="${inputType}" name="${site}ProductSelection" data-store-product-select="${escapeHTML(site)}" data-product-id="${escapeHTML(product.id)}" ${selected ? 'checked' : ''} /><span>${selected ? 'Selected' : 'Select'}</span></label>${amazonOptions}`
         : '';
 
     return `
@@ -3239,7 +3251,7 @@ function updateStoreSelectionSummary(site) {
                 : site === "pokemon"
                     ? `${skuUnits} Pokémon Center item${skuUnits === 1 ? "" : "s"} selected`
                     : site === "amazon"
-                        ? `${selected.size} / 1 Amazon item selected`
+                        ? `${selected.size} Amazon item${selected.size === 1 ? "" : "s"} selected${storePrimaryProductIds.amazon ? " • 1 main item" : ""}`
                         : `${selected.size} selected`;
     }
 }
@@ -3253,15 +3265,22 @@ function applyStoreProductSelection(site, input) {
     const limit = getStoreSelectionLimit(site);
 
     if (site === "amazon") {
-        selected.clear();
-        if (input.checked) selected.add(productId);
-        panel.querySelectorAll("[data-store-product-select]").forEach((other) => {
-            if (other !== input) other.checked = false;
-            const card = other.closest("[data-store-product-card]");
-            if (card) card.classList.toggle("store-product-card--selected", other.checked);
-            const labelSpan = other.closest("label")?.querySelector("span");
-            if (labelSpan) labelSpan.textContent = other.checked ? "Selected" : "Select";
-        });
+        if (input.checked) selected.add(productId); else selected.delete(productId);
+        const qty = panel.querySelector(`[data-amazon-quantity][data-product-id="${CSS.escape(productId)}"]`);
+        const primary = panel.querySelector(`[data-amazon-primary][data-product-id="${CSS.escape(productId)}"]`);
+        if (qty) qty.disabled = !input.checked;
+        if (primary) primary.disabled = !input.checked;
+        if (input.checked && !storePrimaryProductIds.amazon) {
+            storePrimaryProductIds.amazon = productId;
+            if (primary) primary.checked = true;
+        }
+        if (!input.checked && storePrimaryProductIds.amazon === productId) {
+            const nextId = [...selected][0] || '';
+            storePrimaryProductIds.amazon = nextId;
+            panel.querySelectorAll('[data-amazon-primary]').forEach((radio) => {
+                radio.checked = String(radio.dataset.productId || '') === nextId;
+            });
+        }
     } else {
         if (input.checked) {
             const product = (storeProductCache[site] || []).find((row) => String(row.id) === productId);
@@ -3310,7 +3329,7 @@ async function saveStoreProductSelections(site, options = {}) {
     try {
         await authJSON(API + "/product-preferences", {
             method: "PUT",
-            body: JSON.stringify({ site, selected_product_ids: selected }),
+            body: JSON.stringify({ site, selected_product_ids: selected, preferences: selected.map((productId) => ({ catalog_product_id: productId, selected: true, quantity: Number(storeProductQuantities[site]?.[productId] || 1), is_primary: site === "amazon" && String(storePrimaryProductIds.amazon || "") === String(productId) })) }),
             signal: controller.signal
         });
         if (storeProductAutosaveControllers[site] === controller) {
@@ -3345,6 +3364,29 @@ function bindStoreProductSelectionControls(site) {
             scheduleStoreProductAutosave(site);
         });
     });
+
+    if (site === "amazon") {
+        panel.querySelectorAll("[data-amazon-quantity]").forEach((input) => {
+            input.addEventListener("change", () => {
+                const productId = String(input.dataset.productId || "");
+                const qty = Math.max(1, Math.min(99, Math.round(Number(input.value || 1))));
+                input.value = String(qty);
+                storeProductQuantities.amazon = storeProductQuantities.amazon || {};
+                storeProductQuantities.amazon[productId] = qty;
+                scheduleStoreProductAutosave(site);
+            });
+        });
+        panel.querySelectorAll("[data-amazon-primary]").forEach((input) => {
+            input.addEventListener("change", () => {
+                if (!input.checked) return;
+                const productId = String(input.dataset.productId || "");
+                if (!(storeSelectedProductIds.amazon || new Set()).has(productId)) return;
+                storePrimaryProductIds.amazon = productId;
+                updateStoreSelectionSummary(site);
+                scheduleStoreProductAutosave(site);
+            });
+        });
+    }
 
     panel.querySelectorAll("[data-store-product-card]").forEach((card) => {
         if (card.dataset.cardClickBound) return;
@@ -3621,6 +3663,8 @@ async function loadStoreProductsForSite(site) {
         const products = dedupeMultiSkuProducts(migrateLegacyMultiSkuSelections(site, Array.isArray(data.products) ? data.products : []));
         storeProductCache[site] = products;
         storeSelectedProductIds[site] = new Set(products.filter((product) => !!product.selected).map((product) => String(product.id)));
+        storeProductQuantities[site] = Object.fromEntries(products.map((product) => [String(product.id), Number(product.quantity || 1)]));
+        if (site === "amazon") storePrimaryProductIds.amazon = String(products.find((product) => product.selected && product.is_primary)?.id || products.find((product) => product.selected)?.id || "");
 
         if (!products.length) {
             panel.innerHTML = '<div class="empty-card"><p>No products are currently listed for this store.</p></div>';
@@ -3635,7 +3679,7 @@ async function loadStoreProductsForSite(site) {
                 : site === 'pokemon'
                     ? 'Select the Pokémon Center items you want us to run.'
                     : site === 'amazon'
-                        ? 'Select 1 Amazon item.'
+                        ? 'Choose as many Amazon products as you want, set a quantity for each, and choose exactly one Main Item.'
                         : '';
 
         panel.innerHTML = `
@@ -3649,7 +3693,7 @@ async function loadStoreProductsForSite(site) {
                 <input id="${site}ProductSearch" class="input" type="search" placeholder="Search ${site} products by name, SKU, brand, or category" />
             </div>
             ${site === 'target' ? `<div id="targetUserProductExportStatus" class="export-sync-banner export-sync-banner--neutral">Loading product list update status...</div><section class="recommended-lists-section"><div class="panel-header panel-header--compact"><div><h3>Current Running Lists</h3><p class="subtle-text">Apply The Shore Shack list or your admin’s list.</p></div></div><div id="targetRecommendedListsPanel" class="recommended-list-grid"></div></section>` : ''}
-            ${selectable ? `<div class="banner banner-soft"><strong>${escapeHTML(limitText)}</strong><p class="subtle-text">You can pick your own products even if they are not currently recommended. Exports will still be split into 29-SKU batches for the bot.</p><div id="${site}ProductSelectionMessage" class="subtle-text"></div></div>` : ''}
+            ${selectable ? `<div class="banner banner-soft"><strong>${escapeHTML(limitText)}</strong><p class="subtle-text">${site === "amazon" ? "Your Main Item uses the fastest checkout lane and has the best chance of success. The regular selected items run together as a slower backup checkout. The Main Item is also included in the regular multi-item export." : "You can pick your own products even if they are not currently recommended. Exports will still be split into 29-SKU batches for the bot."}</p><div id="${site}ProductSelectionMessage" class="subtle-text"></div></div>` : ''}
             <div class="store-product-scroll">
                 <div id="${site}ProductGridWrap">
                     ${renderStoreProductGroups(site, products)}
@@ -4135,6 +4179,9 @@ function renderProductSelectionExportBoxes(users = [], format = 'stellar') {
             if (text) boxes.push({ title: `${display} - Shikari SKUs`, text, count: skusFromProductSelectionLines(user.lines).length });
             return;
         }
+        if (user.main_item?.line) {
+            boxes.push({ title: `${display} - Amazon Main Item (Fast Checkout)`, text: user.main_item.line, count: 1, main: true });
+        }
         const batches = Array.isArray(user.batches) && user.batches.length ? user.batches : chunkArray(Array.isArray(user.lines) ? user.lines : [], 29);
         batches.forEach((batch, index) => {
             boxes.push({ title: `${display} - Stellar Batch ${index + 1}`, text: batch.join('\n'), count: batch.length });
@@ -4146,7 +4193,7 @@ function renderProductSelectionExportBoxes(users = [], format = 'stellar') {
     }
     results.innerHTML = boxes.map((box, idx) => `
         <section class="panel panel--inner">
-          <div class="panel-header"><div><h3>${escapeHTML(box.title)}</h3><p class="subtle-text">${box.count} SKU${box.count === 1 ? '' : 's'}</p></div><div class="panel-actions"><button class="btn" type="button" data-copy-selection-box="${idx}">Copy ${format === 'shikari' ? 'Shikari List' : 'Batch'}</button></div></div>
+          <div class="panel-header"><div><h3>${escapeHTML(box.title)}</h3><p class="subtle-text">${box.main ? 'Fast checkout item; also included in the regular batch below.' : `${box.count} SKU${box.count === 1 ? '' : 's'}`}</p></div><div class="panel-actions"><button class="btn" type="button" data-copy-selection-box="${idx}">Copy ${format === 'shikari' ? 'Shikari List' : 'Batch'}</button></div></div>
           <textarea class="input" rows="${format === 'shikari' ? 4 : Math.min(14, Math.max(6, box.count + 1))}" readonly>${escapeHTML(box.text)}</textarea>
         </section>
     `).join('');

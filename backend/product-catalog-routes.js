@@ -948,7 +948,7 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
                 .select(`
           id, site, sku, product_name, brand, image_url, product_url,
           default_max_price, credit_cost, release_mode_default, is_enabled, metadata,
-          user_product_preferences!left ( id, selected, run_mode, max_price )
+          user_product_preferences!left ( id, selected, run_mode, max_price, quantity, is_primary )
         `)
                 .eq('catalog_id', activeCatalog.id)
                 .eq('is_enabled', true)
@@ -974,6 +974,8 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
                     selected: pref ? !!pref.selected : false,
                     run_mode: pref?.run_mode || row.release_mode_default || 'current',
                     max_price: pref?.max_price ?? row.default_max_price,
+                    quantity: Math.max(1, Number(pref?.quantity || 1)),
+                    is_primary: !!pref?.is_primary,
                     preference_id: pref?.id || null,
                     metadata: row.metadata || {}
                 };
@@ -994,7 +996,7 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
         try {
             await ensureUserNotRevoked(req.user_id);
             const site = normalizeSite(req.body.site);
-            const limit = site === 'amazon' ? 1 : 9999;
+            const limit = 9999;
 
             const selectedIdsFromBody = Array.isArray(req.body.selected_product_ids)
                 ? req.body.selected_product_ids.map(String).filter(Boolean)
@@ -1045,10 +1047,13 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
                 return total + countCatalogSkuUnits(allowedMap.get(String(id)));
             }, 0);
 
-            if (site === 'amazon' && filteredSelectedIds.length > 1) {
-                return res.status(400).json({ error: 'Amazon allows only 1 selected item right now.' });
-            }
 
+            if (site === 'amazon' && filteredSelectedIds.length) {
+                const primaryRows = preferences.filter((row) => !!row.is_primary && filteredSelectedIds.includes(String(row.catalog_product_id || '')));
+                if (primaryRows.length !== 1) {
+                    return res.status(400).json({ error: 'Choose exactly one Main Item for Amazon.' });
+                }
+            }
 
             const { data: siteProducts, error: siteProductsError } = await supabase
                 .from('catalog_products')
@@ -1075,7 +1080,9 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
                         catalog_product_id: productId,
                         selected: true,
                         run_mode: normalizeRunMode(originalPref.run_mode, 'current'),
-                        max_price: normalizeMaxPrice(originalPref.max_price ?? product?.default_max_price ?? null)
+                        max_price: normalizeMaxPrice(originalPref.max_price ?? product?.default_max_price ?? null),
+                        quantity: site === 'amazon' ? Math.max(1, Math.min(99, Math.round(Number(originalPref.quantity || 1)))) : 1,
+                        is_primary: site === 'amazon' ? !!originalPref.is_primary : false
                     };
                 });
 
@@ -1380,12 +1387,14 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
         // saved on the user's selection when they originally selected the product.
         const price = product.default_max_price ?? row.max_price;
         const skuParts = parseMultiSkuValue(product.sku);
+        const quantity = Math.max(1, Number(row.quantity || 1));
+        const suffix = product.site === 'amazon' ? `;${quantity}` : '';
 
         if (skuParts.length > 1) {
-            return skuParts.map((sku) => `${sku};${product.product_name || sku || ''};${price === null || price === undefined ? '' : price}`);
+            return skuParts.map((sku) => `${sku};${product.product_name || sku || ''};${price === null || price === undefined ? '' : price}${suffix}`);
         }
 
-        return [`${product.sku || ''};${product.product_name || product.sku || ''};${price === null || price === undefined ? '' : price}`];
+        return [`${product.sku || ''};${product.product_name || product.sku || ''};${price === null || price === undefined ? '' : price}${suffix}`];
     }
 
     function chunkProductSelectionLines(lines = [], batchSize = 29) {
@@ -1492,7 +1501,7 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
 
             let query = supabase
                 .from('user_product_preferences')
-                .select(`user_id, selected, max_price, updated_at, catalog_products!inner ( id, site, sku, product_name, default_max_price )`)
+                .select(`user_id, selected, max_price, quantity, is_primary, updated_at, catalog_products!inner ( id, site, sku, product_name, default_max_price )`)
                 .eq('user_id', userId)
                 .eq('selected', true)
                 .eq('catalog_products.site', site);
@@ -1557,7 +1566,7 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
 
             let query = supabase
                 .from('user_product_preferences')
-                .select(`user_id, selected, max_price, updated_at, catalog_products!inner ( id, site, sku, product_name, default_max_price )`)
+                .select(`user_id, selected, max_price, quantity, is_primary, updated_at, catalog_products!inner ( id, site, sku, product_name, default_max_price )`)
                 .eq('selected', true)
                 .eq('catalog_products.site', site);
 
@@ -1754,7 +1763,7 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
 
             let query = supabase
                 .from('user_product_preferences')
-                .select(`user_id, selected, max_price, updated_at, catalog_products!inner ( id, site, sku, product_name, default_max_price )`)
+                .select(`user_id, selected, max_price, quantity, is_primary, updated_at, catalog_products!inner ( id, site, sku, product_name, default_max_price )`)
                 .eq('selected', true)
                 .eq('catalog_products.site', site);
 
@@ -1822,7 +1831,8 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
                         discord_username: user.discord_username || '',
                         discord_display_name: user.discord_display_name || '',
                         user_display: formatDiscordDisplayName(user),
-                        lines: []
+                        lines: [],
+                        main_item: null
                     });
 
                     processedProducts.set(row.user_id, new Set());
@@ -1850,6 +1860,16 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
                 });
 
                 byUser.get(row.user_id).lines = [...existing];
+                if (site === 'amazon' && row.is_primary) {
+                    byUser.get(row.user_id).main_item = {
+                        product_id: product.id || null,
+                        sku: parseMultiSkuValue(product.sku)[0] || product.sku || '',
+                        product_name: product.product_name || product.sku || '',
+                        price: product.default_max_price ?? row.max_price ?? null,
+                        quantity: Math.max(1, Number(row.quantity || 1)),
+                        line: lines[0] || ''
+                    };
+                }
             });
 
             const users = [...byUser.values()].sort((a, b) => (a.user_email || '').localeCompare(b.user_email || ''))
@@ -1937,7 +1957,7 @@ app.get('/admin/product-preferences', auth, admin, async (req, res) => {
             const { data, error } = await supabase
                 .from('user_product_preferences')
                 .select(`
-          id, selected, run_mode, max_price, updated_at,
+          id, selected, run_mode, max_price, quantity, is_primary, updated_at,
           catalog_products!inner ( id, site, sku, product_name, image_url, default_max_price, product_url )
         `)
                 .eq('user_id', targetUserId)
@@ -1970,6 +1990,8 @@ app.get('/admin/product-preferences', auth, admin, async (req, res) => {
                     selected: !!row.selected,
                     run_mode: row.run_mode,
                     max_price: row.max_price,
+                    quantity: Math.max(1, Number(row.quantity || 1)),
+                    is_primary: !!row.is_primary,
                     updated_at: row.updated_at,
                     product: row.catalog_products
                 })),
