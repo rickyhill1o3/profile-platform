@@ -2855,6 +2855,7 @@ async function loadWebhookLogs() {
               ? `<details><summary>Raw payload</summary><pre style="white-space:pre-wrap;max-width:520px;">${escapeHtml(JSON.stringify(item.payload, null, 2))}</pre></details>`
               : '';
             const userLabel = item.user_display || item.user_email || '-';
+            const assignedTarget = targets.map((target) => String(target?.destination_name || target?.assigned_to || target?.brand_label || '').trim()).find(Boolean) || '-';
             const creditsLabel = (item.type === 'checkout') ? String(item.credits_charged ?? 0) : '-';
             const productValue = String(item.product || '-');
             const isProductUrl = /^https?:\/\//i.test(productValue);
@@ -2869,6 +2870,7 @@ async function loadWebhookLogs() {
               <td>${escapeHtml(item.site || '-')}</td>
               <td>${escapeHtml(item.bot || item.payload?.source || '-')}</td>
               <td class="webhook-log-user"><span class="webhook-log-truncate" title="${escapeHtml(userLabel)}">${escapeHtml(userLabel)}</span></td>
+              <td class="webhook-log-assigned"><span class="webhook-log-truncate" title="${escapeHtml(assignedTarget)}">${escapeHtml(assignedTarget)}</span></td>
               <td>${escapeHtml(creditsLabel)}</td>
               <td>${escapeHtml(item.product_type || '-')}</td>
               <td class="webhook-log-product">${productCell}</td>
@@ -2880,7 +2882,7 @@ async function loadWebhookLogs() {
         container.innerHTML = `
             <div class="webhook-log-scroll">
               <table class="admin-table webhook-log-table">
-                <thead><tr><th>Time</th><th>Type</th><th>Status</th><th>Site</th><th>Bot</th><th>User</th><th>Credits</th><th>Product Type</th><th>Product</th><th>SKU</th><th>Error / Debug</th><th>Actions</th></tr></thead>
+                <thead><tr><th>Time</th><th>Type</th><th>Status</th><th>Site</th><th>Bot</th><th>User</th><th>Assigned To</th><th>Credits</th><th>Product Type</th><th>Product</th><th>SKU</th><th>Error / Debug</th><th>Actions</th></tr></thead>
                 <tbody>${rows}</tbody>
               </table>
             </div>`;

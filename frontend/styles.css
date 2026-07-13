@@ -1031,3 +1031,4 @@ h1,h2,h3,h4,p{margin:0}
 .webhook-log-action-buttons{display:grid;gap:6px}
 .webhook-log-action-buttons button{width:100%;white-space:nowrap}
 @media(max-width:900px){.webhook-log-table{min-width:1450px}.webhook-log-scroll{border-radius:8px}}
+.webhook-log-table .webhook-log-assigned { min-width: 165px; max-width: 220px; font-weight: 600; }

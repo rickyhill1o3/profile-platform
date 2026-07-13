@@ -2764,6 +2764,7 @@ async function claimQueuePassDiscordDestination(payload = {}) {
         userId: row.destination_user_id || null,
         webhookUrl: String(row.webhook_url || '').trim(),
         brandLabel: String(row.brand_label || '').trim(),
+        destinationName: String(row.destination_name || '').trim(),
         reused: !!row.reused
     };
 }
@@ -2771,11 +2772,11 @@ async function claimQueuePassDiscordDestination(payload = {}) {
 async function sendQueuePassDiscordNotification(payload = {}) {
     const route = await claimQueuePassDiscordDestination(payload);
     const data = extractQueuePassData(payload);
-    const destinationLabel = route.scope === 'super_admin_reserved'
-        ? 'Reserved super-admin queue pass'
+    const destinationLabel = route.destinationName || (route.scope === 'super_admin_reserved'
+        ? 'theshoreshacktcg super admin'
         : route.scope === 'super_admin_public'
-            ? 'The Shore Shack user group'
-            : (route.brandLabel || 'Admin group');
+            ? 'theshoreshacktcg public'
+            : (route.brandLabel || 'Admin group'));
     const embed = {
         title: 'Successful Queue Pass',
         description: data.checkoutLink
@@ -2802,7 +2803,7 @@ async function sendQueuePassDiscordNotification(payload = {}) {
         });
         const text = response.ok ? '' : await response.text().catch(() => '');
         if (!response.ok) throw new Error(`Discord webhook failed (${response.status}): ${text}`);
-        return { success: true, scope: route.scope, admin_user_id: route.userId, reused: route.reused, queue_pass: true };
+        return { success: true, scope: route.scope, admin_user_id: route.userId, destination_name: destinationLabel, route_id: route.routeId, reused: route.reused, queue_pass: true };
     });
 }
 
