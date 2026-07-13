@@ -875,6 +875,12 @@ placeholder="Enter one SKU per line&#10;12345678&#10;87654321"></textarea>
               <div class="subtle-text">Successful checkouts also send here with admin-safe information only: no passwords, proxies, offer IDs, or private order IDs.</div>
             </div>
 
+            <div class="field field--full" id="queuePassReservedCountField">
+              <label for="queuePassReservedCount">Queue Passes Reserved for Super Admin (rolling 24 hours)</label>
+              <input class="input" id="queuePassReservedCount" type="number" min="0" max="100" step="1" value="2" />
+              <div class="subtle-text">The first number of Queue-it checkout links received during a rolling 24-hour window go only to your private Super Admin Successful Checkout webhook. Later links rotate in order through your public/user checkout webhook, Admin 1, Admin 2, Admin 3, then repeat.</div>
+            </div>
+
             <div class="field field--full" id="superAdminErrorDiscordField">
               <label for="checkoutErrorWebhookUrl">Super Admin Failed / Error Checkout Webhook</label>
               <input class="input" id="checkoutErrorWebhookUrl" placeholder="https://discord.com/api/webhooks/..." />

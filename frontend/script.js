@@ -2898,6 +2898,7 @@ async function loadWebhookSettings() {
     const createMonitorButton = document.getElementById('createMonitorWebhookButton');
     const superAdminField = document.getElementById('superAdminDiscordField');
     const monitorDedupeWindowInput = document.getElementById('monitorDedupeWindowSeconds');
+    const queuePassReservedCountInput = document.getElementById('queuePassReservedCount');
     const superAdminMonitorGroups = document.getElementById('superAdminMonitorGroups');
     const adminMonitorGroupsSection = document.getElementById('adminMonitorGroupsSection');
 
@@ -2969,6 +2970,7 @@ async function loadWebhookSettings() {
         if (adminDiscordInput) adminDiscordInput.value = data.admin_discord_webhook_url || '';
         if (adminErrorDiscordInput) adminErrorDiscordInput.value = data.admin_error_discord_webhook_url || '';
         if (monitorDedupeWindowInput) monitorDedupeWindowInput.value = String(data.monitor_dedupe_window_seconds ?? 90);
+        if (queuePassReservedCountInput) queuePassReservedCountInput.value = String(data.queue_pass_reserved_count ?? 2);
         if (adminBrandInput) adminBrandInput.value = data.admin_brand_label || '';
 
         const monitorSettings = data.monitor_groups || {};
@@ -3053,6 +3055,7 @@ async function saveWebhookSettings() {
     const adminErrorDiscordInput = document.getElementById('adminErrorDiscordRelayWebhookUrl');
     const adminBrandInput = document.getElementById('adminBrandLabel');
     const monitorDedupeWindowInput = document.getElementById('monitorDedupeWindowSeconds');
+    const queuePassReservedCountInput = document.getElementById('queuePassReservedCount');
     const message = document.getElementById('webhookSettingsMessage');
 
     try {
@@ -3065,6 +3068,7 @@ async function saveWebhookSettings() {
                 admin_discord_webhook_url: adminDiscordInput ? adminDiscordInput.value : '',
                 admin_error_discord_webhook_url: adminErrorDiscordInput ? adminErrorDiscordInput.value : '',
                 monitor_dedupe_window_seconds: monitorDedupeWindowInput ? Number(monitorDedupeWindowInput.value || 90) : 90,
+                queue_pass_reserved_count: queuePassReservedCountInput ? Number(queuePassReservedCountInput.value || 0) : 2,
                 admin_brand_label: adminBrandInput ? adminBrandInput.value : '',
                 monitor_groups: {
                     pokemon: {

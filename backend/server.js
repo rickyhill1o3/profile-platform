@@ -2722,7 +2722,94 @@ async function sendPokemonCenterStatusToMonitorRoutes(payload = {}, { superAdmin
     return { item, results, usedTargets };
 }
 
+
+function isQueuePassPayload(payload = {}) {
+    const { embed, fields } = extractEmbedFields(payload || {});
+    const site = String(fields['site'] || payload.site || '').trim().toLowerCase();
+    const title = decodeHtmlEntities(String(embed?.title || '')).replace(/\*\*/g, '').trim().toLowerCase();
+    return site === 'queueit' || title.includes('successful queue pass');
+}
+
+function extractQueuePassData(payload = {}) {
+    const { embed, fields } = extractEmbedFields(payload || {});
+    const clean = (value = '') => decodeHtmlEntities(String(value || '')).replace(/\|\|/g, '').trim();
+    const checkoutLink = clean(embed?.description || payload.checkout_link || payload.url || '');
+    const extensionLink = clean(fields['extension link'] || payload.extension_link || '');
+    const mode = clean(fields['mode'] || payload.mode || 'normal');
+    return { checkoutLink, extensionLink, mode };
+}
+
+function queuePassEventKey(payload = {}) {
+    const data = extractQueuePassData(payload);
+    const stable = data.checkoutLink || data.extensionLink || JSON.stringify(payload || {});
+    return crypto.createHash('sha256').update(stable).digest('hex');
+}
+
+async function claimQueuePassDiscordDestination(payload = {}) {
+    const settings = await getAppSetting('webhook_settings', {});
+    const reservedCount = Math.max(0, Math.min(100, Number(settings?.queue_pass_reserved_count ?? 2) || 0));
+    const eventKey = queuePassEventKey(payload);
+    const { data, error } = await supabase.rpc('claim_queue_pass_destination', {
+        p_event_key: eventKey,
+        p_reserved_count: reservedCount
+    });
+    if (error) throw new Error(`Queue-pass routing SQL is not installed or failed: ${error.message}`);
+    const row = Array.isArray(data) ? data[0] : data;
+    if (!row?.webhook_url) throw new Error('No eligible queue-pass Discord webhook is configured. Add the super-admin public checkout webhook and at least one admin checkout webhook.');
+    return {
+        eventKey,
+        reservedCount,
+        routeId: row.route_id || null,
+        scope: row.destination_scope || 'unknown',
+        userId: row.destination_user_id || null,
+        webhookUrl: String(row.webhook_url || '').trim(),
+        brandLabel: String(row.brand_label || '').trim(),
+        reused: !!row.reused
+    };
+}
+
+async function sendQueuePassDiscordNotification(payload = {}) {
+    const route = await claimQueuePassDiscordDestination(payload);
+    const data = extractQueuePassData(payload);
+    const destinationLabel = route.scope === 'super_admin_reserved'
+        ? 'Reserved super-admin queue pass'
+        : route.scope === 'super_admin_public'
+            ? 'The Shore Shack user group'
+            : (route.brandLabel || 'Admin group');
+    const embed = {
+        title: 'Successful Queue Pass',
+        description: data.checkoutLink
+            ? `[Open checkout link](${data.checkoutLink})`
+            : 'A queue pass was received, but no checkout URL was found.',
+        fields: [
+            { name: 'Site', value: 'queueit', inline: true },
+            { name: 'Mode', value: data.mode || 'normal', inline: true },
+            { name: 'Assigned Group', value: destinationLabel, inline: true },
+            { name: 'Important', value: 'This link is assigned to this Discord group. Open it only when you are ready to complete checkout so two people do not use the same pass.', inline: false }
+        ],
+        color: 65280,
+        timestamp: new Date().toISOString(),
+        footer: { text: route.scope === 'super_admin_reserved' ? 'Private reserved queue pass' : 'Round-robin queue-pass distribution' }
+    };
+    if (data.extensionLink) {
+        embed.fields.push({ name: 'Extension Link', value: `[Open extension link](${data.extensionLink})`, inline: false });
+    }
+    return enqueueDiscordWebhookJob(route.webhookUrl, async () => {
+        const response = await globalThis.fetch(route.webhookUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ username: route.brandLabel || 'The Shore Shack', embeds: [embed] })
+        });
+        const text = response.ok ? '' : await response.text().catch(() => '');
+        if (!response.ok) throw new Error(`Discord webhook failed (${response.status}): ${text}`);
+        return { success: true, scope: route.scope, admin_user_id: route.userId, reused: route.reused, queue_pass: true };
+    });
+}
+
 async function sendCheckoutDiscordNotificationsForPayload(payload = {}, matchedUser = null, extra = {}) {
+    if (isQueuePassPayload(payload)) {
+        return [await sendQueuePassDiscordNotification(payload)];
+    }
     if (extra?.order && typeof extra.order === 'object') {
         return sendCheckoutDiscordNotifications(extra.order, matchedUser || null);
     }
@@ -4215,6 +4302,21 @@ app.post(["/webhooks/orders", "/webhooks/orders/:token"], async (req, res) => {
                     }).catch(() => null);
                     return;
                 }
+                if (isQueuePassPayload(payload)) {
+                    const queueResult = await sendQueuePassDiscordNotification(payload);
+                    const queueData = extractQueuePassData(payload);
+                    await updateWebhookLogEntry(logId, {
+                        status: 'distributed',
+                        site: 'queueit',
+                        product: String(queueData.checkoutLink || queueData.extensionLink || 'Queue pass'),
+                        sku: '',
+                        error: '',
+                        discord_targets: [queueResult]
+                    }).catch(() => null);
+                    checkoutDiscordSent = true;
+                    return;
+                }
+
                 const matchedUser = await findUserForWebhook(payload).catch(() => null);
                 let resolvedUser = matchedUser?.id ? matchedUser : null;
                 let finalDiscordResults = [];
@@ -4830,6 +4932,7 @@ app.get('/admin/webhooks/settings', auth, admin, async (req, res) => {
             monitor_groups: Object.keys(superMonitorGroups).length ? superMonitorGroups : (globalSettings?.monitor_groups || {}),
             admin_monitor_groups: Object.keys(adminMonitorGroups).length ? adminMonitorGroups : (adminSettings?.monitor_groups || {}),
             monitor_dedupe_window_seconds: Number(globalSettings?.monitor_dedupe_window_seconds || 90),
+            queue_pass_reserved_count: Math.max(0, Number(globalSettings?.queue_pass_reserved_count ?? 2) || 0),
             can_create_inbound: currentUser.role === 'super_admin',
             is_super_admin: currentUser.role === 'super_admin'
         });
@@ -5525,13 +5628,15 @@ app.post('/admin/webhooks/settings', auth, admin, async (req, res) => {
             const checkoutErrorWebhookUrl = String(req.body?.checkout_error_webhook_url || '').trim();
             const currentGlobal = await getAppSetting('webhook_settings', {});
             const monitorDedupeWindowSeconds = Math.max(0, Math.min(600, Number(req.body?.monitor_dedupe_window_seconds ?? currentGlobal.monitor_dedupe_window_seconds ?? 90) || 90));
+            const queuePassReservedCount = Math.max(0, Math.min(100, Number(req.body?.queue_pass_reserved_count ?? currentGlobal.queue_pass_reserved_count ?? 2) || 0));
             await setAppSetting('webhook_settings', {
                 ...currentGlobal,
                 discord_webhook_url: discordWebhookUrl,
                 super_admin_public_checkout_webhook_url: superAdminPublicCheckoutWebhookUrl,
                 checkout_error_webhook_url: checkoutErrorWebhookUrl,
                 monitor_groups: req.body?.monitor_groups || currentGlobal.monitor_groups || {},
-                monitor_dedupe_window_seconds: monitorDedupeWindowSeconds
+                monitor_dedupe_window_seconds: monitorDedupeWindowSeconds,
+                queue_pass_reserved_count: queuePassReservedCount
             });
             await upsertDiscordWebhookRoute({ scope: 'super_admin', webhookType: 'checkout_success', category: 'all', webhookUrl: discordWebhookUrl, isActive: !!discordWebhookUrl });
             await upsertDiscordWebhookRoute({ scope: 'super_admin_public', webhookType: 'checkout_success', category: 'all', webhookUrl: superAdminPublicCheckoutWebhookUrl, isActive: !!superAdminPublicCheckoutWebhookUrl });
@@ -5545,6 +5650,7 @@ app.post('/admin/webhooks/settings', auth, admin, async (req, res) => {
             response.checkout_error_webhook_url = checkoutErrorWebhookUrl;
             response.monitor_groups = req.body?.monitor_groups || {};
             response.monitor_dedupe_window_seconds = monitorDedupeWindowSeconds;
+            response.queue_pass_reserved_count = queuePassReservedCount;
         }
 
         res.json(response);
