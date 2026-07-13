@@ -2856,25 +2856,30 @@ async function loadWebhookLogs() {
               : '';
             const userLabel = item.user_display || item.user_email || '-';
             const creditsLabel = (item.type === 'checkout') ? String(item.credits_charged ?? 0) : '-';
+            const productValue = String(item.product || '-');
+            const isProductUrl = /^https?:\/\//i.test(productValue);
+            const productCell = isProductUrl
+              ? `<a class="webhook-log-link" href="${escapeHtml(productValue)}" target="_blank" rel="noopener noreferrer" title="${escapeHtml(productValue)}">Open checkout link</a>`
+              : `<span class="webhook-log-truncate" title="${escapeHtml(productValue)}">${escapeHtml(productValue)}</span>`;
             return `
             <tr>
-              <td>${escapeHtml(new Date(item.created_at).toLocaleString())}</td>
+              <td class="webhook-log-time">${escapeHtml(new Date(item.created_at).toLocaleString())}</td>
               <td>${escapeHtml(item.type || '-')}</td>
-              <td>${escapeHtml(item.status || '-')}</td>
+              <td><span class="webhook-log-status">${escapeHtml(item.status || '-')}</span></td>
               <td>${escapeHtml(item.site || '-')}</td>
               <td>${escapeHtml(item.bot || item.payload?.source || '-')}</td>
-              <td>${escapeHtml(userLabel)}</td>
+              <td class="webhook-log-user"><span class="webhook-log-truncate" title="${escapeHtml(userLabel)}">${escapeHtml(userLabel)}</span></td>
               <td>${escapeHtml(creditsLabel)}</td>
               <td>${escapeHtml(item.product_type || '-')}</td>
-              <td style="max-width:280px;word-break:break-word;">${escapeHtml(item.product || '-')}</td>
-              <td>${escapeHtml(item.sku || '-')}</td>
-              <td style="max-width:360px;word-break:break-word;">${escapeHtml(item.error || '')}${details}${targetDetails}${payloadDetails}</td>
-              <td><div style="display:flex;gap:6px;flex-wrap:wrap;"><button class="secondary" type="button" onclick="resendWebhookLog('${escapeHtml(item.id || '')}', this)">Resend to Discord</button><button class="secondary" type="button" onclick="recheckWebhookCredits('${escapeHtml(item.id || '')}', this)">Recheck Credits</button></div></td>
+              <td class="webhook-log-product">${productCell}</td>
+              <td class="webhook-log-sku"><span class="webhook-log-truncate" title="${escapeHtml(item.sku || '-')}">${escapeHtml(item.sku || '-')}</span></td>
+              <td class="webhook-log-debug"><div class="webhook-log-error">${escapeHtml(item.error || '')}</div>${details}${targetDetails}${payloadDetails}</td>
+              <td class="webhook-log-actions"><div class="webhook-log-action-buttons"><button class="secondary" type="button" onclick="resendWebhookLog('${escapeHtml(item.id || '')}', this)">Resend</button><button class="secondary" type="button" onclick="recheckWebhookCredits('${escapeHtml(item.id || '')}', this)">Recheck credits</button></div></td>
             </tr>`;
         }).join('');
         container.innerHTML = `
-            <div style="overflow:auto;">
-              <table class="admin-table">
+            <div class="webhook-log-scroll">
+              <table class="admin-table webhook-log-table">
                 <thead><tr><th>Time</th><th>Type</th><th>Status</th><th>Site</th><th>Bot</th><th>User</th><th>Credits</th><th>Product Type</th><th>Product</th><th>SKU</th><th>Error / Debug</th><th>Actions</th></tr></thead>
                 <tbody>${rows}</tbody>
               </table>

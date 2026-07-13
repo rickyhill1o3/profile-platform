@@ -1003,3 +1003,31 @@ h1,h2,h3,h4,p{margin:0}
 @media (max-width: 700px) {
   .amazon-product-options { grid-template-columns: 1fr; }
 }
+
+
+/* Webhook event log: keep columns readable and use horizontal scrolling rather than letter-by-letter wrapping. */
+.webhook-log-scroll{width:100%;overflow-x:auto;overflow-y:visible;border:1px solid var(--line,#dbe3ef);border-radius:12px;background:#fff}
+.webhook-log-table{width:100%;min-width:1560px;table-layout:fixed;margin:0}
+.webhook-log-table th,.webhook-log-table td{vertical-align:top;word-break:normal;overflow-wrap:normal;white-space:nowrap;padding:10px 8px}
+.webhook-log-table th:nth-child(1),.webhook-log-table td:nth-child(1){width:150px}
+.webhook-log-table th:nth-child(2),.webhook-log-table td:nth-child(2){width:80px}
+.webhook-log-table th:nth-child(3),.webhook-log-table td:nth-child(3){width:125px}
+.webhook-log-table th:nth-child(4),.webhook-log-table td:nth-child(4){width:90px}
+.webhook-log-table th:nth-child(5),.webhook-log-table td:nth-child(5){width:90px}
+.webhook-log-table th:nth-child(6),.webhook-log-table td:nth-child(6){width:190px}
+.webhook-log-table th:nth-child(7),.webhook-log-table td:nth-child(7){width:70px;text-align:center}
+.webhook-log-table th:nth-child(8),.webhook-log-table td:nth-child(8){width:110px}
+.webhook-log-table th:nth-child(9),.webhook-log-table td:nth-child(9){width:230px}
+.webhook-log-table th:nth-child(10),.webhook-log-table td:nth-child(10){width:130px}
+.webhook-log-table th:nth-child(11),.webhook-log-table td:nth-child(11){width:280px}
+.webhook-log-table th:nth-child(12),.webhook-log-table td:nth-child(12){width:145px}
+.webhook-log-truncate{display:block;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.webhook-log-link{display:inline-block;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:700}
+.webhook-log-debug{white-space:normal!important}
+.webhook-log-error{max-height:4.8em;overflow:auto;white-space:normal;overflow-wrap:anywhere;line-height:1.35}
+.webhook-log-debug details{margin-top:6px;white-space:normal}
+.webhook-log-debug summary{cursor:pointer;font-weight:700;white-space:nowrap}
+.webhook-log-debug pre{max-width:100%!important;max-height:360px;overflow:auto;white-space:pre-wrap!important;overflow-wrap:anywhere;margin:6px 0 0}
+.webhook-log-action-buttons{display:grid;gap:6px}
+.webhook-log-action-buttons button{width:100%;white-space:nowrap}
+@media(max-width:900px){.webhook-log-table{min-width:1450px}.webhook-log-scroll{border-radius:8px}}
