@@ -133,10 +133,29 @@ function countEffectiveSkus(product) {
   }
   function renderOrders() {
     const body = $('storeOrdersBody'); if (!body) return;
+    const statusBadge = (status, error, sentAt) => {
+      const normalized = String(status || 'not_attempted');
+      const label = normalized === 'sent' ? `Sent${sentAt ? ` ${dateTime(sentAt)}` : ''}` : normalized === 'failed' ? 'Failed' : 'Not attempted';
+      const cls = normalized === 'sent' ? 'badge--success' : normalized === 'failed' ? 'badge--danger' : 'badge--muted';
+      return `<span class="badge ${cls}" title="${escape(error || '')}">${escape(label)}</span>`;
+    };
     body.innerHTML = state.orders.length ? state.orders.map((order) => {
       const itemSummary = (order.items || []).map((item) => `${escape(item.title || 'Item')} × ${escape(item.quantity || 0)}`).join('<br>');
-      return `<tr><td>${escape(dateTime(order.placed_at))}</td><td><strong>${escape(order.order_number || order.session_id || 'Order')}</strong></td><td><div>${escape(order.customer_email || '—')}</div><div class="subtle-text">${escape(order.shipping_name || '')}</div></td><td>${itemSummary || '—'}</td><td>${money(order.total)}</td><td><span class="badge">${escape(order.status || 'paid')}</span></td><td><div>${escape(order.tracking_number || '—')}</div><div class="subtle-text">${escape(order.tracking_carrier || '')}</div></td><td><div class="form-grid storefront-order-inline-form"><div class="field"><input class="input input--sm" placeholder="Carrier" data-order-tracking-carrier="${escape(order.session_id)}" value="${escape(order.tracking_carrier || '')}" /></div><div class="field"><input class="input input--sm" placeholder="Tracking number" data-order-tracking-number="${escape(order.session_id)}" value="${escape(order.tracking_number || '')}" /></div><div class="field"><input class="input input--sm" placeholder="Tracking URL (optional)" data-order-tracking-url="${escape(order.session_id)}" value="${escape(order.tracking_url || '')}" /></div><div class="field"><button class="btn btn-primary" type="button" data-save-order-tracking="${escape(order.session_id)}">Save Tracking + Email</button></div></div></td></tr>`;
-    }).join('') : '<tr><td colspan="8">No active orders found.</td></tr>';
+      const emailVerification = `<div><strong>Customer:</strong> ${statusBadge(order.customer_email_status, order.customer_email_error, order.customer_email_sent_at)}</div><div><strong>Admin:</strong> ${statusBadge(order.admin_email_status, order.admin_email_error, order.admin_email_sent_at)}</div><details><summary>Email previews</summary><div class="store-email-preview"><strong>${escape(order.customer_email_subject || 'Customer confirmation')}</strong><pre>${escape(order.customer_email_preview || 'No customer email preview stored.')}</pre><strong>${escape(order.admin_email_subject || 'Admin sale notice')}</strong><pre>${escape(order.admin_email_preview || 'No admin email preview stored.')}</pre></div></details>`;
+      return `<tr><td>${escape(dateTime(order.placed_at))}</td><td><strong>${escape(order.order_number || order.session_id || 'Order')}</strong></td><td><div>${escape(order.customer_email || '—')}</div><div class="subtle-text">${escape(order.shipping_name || '')}</div></td><td>${itemSummary || '—'}</td><td>${money(order.total)}</td><td><span class="badge">${escape(order.status || 'paid')}</span></td><td>${emailVerification}</td><td><div>${escape(order.tracking_number || '—')}</div><div class="subtle-text">${escape(order.tracking_carrier || '')}</div></td><td><div class="form-grid storefront-order-inline-form"><div class="field"><button class="btn" type="button" data-resend-order-confirmation="${escape(order.session_id)}">Resend confirmation emails</button></div><div class="field"><input class="input input--sm" placeholder="Carrier" data-order-tracking-carrier="${escape(order.session_id)}" value="${escape(order.tracking_carrier || '')}" /></div><div class="field"><input class="input input--sm" placeholder="Tracking number" data-order-tracking-number="${escape(order.session_id)}" value="${escape(order.tracking_number || '')}" /></div><div class="field"><input class="input input--sm" placeholder="Tracking URL (optional)" data-order-tracking-url="${escape(order.session_id)}" value="${escape(order.tracking_url || '')}" /></div><div class="field"><button class="btn btn-primary" type="button" data-save-order-tracking="${escape(order.session_id)}">Save Tracking + Email</button></div></div></td></tr>`;
+    }).join('') : '<tr><td colspan="9">No active orders found.</td></tr>';
+    body.querySelectorAll('[data-resend-order-confirmation]').forEach((button) => button.addEventListener('click', async () => {
+      const sessionId = button.dataset.resendOrderConfirmation;
+      button.disabled = true; showMessage('storeOrdersMessage', 'Sending customer and admin confirmation emails...');
+      try {
+        const result = await authJSON(API + '/admin/store/orders/' + encodeURIComponent(sessionId) + '/resend-confirmation', { method: 'POST' });
+        const customer = result.email?.customer?.success ? 'customer sent' : `customer failed: ${result.email?.customer?.error || 'unknown error'}`;
+        const adminEmail = result.email?.admin?.success ? 'admin sent' : `admin failed: ${result.email?.admin?.error || 'unknown error'}`;
+        showMessage('storeOrdersMessage', `Confirmation result — ${customer}; ${adminEmail}.`, !(result.email?.customer?.success && result.email?.admin?.success));
+        await loadOrders();
+      } catch (error) { showMessage('storeOrdersMessage', error.message || 'Could not resend confirmation emails.', true); }
+      finally { button.disabled = false; }
+    }));
     body.querySelectorAll('[data-save-order-tracking]').forEach((button) => button.addEventListener('click', async () => {
       const sessionId = button.dataset.saveOrderTracking;
       const carrier = body.querySelector(`[data-order-tracking-carrier="${CSS.escape(sessionId)}"]`)?.value || '';
@@ -144,7 +163,7 @@ function countEffectiveSkus(product) {
       const url = body.querySelector(`[data-order-tracking-url="${CSS.escape(sessionId)}"]`)?.value || '';
       if (!number) return showMessage('storeOrdersMessage', 'Tracking number is required.', true);
       button.disabled = true; showMessage('storeOrdersMessage', 'Saving tracking and sending email...');
-      try { await authJSON(API + '/admin/store/orders/' + encodeURIComponent(sessionId) + '/tracking', { method: 'POST', body: JSON.stringify({ tracking_carrier: carrier, tracking_number: number, tracking_url: url }) }); showMessage('storeOrdersMessage', 'Tracking saved and customer email sent.'); await loadOrders(); }
+      try { const result = await authJSON(API + '/admin/store/orders/' + encodeURIComponent(sessionId) + '/tracking', { method: 'POST', body: JSON.stringify({ tracking_carrier: carrier, tracking_number: number, tracking_url: url }) }); showMessage('storeOrdersMessage', result.email?.success ? 'Tracking saved and customer email sent.' : `Tracking saved, but email failed: ${result.email?.error || 'unknown error'}`, !result.email?.success); await loadOrders(); }
       catch (error) { showMessage('storeOrdersMessage', error.message || 'Could not save tracking.', true); } finally { button.disabled = false; }
     }));
   }
@@ -171,7 +190,7 @@ function countEffectiveSkus(product) {
   async function loadProducts() { const data = await authJSON(API + '/admin/store/products'); state.products = Array.isArray(data.products) ? data.products : []; renderProducts(); renderTopStats(); }
   async function loadReceipts() { const data = await authJSON(API + '/admin/store/receipts'); state.receipts = Array.isArray(data.receipts) ? data.receipts : []; renderReceipts(); renderTopStats(); }
   async function loadOverrides() { const data = await authJSON(API + '/admin/store/pricing'); state.overrides = Array.isArray(data.overrides) ? data.overrides : []; renderOverrides(); }
-  async function loadOrders() { const data = await authJSON(API + '/admin/store/orders'); state.orders = Array.isArray(data.orders) ? data.orders : []; renderOrders(); }
+  async function loadOrders() { showMessage('storeOrdersMessage', 'Loading active orders...'); try { const data = await authJSON(API + '/admin/store/orders'); state.orders = Array.isArray(data.orders) ? data.orders : []; renderOrders(); showMessage('storeOrdersMessage', state.orders.length ? `Loaded ${state.orders.length} active order${state.orders.length === 1 ? '' : 's'}.` : 'No active storefront orders right now.'); } catch (error) { state.orders = []; renderOrders(); showMessage('storeOrdersMessage', `Could not load orders: ${error.message || 'Unknown error'}`, true); throw error; } }
   async function loadAccounting() { const data = await authJSON(API + '/admin/store/accounting/summary'); state.accounting = data || {}; $('accountingExportLink').href = API + '/admin/store/accounting/export.csv'; renderAccounting(); renderTopStats(); }
   async function loadDiscounts() { const data = await authJSON(API + '/api/discounts'); state.discounts = Array.isArray(data.discounts) ? data.discounts : []; renderDiscounts(); }
   async function refreshAll() { await Promise.all([loadProducts(), loadReceipts(), loadOverrides(), loadOrders(), loadAccounting(), loadDiscounts()]); }
@@ -229,6 +248,7 @@ function countEffectiveSkus(product) {
     if (!requireAdminAccess()) return;
     bindPaneNav(); bindInventoryForm(); bindPricingForm(); bindEditForm(); bindDiscountForm();
     $('refreshStoreDataButton')?.addEventListener('click', refreshAll);
+    $('refreshStoreOrdersButton')?.addEventListener('click', () => loadOrders().catch(() => {}));
     $('discountActive').value = 'true';
     await refreshAll();
     showMessage('storeAdminMessage', 'Storefront data loaded.');

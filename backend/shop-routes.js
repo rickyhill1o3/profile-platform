@@ -1103,6 +1103,44 @@ function loadSeedTargetList() {
   return null;
 }
 
+
+function htmlEscape(value = '') {
+  return String(value ?? '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
+}
+
+function mapSalesToOrder(rows = []) {
+  if (!Array.isArray(rows) || !rows.length) return null;
+  const first = rows[0] || {};
+  const metadata = first.metadata || {};
+  return {
+    session_id: first.stripe_session_id || first.id,
+    order_number: metadata.order_number || first.stripe_session_id || first.id,
+    placed_at: first.sold_at || first.created_at,
+    customer_email: first.customer_email || '',
+    shipping_name: metadata.shipping_name || metadata.customer_name || '',
+    total: centsToDollars(rows.reduce((sum, row) => sum + Number(row.total_cents || 0), 0)),
+    status: metadata.fulfillment_status || 'paid',
+    tracking_number: metadata.tracking_number || '',
+    tracking_carrier: metadata.tracking_carrier || '',
+    tracking_url: metadata.tracking_url || '',
+    customer_email_status: metadata.customer_confirmation_email_status || 'not_attempted',
+    customer_email_sent_at: metadata.customer_confirmation_email_sent_at || '',
+    customer_email_error: metadata.customer_confirmation_email_error || '',
+    admin_email_status: metadata.admin_sale_email_status || 'not_attempted',
+    admin_email_sent_at: metadata.admin_sale_email_sent_at || '',
+    admin_email_error: metadata.admin_sale_email_error || '',
+    customer_email_subject: metadata.customer_confirmation_email_subject || '',
+    customer_email_preview: metadata.customer_confirmation_email_preview || '',
+    admin_email_subject: metadata.admin_sale_email_subject || '',
+    admin_email_preview: metadata.admin_sale_email_preview || '',
+    items: rows.map((row) => ({
+      title: row.storefront_products?.title || row.metadata?.product_title || 'Storefront item',
+      quantity: Number(row.quantity || 0),
+      sku: row.storefront_products?.primary_sku || ''
+    }))
+  };
+}
+
 function registerShopRoutes({
   app,
   supabase,
@@ -1115,6 +1153,66 @@ function registerShopRoutes({
   SUPER_ADMIN_EMAIL,
   validateDiscountCode
 }) {
+  async function updateSalesEmailMetadata(sales, patch) {
+    for (const sale of sales || []) {
+      const merged = { ...(sale.metadata || {}), ...patch };
+      const { error } = await supabase.from('storefront_sales').update({ metadata: merged }).eq('id', sale.id);
+      if (error) console.error('Storefront email metadata update failed:', error.message || error);
+      sale.metadata = merged;
+    }
+  }
+
+  function buildOrderEmailContent(sales = []) {
+    const order = mapSalesToOrder(sales);
+    const itemLines = (order?.items || []).map((item) => `${item.title} × ${item.quantity}`);
+    const itemHtml = (order?.items || []).map((item) => `<li>${htmlEscape(item.title)} × ${Number(item.quantity || 0)}</li>`).join('');
+    const orderNumber = order?.order_number || 'Storefront order';
+    const total = `$${Number(order?.total || 0).toFixed(2)}`;
+    return {
+      order,
+      customerSubject: `Thank you for your purchase — ${orderNumber}`,
+      customerText: ['Thank you for shopping with The Shore Shack.','',`Order: ${orderNumber}`,...itemLines,`Total: ${total}`,'','We received your order and will email tracking information after it ships.'].join('\n'),
+      customerHtml: `<h2>Thank you for your purchase!</h2><p>We received your order from The Shore Shack.</p><p><strong>Order:</strong> ${htmlEscape(orderNumber)}</p><ul>${itemHtml}</ul><p><strong>Total:</strong> ${htmlEscape(total)}</p><p>We will email tracking information after your order ships.</p>`,
+      adminSubject: `New storefront sale — ${orderNumber}`,
+      adminText: ['A new storefront sale was completed.','',`Order: ${orderNumber}`,`Customer: ${order?.customer_email || 'No customer email provided'}`,...itemLines,`Total: ${total}`].join('\n'),
+      adminHtml: `<h2>New storefront sale</h2><p><strong>Order:</strong> ${htmlEscape(orderNumber)}</p><p><strong>Customer:</strong> ${htmlEscape(order?.customer_email || 'No customer email provided')}</p><ul>${itemHtml}</ul><p><strong>Total:</strong> ${htmlEscape(total)}</p>`
+    };
+  }
+
+  async function sendStorefrontOrderConfirmation({ sales = [] }) {
+    const content = buildOrderEmailContent(sales);
+    const now = new Date().toISOString();
+    const customerEmail = String(content.order?.customer_email || '').trim();
+    const customer = { attempted: Boolean(customerEmail), success: false, to: customerEmail, error: '' };
+    const adminResult = { attempted: Boolean(SUPER_ADMIN_EMAIL), success: false, to: SUPER_ADMIN_EMAIL, error: '' };
+    if (customerEmail) {
+      try { await sendEmail({ to: customerEmail, subject: content.customerSubject, text: content.customerText, html: content.customerHtml }); customer.success = true; }
+      catch (err) { customer.error = err.message || String(err); }
+    } else customer.error = 'No customer email was supplied by Stripe.';
+    if (SUPER_ADMIN_EMAIL) {
+      try { await sendEmail({ to: SUPER_ADMIN_EMAIL, subject: content.adminSubject, text: content.adminText, html: content.adminHtml }); adminResult.success = true; }
+      catch (err) { adminResult.error = err.message || String(err); }
+    }
+    await updateSalesEmailMetadata(sales, {
+      customer_confirmation_email_status: customer.success ? 'sent' : 'failed', customer_confirmation_email_sent_at: customer.success ? now : null,
+      customer_confirmation_email_error: customer.error || null, customer_confirmation_email_subject: content.customerSubject, customer_confirmation_email_preview: content.customerText,
+      admin_sale_email_status: adminResult.success ? 'sent' : 'failed', admin_sale_email_sent_at: adminResult.success ? now : null,
+      admin_sale_email_error: adminResult.error || null, admin_sale_email_subject: content.adminSubject, admin_sale_email_preview: content.adminText
+    });
+    return { customer, admin: adminResult };
+  }
+
+  async function sendStorefrontTrackingEmail({ sales = [], trackingNumber, trackingCarrier, trackingUrl }) {
+    const order = mapSalesToOrder(sales);
+    const to = String(order?.customer_email || '').trim();
+    if (!to) return { attempted: false, success: false, error: 'No customer email was supplied by Stripe.' };
+    const subject = `Your Shore Shack order has shipped — ${order.order_number || order.session_id}`;
+    const text = ['Your order has shipped.','',`Carrier: ${trackingCarrier || 'Carrier not provided'}`,`Tracking number: ${trackingNumber}`,trackingUrl ? `Track your package: ${trackingUrl}` : ''].filter(Boolean).join('\n');
+    const html = `<h2>Your order has shipped</h2><p><strong>Carrier:</strong> ${htmlEscape(trackingCarrier || 'Carrier not provided')}</p><p><strong>Tracking number:</strong> ${htmlEscape(trackingNumber)}</p>${trackingUrl ? `<p><a href="${htmlEscape(trackingUrl)}">Track your package</a></p>` : ''}`;
+    try { await sendEmail({ to, subject, text, html }); return { attempted: true, success: true, to }; }
+    catch (err) { return { attempted: true, success: false, to, error: err.message || String(err) }; }
+  }
+
   app.get('/public/store/products', async (req, res) => {
     try {
       const { data, error } = await supabase
@@ -1576,13 +1674,21 @@ function registerShopRoutes({
     try {
       const { data, error } = await supabase
         .from('storefront_sales')
-        .select('*, storefront_products(id, title, image_url, primary_site, primary_sku)')
+        .select('*')
         .order('sold_at', { ascending: false })
         .limit(500);
       if (error) return res.status(500).json({ error: error.message });
 
+      const productIds = [...new Set((data || []).map((row) => row.storefront_product_id).filter(Boolean))];
+      let productMap = new Map();
+      if (productIds.length) {
+        const { data: products, error: productsError } = await supabase.from('storefront_products').select('id, title, image_url, primary_site, primary_sku').in('id', productIds);
+        if (productsError) return res.status(500).json({ error: productsError.message });
+        productMap = new Map((products || []).map((row) => [String(row.id), row]));
+      }
+      const hydratedRows = (data || []).map((row) => ({ ...row, storefront_products: productMap.get(String(row.storefront_product_id)) || null }));
       const grouped = new Map();
-      for (const row of data || []) {
+      for (const row of hydratedRows) {
         const key = String(row.stripe_session_id || row.id);
         if (!grouped.has(key)) grouped.set(key, []);
         grouped.get(key).push(row);
@@ -1610,7 +1716,7 @@ function registerShopRoutes({
 
       const { data: sales, error } = await supabase
         .from('storefront_sales')
-        .select('*, storefront_products(id, title, image_url, primary_site, primary_sku)')
+        .select('*')
         .eq('stripe_session_id', sessionId)
         .order('created_at', { ascending: true });
       if (error) return res.status(500).json({ error: error.message });
@@ -1653,6 +1759,21 @@ function registerShopRoutes({
     } catch (err) {
       res.status(500).json({ error: err.message });
     }
+  });
+
+  app.post('/admin/store/orders/:sessionId/resend-confirmation', auth, admin, async (req, res) => {
+    try {
+      const sessionId = String(req.params.sessionId || '').trim();
+      const { data: sales, error } = await supabase.from('storefront_sales').select('*').eq('stripe_session_id', sessionId).order('created_at', { ascending: true });
+      if (error) return res.status(500).json({ error: error.message });
+      if (!sales || !sales.length) return res.status(404).json({ error: 'Order not found' });
+      const productIds = [...new Set(sales.map((row) => row.storefront_product_id).filter(Boolean))];
+      const { data: products } = productIds.length ? await supabase.from('storefront_products').select('id, title, image_url, primary_site, primary_sku').in('id', productIds) : { data: [] };
+      const map = new Map((products || []).map((row) => [String(row.id), row]));
+      const hydrated = sales.map((row) => ({ ...row, storefront_products: map.get(String(row.storefront_product_id)) || null }));
+      const email = await sendStorefrontOrderConfirmation({ sales: hydrated });
+      res.json({ success: true, email, order: mapSalesToOrder(hydrated) });
+    } catch (err) { res.status(500).json({ error: err.message }); }
   });
 
   app.get('/admin/store/accounting/summary', auth, admin, async (req, res) => {
