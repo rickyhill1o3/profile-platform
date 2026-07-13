@@ -425,6 +425,52 @@
     </div>
   </div>
 
+
+  <div class="store-modal" id="storeReceiptModal" aria-hidden="true">
+    <div class="store-modal__backdrop" data-close-store-modal="storeReceiptModal"></div>
+    <section class="store-modal__panel store-modal__panel--wide" role="dialog" aria-modal="true" aria-labelledby="storeReceiptTitle">
+      <div class="panel-header"><div><h2 id="storeReceiptTitle">Customer Receipt</h2><p class="subtle-text" id="storeReceiptOrder"></p></div><button class="btn" type="button" data-close-store-modal="storeReceiptModal">Close</button></div>
+      <p><strong>Customer:</strong> <span id="storeReceiptCustomer">—</span></p>
+      <div class="table-wrap"><table class="admin-table"><thead><tr><th>Item</th><th>Qty</th><th>Unit price</th><th>Item subtotal</th><th>Tax</th><th>Line total</th></tr></thead><tbody id="storeReceiptItems"></tbody></table></div>
+      <div class="receipt-totals">
+        <div><span>Items subtotal</span><strong id="storeReceiptSubtotal">$0.00</strong></div>
+        <div><span>Shipping</span><strong id="storeReceiptShipping">$0.00</strong></div>
+        <div><span>Sales tax</span><strong id="storeReceiptTax">$0.00</strong></div>
+        <div class="receipt-totals__grand"><span>Order total</span><strong id="storeReceiptTotal">$0.00</strong></div>
+        <div><span>Refunded</span><strong id="storeReceiptRefunded">$0.00</strong></div>
+        <div><span>Remaining paid amount</span><strong id="storeReceiptRemaining">$0.00</strong></div>
+      </div>
+      <div class="banner" id="storeReceiptTaxNote"></div>
+    </section>
+  </div>
+
+  <div class="store-modal" id="storeTrackingModal" aria-hidden="true">
+    <div class="store-modal__backdrop" data-close-store-modal="storeTrackingModal"></div>
+    <section class="store-modal__panel" role="dialog" aria-modal="true" aria-labelledby="storeTrackingTitle">
+      <div class="panel-header"><h2 id="storeTrackingTitle">Add Tracking</h2><button class="btn" type="button" data-close-store-modal="storeTrackingModal">Close</button></div>
+      <div class="field"><label for="storeTrackingCarrier">Carrier</label><input class="input" id="storeTrackingCarrier" placeholder="USPS, UPS, FedEx" /></div>
+      <div class="field"><label for="storeTrackingNumber">Tracking number</label><input class="input" id="storeTrackingNumber" /></div>
+      <div class="field"><label for="storeTrackingUrl">Tracking URL (optional)</label><input class="input" id="storeTrackingUrl" placeholder="https://..." /></div>
+      <div class="panel-actions"><button class="btn btn-primary" type="button" id="storeTrackingSave">Save Tracking + Email Customer</button></div>
+    </section>
+  </div>
+
+  <div class="store-modal" id="storeRefundModal" aria-hidden="true">
+    <div class="store-modal__backdrop" data-close-store-modal="storeRefundModal"></div>
+    <section class="store-modal__panel store-modal__panel--wide" role="dialog" aria-modal="true" aria-labelledby="storeRefundTitle">
+      <div class="panel-header"><div><h2 id="storeRefundTitle">Refund Order</h2><p class="subtle-text" id="storeRefundOrderLabel"></p></div><button class="btn" type="button" data-close-store-modal="storeRefundModal">Close</button></div>
+      <label class="refund-full-toggle"><input type="checkbox" id="storeRefundFullOrder" /> Refund the entire remaining order, including remaining shipping and taxes</label>
+      <div class="refund-items" id="storeRefundItems"></div>
+      <div class="form-grid">
+        <div class="field"><label for="storeRefundReason">Refund reason</label><select class="input" id="storeRefundReason"><option value="out_of_stock">Ran out of product</option><option value="pricing_error">Wrong price entered too low</option><option value="damaged_inventory">Inventory damaged or unavailable</option><option value="customer_request">Customer requested cancellation</option><option value="duplicate_order">Duplicate order</option><option value="cannot_fulfill">Unable to fulfill order</option><option value="other">Other</option></select></div>
+        <div class="field" id="storeRefundCustomReasonWrap" hidden><label for="storeRefundCustomReason">Custom reason</label><input class="input" id="storeRefundCustomReason" /></div>
+      </div>
+      <div class="field"><label>Customer refund email preview</label><pre class="store-refund-preview" id="storeRefundEmailPreview"></pre></div>
+      <div class="banner">Partial refunds include the selected items and their proportional sales tax. Shipping is refunded only when you select the full remaining order.</div>
+      <div class="panel-actions"><button class="btn btn-danger" type="button" id="storeRefundSubmit">Submit Refund Through Stripe + Email Customer</button></div>
+    </section>
+  </div>
+
   <script src="script.js">
 
 // MULTI SKU HELPERS

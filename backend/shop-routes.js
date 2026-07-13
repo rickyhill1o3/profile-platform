@@ -1118,7 +1118,13 @@ function mapSalesToOrder(rows = []) {
     placed_at: first.sold_at || first.created_at,
     customer_email: first.customer_email || '',
     shipping_name: metadata.shipping_name || metadata.customer_name || '',
+    subtotal: centsToDollars(rows.reduce((sum, row) => sum + Number(row.sale_subtotal_cents || 0), 0)),
+    shipping: centsToDollars(rows.reduce((sum, row) => sum + Number(row.shipping_cents || 0), 0)),
+    tax: centsToDollars(rows.reduce((sum, row) => sum + Number(row.tax_cents || 0), 0)),
     total: centsToDollars(rows.reduce((sum, row) => sum + Number(row.total_cents || 0), 0)),
+    refunded_total: centsToDollars(rows.reduce((sum, row) => sum + Number(row.metadata?.refunded_amount_cents || 0), 0)),
+    remaining_total: centsToDollars(rows.reduce((sum, row) => sum + Math.max(0, Number(row.total_cents || 0) - Number(row.metadata?.refunded_amount_cents || 0)), 0)),
+    payment_intent: metadata.stripe_payment_intent || metadata.raw_session?.payment_intent || '',
     status: metadata.fulfillment_status || 'paid',
     tracking_number: metadata.tracking_number || '',
     tracking_carrier: metadata.tracking_carrier || '',
@@ -1133,11 +1139,26 @@ function mapSalesToOrder(rows = []) {
     customer_email_preview: metadata.customer_confirmation_email_preview || '',
     admin_email_subject: metadata.admin_sale_email_subject || '',
     admin_email_preview: metadata.admin_sale_email_preview || '',
-    items: rows.map((row) => ({
-      title: row.storefront_products?.title || row.metadata?.product_title || 'Storefront item',
-      quantity: Number(row.quantity || 0),
-      sku: row.storefront_products?.primary_sku || ''
-    }))
+    items: rows.map((row) => {
+      const quantity = Number(row.quantity || 0);
+      const refundedQuantity = Number(row.metadata?.refunded_quantity || 0);
+      return {
+        sale_id: row.id,
+        product_id: row.storefront_product_id,
+        title: row.storefront_products?.title || row.metadata?.product_title || 'Storefront item',
+        quantity,
+        refunded_quantity: refundedQuantity,
+        refundable_quantity: Math.max(0, quantity - refundedQuantity),
+        sku: row.storefront_products?.primary_sku || '',
+        unit_price: centsToDollars(row.sale_unit_price_cents || 0),
+        subtotal: centsToDollars(row.sale_subtotal_cents || 0),
+        shipping: centsToDollars(row.shipping_cents || 0),
+        tax: centsToDollars(row.tax_cents || 0),
+        total: centsToDollars(row.total_cents || 0),
+        refunded_amount: centsToDollars(row.metadata?.refunded_amount_cents || 0)
+      };
+    }),
+    refund_history: rows.flatMap((row) => Array.isArray(row.metadata?.refund_history) ? row.metadata.refund_history : [])
   };
 }
 
@@ -1696,9 +1717,182 @@ function registerShopRoutes({
 
       const orders = Array.from(grouped.values()).map((rows) => mapSalesToOrder(rows)).filter(Boolean);
       const activeOnly = String(req.query.active_only || 'true').toLowerCase() !== 'false';
-      const activeStatuses = new Set(['paid', 'processing', 'packed', 'shipped']);
+      const activeStatuses = new Set(['paid', 'processing', 'packed', 'shipped', 'partially_refunded', 'refunded']);
       const filtered = activeOnly ? orders.filter((order) => activeStatuses.has(String(order.status || '').toLowerCase())) : orders;
       res.json({ orders: filtered });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+
+  async function loadHydratedStorefrontOrder(sessionId) {
+    const { data: sales, error } = await supabase
+      .from('storefront_sales')
+      .select('*')
+      .eq('stripe_session_id', sessionId)
+      .order('created_at', { ascending: true });
+    if (error) throw new Error(error.message);
+    if (!sales || !sales.length) return [];
+    const productIds = [...new Set(sales.map((row) => row.storefront_product_id).filter(Boolean))];
+    const { data: products, error: productError } = productIds.length
+      ? await supabase.from('storefront_products').select('id, title, image_url, primary_site, primary_sku').in('id', productIds)
+      : { data: [], error: null };
+    if (productError) throw new Error(productError.message);
+    const productMap = new Map((products || []).map((row) => [String(row.id), row]));
+    return sales.map((row) => ({ ...row, storefront_products: productMap.get(String(row.storefront_product_id)) || null }));
+  }
+
+  const REFUND_REASON_LABELS = {
+    out_of_stock: 'We ran out of stock before we could fulfill the order',
+    pricing_error: 'The item was listed at an incorrect price',
+    damaged_inventory: 'The remaining inventory was damaged or unavailable',
+    customer_request: 'Refund requested by the customer',
+    duplicate_order: 'Duplicate order',
+    cannot_fulfill: 'We are unable to fulfill this order',
+    other: 'Other'
+  };
+
+  async function restoreInventoryForRefund(sale, quantityToRestore) {
+    let remaining = Math.max(0, Number(quantityToRestore || 0));
+    if (!remaining) return;
+    const metadata = sale.metadata || {};
+    const allocations = Array.isArray(metadata.allocations) ? metadata.allocations : [];
+    const restoredByReceipt = { ...(metadata.refund_restored_by_receipt || {}) };
+    for (const allocation of allocations) {
+      if (remaining <= 0) break;
+      const receiptId = String(allocation.receipt_id || '');
+      if (!receiptId) continue;
+      const allocated = Number(allocation.quantity || 0);
+      const alreadyRestored = Number(restoredByReceipt[receiptId] || 0);
+      const available = Math.max(0, allocated - alreadyRestored);
+      const take = Math.min(remaining, available);
+      if (!take) continue;
+      const { data: receipt, error: readError } = await supabase.from('storefront_receipts').select('quantity_remaining').eq('id', receiptId).single();
+      if (readError) throw new Error(readError.message);
+      const { error: updateError } = await supabase.from('storefront_receipts').update({
+        quantity_remaining: Number(receipt?.quantity_remaining || 0) + take,
+        updated_at: new Date().toISOString()
+      }).eq('id', receiptId);
+      if (updateError) throw new Error(updateError.message);
+      restoredByReceipt[receiptId] = alreadyRestored + take;
+      remaining -= take;
+    }
+    if (remaining > 0) throw new Error('Could not restore all refunded units to their inventory receipts');
+    return restoredByReceipt;
+  }
+
+  async function sendStorefrontRefundEmail({ sales, refundAmountCents, reasonLabel, refundedItems, fullOrder }) {
+    const order = mapSalesToOrder(sales);
+    const to = String(order?.customer_email || '').trim();
+    if (!to) return { attempted: false, success: false, error: 'No customer email was supplied by Stripe.' };
+    const amount = `$${(Number(refundAmountCents || 0) / 100).toFixed(2)}`;
+    const itemLines = (refundedItems || []).map((item) => `${item.title} × ${item.quantity}`).join('\n');
+    const subject = `${fullOrder ? 'Order refund' : 'Partial refund'} — ${order.order_number || order.session_id}`;
+    const text = [
+      `We issued a ${fullOrder ? 'full' : 'partial'} refund for your Shore Shack order.`,
+      '',
+      `Order: ${order.order_number || order.session_id}`,
+      `Refund amount: ${amount}`,
+      `Reason: ${reasonLabel}`,
+      itemLines ? `Refunded items:\n${itemLines}` : '',
+      '',
+      'The refund has been submitted to your original payment method. Your bank may take several business days to post it.'
+    ].filter(Boolean).join('\n');
+    const htmlItems = (refundedItems || []).map((item) => `<li>${htmlEscape(item.title)} × ${Number(item.quantity || 0)}</li>`).join('');
+    const html = `<h2>${fullOrder ? 'Order refund' : 'Partial refund'} issued</h2><p><strong>Order:</strong> ${htmlEscape(order.order_number || order.session_id)}</p><p><strong>Refund amount:</strong> ${htmlEscape(amount)}</p><p><strong>Reason:</strong> ${htmlEscape(reasonLabel)}</p>${htmlItems ? `<p><strong>Refunded items:</strong></p><ul>${htmlItems}</ul>` : ''}<p>The refund was submitted to your original payment method. Your bank may take several business days to post it.</p>`;
+    try {
+      await sendEmail({ to, subject, text, html });
+      return { attempted: true, success: true, to, subject, preview: text };
+    } catch (err) {
+      return { attempted: true, success: false, to, subject, preview: text, error: err.message || String(err) };
+    }
+  }
+
+  app.post('/admin/store/orders/:sessionId/refund', auth, admin, async (req, res) => {
+    try {
+      if (!stripe) return res.status(400).json({ error: 'Stripe is not configured yet' });
+      const sessionId = String(req.params.sessionId || '').trim();
+      const fullOrder = req.body?.full_order === true;
+      const reasonCode = String(req.body?.reason_code || 'other').trim();
+      const customReason = normalizeText(req.body?.custom_reason);
+      const reasonLabel = reasonCode === 'other' && customReason ? customReason : (REFUND_REASON_LABELS[reasonCode] || customReason || REFUND_REASON_LABELS.other);
+      const requestedItems = Array.isArray(req.body?.items) ? req.body.items : [];
+      const sales = await loadHydratedStorefrontOrder(sessionId);
+      if (!sales.length) return res.status(404).json({ error: 'Order not found' });
+      const paymentIntent = sales[0]?.metadata?.stripe_payment_intent || sales[0]?.metadata?.raw_session?.payment_intent;
+      if (!paymentIntent) return res.status(400).json({ error: 'Stripe payment intent was not stored for this order' });
+
+      const requestedBySale = new Map(requestedItems.map((item) => [String(item.sale_id || ''), Math.max(0, Number(item.quantity || 0) || 0)]));
+      const calculations = [];
+      for (const sale of sales) {
+        const originalQty = Number(sale.quantity || 0);
+        const alreadyRefundedQty = Number(sale.metadata?.refunded_quantity || 0);
+        const refundableQty = Math.max(0, originalQty - alreadyRefundedQty);
+        const qty = fullOrder ? refundableQty : Math.min(refundableQty, requestedBySale.get(String(sale.id)) || 0);
+        if (!qty) continue;
+        const subtotal = fullOrder && qty === refundableQty
+          ? Math.max(0, Number(sale.sale_subtotal_cents || 0) - Number(sale.metadata?.refunded_subtotal_cents || 0))
+          : Math.min(Math.max(0, Number(sale.sale_subtotal_cents || 0) - Number(sale.metadata?.refunded_subtotal_cents || 0)), Math.round((Number(sale.sale_subtotal_cents || 0) / Math.max(1, originalQty)) * qty));
+        const tax = fullOrder && qty === refundableQty
+          ? Math.max(0, Number(sale.tax_cents || 0) - Number(sale.metadata?.refunded_tax_cents || 0))
+          : Math.min(Math.max(0, Number(sale.tax_cents || 0) - Number(sale.metadata?.refunded_tax_cents || 0)), Math.round((Number(sale.tax_cents || 0) / Math.max(1, originalQty)) * qty));
+        const shipping = fullOrder ? Math.max(0, Number(sale.shipping_cents || 0) - Number(sale.metadata?.refunded_shipping_cents || 0)) : 0;
+        calculations.push({ sale, qty, subtotal, tax, shipping, amount: subtotal + tax + shipping });
+      }
+      if (!calculations.length) return res.status(400).json({ error: 'Select at least one refundable item quantity' });
+      const refundAmountCents = calculations.reduce((sum, row) => sum + row.amount, 0);
+      if (refundAmountCents <= 0) return res.status(400).json({ error: 'This order has no refundable balance remaining' });
+
+      const refund = await stripe.refunds.create({
+        payment_intent: paymentIntent,
+        amount: refundAmountCents,
+        reason: reasonCode === 'customer_request' ? 'requested_by_customer' : undefined,
+        metadata: { storefront_session_id: sessionId, reason_code: reasonCode, reason: reasonLabel.slice(0, 450) }
+      });
+      const now = new Date().toISOString();
+      const refundedItems = [];
+      for (const calc of calculations) {
+        const sale = calc.sale;
+        const restoredByReceipt = await restoreInventoryForRefund(sale, calc.qty);
+        const historyEntry = {
+          at: now,
+          stripe_refund_id: refund.id,
+          quantity: calc.qty,
+          subtotal_cents: calc.subtotal,
+          tax_cents: calc.tax,
+          shipping_cents: calc.shipping,
+          amount_cents: calc.amount,
+          reason_code: reasonCode,
+          reason: reasonLabel,
+          full_order: fullOrder
+        };
+        const metadata = {
+          ...(sale.metadata || {}),
+          refunded_quantity: Number(sale.metadata?.refunded_quantity || 0) + calc.qty,
+          refunded_subtotal_cents: Number(sale.metadata?.refunded_subtotal_cents || 0) + calc.subtotal,
+          refunded_tax_cents: Number(sale.metadata?.refunded_tax_cents || 0) + calc.tax,
+          refunded_shipping_cents: Number(sale.metadata?.refunded_shipping_cents || 0) + calc.shipping,
+          refunded_amount_cents: Number(sale.metadata?.refunded_amount_cents || 0) + calc.amount,
+          refund_restored_by_receipt: restoredByReceipt,
+          refund_history: [...(Array.isArray(sale.metadata?.refund_history) ? sale.metadata.refund_history : []), historyEntry],
+          fulfillment_status: fullOrder ? 'refunded' : 'partially_refunded'
+        };
+        const { error: updateError } = await supabase.from('storefront_sales').update({ metadata }).eq('id', sale.id);
+        if (updateError) throw new Error(updateError.message);
+        sale.metadata = metadata;
+        refundedItems.push({ title: sale.storefront_products?.title || 'Storefront item', quantity: calc.qty, amount: centsToDollars(calc.amount) });
+        await recalculateProductInventory(supabase, sale.storefront_product_id);
+      }
+      const email = await sendStorefrontRefundEmail({ sales, refundAmountCents, reasonLabel, refundedItems, fullOrder });
+      await updateSalesEmailMetadata(sales, {
+        refund_email_status: email.success ? 'sent' : 'failed',
+        refund_email_sent_at: email.success ? now : null,
+        refund_email_error: email.error || null,
+        refund_email_subject: email.subject || null,
+        refund_email_preview: email.preview || null
+      });
+      res.json({ success: true, refund: { id: refund.id, amount: centsToDollars(refundAmountCents), status: refund.status }, email, order: mapSalesToOrder(sales) });
     } catch (err) {
       res.status(500).json({ error: err.message });
     }

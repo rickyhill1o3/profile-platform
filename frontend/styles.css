@@ -1032,3 +1032,25 @@ h1,h2,h3,h4,p{margin:0}
 .webhook-log-action-buttons button{width:100%;white-space:nowrap}
 @media(max-width:900px){.webhook-log-table{min-width:1450px}.webhook-log-scroll{border-radius:8px}}
 .webhook-log-table .webhook-log-assigned { min-width: 165px; max-width: 220px; font-weight: 600; }
+
+/* Storefront order management */
+.store-order-actions{display:grid;grid-template-columns:repeat(2,minmax(92px,1fr));gap:7px;min-width:210px}
+.store-order-actions .btn{width:100%;padding:8px 10px}
+.storefront-admin-shell [data-store-pane="orders"] .admin-table{min-width:1250px}
+.storefront-admin-shell [data-store-pane="orders"] .admin-table th:last-child,
+.storefront-admin-shell [data-store-pane="orders"] .admin-table td:last-child{min-width:225px;width:225px}
+.storefront-admin-shell [data-store-pane="orders"] .admin-table td{vertical-align:top}
+.store-modal{display:none;position:fixed;inset:0;z-index:10000;align-items:center;justify-content:center;padding:20px}
+.store-modal.is-open{display:flex}
+.store-modal__backdrop{position:absolute;inset:0;background:rgba(15,23,42,.58)}
+.store-modal__panel{position:relative;z-index:1;width:min(560px,calc(100vw - 28px));max-height:88vh;overflow:auto;background:#fff;border:1px solid var(--line);border-radius:18px;padding:22px;box-shadow:0 24px 80px rgba(15,23,42,.28)}
+.store-modal__panel--wide{width:min(900px,calc(100vw - 28px))}
+.store-modal__panel .field{margin-top:14px}
+.receipt-totals{margin:18px 0 12px auto;max-width:390px;border-top:1px solid var(--line)}
+.receipt-totals>div{display:flex;justify-content:space-between;gap:20px;padding:9px 4px;border-bottom:1px solid var(--line)}
+.receipt-totals__grand{font-size:1.12rem}
+.refund-full-toggle{display:flex;gap:10px;align-items:flex-start;padding:12px;background:#f8fafc;border:1px solid var(--line);border-radius:12px;font-weight:700}
+.refund-items{display:grid;gap:10px;margin:14px 0}
+.refund-item-row{display:grid;grid-template-columns:1fr 100px;gap:14px;align-items:center;padding:12px;border:1px solid var(--line);border-radius:12px}
+.store-refund-preview{white-space:pre-wrap;max-height:220px;overflow:auto;padding:14px;background:#0f172a;color:#e2e8f0;border-radius:12px;font-size:13px}
+@media(max-width:720px){.store-order-actions{grid-template-columns:1fr;min-width:135px}.refund-item-row{grid-template-columns:1fr}.store-modal{padding:8px}.store-modal__panel{padding:16px}}

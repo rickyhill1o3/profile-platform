@@ -26,7 +26,7 @@ function countEffectiveSkus(product) {
 (function () {
   const panes = Array.from(document.querySelectorAll('[data-store-pane]'));
   const navButtons = Array.from(document.querySelectorAll('[data-store-nav]'));
-  const state = { products: [], orders: [], receipts: [], overrides: [], discounts: [], accounting: null, editingProductId: '' };
+  const state = { products: [], orders: [], receipts: [], overrides: [], discounts: [], accounting: null, editingProductId: '', activeOrder: null };
   function $(id) { return document.getElementById(id); }
   function setPane(name) { panes.forEach((pane) => pane.classList.toggle('is-active', pane.dataset.storePane === name)); navButtons.forEach((button) => button.classList.toggle('is-active', button.dataset.storeNav === name)); }
   function escape(value) { return typeof escapeHTML === 'function' ? escapeHTML(value) : String(value || ''); }
@@ -131,6 +131,52 @@ function countEffectiveSkus(product) {
     cards.innerHTML = [['Sales revenue', money(summary.total_sales_revenue)], ['Purchase cost', money(summary.total_purchase_cost)], ['Tax collected', money(summary.total_tax_collected)], ['Shipping collected', money(summary.total_shipping_collected)], ['Stock units', String(summary.stock_units || 0)], ['Gross profit', money(summary.gross_profit)]].map(([label, value]) => `<div class="stat-card"><span class="stat-label">${label}</span><strong class="stat-value">${escape(value)}</strong></div>`).join('');
     body.innerHTML = (state.accounting?.products || []).length ? state.accounting.products.map((row) => `<tr><td>${escape(row.title || 'Untitled')}</td><td>${money(row.sale_price)}</td><td>${escape(row.total_purchased_qty || 0)}</td><td>${escape(row.total_sold_qty || 0)}</td><td>${escape(row.stock_on_hand || 0)}</td><td>${money(row.total_purchase_cost)}</td><td>${money(row.total_sales_revenue)}</td><td>${money(row.gross_profit)}</td></tr>`).join('') : '<tr><td colspan="8">No accounting data found.</td></tr>';
   }
+  function closeStoreModal(id) { const modal = $(id); if (modal) modal.classList.remove('is-open'); }
+  function openReceipt(order) {
+    state.activeOrder = order;
+    $('storeReceiptOrder').textContent = order.order_number || order.session_id || 'Order';
+    $('storeReceiptCustomer').textContent = [order.shipping_name, order.customer_email].filter(Boolean).join(' — ') || '—';
+    $('storeReceiptItems').innerHTML = (order.items || []).map((item) => `<tr><td>${escape(item.title)}</td><td>${escape(item.quantity)}</td><td>${money(item.unit_price)}</td><td>${money(item.subtotal)}</td><td>${money(item.tax)}</td><td>${money(item.total)}</td></tr>`).join('') || '<tr><td colspan="6">No items found.</td></tr>';
+    $('storeReceiptSubtotal').textContent = money(order.subtotal);
+    $('storeReceiptShipping').textContent = money(order.shipping);
+    $('storeReceiptTax').textContent = money(order.tax);
+    $('storeReceiptTotal').textContent = money(order.total);
+    $('storeReceiptRefunded').textContent = money(order.refunded_total);
+    $('storeReceiptRemaining').textContent = money(order.remaining_total);
+    $('storeReceiptTaxNote').textContent = Number(order.tax || 0) > 0 ? 'Stripe calculated and collected sales tax for this order.' : 'No sales tax was collected. Stripe Automatic Tax is enabled, but tax can still be $0 if your Stripe tax registration, customer location, or product tax settings do not require collection.';
+    $('storeReceiptModal').classList.add('is-open');
+  }
+  function openTracking(order) {
+    state.activeOrder = order;
+    $('storeTrackingCarrier').value = order.tracking_carrier || '';
+    $('storeTrackingNumber').value = order.tracking_number || '';
+    $('storeTrackingUrl').value = order.tracking_url || '';
+    $('storeTrackingModal').classList.add('is-open');
+  }
+  function refundReasonText(code) {
+    return ({ out_of_stock: 'We ran out of stock before we could fulfill the order', pricing_error: 'The item was listed at an incorrect price', damaged_inventory: 'The remaining inventory was damaged or unavailable', customer_request: 'Refund requested by the customer', duplicate_order: 'Duplicate order', cannot_fulfill: 'We are unable to fulfill this order', other: '' })[code] || '';
+  }
+  function updateRefundPreview() {
+    const code = $('storeRefundReason').value;
+    const custom = $('storeRefundCustomReason').value.trim();
+    const reason = code === 'other' ? (custom || '[enter your reason]') : refundReasonText(code);
+    const full = $('storeRefundFullOrder').checked;
+    const order = state.activeOrder || {};
+    const lines = [];
+    document.querySelectorAll('[data-refund-qty]').forEach((input) => { const qty = Number(input.value || 0); if (qty > 0) lines.push(`${input.dataset.itemTitle} × ${qty}`); });
+    $('storeRefundEmailPreview').textContent = [`We issued a ${full ? 'full' : 'partial'} refund for your Shore Shack order.`, '', `Order: ${order.order_number || order.session_id || ''}`, 'Refund amount: calculated when submitted', `Reason: ${reason}`, lines.length ? `Refunded items:\n${lines.join('\n')}` : '', '', 'The refund has been submitted to your original payment method. Your bank may take several business days to post it.'].filter(Boolean).join('\n');
+  }
+  function openRefund(order) {
+    state.activeOrder = order;
+    $('storeRefundOrderLabel').textContent = order.order_number || order.session_id || 'Order';
+    $('storeRefundFullOrder').checked = false;
+    $('storeRefundReason').value = 'out_of_stock';
+    $('storeRefundCustomReason').value = '';
+    $('storeRefundCustomReasonWrap').hidden = true;
+    $('storeRefundItems').innerHTML = (order.items || []).map((item) => `<div class="refund-item-row"><div><strong>${escape(item.title)}</strong><div class="subtle-text">Purchased ${escape(item.quantity)} • already refunded ${escape(item.refunded_quantity || 0)} • refundable ${escape(item.refundable_quantity || 0)}</div></div><input class="input input--sm" type="number" min="0" max="${escape(item.refundable_quantity || 0)}" value="0" data-refund-qty="${escape(item.sale_id)}" data-item-title="${escape(item.title)}" ${Number(item.refundable_quantity || 0) <= 0 ? 'disabled' : ''}></div>`).join('') || '<p>No refundable items remain.</p>';
+    $('storeRefundModal').classList.add('is-open');
+    updateRefundPreview();
+  }
   function renderOrders() {
     const body = $('storeOrdersBody'); if (!body) return;
     const statusBadge = (status, error, sentAt) => {
@@ -140,31 +186,19 @@ function countEffectiveSkus(product) {
       return `<span class="badge ${cls}" title="${escape(error || '')}">${escape(label)}</span>`;
     };
     body.innerHTML = state.orders.length ? state.orders.map((order) => {
-      const itemSummary = (order.items || []).map((item) => `${escape(item.title || 'Item')} × ${escape(item.quantity || 0)}`).join('<br>');
-      const emailVerification = `<div><strong>Customer:</strong> ${statusBadge(order.customer_email_status, order.customer_email_error, order.customer_email_sent_at)}</div><div><strong>Admin:</strong> ${statusBadge(order.admin_email_status, order.admin_email_error, order.admin_email_sent_at)}</div><details><summary>Email previews</summary><div class="store-email-preview"><strong>${escape(order.customer_email_subject || 'Customer confirmation')}</strong><pre>${escape(order.customer_email_preview || 'No customer email preview stored.')}</pre><strong>${escape(order.admin_email_subject || 'Admin sale notice')}</strong><pre>${escape(order.admin_email_preview || 'No admin email preview stored.')}</pre></div></details>`;
-      return `<tr><td>${escape(dateTime(order.placed_at))}</td><td><strong>${escape(order.order_number || order.session_id || 'Order')}</strong></td><td><div>${escape(order.customer_email || '—')}</div><div class="subtle-text">${escape(order.shipping_name || '')}</div></td><td>${itemSummary || '—'}</td><td>${money(order.total)}</td><td><span class="badge">${escape(order.status || 'paid')}</span></td><td>${emailVerification}</td><td><div>${escape(order.tracking_number || '—')}</div><div class="subtle-text">${escape(order.tracking_carrier || '')}</div></td><td><div class="form-grid storefront-order-inline-form"><div class="field"><button class="btn" type="button" data-resend-order-confirmation="${escape(order.session_id)}">Resend confirmation emails</button></div><div class="field"><input class="input input--sm" placeholder="Carrier" data-order-tracking-carrier="${escape(order.session_id)}" value="${escape(order.tracking_carrier || '')}" /></div><div class="field"><input class="input input--sm" placeholder="Tracking number" data-order-tracking-number="${escape(order.session_id)}" value="${escape(order.tracking_number || '')}" /></div><div class="field"><input class="input input--sm" placeholder="Tracking URL (optional)" data-order-tracking-url="${escape(order.session_id)}" value="${escape(order.tracking_url || '')}" /></div><div class="field"><button class="btn btn-primary" type="button" data-save-order-tracking="${escape(order.session_id)}">Save Tracking + Email</button></div></div></td></tr>`;
+      const itemSummary = (order.items || []).map((item) => `${escape(item.title || 'Item')} × ${escape(item.quantity || 0)}${Number(item.refunded_quantity || 0) ? ` <span class="subtle-text">(${escape(item.refunded_quantity)} refunded)</span>` : ''}`).join('<br>');
+      const emailVerification = `<div><strong>Customer:</strong> ${statusBadge(order.customer_email_status, order.customer_email_error, order.customer_email_sent_at)}</div><div><strong>Admin:</strong> ${statusBadge(order.admin_email_status, order.admin_email_error, order.admin_email_sent_at)}</div>`;
+      return `<tr><td>${escape(dateTime(order.placed_at))}</td><td><strong>${escape(order.order_number || order.session_id || 'Order')}</strong></td><td><div>${escape(order.customer_email || '—')}</div><div class="subtle-text">${escape(order.shipping_name || '')}</div></td><td>${itemSummary || '—'}</td><td><div>${money(order.total)}</div>${Number(order.refunded_total || 0) ? `<div class="subtle-text">Refunded ${money(order.refunded_total)}</div>` : ''}</td><td><span class="badge">${escape(order.status || 'paid')}</span></td><td>${emailVerification}</td><td><div>${escape(order.tracking_number || '—')}</div><div class="subtle-text">${escape(order.tracking_carrier || '')}</div></td><td><div class="store-order-actions"><button class="btn" type="button" data-view-receipt="${escape(order.session_id)}">Receipt</button><button class="btn" type="button" data-open-tracking="${escape(order.session_id)}">Tracking</button><button class="btn btn-danger" type="button" data-open-refund="${escape(order.session_id)}" ${Number(order.remaining_total || 0) <= 0 ? 'disabled' : ''}>Refund</button><button class="btn" type="button" data-resend-order-confirmation="${escape(order.session_id)}">Resend emails</button></div></td></tr>`;
     }).join('') : '<tr><td colspan="9">No active orders found.</td></tr>';
+    body.querySelectorAll('[data-view-receipt]').forEach((button) => button.addEventListener('click', () => { const order = state.orders.find((row) => String(row.session_id) === String(button.dataset.viewReceipt)); if (order) openReceipt(order); }));
+    body.querySelectorAll('[data-open-tracking]').forEach((button) => button.addEventListener('click', () => { const order = state.orders.find((row) => String(row.session_id) === String(button.dataset.openTracking)); if (order) openTracking(order); }));
+    body.querySelectorAll('[data-open-refund]').forEach((button) => button.addEventListener('click', () => { const order = state.orders.find((row) => String(row.session_id) === String(button.dataset.openRefund)); if (order) openRefund(order); }));
     body.querySelectorAll('[data-resend-order-confirmation]').forEach((button) => button.addEventListener('click', async () => {
       const sessionId = button.dataset.resendOrderConfirmation;
       button.disabled = true; showMessage('storeOrdersMessage', 'Sending customer and admin confirmation emails...');
-      try {
-        const result = await authJSON(API + '/admin/store/orders/' + encodeURIComponent(sessionId) + '/resend-confirmation', { method: 'POST' });
-        const customer = result.email?.customer?.success ? 'customer sent' : `customer failed: ${result.email?.customer?.error || 'unknown error'}`;
-        const adminEmail = result.email?.admin?.success ? 'admin sent' : `admin failed: ${result.email?.admin?.error || 'unknown error'}`;
-        showMessage('storeOrdersMessage', `Confirmation result — ${customer}; ${adminEmail}.`, !(result.email?.customer?.success && result.email?.admin?.success));
-        await loadOrders();
-      } catch (error) { showMessage('storeOrdersMessage', error.message || 'Could not resend confirmation emails.', true); }
+      try { const result = await authJSON(API + '/admin/store/orders/' + encodeURIComponent(sessionId) + '/resend-confirmation', { method: 'POST' }); const customer = result.email?.customer?.success ? 'customer sent' : `customer failed: ${result.email?.customer?.error || 'unknown error'}`; const adminEmail = result.email?.admin?.success ? 'admin sent' : `admin failed: ${result.email?.admin?.error || 'unknown error'}`; showMessage('storeOrdersMessage', `Confirmation result — ${customer}; ${adminEmail}.`, !(result.email?.customer?.success && result.email?.admin?.success)); await loadOrders(); }
+      catch (error) { showMessage('storeOrdersMessage', error.message || 'Could not resend confirmation emails.', true); }
       finally { button.disabled = false; }
-    }));
-    body.querySelectorAll('[data-save-order-tracking]').forEach((button) => button.addEventListener('click', async () => {
-      const sessionId = button.dataset.saveOrderTracking;
-      const carrier = body.querySelector(`[data-order-tracking-carrier="${CSS.escape(sessionId)}"]`)?.value || '';
-      const number = body.querySelector(`[data-order-tracking-number="${CSS.escape(sessionId)}"]`)?.value || '';
-      const url = body.querySelector(`[data-order-tracking-url="${CSS.escape(sessionId)}"]`)?.value || '';
-      if (!number) return showMessage('storeOrdersMessage', 'Tracking number is required.', true);
-      button.disabled = true; showMessage('storeOrdersMessage', 'Saving tracking and sending email...');
-      try { const result = await authJSON(API + '/admin/store/orders/' + encodeURIComponent(sessionId) + '/tracking', { method: 'POST', body: JSON.stringify({ tracking_carrier: carrier, tracking_number: number, tracking_url: url }) }); showMessage('storeOrdersMessage', result.email?.success ? 'Tracking saved and customer email sent.' : `Tracking saved, but email failed: ${result.email?.error || 'unknown error'}`, !result.email?.success); await loadOrders(); }
-      catch (error) { showMessage('storeOrdersMessage', error.message || 'Could not save tracking.', true); } finally { button.disabled = false; }
     }));
   }
   function renderDiscounts() {
@@ -250,6 +284,30 @@ function countEffectiveSkus(product) {
     $('refreshStoreDataButton')?.addEventListener('click', refreshAll);
     $('refreshStoreOrdersButton')?.addEventListener('click', () => loadOrders().catch(() => {}));
     $('discountActive').value = 'true';
+    document.querySelectorAll('[data-close-store-modal]').forEach((button) => button.addEventListener('click', () => closeStoreModal(button.dataset.closeStoreModal)));
+    $('storeTrackingSave')?.addEventListener('click', async () => {
+      const order = state.activeOrder; if (!order) return;
+      const number = $('storeTrackingNumber').value.trim(); if (!number) return showMessage('storeOrdersMessage', 'Tracking number is required.', true);
+      const button = $('storeTrackingSave'); button.disabled = true;
+      try { const result = await authJSON(API + '/admin/store/orders/' + encodeURIComponent(order.session_id) + '/tracking', { method: 'POST', body: JSON.stringify({ tracking_carrier: $('storeTrackingCarrier').value, tracking_number: number, tracking_url: $('storeTrackingUrl').value }) }); closeStoreModal('storeTrackingModal'); showMessage('storeOrdersMessage', result.email?.success ? 'Tracking saved and customer email sent.' : `Tracking saved, but email failed: ${result.email?.error || 'unknown error'}`, !result.email?.success); await loadOrders(); }
+      catch (error) { showMessage('storeOrdersMessage', error.message || 'Could not save tracking.', true); } finally { button.disabled = false; }
+    });
+    $('storeRefundReason')?.addEventListener('change', () => { $('storeRefundCustomReasonWrap').hidden = $('storeRefundReason').value !== 'other'; updateRefundPreview(); });
+    $('storeRefundCustomReason')?.addEventListener('input', updateRefundPreview);
+    $('storeRefundFullOrder')?.addEventListener('change', () => { document.querySelectorAll('[data-refund-qty]').forEach((input) => { input.disabled = $('storeRefundFullOrder').checked || Number(input.max || 0) <= 0; input.value = $('storeRefundFullOrder').checked ? input.max : 0; }); updateRefundPreview(); });
+    $('storeRefundItems')?.addEventListener('input', updateRefundPreview);
+    $('storeRefundSubmit')?.addEventListener('click', async () => {
+      const order = state.activeOrder; if (!order) return;
+      const fullOrder = $('storeRefundFullOrder').checked;
+      const items = Array.from(document.querySelectorAll('[data-refund-qty]')).map((input) => ({ sale_id: input.dataset.refundQty, quantity: Number(input.value || 0) })).filter((item) => item.quantity > 0);
+      if (!fullOrder && !items.length) return alert('Select at least one item quantity to refund.');
+      const reasonCode = $('storeRefundReason').value; const customReason = $('storeRefundCustomReason').value.trim();
+      if (reasonCode === 'other' && !customReason) return alert('Enter the custom refund reason.');
+      if (!confirm(`Submit this ${fullOrder ? 'full' : 'partial'} refund through Stripe? This cannot be undone.`)) return;
+      const button = $('storeRefundSubmit'); button.disabled = true;
+      try { const result = await authJSON(API + '/admin/store/orders/' + encodeURIComponent(order.session_id) + '/refund', { method: 'POST', body: JSON.stringify({ full_order: fullOrder, items, reason_code: reasonCode, custom_reason: customReason }) }); closeStoreModal('storeRefundModal'); showMessage('storeOrdersMessage', `Refunded ${money(result.refund?.amount)}. ${result.email?.success ? 'Customer refund email sent.' : `Refund completed, but email failed: ${result.email?.error || 'unknown error'}`}`, !result.email?.success); await refreshAll(); }
+      catch (error) { showMessage('storeOrdersMessage', error.message || 'Could not process refund.', true); } finally { button.disabled = false; }
+    });
     await refreshAll();
     showMessage('storeAdminMessage', 'Storefront data loaded.');
     showMessage('storeOrdersMessage', state.orders.length ? 'Active storefront orders loaded.' : 'No active storefront orders right now.');
