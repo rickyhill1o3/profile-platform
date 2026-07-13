@@ -1823,6 +1823,19 @@ function registerShopRoutes({
       const paymentIntent = sales[0]?.metadata?.stripe_payment_intent || sales[0]?.metadata?.raw_session?.payment_intent;
       if (!paymentIntent) return res.status(400).json({ error: 'Stripe payment intent was not stored for this order' });
 
+      // Read the authoritative Stripe payment balance before calculating the refund.
+      // A full-order refund must return every cent the customer paid, including any
+      // shipping, tax, or order-level amount that was not allocated onto individual sale rows.
+      const paymentIntentRecord = await stripe.paymentIntents.retrieve(paymentIntent, {
+        expand: ['latest_charge']
+      });
+      const amountPaidCents = Math.max(0, Number(paymentIntentRecord.amount_received || paymentIntentRecord.amount || 0));
+      const latestCharge = paymentIntentRecord.latest_charge && typeof paymentIntentRecord.latest_charge === 'object'
+        ? paymentIntentRecord.latest_charge
+        : null;
+      const amountAlreadyRefundedCents = Math.max(0, Number(latestCharge?.amount_refunded || 0));
+      const stripeRemainingRefundableCents = Math.max(0, amountPaidCents - amountAlreadyRefundedCents);
+
       const requestedBySale = new Map(requestedItems.map((item) => [String(item.sale_id || ''), Math.max(0, Number(item.quantity || 0) || 0)]));
       const calculations = [];
       for (const sale of sales) {
@@ -1840,9 +1853,21 @@ function registerShopRoutes({
         const shipping = fullOrder ? Math.max(0, Number(sale.shipping_cents || 0) - Number(sale.metadata?.refunded_shipping_cents || 0)) : 0;
         calculations.push({ sale, qty, subtotal, tax, shipping, amount: subtotal + tax + shipping });
       }
-      if (!calculations.length) return res.status(400).json({ error: 'Select at least one refundable item quantity' });
-      const refundAmountCents = calculations.reduce((sum, row) => sum + row.amount, 0);
-      if (refundAmountCents <= 0) return res.status(400).json({ error: 'This order has no refundable balance remaining' });
+      if (!calculations.length && !fullOrder) return res.status(400).json({ error: 'Select at least one refundable item quantity' });
+
+      const calculatedItemRefundCents = calculations.reduce((sum, row) => sum + row.amount, 0);
+      const refundAmountCents = fullOrder
+        ? stripeRemainingRefundableCents
+        : Math.min(calculatedItemRefundCents, stripeRemainingRefundableCents);
+
+      if (refundAmountCents <= 0) return res.status(400).json({ error: 'This order has no refundable Stripe balance remaining' });
+
+      // Any difference on a full refund represents order-level money paid by the customer
+      // that was not attached to an individual sale row (for example shipping, tax, or a
+      // legacy checkout total allocation). It must still be refunded to make the customer whole.
+      const unallocatedFullRefundCents = fullOrder
+        ? Math.max(0, refundAmountCents - calculatedItemRefundCents)
+        : 0;
 
       const refund = await stripe.refunds.create({
         payment_intent: paymentIntent,
@@ -1884,6 +1909,47 @@ function registerShopRoutes({
         refundedItems.push({ title: sale.storefront_products?.title || 'Storefront item', quantity: calc.qty, amount: centsToDollars(calc.amount) });
         await recalculateProductInventory(supabase, sale.storefront_product_id);
       }
+
+      // Record any order-level residual refund exactly once without restoring inventory again.
+      if (fullOrder && unallocatedFullRefundCents > 0 && sales[0]) {
+        const sale = sales[0];
+        const residualHistoryEntry = {
+          at: now,
+          stripe_refund_id: refund.id,
+          quantity: 0,
+          subtotal_cents: 0,
+          tax_cents: 0,
+          shipping_cents: 0,
+          order_level_adjustment_cents: unallocatedFullRefundCents,
+          amount_cents: unallocatedFullRefundCents,
+          reason_code: reasonCode,
+          reason: reasonLabel,
+          full_order: true
+        };
+        const metadata = {
+          ...(sale.metadata || {}),
+          refunded_amount_cents: Number(sale.metadata?.refunded_amount_cents || 0) + unallocatedFullRefundCents,
+          refunded_order_adjustment_cents: Number(sale.metadata?.refunded_order_adjustment_cents || 0) + unallocatedFullRefundCents,
+          refund_history: [...(Array.isArray(sale.metadata?.refund_history) ? sale.metadata.refund_history : []), residualHistoryEntry],
+          fulfillment_status: 'refunded'
+        };
+        const { error: residualUpdateError } = await supabase.from('storefront_sales').update({ metadata }).eq('id', sale.id);
+        if (residualUpdateError) throw new Error(residualUpdateError.message);
+        sale.metadata = metadata;
+        refundedItems.push({ title: 'Remaining order charges', quantity: 1, amount: centsToDollars(unallocatedFullRefundCents) });
+      }
+
+      // Ensure every row reflects the final order status after a full Stripe refund.
+      if (fullOrder) {
+        for (const sale of sales) {
+          if (sale.metadata?.fulfillment_status === 'refunded') continue;
+          const metadata = { ...(sale.metadata || {}), fulfillment_status: 'refunded' };
+          const { error: statusUpdateError } = await supabase.from('storefront_sales').update({ metadata }).eq('id', sale.id);
+          if (statusUpdateError) throw new Error(statusUpdateError.message);
+          sale.metadata = metadata;
+        }
+      }
+
       const email = await sendStorefrontRefundEmail({ sales, refundAmountCents, reasonLabel, refundedItems, fullOrder });
       await updateSalesEmailMetadata(sales, {
         refund_email_status: email.success ? 'sent' : 'failed',
