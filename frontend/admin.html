@@ -238,6 +238,19 @@ placeholder="Enter one SKU per line&#10;12345678&#10;87654321"></textarea>
                     Product</button></div>
               </form>
 
+              <div class="banner banner-soft"><strong>Bulk Target SKU lookup</strong>
+                <p class="subtle-text">Paste Target TCIN/SKU numbers separated by commas or new lines. Existing catalog SKUs are skipped without being looked up again. Only missing SKUs are searched and added with the product name, current price, Target URL, and image when Target provides them. Credit cost remains blank for you to set manually.</p>
+              </div>
+              <form id="targetBulkSkuLookupForm" class="form-grid">
+                <div class="field field--full"><label for="targetBulkSkuLookupInput">Target SKU list</label>
+                  <textarea class="input" id="targetBulkSkuLookupInput" rows="8" placeholder="1007935778,1008581387,1010423714"></textarea>
+                </div>
+                <div class="field field--full panel-actions">
+                  <button class="btn btn-primary" type="submit" id="targetBulkSkuLookupButton">Find and add missing Target products</button>
+                </div>
+                <div class="field field--full"><div class="subtle-text" id="targetBulkSkuLookupProgress"></div></div>
+              </form>
+
               <div class="banner banner-soft"><strong>Bulk import lists</strong>
                 <p class="subtle-text">Import Amazon or Target JSON exports into the live catalog. Target items will try to pull live retail price before saving.</p>
               </div>

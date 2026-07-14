@@ -328,6 +328,69 @@ async function fetchHtml(url) {
     return await response.text();
 }
 
+
+function absoluteUrl(origin, value) {
+    const raw = String(value || '').trim();
+    if (!raw) return '';
+    try { return new URL(raw, origin).toString(); } catch (_) { return raw; }
+}
+
+function findJsonLdProduct($) {
+    let found = null;
+    $('script[type="application/ld+json"]').each((_, element) => {
+        if (found) return;
+        try {
+            const parsed = JSON.parse($(element).text());
+            const values = Array.isArray(parsed) ? parsed : [parsed];
+            const queue = [...values];
+            while (queue.length && !found) {
+                const item = queue.shift();
+                if (!item || typeof item !== 'object') continue;
+                const type = item['@type'];
+                if (type === 'Product' || (Array.isArray(type) && type.includes('Product'))) {
+                    found = item;
+                    break;
+                }
+                if (Array.isArray(item['@graph'])) queue.push(...item['@graph']);
+            }
+        } catch (_) {}
+    });
+    return found;
+}
+
+async function lookupTargetByTcin(sku) {
+    const cleanSku = String(sku || '').trim();
+    const directUrl = `https://www.target.com/p/-/A-${encodeURIComponent(cleanSku)}`;
+    const html = await fetchHtml(directUrl);
+    const $ = cheerio.load(html);
+    const jsonLd = findJsonLdProduct($) || {};
+    const offers = Array.isArray(jsonLd.offers) ? jsonLd.offers[0] : (jsonLd.offers || {});
+    const title = String(
+        jsonLd.name ||
+        $('meta[property="og:title"]').attr('content') ||
+        $('meta[name="twitter:title"]').attr('content') ||
+        $('h1').first().text() ||
+        ''
+    ).replace(/\s*:\s*Target\s*$/i, '').trim();
+    const imageValue = Array.isArray(jsonLd.image) ? jsonLd.image[0] : jsonLd.image;
+    const image = absoluteUrl('https://www.target.com', imageValue || $('meta[property="og:image"]').attr('content') || $('meta[name="twitter:image"]').attr('content'));
+    const canonical = $('link[rel="canonical"]').attr('href') || $('meta[property="og:url"]').attr('content') || directUrl;
+    const price = parseMoney(offers.price || offers.lowPrice || $('meta[property="product:price:amount"]').attr('content') || $('[data-test="product-price"]').first().text());
+    return {
+        sku: cleanSku,
+        product_name: title || cleanSku,
+        brand: String(jsonLd.brand?.name || jsonLd.brand || 'Target').trim() || 'Target',
+        product_url: absoluteUrl('https://www.target.com', canonical),
+        image_url: image,
+        default_max_price: price,
+        metadata: {
+            source: title ? 'target_direct_product' : 'target_direct_fallback',
+            lookup_url: directUrl,
+            lookup_failed: !title
+        }
+    };
+}
+
 async function bestEffortLookupBySku(site, sku) {
     const cleanSku = String(sku || "").trim();
     if (!cleanSku) throw new Error("SKU is required");
@@ -342,6 +405,15 @@ async function bestEffortLookupBySku(site, sku) {
             default_max_price: null,
             metadata: { source: "manual_general" }
         };
+    }
+
+    if (site === "target") {
+        try {
+            const direct = await lookupTargetByTcin(cleanSku);
+            if (direct.product_name && direct.product_name !== cleanSku) return direct;
+        } catch (_) {
+            // Fall through to Target search as a best-effort fallback.
+        }
     }
 
     const searchUrls = {
@@ -1194,6 +1266,58 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
                 });
             }
             res.status(500).json({ error: msg });
+        }
+    });
+
+
+    app.post('/admin/catalog-products/bulk-lookup-missing', auth, admin, async (req, res) => {
+        if (!requireSuperAdmin(req, res)) return;
+        try {
+            const site = normalizeSite(req.body?.site || 'target');
+            if (site !== 'target') return res.status(400).json({ error: 'This bulk lookup currently supports Target SKUs only.' });
+            const raw = Array.isArray(req.body?.skus) ? req.body.skus : String(req.body?.skus || '').split(/[\s,;]+/);
+            const skus = [...new Set(raw.map((value) => String(value || '').trim()).filter(Boolean))].slice(0, 25);
+            if (!skus.length) return res.status(400).json({ error: 'Enter at least one Target SKU.' });
+
+            const { data: existingRows, error: existingError } = await supabase
+                .from('catalog_products')
+                .select('sku')
+                .eq('site', site)
+                .in('sku', skus);
+            if (existingError) throw new Error(existingError.message);
+            const existing = new Set((existingRows || []).map((row) => String(row.sku || '').trim()));
+            const missing = skus.filter((sku) => !existing.has(sku));
+            const added = [];
+            const failed = [];
+
+            // Keep concurrency deliberately low so Target is not hammered and Render stays stable.
+            for (let index = 0; index < missing.length; index += 3) {
+                const group = missing.slice(index, index + 3);
+                const results = await Promise.all(group.map(async (sku) => {
+                    try {
+                        const product = await upsertCatalogProductByLookup(supabase, site, sku);
+                        return { ok: true, sku, product };
+                    } catch (err) {
+                        return { ok: false, sku, error: String(err?.message || err) };
+                    }
+                }));
+                results.forEach((result) => {
+                    if (result.ok) added.push(result.product);
+                    else failed.push({ sku: result.sku, error: result.error });
+                });
+            }
+
+            res.json({
+                success: true,
+                requested: skus.length,
+                skipped_existing: skus.length - missing.length,
+                added: added.length,
+                failed,
+                items: added,
+                message: `Added ${added.length} missing Target product${added.length === 1 ? '' : 's'}; skipped ${skus.length - missing.length} already in the catalog${failed.length ? `; ${failed.length} lookup${failed.length === 1 ? '' : 's'} need review` : ''}.`
+            });
+        } catch (err) {
+            res.status(500).json({ error: String(err?.message || err) });
         }
     });
 

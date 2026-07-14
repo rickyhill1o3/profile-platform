@@ -2419,6 +2419,8 @@ async function initCatalogTools() {
     const controls = document.getElementById('superAdminCatalogControls');
     const notice = document.getElementById('superAdminCatalogNotice');
     const bulkImportForm = document.getElementById('catalogBulkImportForm');
+    const targetBulkSkuLookupForm = document.getElementById('targetBulkSkuLookupForm');
+    const targetBulkSkuLookupProgress = document.getElementById('targetBulkSkuLookupProgress');
     const exportForm = document.getElementById('catalogExportForm');
     const exportResults = document.getElementById('catalogExportResults');
     const superAdmin = canManageCatalog();
@@ -2469,6 +2471,54 @@ async function initCatalogTools() {
                 await loadCatalogProducts();
             } catch (err) {
                 message.textContent = err.message;
+            }
+        });
+    }
+
+
+    if (targetBulkSkuLookupForm && superAdmin) {
+        targetBulkSkuLookupForm.addEventListener('submit', async (event) => {
+            event.preventDefault();
+            const input = document.getElementById('targetBulkSkuLookupInput');
+            const button = document.getElementById('targetBulkSkuLookupButton');
+            const skus = [...new Set(String(input?.value || '')
+                .split(/[\s,;]+/)
+                .map((value) => value.trim())
+                .filter(Boolean))];
+            if (!skus.length) {
+                if (targetBulkSkuLookupProgress) targetBulkSkuLookupProgress.textContent = 'Paste at least one Target SKU.';
+                return;
+            }
+            const chunkSize = 20;
+            let added = 0;
+            let skipped = 0;
+            const failures = [];
+            if (button) button.disabled = true;
+            try {
+                for (let offset = 0; offset < skus.length; offset += chunkSize) {
+                    const chunk = skus.slice(offset, offset + chunkSize);
+                    if (targetBulkSkuLookupProgress) {
+                        targetBulkSkuLookupProgress.textContent = `Checking ${Math.min(offset + chunk.length, skus.length)} of ${skus.length} Target SKUs... Added ${added}; skipped ${skipped}.`;
+                    }
+                    const data = await authJSON(API + '/admin/catalog-products/bulk-lookup-missing', {
+                        method: 'POST',
+                        body: JSON.stringify({ site: 'target', skus: chunk })
+                    });
+                    added += Number(data.added || 0);
+                    skipped += Number(data.skipped_existing || 0);
+                    if (Array.isArray(data.failed)) failures.push(...data.failed);
+                }
+                const suffix = failures.length
+                    ? ` ${failures.length} SKU${failures.length === 1 ? '' : 's'} could not be fully looked up and may need manual review: ${failures.slice(0, 8).map((row) => row.sku).join(', ')}${failures.length > 8 ? '…' : ''}`
+                    : '';
+                if (targetBulkSkuLookupProgress) targetBulkSkuLookupProgress.textContent = `Finished. Added ${added} missing Target products and skipped ${skipped} products already in your catalog.${suffix}`;
+                message.textContent = `Target bulk lookup finished: ${added} added, ${skipped} skipped, ${failures.length} need review.`;
+                await loadCatalogProducts();
+            } catch (err) {
+                if (targetBulkSkuLookupProgress) targetBulkSkuLookupProgress.textContent = `Stopped: ${err.message}`;
+                message.textContent = err.message;
+            } finally {
+                if (button) button.disabled = false;
             }
         });
     }
