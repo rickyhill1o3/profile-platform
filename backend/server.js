@@ -8606,6 +8606,28 @@ async function ensureSuperAdmin() {
 }
 
 
+registerProductCatalogRoutes({
+    app,
+    supabase,
+    auth,
+    admin,
+    getCurrentUser,
+    ensureUserNotRevoked
+});
+
+shopRoutes = registerShopRoutes({
+    app,
+    supabase,
+    stripe,
+    auth,
+    admin,
+    getCurrentUser,
+    buildAppUrl,
+    sendEmail,
+    SUPER_ADMIN_EMAIL,
+    validateDiscountCode
+});
+
 ensureFailsafeQueueDir();
 setInterval(() => {
     replayWebhookFailoverQueue().catch((err) => console.error('Failover queue replay interval failed:', err));
