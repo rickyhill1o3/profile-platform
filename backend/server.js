@@ -1060,11 +1060,10 @@ async function resolveOrderCreditCost(payload) {
     const countdownMatch = await getCountdownCreditCost({ countdownId, productId: productMatch.product?.id || productId, site, sku });
     const pokemonMultiItemMatch = await getPokemonCenterMultiItemCreditCost(payload);
 
-    const explicitCredits = payload.credits_charged !== undefined && payload.credits_charged !== null
-        ? asWholeCredits(payload.credits_charged, 0)
-        : null;
-
-    if (explicitCredits !== null) return { credits: explicitCredits, productMatch, countdownMatch, pokemonMultiItemMatch };
+    // Never trust a bot/webhook-provided credits_charged value when calculating a checkout.
+    // Some bot payloads include their own numeric "credits" field (or a previously stored
+    // credits_charged value), which can override the live catalog price and cause incorrect
+    // charges. The authoritative value is always the current website catalog/countdown rules.
     if (pokemonMultiItemMatch.credits > 0) return { credits: pokemonMultiItemMatch.credits, productMatch, countdownMatch, pokemonMultiItemMatch };
     if (countdownMatch.credits > 0) return { credits: countdownMatch.credits, productMatch, countdownMatch, pokemonMultiItemMatch };
     if (productMatch.credits > 0) return { credits: productMatch.credits, productMatch, countdownMatch, pokemonMultiItemMatch };
