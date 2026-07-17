@@ -3377,12 +3377,29 @@ async function sendMonitorDiscordWebhookBatch(routeConfigOrUrl, items = []) {
     const webhookUrl = routeConfig.webhook_url || (typeof routeConfigOrUrl === 'string' ? String(routeConfigOrUrl).trim() : '');
     if (!webhookUrl) throw new Error('Monitor Discord webhook URL is missing');
     const validItems = Array.isArray(items) ? items.filter(Boolean) : [];
-    if (!validItems.length) return { success: true, sent: 0, attempts: [] };
+    if (!validItems.length) return { success: true, sent: 0, attempts: [], message_ids: [] };
 
+    // Discord allows up to 10 embeds, but the complete message also has a shared
+    // character/size limit. Large product titles, links, and image URLs can make a
+    // 9- or 10-embed monitor payload fail or disappear. Three embeds per request is
+    // deliberately conservative and still avoids rapid one-request-per-SKU bursts.
     const mentionText = getMonitorMentionText(routeConfig);
     const chunks = [];
-    for (let i = 0; i < validItems.length; i += 10) chunks.push(validItems.slice(i, i + 10));
+    for (let i = 0; i < validItems.length; i += 3) chunks.push(validItems.slice(i, i + 3));
     const attempts = [];
+    const messageIds = [];
+
+    // wait=true makes Discord return the created message instead of a bare 204.
+    // This lets us verify that Discord actually created every monitor message.
+    const deliveryUrl = (() => {
+        try {
+            const parsed = new URL(webhookUrl);
+            parsed.searchParams.set('wait', 'true');
+            return parsed.toString();
+        } catch {
+            return webhookUrl.includes('?') ? `${webhookUrl}&wait=true` : `${webhookUrl}?wait=true`;
+        }
+    })();
 
     for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex += 1) {
         const chunk = chunks[chunkIndex];
@@ -3392,15 +3409,25 @@ async function sendMonitorDiscordWebhookBatch(routeConfigOrUrl, items = []) {
             allowed_mentions: { parse: ['everyone', 'roles'] },
             embeds: chunk.map(buildMonitorDiscordEmbed)
         });
+
         const result = await enqueueDiscordWebhookJob(webhookUrl, async () => {
             for (let attempt = 1; attempt <= 7; attempt += 1) {
-                const response = await globalThis.fetch(webhookUrl, {
+                const response = await globalThis.fetch(deliveryUrl, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body
                 });
-                if (response.ok) return { success: true, attempt };
                 const text = await response.text().catch(() => '');
+                if (response.ok) {
+                    let messageId = '';
+                    if (text) {
+                        try { messageId = String(JSON.parse(text)?.id || ''); } catch {}
+                    }
+                    if (!messageId && response.status !== 204) {
+                        throw new Error(`Discord returned success without a message id: ${text || response.statusText}`);
+                    }
+                    return { success: true, attempt, message_id: messageId };
+                }
                 if (response.status === 429) {
                     let retryMs = 5000;
                     try {
@@ -3422,6 +3449,7 @@ async function sendMonitorDiscordWebhookBatch(routeConfigOrUrl, items = []) {
             throw new Error('Discord webhook failed after maximum retry attempts');
         });
         attempts.push(result?.attempt || 1);
+        if (result?.message_id) messageIds.push(result.message_id);
     }
 
     return {
@@ -3429,6 +3457,7 @@ async function sendMonitorDiscordWebhookBatch(routeConfigOrUrl, items = []) {
         sent: validItems.length,
         chunks: chunks.length,
         attempts,
+        message_ids: messageIds,
         ping_mode: routeConfig.ping_mode || 'none',
         role_mention: routeConfig.role_mention || ''
     };
@@ -4283,6 +4312,7 @@ app.post(["/webhooks/monitor", "/webhooks/monitor/:token"], async (req, res) => 
                                 batch_sent: true,
                                 batch_size: delivery.items.length,
                                 chunks: sendResult?.chunks || 1,
+                                discord_message_ids: sendResult?.message_ids || [],
                                 ping_mode: sendResult?.ping_mode || 'none',
                                 role_mention: sendResult?.role_mention || ''
                             });
