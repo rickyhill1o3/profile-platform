@@ -1230,6 +1230,21 @@ function extractOrderIdFromText(value = '') {
     return m ? String(m[1] || '').trim() : '';
 }
 
+function extractTargetSkuFromText(value = '') {
+    const text = decodeHtmlEntities(String(value || '')).replace(/\|\|/g, '').trim();
+    if (!text) return '';
+
+    // Target product URLs commonly end in /A-12345678, including markdown links
+    // such as [Product](https://www.target.com/p/prod/-/A-1010892077).
+    const targetUrlMatch = text.match(/target\.com\/[^\s)]+?\/A-(\d{6,12})(?:[/?#)\s]|$)/i);
+    if (targetUrlMatch) return String(targetUrlMatch[1] || '').trim();
+
+    const aNumberMatch = text.match(/(?:^|[\s/(])-?A-(\d{6,12})(?:[/?#)\s]|$)/i);
+    if (aNumberMatch) return String(aNumberMatch[1] || '').trim();
+
+    return '';
+}
+
 function stableExternalOrderId(payload = {}, normalized = {}) {
     const direct = String(
         payload.external_order_id ||
@@ -1337,7 +1352,8 @@ function normalizeIncomingOrderPayload(payload = {}) {
     const indexedPriceValue = getFirstFieldValueByPrefix(fields, 'price');
     const productFieldRaw = payload.product_name || payload.product?.name || fields['product'] || fields['product name'] || indexedProductValue || embed.description || '';
     const descOrderId = extractOrderIdFromText(embed.description || payload.description || '');
-    const productLink = extractMarkdownLink(payload.product_url || payload.url || fields['product'] || indexedProductValue || fields['share link'] || fields['input'] || '');
+    const productLinkSource = payload.product_url || payload.url || fields['product'] || indexedProductValue || fields['share link'] || fields['input'] || embed.description || embed.url || '';
+    const productLink = extractMarkdownLink(productLinkSource);
     const orderLink = extractMarkdownLink(fields['order id'] || fields['order number'] || payload.order_number || '');
     let productName = cleanFieldValue(productLink?.text || productFieldRaw || '');
     if (!productName || /^n\/?a$/i.test(productName)) {
@@ -1347,7 +1363,12 @@ function normalizeIncomingOrderPayload(payload = {}) {
     const orderNumber = cleanFieldValue(orderLink?.text || payload.order_number || fields['order id'] || fields['order number'] || descOrderId || '').replace(/^#/, '');
     const accountEmail = extractEmail(payload.user_email || payload.email || fields['account'] || fields['email'] || '');
     const profileName = cleanFieldValue(payload.profile_name || fields['profile'] || '');
-    const sku = cleanFieldValue(payload.sku || payload.product_sku || fields['sku'] || '') || cleanFieldValue(productLink?.url || '').match(/(?:A-|ip\/seort\/|ip\/)(\d{6,})/)?.[1] || '';
+    const sku = cleanFieldValue(payload.sku || payload.product_sku || fields['sku'] || '')
+        || extractTargetSkuFromText(productLink?.url || '')
+        || extractTargetSkuFromText(embed.description || '')
+        || extractTargetSkuFromText(embed.url || '')
+        || extractTargetSkuFromText(payload.product_url || payload.url || fields['input'] || fields['share link'] || '')
+        || '';
     const indexedProductCount = countIndexedFields(fields, 'product');
     const quantityRaw = payload.quantity ?? payload.qty ?? fields['quantity'] ?? fields['qty'];
     const pokemonCenterPayload = isPokemonCenterPayload(payload, embed, fields);
@@ -1367,7 +1388,7 @@ function normalizeIncomingOrderPayload(payload = {}) {
     ].find((value) => value !== undefined && value !== null && String(value).trim() !== '');
     const priceMatch = String(priceRaw || '').replace(/[^0-9.]/g, '');
     const price = priceMatch ? Number(priceMatch) : null;
-    const productUrl = String(productLink?.url || payload.product_url || payload.url || fields['input'] || fields['share link'] || '').trim();
+    const productUrl = String(productLink?.url || payload.product_url || payload.url || fields['input'] || fields['share link'] || embed.url || '').trim();
     const imageUrl = payload.image_url || payload.product?.image_url || embed.thumbnail?.url || embed.image?.url || '';
     const timestamp = cleanFieldValue(payload.timestamp || embed.timestamp || embed.footer?.text || '');
     const mode = cleanFieldValue(payload.mode || fields['mode'] || '');
