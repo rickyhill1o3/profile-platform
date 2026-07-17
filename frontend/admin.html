@@ -49,7 +49,6 @@
         <button class="admin-nav-button" type="button" data-admin-nav="credits">Credits + Orders</button>
         <button class="admin-nav-button" type="button" data-admin-nav="webhooks">Webhooks</button>
         <button class="admin-nav-button" type="button" data-admin-nav="announcements">Announcements</button>
-        <button class="admin-nav-button" type="button" data-admin-nav="success-network">Success Network</button>
       </aside>
 
       <div class="admin-content-stack">
@@ -850,25 +849,6 @@ placeholder="Enter one SKU per line&#10;12345678&#10;87654321"></textarea>
         </section>
 
 
-        <section class="admin-pane" data-admin-pane="success-network">
-          <section class="panel">
-            <div class="panel-header"><div><h2>Discord Success Network</h2><p class="subtle-text">Install the bot, then choose the one success channel it should watch. Every human post in that channel is copied only to the Super Admin master success channel. The bot ignores every other channel.</p></div></div>
-            <div id="successNetworkStatus" class="notice-box">Loading Success Network...</div>
-            <div class="panel-actions" style="margin:12px 0"><a class="btn btn-primary" id="successBotInstallLink" href="#" target="_blank" rel="noopener">Install Success Bot</a><button class="btn" type="button" onclick="loadSuccessNetwork()">Refresh Discord Servers</button></div>
-            <div class="form-grid">
-              <div class="field"><label for="successSourceGuild">Your Discord server</label><select class="input" id="successSourceGuild" onchange="populateSuccessChannels('source')"><option value="">Choose server</option></select></div>
-              <div class="field"><label for="successSourceChannel">Success channel to watch</label><select class="input" id="successSourceChannel"><option value="">Choose channel</option></select></div>
-            </div>
-            <div class="panel-actions"><button class="btn btn-primary" type="button" onclick="saveSuccessSourceChannel()">Save My Success Channel</button></div>
-            <div id="successMasterSection" style="display:none;margin-top:22px">
-              <hr><h3>Super Admin Master Success Destination</h3><p class="subtle-text">All configured Discord success channels forward here. This is the only combined destination.</p>
-              <div class="form-grid"><div class="field"><label for="successMasterGuild">Master Discord server</label><select class="input" id="successMasterGuild" onchange="populateSuccessChannels('master')"><option value="">Choose server</option></select></div><div class="field"><label for="successMasterChannel">Master success channel</label><select class="input" id="successMasterChannel"><option value="">Choose channel</option></select></div></div>
-              <div class="panel-actions"><button class="btn btn-primary" type="button" onclick="saveSuccessMasterChannel()">Save Master Destination</button></div>
-            </div>
-            <div id="successNetworkMessage" class="subtle-text" style="margin-top:12px"></div>
-          </section>
-          <section class="panel"><div class="panel-header"><div><h3>Recent Forwarding Activity</h3><p class="subtle-text">Only Super Admin receives the combined success feed. Partner Discords never receive each other's posts.</p></div></div><div id="successNetworkRecent" class="subtle-text">No activity loaded.</div></section>
-        </section>
         <section class="admin-pane" data-admin-pane="webhooks">
           <section class="panel">
           <div class="panel-header">
