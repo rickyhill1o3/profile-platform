@@ -3267,7 +3267,7 @@ async function clearMyTargetProductSelections() {
         });
         if (message) message.textContent = "All Target product and checkout-list selections were cleared.";
         await loadTargetCheckoutListsForUser();
-        await loadStoreProducts("target");
+        await loadStoreProductsForSite("target");
     } catch (err) {
         if (message) message.textContent = err.message || "Could not clear Target selections.";
     } finally {
@@ -3829,7 +3829,7 @@ function renderTargetCheckoutListCard(list, options = {}) {
     }).join("\n");
 
     return `
-        <article class="target-checkout-list-card ${options.selected ? "target-checkout-list-card--selected" : ""}">
+        <article class="target-checkout-list-card ${options.selected ? "target-checkout-list-card--selected" : ""}" ${selectable ? `data-target-checkout-list-card="${escapeHTML(list.id)}" role="button" tabindex="0" aria-pressed="${options.selected ? "true" : "false"}` : ""}>
             <div class="target-checkout-list-card__header">
                 <div>
                     <h3>${escapeHTML(list.title || "Untitled List")}</h3>
@@ -3858,7 +3858,7 @@ async function saveTargetCheckoutListSelectionsFromPage() {
         const missing = Array.isArray(data.missing_skus) ? data.missing_skus.length : 0;
         message.textContent = `Saved automatically. ${Number(data.products_selected_from_lists || 0)} Target product${Number(data.products_selected_from_lists || 0) === 1 ? "" : "s"} supplied by selected lists.${added ? ` Added ${added}.` : ""}${removed ? ` Removed ${removed}.` : ""}${missing ? ` ${missing} SKU${missing === 1 ? " is" : "s are"} not yet in the catalog.` : ""}`;
     }
-    await loadStoreProducts("target");
+    await loadStoreProductsForSite("target");
     return data;
 }
 
@@ -3884,23 +3884,51 @@ async function loadTargetCheckoutListsForUser() {
             selectable: true
         })).join("");
 
+        const setTargetListCardState = (input) => {
+            const card = input.closest(".target-checkout-list-card");
+            const label = input.closest("label")?.querySelector("span");
+            if (card) {
+                card.classList.toggle("target-checkout-list-card--selected", input.checked);
+                card.setAttribute("aria-pressed", input.checked ? "true" : "false");
+            }
+            if (label) label.textContent = input.checked ? "Selected" : "Select this list";
+        };
+
+        const persistTargetListSelection = async (input) => {
+            setTargetListCardState(input);
+            panel.querySelectorAll("[data-target-checkout-list-select]").forEach((box) => { box.disabled = true; });
+            try {
+                await saveTargetCheckoutListSelectionsFromPage();
+            } catch (err) {
+                input.checked = !input.checked;
+                setTargetListCardState(input);
+                if (message) message.textContent = err.message || "Could not save selected lists.";
+            } finally {
+                panel.querySelectorAll("[data-target-checkout-list-select]").forEach((box) => { box.disabled = false; });
+            }
+        };
+
         panel.querySelectorAll("[data-target-checkout-list-select]").forEach((input) => {
-            input.addEventListener("change", async () => {
-                const card = input.closest(".target-checkout-list-card");
-                const label = input.closest("label")?.querySelector("span");
-                if (card) card.classList.toggle("target-checkout-list-card--selected", input.checked);
-                if (label) label.textContent = input.checked ? "Selected" : "Select this list";
-                panel.querySelectorAll("[data-target-checkout-list-select]").forEach((box) => { box.disabled = true; });
-                try {
-                    await saveTargetCheckoutListSelectionsFromPage();
-                } catch (err) {
-                    input.checked = !input.checked;
-                    if (card) card.classList.toggle("target-checkout-list-card--selected", input.checked);
-                    if (label) label.textContent = input.checked ? "Selected" : "Select this list";
-                    if (message) message.textContent = err.message || "Could not save selected lists.";
-                } finally {
-                    panel.querySelectorAll("[data-target-checkout-list-select]").forEach((box) => { box.disabled = false; });
-                }
+            input.addEventListener("change", () => persistTargetListSelection(input));
+        });
+
+        panel.querySelectorAll("[data-target-checkout-list-card]").forEach((card) => {
+            const input = card.querySelector("[data-target-checkout-list-select]");
+            if (!input) return;
+
+            card.addEventListener("click", (event) => {
+                if (input.disabled) return;
+                if (event.target.closest("input, label, textarea, button, a, select")) return;
+                input.checked = !input.checked;
+                input.dispatchEvent(new Event("change", { bubbles: true }));
+            });
+
+            card.addEventListener("keydown", (event) => {
+                if (input.disabled || (event.key !== "Enter" && event.key !== " ")) return;
+                if (event.target.closest("textarea, input, button, a, select")) return;
+                event.preventDefault();
+                input.checked = !input.checked;
+                input.dispatchEvent(new Event("change", { bubbles: true }));
             });
         });
     } catch (err) {

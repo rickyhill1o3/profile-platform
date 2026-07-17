@@ -1075,3 +1075,20 @@ h1,h2,h3,h4,p{margin:0}
   white-space: pre;
   overflow: auto;
 }
+
+/* Target checkout list cards are selectable across the full card surface. */
+.target-checkout-list-card[data-target-checkout-list-card] {
+  cursor: pointer;
+  transition: border-color .15s ease, box-shadow .15s ease, transform .15s ease;
+}
+.target-checkout-list-card[data-target-checkout-list-card]:hover {
+  border-color: #60a5fa;
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.08);
+}
+.target-checkout-list-card[data-target-checkout-list-card]:focus-visible {
+  outline: 3px solid rgba(37, 99, 235, 0.28);
+  outline-offset: 2px;
+}
+.target-checkout-list-card[data-target-checkout-list-card] .target-checkout-stellar-list {
+  cursor: text;
+}
