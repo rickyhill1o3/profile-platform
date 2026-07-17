@@ -3829,11 +3829,11 @@ function renderTargetCheckoutListCard(list, options = {}) {
     }).join("\n");
 
     return `
-        <article class="target-checkout-list-card ${options.selected ? "target-checkout-list-card--selected" : ""}" ${selectable ? `data-target-checkout-list-card="${escapeHTML(list.id)}" role="button" tabindex="0" aria-pressed="${options.selected ? "true" : "false"}` : ""}>
+        <article class="target-checkout-list-card ${options.selected ? "target-checkout-list-card--selected" : ""}" ${selectable ? `data-target-checkout-list-card="${escapeHTML(list.id)}" data-target-checkout-list-item-count="${items.length}" role="button" tabindex="0" aria-pressed="${options.selected ? "true" : "false"}` : ""}>
             <div class="target-checkout-list-card__header">
                 <div>
                     <h3>${escapeHTML(list.title || "Untitled List")}</h3>
-                    <p class="subtle-text">${items.length} SKU${items.length === 1 ? "" : "s"}${items.length >= 29 ? " • Full 29 SKU list" : ""}</p>
+                    <p class="subtle-text">${items.length} SKU${items.length === 1 ? "" : "s"}</p>
                 </div>
                 ${controls}
             </div>
@@ -3895,10 +3895,30 @@ async function loadTargetCheckoutListsForUser() {
         };
 
         const persistTargetListSelection = async (input) => {
+            const isUnselecting = !input.checked;
+            const card = input.closest(".target-checkout-list-card");
+            const listTitle = card?.querySelector("h3")?.textContent?.trim() || "this checkout list";
+            const itemCount = Number(card?.dataset.targetCheckoutListItemCount || 0);
+
+            if (isUnselecting) {
+                const confirmed = confirm(
+                    `Unselect ${listTitle}?\n\nThis will remove all ${itemCount || ""} product${itemCount === 1 ? "" : "s"} from this list from your Target selections. You may need to reselect individual products you still want.`
+                );
+                if (!confirmed) {
+                    input.checked = true;
+                    setTargetListCardState(input);
+                    return;
+                }
+            }
+
             setTargetListCardState(input);
             panel.querySelectorAll("[data-target-checkout-list-select]").forEach((box) => { box.disabled = true; });
             try {
-                await saveTargetCheckoutListSelectionsFromPage();
+                const result = await saveTargetCheckoutListSelectionsFromPage();
+                if (isUnselecting && message) {
+                    const removed = Number(result.products_removed || 0);
+                    message.textContent = `${listTitle} was unselected. ${removed} product${removed === 1 ? " was" : "s were"} removed from your Target selections. Reselect any individual products you still want to run.`;
+                }
             } catch (err) {
                 input.checked = !input.checked;
                 setTargetListCardState(input);
@@ -4030,11 +4050,6 @@ function initTargetCheckoutListAdmin() {
             if (message) message.textContent = "Add at least one SKU line.";
             return;
         }
-        if (count > 29) {
-            if (message) message.textContent = "Target checkout lists can only contain up to 29 SKUs.";
-            return;
-        }
-
         const submit = form.querySelector('button[type="submit"]');
         if (submit) submit.disabled = true;
         if (message) message.textContent = "Saving Target checkout list...";

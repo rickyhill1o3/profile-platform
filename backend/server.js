@@ -5031,7 +5031,7 @@ function normalizeTargetCheckoutLists(value) {
     return rawLists.map((list) => ({
         id: String(list.id || `target-list-${Date.now()}-${Math.random().toString(16).slice(2)}`),
         title: String(list.title || "Untitled List").trim() || "Untitled List",
-        items: Array.isArray(list.items) ? list.items.slice(0, 29).map((item) => {
+        items: Array.isArray(list.items) ? list.items.map((item) => {
             const numericPrice = item.price === null || item.price === undefined || item.price === "" ? null : Number(item.price);
             return {
                 sku: String(item.sku || "").trim(),
@@ -5173,7 +5173,6 @@ app.post('/admin/target-checkout-lists', auth, admin, async (req, res) => {
         const parsed = parseTargetCheckoutSkuLines(rawSkuList);
         if (parsed.errors.length) return res.status(400).json({ error: parsed.errors[0], errors: parsed.errors });
         if (!parsed.items.length) return res.status(400).json({ error: 'Add at least one SKU line.' });
-        if (parsed.items.length > 29) return res.status(400).json({ error: 'Target checkout lists can only contain up to 29 SKUs.' });
 
         const current = normalizeTargetCheckoutLists(await getAppSetting('target_checkout_lists', []));
         const catalogResult = await applyCatalogNamesToTargetCheckoutItems(parsed.items);
