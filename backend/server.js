@@ -3329,6 +3329,111 @@ async function sendMonitorDiscordWebhook(routeConfigOrUrl, item) {
     });
 }
 
+
+function buildMonitorDiscordEmbed(item = {}) {
+    const finalUrl = buildProductUrl(item.site, item.sku, item.url, item.title, item.image);
+    const cleanPrice = cleanMonitorPriceValue(item.price);
+    const displayPrice = cleanPrice && cleanPrice.toUpperCase() !== 'N/A' ? `$${cleanPrice}` : '-';
+    const fields = [
+        { name: 'Site', value: String(item.site || '-'), inline: true },
+        { name: 'Category', value: String(item.category || 'lowkey'), inline: true },
+        { name: 'SKU', value: String(item.sku || '-'), inline: true },
+        { name: 'Price', value: displayPrice, inline: true }
+    ];
+    if (item.offerId) fields.push({ name: 'Offer ID', value: String(item.offerId), inline: false });
+    if (item.cartLimit != null && String(item.cartLimit).trim() !== '') {
+        fields.push({ name: 'Cart Limit', value: String(item.cartLimit), inline: true });
+    }
+    if (finalUrl) fields.push({ name: 'Product Link', value: finalUrl, inline: false });
+
+    const atcLinks = Array.isArray(item.atcLinks) ? item.atcLinks.filter((row) => row && row.url) : [];
+    if (atcLinks.length) {
+        const allowedQty = new Set(['1', '3', '5']);
+        const formattedAtcLinks = atcLinks
+            .map((row) => {
+                const qtyMatch = String(row.label || '').match(/(\d+)x/i);
+                const qty = qtyMatch ? String(qtyMatch[1]) : '';
+                if (qty && !allowedQty.has(qty)) return null;
+                const label = qty ? `ATC ${qty}x` : String(row.label || 'ATC').replace(/^ATC Link\s*/i, 'ATC ');
+                return `[${label}](${row.url})`;
+            })
+            .filter(Boolean)
+            .slice(0, 3);
+        if (formattedAtcLinks.length) fields.push({ name: 'ATC Links', value: formattedAtcLinks.join(' • '), inline: false });
+    }
+
+    return {
+        title: decodeHtmlEntities(item.title || item.sku || 'In stock item'),
+        description: item.isStatusEvent ? 'Pokemon Center status notification' : 'Item restocked',
+        url: finalUrl || undefined,
+        fields,
+        thumbnail: item.image ? { url: item.image } : undefined,
+        timestamp: new Date().toISOString()
+    };
+}
+
+async function sendMonitorDiscordWebhookBatch(routeConfigOrUrl, items = []) {
+    const routeConfig = normalizeMonitorGroupConfig(routeConfigOrUrl);
+    const webhookUrl = routeConfig.webhook_url || (typeof routeConfigOrUrl === 'string' ? String(routeConfigOrUrl).trim() : '');
+    if (!webhookUrl) throw new Error('Monitor Discord webhook URL is missing');
+    const validItems = Array.isArray(items) ? items.filter(Boolean) : [];
+    if (!validItems.length) return { success: true, sent: 0, attempts: [] };
+
+    const mentionText = getMonitorMentionText(routeConfig);
+    const chunks = [];
+    for (let i = 0; i < validItems.length; i += 10) chunks.push(validItems.slice(i, i + 10));
+    const attempts = [];
+
+    for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex += 1) {
+        const chunk = chunks[chunkIndex];
+        const body = JSON.stringify({
+            username: 'In Stock Monitor',
+            content: chunkIndex === 0 ? (mentionText || undefined) : undefined,
+            allowed_mentions: { parse: ['everyone', 'roles'] },
+            embeds: chunk.map(buildMonitorDiscordEmbed)
+        });
+        const result = await enqueueDiscordWebhookJob(webhookUrl, async () => {
+            for (let attempt = 1; attempt <= 7; attempt += 1) {
+                const response = await globalThis.fetch(webhookUrl, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body
+                });
+                if (response.ok) return { success: true, attempt };
+                const text = await response.text().catch(() => '');
+                if (response.status === 429) {
+                    let retryMs = 5000;
+                    try {
+                        const parsed = JSON.parse(text || '{}');
+                        if (parsed?.retry_after != null) {
+                            const rawRetry = Number(parsed.retry_after);
+                            retryMs = rawRetry > 1000 ? Math.ceil(rawRetry) : Math.ceil(rawRetry * 1000);
+                        }
+                    } catch {}
+                    await new Promise((resolve) => setTimeout(resolve, Math.max(1000, retryMs + 250)));
+                    continue;
+                }
+                if (response.status >= 500) {
+                    await new Promise((resolve) => setTimeout(resolve, 1500 * attempt));
+                    continue;
+                }
+                throw new Error(`Discord webhook failed (${response.status}): ${text || response.statusText}`);
+            }
+            throw new Error('Discord webhook failed after maximum retry attempts');
+        });
+        attempts.push(result?.attempt || 1);
+    }
+
+    return {
+        success: true,
+        sent: validItems.length,
+        chunks: chunks.length,
+        attempts,
+        ping_mode: routeConfig.ping_mode || 'none',
+        role_mention: routeConfig.role_mention || ''
+    };
+}
+
 function maskEmail(email = '') {
     const value = String(email || '').trim().toLowerCase();
     const parts = value.split('@');
@@ -4117,6 +4222,9 @@ app.post(["/webhooks/monitor", "/webhooks/monitor/:token"], async (req, res) => 
                     }
                 }
 
+                // Group all parsed monitor items by destination webhook and send up to 10 embeds
+                // in one Discord request. This prevents partial delivery when many SKUs restock together.
+                const deliveriesByTarget = new Map();
                 for (const item of items) {
                     const targets = [];
                     const seenTargetUrls = new Set();
@@ -4144,12 +4252,53 @@ app.post(["/webhooks/monitor", "/webhooks/monitor/:token"], async (req, res) => 
                     }
                     for (const target of targets) {
                         const url = String(target.route.webhook_url || '').trim();
-                        usedTargets.push({ category: item.category, scope: target.scope, user_id: target.user_id, webhook_url: url.slice(0, 80), ping_mode: target.route.ping_mode || 'none', role_mention: target.route.role_mention || '' });
-                        try {
-                            const sendResult = await sendMonitorDiscordWebhook(target.route, item);
-                            results.push({ sku: item.sku, category: item.category, scope: target.scope, user_id: target.user_id, success: true, attempt: sendResult?.attempt || 1, ping_mode: sendResult?.ping_mode || 'none', role_mention: sendResult?.role_mention || '' });
-                        } catch (sendErr) {
-                            results.push({ sku: item.sku, category: item.category, scope: target.scope, user_id: target.user_id, success: false, error: sendErr.message });
+                        const targetKey = `${target.scope}:${target.user_id || 'super'}:${url}`;
+                        if (!deliveriesByTarget.has(targetKey)) {
+                            deliveriesByTarget.set(targetKey, { ...target, url, items: [] });
+                        }
+                        deliveriesByTarget.get(targetKey).items.push(item);
+                    }
+                }
+
+                for (const delivery of deliveriesByTarget.values()) {
+                    usedTargets.push({
+                        category: [...new Set(delivery.items.map((item) => item.category))].join(','),
+                        scope: delivery.scope,
+                        user_id: delivery.user_id,
+                        webhook_url: delivery.url.slice(0, 80),
+                        ping_mode: delivery.route.ping_mode || 'none',
+                        role_mention: delivery.route.role_mention || '',
+                        item_count: delivery.items.length,
+                        skus: delivery.items.map((item) => item.sku || '').filter(Boolean)
+                    });
+                    try {
+                        const sendResult = await sendMonitorDiscordWebhookBatch(delivery.route, delivery.items);
+                        for (const item of delivery.items) {
+                            results.push({
+                                sku: item.sku,
+                                category: item.category,
+                                scope: delivery.scope,
+                                user_id: delivery.user_id,
+                                success: true,
+                                batch_sent: true,
+                                batch_size: delivery.items.length,
+                                chunks: sendResult?.chunks || 1,
+                                ping_mode: sendResult?.ping_mode || 'none',
+                                role_mention: sendResult?.role_mention || ''
+                            });
+                        }
+                    } catch (sendErr) {
+                        for (const item of delivery.items) {
+                            results.push({
+                                sku: item.sku,
+                                category: item.category,
+                                scope: delivery.scope,
+                                user_id: delivery.user_id,
+                                success: false,
+                                batch_sent: true,
+                                batch_size: delivery.items.length,
+                                error: sendErr.message
+                            });
                         }
                     }
                 }
