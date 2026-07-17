@@ -1092,3 +1092,49 @@ h1,h2,h3,h4,p{margin:0}
 .target-checkout-list-card[data-target-checkout-list-card] .target-checkout-stellar-list {
   cursor: text;
 }
+
+/* ===== Guided setup + help center ===== */
+.setup-health-card { margin-bottom: 18px; overflow: hidden; }
+.setup-health-header { display:flex; justify-content:space-between; align-items:center; gap:18px; }
+.setup-progress-ring { width:76px; height:76px; flex:0 0 76px; border-radius:50%; display:grid; place-items:center; background:conic-gradient(#2563eb var(--setup-progress, 0%), #e7edf7 0); position:relative; }
+.setup-progress-ring::after { content:""; position:absolute; inset:8px; border-radius:50%; background:#fff; }
+.setup-progress-ring strong { position:relative; z-index:1; font-size:17px; }
+.setup-progress-track { width:100%; height:9px; overflow:hidden; border-radius:999px; background:#e7edf7; margin:14px 0; }
+.setup-progress-track > span { display:block; height:100%; width:0; background:linear-gradient(90deg,#2563eb,#4f46e5); border-radius:inherit; transition:width .25s ease; }
+.setup-checklist-compact { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:8px; margin-bottom:14px; }
+.setup-check-chip { border:1px solid #dbe4f0; border-radius:10px; padding:9px 10px; font-size:13px; background:#f8fafc; display:flex; gap:8px; align-items:center; }
+.setup-check-chip.is-complete { background:#ecfdf3; border-color:#a7e4bd; }
+.setup-check-chip.is-incomplete { background:#fff7ed; border-color:#fed7aa; }
+.help-center-hero { margin-bottom:14px; }
+.help-search-row { display:flex; gap:10px; margin-top:14px; }
+.help-search-row .input { flex:1; }
+.help-topic-grid { display:grid; gap:14px; grid-template-columns:repeat(2,minmax(0,1fr)); }
+.help-topic { margin:0; }
+.help-topic h3 { margin-top:0; }
+.help-topic ol,.help-topic ul { padding-left:20px; line-height:1.55; }
+.help-topic details { border-top:1px solid #e5eaf1; padding:10px 0; }
+.help-topic details:first-of-type { margin-top:8px; }
+.help-topic summary { font-weight:700; cursor:pointer; }
+.help-callout { padding:11px 12px; border-radius:10px; background:#eff6ff; border:1px solid #bfdbfe; margin-top:10px; }
+.help-callout.warning { background:#fff7ed; border-color:#fed7aa; }
+.setup-wizard-backdrop { position:fixed; inset:0; z-index:9999; background:rgba(15,23,42,.62); padding:22px; display:grid; place-items:center; }
+.setup-wizard-backdrop[hidden] { display:none; }
+.setup-wizard { width:min(720px,100%); max-height:90vh; overflow:auto; background:#fff; border-radius:18px; box-shadow:0 24px 70px rgba(15,23,42,.3); padding:24px; position:relative; }
+.setup-wizard-close { position:absolute; right:16px; top:12px; border:0; background:transparent; font-size:30px; cursor:pointer; }
+.setup-wizard-steps { margin-top:14px; }
+.setup-wizard-step { display:none; }
+.setup-wizard-step.is-active { display:block; }
+.setup-wizard-step-card { padding:18px; border:1px solid #dbe4f0; border-radius:14px; background:#f8fafc; }
+.setup-wizard-status { display:inline-flex; align-items:center; gap:7px; font-weight:700; border-radius:999px; padding:6px 10px; margin:8px 0 12px; }
+.setup-wizard-status.is-complete { color:#166534; background:#dcfce7; }
+.setup-wizard-status.is-incomplete { color:#9a3412; background:#ffedd5; }
+.setup-wizard-footer { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-top:18px; }
+.setup-step-actions { display:flex; flex-wrap:wrap; gap:8px; margin-top:14px; }
+.setup-step-list { line-height:1.65; padding-left:20px; }
+@media (max-width: 800px) {
+  .setup-health-header { align-items:flex-start; }
+  .setup-checklist-compact,.help-topic-grid { grid-template-columns:1fr; }
+  .help-search-row { flex-direction:column; }
+  .setup-wizard-backdrop { padding:10px; align-items:end; }
+  .setup-wizard { border-radius:18px 18px 0 0; max-height:94vh; }
+}

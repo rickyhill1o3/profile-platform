@@ -24,6 +24,23 @@
       </div>
     </header>
 
+    <section class="panel setup-health-card" id="setupHealthCard">
+      <div class="setup-health-header">
+        <div>
+          <p class="eyebrow">Account Setup</p>
+          <h2 id="setupHealthTitle">Checking your account readiness...</h2>
+          <p class="subtle-text" id="setupHealthSummary">We are reviewing profiles, store credentials, run status, and product selections.</p>
+        </div>
+        <div class="setup-progress-ring" id="setupProgressRing" aria-label="Setup progress"><strong id="setupProgressPercent">0%</strong></div>
+      </div>
+      <div class="setup-progress-track"><span id="setupProgressBar"></span></div>
+      <div class="setup-checklist-compact" id="setupChecklistCompact"></div>
+      <div class="panel-actions">
+        <button class="btn btn-primary" type="button" id="openSetupWizardButton">Continue Setup</button>
+        <button class="btn" type="button" id="openHelpCenterButton">Open Help Center</button>
+      </div>
+    </section>
+
     <section class="stats-grid">
       <div class="stat-card"><span class="stat-label">All Profiles</span><strong class="stat-value" id="profileCountStat">0</strong><span class="stat-help">Saved checkout profiles</span></div>
       <div class="stat-card"><span class="stat-label">Amazon</span><strong class="stat-value" id="amazonProfileCountStat">0</strong><span class="stat-help">Amazon-ready profiles</span></div>
@@ -51,6 +68,7 @@
         <button class="admin-nav-button" type="button" data-user-nav="credits">Buy Credits</button>
         <button class="admin-nav-button" type="button" data-user-nav="history">Order History</button>
         <button class="admin-nav-button" type="button" data-user-nav="discord">Discord Settings</button>
+        <button class="admin-nav-button" type="button" data-user-nav="help">Help Center</button>
       </aside>
 
       <div class="admin-content-stack">
@@ -422,11 +440,91 @@
             </div>
           </section>
         </section>
+
+        <section class="admin-pane" data-user-pane="help">
+          <section class="panel help-center-hero">
+            <p class="eyebrow">Help Center</p>
+            <h2>Set up your account from start to finish</h2>
+            <p class="subtle-text">Follow the steps in order. Each section explains what to enter, why it is needed, and how to fix common problems.</p>
+            <div class="help-search-row">
+              <input class="input" id="helpCenterSearch" placeholder="Search IMAP, 2FA, Target, profiles, products..." />
+              <button class="btn btn-primary" type="button" id="restartSetupWizardButton">Run Setup Wizard</button>
+            </div>
+          </section>
+          <section class="help-topic-grid" id="helpTopicGrid">
+            <article class="panel help-topic" data-help-keywords="start welcome account setup checklist">
+              <h3>1. Getting Started</h3>
+              <p>Create at least one profile, attach the stores you want to run, add store login credentials, enable those stores, and select products.</p>
+              <button class="btn help-jump" type="button" data-help-nav="profiles">Go to Profiles</button>
+            </article>
+            <article class="panel help-topic" data-help-keywords="profile billing shipping card address phone email create edit">
+              <h3>2. Build Profiles</h3>
+              <p>A profile contains the shipping, billing, phone, email, and payment information used at checkout. Create one profile, then assign it to every applicable store.</p>
+              <ol><li>Open <strong>Profiles</strong>.</li><li>Click <strong>Create Profile</strong>.</li><li>Complete shipping, billing, phone, email, and card details.</li><li>Select the stores that should use the profile.</li><li>Save the profile.</li></ol>
+              <button class="btn help-jump" type="button" data-help-nav="profiles">Open Profiles</button>
+            </article>
+            <article class="panel help-topic" data-help-keywords="store login account password target walmart amazon pokemon center credentials">
+              <h3>3. Add Store Accounts</h3>
+              <p>Inside the profile, add the login email and password for each assigned store. Credentials are stored separately per store so the same profile can use different retailer accounts.</p>
+              <div class="help-callout"><strong>Required:</strong> Target and Walmart generally need login + IMAP. Amazon generally needs login + authenticator secret.</div>
+            </article>
+            <article class="panel help-topic" data-help-keywords="imap gmail outlook yahoo icloud app password otp email verification code">
+              <h3>4. IMAP / Email Verification Codes</h3>
+              <p>IMAP allows the platform to retrieve one-time retailer verification codes from your mailbox. Use an <strong>app password</strong>, not your normal email password.</p>
+              <details><summary>Gmail</summary><ol><li>Turn on 2-Step Verification for the Google account.</li><li>Open Google Account → Security → App passwords.</li><li>Create an app password named “The Shore Shack”.</li><li>Paste the 16-character app password into the store’s IMAP/App Password field.</li></ol><p>The existing <strong>What is this?</strong> button beside the Gmail field also opens these instructions.</p></details>
+              <details><summary>Microsoft Outlook / Hotmail</summary><ol><li>Turn on two-step verification in Microsoft Account Security.</li><li>Create an app password under Advanced security options.</li><li>Paste that app password into the IMAP/App Password field.</li></ol></details>
+              <details><summary>Yahoo Mail</summary><ol><li>Open Yahoo Account Security.</li><li>Select <strong>Generate app password</strong>.</li><li>Create one for “Other App” and paste it into the IMAP field.</li></ol></details>
+              <details><summary>Apple iCloud Mail</summary><ol><li>Sign in at Apple ID account settings.</li><li>Under Sign-In and Security, create an app-specific password.</li><li>Paste it into the IMAP field.</li></ol></details>
+              <div class="help-callout warning"><strong>Never use:</strong> your regular mailbox password. If codes stop arriving, generate a new app password and save the profile again.</div>
+            </article>
+            <article class="panel help-topic" data-help-keywords="2fa authenticator qr code secret amazon totp google authenticator authy">
+              <h3>5. Authenticator / 2FA Secret</h3>
+              <p>The platform needs the secret behind the rotating six-digit code, not a single temporary code.</p>
+              <ol><li>Open the retailer’s security settings and choose to set up an authenticator app.</li><li>When the QR code appears, look for <strong>Can’t scan?</strong>, <strong>Enter setup key</strong>, or <strong>Show secret key</strong>.</li><li>Copy the permanent setup key into the profile’s 2FA Secret field.</li><li>Also scan the QR code into Google Authenticator, Microsoft Authenticator, Authy, or your preferred app.</li><li>Finish verification on the retailer website and save the profile.</li></ol>
+              <div class="help-callout warning"><strong>Do not paste:</strong> the current six-digit code. It expires every 30 seconds.</div>
+            </article>
+            <article class="panel help-topic" data-help-keywords="store run status active paused on off enable">
+              <h3>6. Turn Stores On</h3>
+              <p>After profiles and credentials are saved, open <strong>Store Run Status</strong> and turn on every store you authorize the team to run. A store left paused will not run.</p>
+              <button class="btn help-jump" type="button" data-help-nav="run-status">Open Store Run Status</button>
+            </article>
+            <article class="panel help-topic" data-help-keywords="products selections target checkout list amazon main item quantity red green synced">
+              <h3>7. Select Products</h3>
+              <p>Choose the products you want the bots to target. Profiles tell the system <em>how</em> to checkout; product selections tell it <em>what</em> to checkout.</p>
+              <ul><li>Target checkout lists automatically add every product in the list.</li><li>Unselecting a Target list removes the products contained in that list.</li><li>A red status means your selections changed and your admin still needs to update the bot export.</li><li>A green status means your latest selections have been copied.</li></ul>
+              <button class="btn help-jump" type="button" data-help-nav="target">Open Target Products</button>
+            </article>
+            <article class="panel help-topic" data-help-keywords="troubleshooting login failed otp missing checkout not running">
+              <h3>8. Troubleshooting</h3>
+              <details><summary>My store is not running</summary><p>Confirm the store is active in Store Run Status, the profile is assigned to that store, login credentials are complete, and at least one product is selected.</p></details>
+              <details><summary>Verification codes are not working</summary><p>Generate a fresh email app password, confirm the mailbox address matches the retailer account, save the profile, and notify your admin that profiles changed.</p></details>
+              <details><summary>Amazon authenticator codes fail</summary><p>Reconfigure authenticator on Amazon and save the permanent setup key. Do not enter the rotating six-digit code.</p></details>
+              <details><summary>I updated a profile or product</summary><p>Red means your admin has not yet copied the update. Green means the current version is synced.</p></details>
+            </article>
+          </section>
+        </section>
       </div>
     </div>
   </div>
 
   <script src="products.js?v=20260323b" defer></script>
+
+  <div class="setup-wizard-backdrop" id="setupWizardBackdrop" hidden>
+    <section class="setup-wizard" role="dialog" aria-modal="true" aria-labelledby="setupWizardTitle">
+      <button class="setup-wizard-close" type="button" id="closeSetupWizardButton" aria-label="Close setup wizard">×</button>
+      <p class="eyebrow">Guided Account Setup</p>
+      <h2 id="setupWizardTitle">Get your account ready</h2>
+      <p class="subtle-text" id="setupWizardIntro">Complete each step in order. Your progress is checked from your real account data.</p>
+      <div class="setup-progress-track"><span id="wizardProgressBar"></span></div>
+      <div id="setupWizardSteps" class="setup-wizard-steps"></div>
+      <div class="setup-wizard-footer">
+        <button class="btn" type="button" id="setupWizardPrevious">Previous</button>
+        <span id="setupWizardPosition" class="subtle-text"></span>
+        <button class="btn btn-primary" type="button" id="setupWizardNext">Next Step</button>
+      </div>
+    </section>
+  </div>
+
   <script src="script.js?v=20260326a" defer></script>
 </body>
 </html>

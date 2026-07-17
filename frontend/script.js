@@ -4970,6 +4970,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         try { await loadTargetCheckoutListsForUser(); } catch (err) { console.error("Target checkout lists failed:", err); }
         try { await loadCreditsBalance(); } catch (_) { }
         try { await loadUserActivity(); } catch (_) { }
+        try { await initGuidedSetup(); } catch (err) { console.error("Guided setup failed:", err); }
     }
 
     if (document.getElementById("profileForm")) {
@@ -5125,3 +5126,226 @@ document.addEventListener("click", (event) => {
     const button = event.target.closest("#clearMyTargetProductSelections");
     if (button) clearMyTargetProductSelections();
 });
+
+/* ================= GUIDED SETUP + HELP CENTER ================= */
+let setupWizardState = null;
+let setupWizardIndex = 0;
+
+function navigateUserDashboardPane(key) {
+    const button = document.querySelector(`[data-user-nav="${CSS.escape(String(key || ''))}"]`);
+    if (button) {
+        button.click();
+        button.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+}
+
+function onboardingProfileCredentialSummary(profiles = []) {
+    const assignedStores = new Set();
+    const completeStores = new Set();
+    const missingStores = new Set();
+    profiles.forEach((profile) => {
+        profileAssignedStores(profile).forEach((store) => {
+            assignedStores.add(store);
+            const cfg = STORE_CREDENTIAL_CONFIG[store];
+            if (!cfg) return;
+            if (credentialStatusForStore(profile, store) === 'Login complete') completeStores.add(store);
+            else missingStores.add(store);
+        });
+    });
+    // A store is complete if at least one assigned profile has complete credentials.
+    completeStores.forEach((store) => missingStores.delete(store));
+    return { assignedStores, completeStores, missingStores };
+}
+
+async function collectSetupWizardState() {
+    const profiles = Array.isArray(allDashboardProfiles) && allDashboardProfiles.length
+        ? allDashboardProfiles
+        : await authJSON(API + '/profiles').catch(() => []);
+    const [runData, targetLists] = await Promise.all([
+        authJSON(API + '/store-run-status').catch(() => ({ stores: [] })),
+        authJSON(API + '/target-checkout-lists').catch(() => ({ lists: [], selected_list_ids: [] }))
+    ]);
+    const credentialSummary = onboardingProfileCredentialSummary(profiles);
+    const enabledStores = new Set((runData.stores || []).filter((row) => row.is_enabled).map((row) => row.site));
+    const selectedBySite = Object.fromEntries(Object.entries(storeSelectedProductIds || {}).map(([site, set]) => [site, set instanceof Set ? set.size : 0]));
+    const selectedProductCount = Object.values(selectedBySite).reduce((sum, value) => sum + Number(value || 0), 0);
+    const selectedTargetListCount = Array.isArray(targetLists.selected_list_ids) ? targetLists.selected_list_ids.length : 0;
+    const hasCredentials = credentialSummary.assignedStores.size === 0
+        ? false
+        : Array.from(credentialSummary.assignedStores).filter((store) => STORE_CREDENTIAL_CONFIG[store]).every((store) => credentialSummary.completeStores.has(store));
+    const steps = [
+        {
+            key: 'profiles', title: 'Create your first profile', complete: profiles.length > 0,
+            description: 'Add your shipping, billing, phone, email, and payment information.',
+            detail: profiles.length ? `${profiles.length} profile${profiles.length === 1 ? '' : 's'} saved.` : 'No profiles have been created yet.',
+            nav: 'profiles', action: 'Open Profiles'
+        },
+        {
+            key: 'assignments', title: 'Assign stores to your profiles', complete: credentialSummary.assignedStores.size > 0,
+            description: 'Choose Target, Walmart, Amazon, Pokémon Center, General, or any other store that should use each profile.',
+            detail: credentialSummary.assignedStores.size ? `Assigned stores: ${Array.from(credentialSummary.assignedStores).map((s) => STORE_CREDENTIAL_CONFIG[s]?.label || s).join(', ')}.` : 'Edit a profile and select at least one store.',
+            nav: 'profiles', action: 'Edit Profiles'
+        },
+        {
+            key: 'credentials', title: 'Complete store logins, IMAP, and 2FA', complete: hasCredentials,
+            description: 'Store accounts need a login. Target/Walmart generally need an email app password; Amazon generally needs an authenticator secret.',
+            detail: credentialSummary.missingStores.size ? `Missing or incomplete: ${Array.from(credentialSummary.missingStores).map((s) => STORE_CREDENTIAL_CONFIG[s]?.label || s).join(', ')}.` : (hasCredentials ? 'Required credentials are complete.' : 'Assign a store before credentials can be checked.'),
+            nav: 'profiles', action: 'Add Credentials', help: true
+        },
+        {
+            key: 'run-status', title: 'Turn stores on', complete: enabledStores.size > 0,
+            description: 'Enable every store you authorize The Shore Shack to run.',
+            detail: enabledStores.size ? `Active stores: ${Array.from(enabledStores).join(', ')}.` : 'All stores are currently paused.',
+            nav: 'run-status', action: 'Open Run Status'
+        },
+        {
+            key: 'products', title: 'Select products or checkout lists', complete: selectedProductCount > 0 || selectedTargetListCount > 0,
+            description: 'Select the products you want targeted. Target checkout lists can add many products at once.',
+            detail: `${selectedProductCount} directly selected product${selectedProductCount === 1 ? '' : 's'}${selectedTargetListCount ? ` and ${selectedTargetListCount} Target list${selectedTargetListCount === 1 ? '' : 's'}` : ''}.`,
+            nav: 'target', action: 'Select Products'
+        },
+        {
+            key: 'ready', title: 'Final account check', complete: false,
+            description: 'Your account is ready when every required step above is complete.',
+            detail: '', nav: 'help', action: 'Review Help Center'
+        }
+    ];
+    steps[steps.length - 1].complete = steps.slice(0, -1).every((step) => step.complete);
+    steps[steps.length - 1].detail = steps[steps.length - 1].complete
+        ? 'Your core setup is complete. Keep profiles and product selections current before releases.'
+        : 'Complete the orange steps above before your next release.';
+    return { profiles, credentialSummary, enabledStores, selectedBySite, selectedProductCount, selectedTargetListCount, steps };
+}
+
+function renderSetupHealth(state) {
+    const card = document.getElementById('setupHealthCard');
+    if (!card || !state) return;
+    const coreSteps = state.steps.slice(0, -1);
+    const completeCount = coreSteps.filter((step) => step.complete).length;
+    const percent = Math.round((completeCount / coreSteps.length) * 100);
+    const ring = document.getElementById('setupProgressRing');
+    if (ring) ring.style.setProperty('--setup-progress', `${percent}%`);
+    const percentNode = document.getElementById('setupProgressPercent');
+    if (percentNode) percentNode.textContent = `${percent}%`;
+    const bar = document.getElementById('setupProgressBar');
+    if (bar) bar.style.width = `${percent}%`;
+    const title = document.getElementById('setupHealthTitle');
+    const summary = document.getElementById('setupHealthSummary');
+    if (title) title.textContent = percent === 100 ? 'Your account setup is complete' : `Account setup is ${percent}% complete`;
+    if (summary) summary.textContent = percent === 100
+        ? 'Everything required for the core setup is ready. Review red profile or product sync notices before releases.'
+        : `${coreSteps.length - completeCount} setup step${coreSteps.length - completeCount === 1 ? '' : 's'} still need attention.`;
+    const compact = document.getElementById('setupChecklistCompact');
+    if (compact) compact.innerHTML = coreSteps.map((step) => `<div class="setup-check-chip ${step.complete ? 'is-complete' : 'is-incomplete'}"><span>${step.complete ? '✓' : '!'}</span><span>${escapeHTML(step.title)}</span></div>`).join('');
+    const openButton = document.getElementById('openSetupWizardButton');
+    if (openButton) openButton.textContent = percent === 100 ? 'Review Setup' : 'Continue Setup';
+}
+
+function renderSetupWizardStep() {
+    const state = setupWizardState;
+    const container = document.getElementById('setupWizardSteps');
+    if (!state || !container) return;
+    const steps = state.steps;
+    setupWizardIndex = Math.max(0, Math.min(setupWizardIndex, steps.length - 1));
+    const step = steps[setupWizardIndex];
+    const percent = Math.round(((setupWizardIndex + 1) / steps.length) * 100);
+    container.innerHTML = `<div class="setup-wizard-step is-active"><div class="setup-wizard-step-card">
+        <p class="eyebrow">Step ${setupWizardIndex + 1} of ${steps.length}</p>
+        <h3>${escapeHTML(step.title)}</h3>
+        <div class="setup-wizard-status ${step.complete ? 'is-complete' : 'is-incomplete'}">${step.complete ? '✓ Complete' : 'Needs attention'}</div>
+        <p>${escapeHTML(step.description)}</p>
+        <p class="subtle-text">${escapeHTML(step.detail)}</p>
+        ${step.key === 'credentials' ? `<ul class="setup-step-list"><li>Target, Walmart, and Sam’s Club: retailer login plus mailbox app password/IMAP.</li><li>Amazon: retailer login plus the permanent authenticator setup key.</li><li>Never paste a temporary six-digit code into the 2FA Secret field.</li></ul>` : ''}
+        <div class="setup-step-actions">
+          <button class="btn btn-primary" type="button" data-setup-go="${escapeHTML(step.nav)}">${escapeHTML(step.action)}</button>
+          ${step.help ? '<button class="btn" type="button" data-setup-help>Read IMAP & 2FA Help</button>' : ''}
+          <button class="btn" type="button" data-refresh-setup>Refresh Check</button>
+        </div>
+    </div></div>`;
+    const wizardBar = document.getElementById('wizardProgressBar');
+    if (wizardBar) wizardBar.style.width = `${percent}%`;
+    const position = document.getElementById('setupWizardPosition');
+    if (position) position.textContent = `${setupWizardIndex + 1} / ${steps.length}`;
+    const prev = document.getElementById('setupWizardPrevious');
+    const next = document.getElementById('setupWizardNext');
+    if (prev) prev.disabled = setupWizardIndex === 0;
+    if (next) next.textContent = setupWizardIndex === steps.length - 1 ? 'Finish' : 'Next Step';
+    container.querySelector('[data-setup-go]')?.addEventListener('click', (event) => {
+        closeSetupWizard();
+        navigateUserDashboardPane(event.currentTarget.dataset.setupGo);
+    });
+    container.querySelector('[data-setup-help]')?.addEventListener('click', () => {
+        closeSetupWizard();
+        navigateUserDashboardPane('help');
+        setTimeout(() => document.querySelector('[data-help-keywords*="imap"]')?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 100);
+    });
+    container.querySelector('[data-refresh-setup]')?.addEventListener('click', refreshSetupWizard);
+}
+
+async function refreshSetupWizard() {
+    const button = document.querySelector('[data-refresh-setup]');
+    if (button) button.disabled = true;
+    try {
+        setupWizardState = await collectSetupWizardState();
+        renderSetupHealth(setupWizardState);
+        renderSetupWizardStep();
+    } finally {
+        if (button) button.disabled = false;
+    }
+}
+
+function openSetupWizard(index = null) {
+    const backdrop = document.getElementById('setupWizardBackdrop');
+    if (!backdrop) return;
+    if (Number.isInteger(index)) setupWizardIndex = index;
+    else if (setupWizardState) setupWizardIndex = Math.max(0, setupWizardState.steps.slice(0, -1).findIndex((step) => !step.complete));
+    if (setupWizardIndex < 0) setupWizardIndex = 0;
+    backdrop.hidden = false;
+    document.body.style.overflow = 'hidden';
+    renderSetupWizardStep();
+}
+
+function closeSetupWizard() {
+    const backdrop = document.getElementById('setupWizardBackdrop');
+    if (backdrop) backdrop.hidden = true;
+    document.body.style.overflow = '';
+}
+
+function initHelpCenter() {
+    const search = document.getElementById('helpCenterSearch');
+    if (search) search.addEventListener('input', () => {
+        const query = search.value.trim().toLowerCase();
+        document.querySelectorAll('.help-topic').forEach((topic) => {
+            const haystack = `${topic.dataset.helpKeywords || ''} ${topic.textContent || ''}`.toLowerCase();
+            topic.style.display = !query || haystack.includes(query) ? '' : 'none';
+        });
+    });
+    document.querySelectorAll('.help-jump').forEach((button) => button.addEventListener('click', () => navigateUserDashboardPane(button.dataset.helpNav)));
+    document.getElementById('restartSetupWizardButton')?.addEventListener('click', () => openSetupWizard(0));
+    document.getElementById('openHelpCenterButton')?.addEventListener('click', () => navigateUserDashboardPane('help'));
+}
+
+async function initGuidedSetup() {
+    if (!document.getElementById('setupHealthCard')) return;
+    initHelpCenter();
+    document.getElementById('openSetupWizardButton')?.addEventListener('click', () => openSetupWizard());
+    document.getElementById('closeSetupWizardButton')?.addEventListener('click', closeSetupWizard);
+    document.getElementById('setupWizardBackdrop')?.addEventListener('click', (event) => { if (event.target.id === 'setupWizardBackdrop') closeSetupWizard(); });
+    document.getElementById('setupWizardPrevious')?.addEventListener('click', () => { setupWizardIndex -= 1; renderSetupWizardStep(); });
+    document.getElementById('setupWizardNext')?.addEventListener('click', () => {
+        if (!setupWizardState) return;
+        if (setupWizardIndex >= setupWizardState.steps.length - 1) { closeSetupWizard(); return; }
+        setupWizardIndex += 1;
+        renderSetupWizardStep();
+    });
+    setupWizardState = await collectSetupWizardState();
+    renderSetupHealth(setupWizardState);
+    const coreComplete = setupWizardState.steps.slice(0, -1).every((step) => step.complete);
+    if (!coreComplete && setupWizardState.profiles.length === 0) {
+        const key = 'shoreShackSetupWizardShownThisSession';
+        if (!sessionStorage.getItem(key)) {
+            sessionStorage.setItem(key, '1');
+            setTimeout(() => openSetupWizard(), 350);
+        }
+    }
+}

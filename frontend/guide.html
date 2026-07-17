@@ -11,117 +11,53 @@
     <header class="topbar">
       <div>
         <p class="eyebrow">The Shore Shack TCG</p>
-        <h1>User Guide</h1>
-        <p class="subtle-text">Everything a user needs to know before the next drop.</p>
+        <h1>Complete User Guide</h1>
+        <p class="subtle-text">Follow these steps in order to prepare your account for releases.</p>
       </div>
       <div class="topbar-actions">
         <a class="btn" href="index.html">Home</a>
-        <a class="btn" href="login.html">Login</a>
-        <a class="btn btn-primary" href="signup.html">Sign Up</a>
+        <a class="btn btn-primary" href="dashboard.html">Open Dashboard</a>
       </div>
     </header>
 
+    <section class="panel banner banner-soft">
+      <strong>Recommended order</strong>
+      <p class="subtle-text">1. Create profiles → 2. Assign stores → 3. Add store login and IMAP/2FA → 4. Turn stores on → 5. Select products → 6. Confirm green sync status.</p>
+    </section>
+
     <section class="guide-layout">
       <article class="panel guide-content">
-        <div class="guide-block">
-          <h2>1. Access the website</h2>
-          <p>Go to <strong>https://www.theshoreshacktcg.com</strong>. If a browser has old DNS or SSL cache, open the site in a private window or toggle Wi-Fi off and back on.</p>
+        <div class="guide-block"><h2>1. Create your account</h2><p>Sign up with your invite code, verify that you can log in, and open the User Dashboard. The guided setup card at the top checks your real account and shows what is incomplete.</p></div>
+        <div class="guide-block"><h2>2. Build your first profile</h2><p>Open <strong>Profiles</strong> and click <strong>Create Profile</strong>. Enter the shipping address, billing address, phone number, email, and payment information that should be used at checkout.</p><p>You may create multiple profiles. Give each profile a clear name so you and the admin can identify it.</p></div>
+        <div class="guide-block"><h2>3. Assign stores to the profile</h2><p>While creating or editing a profile, select every store that should use that profile. Store assignments determine where the profile appears and which store credentials are required.</p></div>
+        <div class="guide-block"><h2>4. Add retailer login credentials</h2><p>For each assigned store, enter the retailer account email and password. Target, Walmart, and Sam’s Club generally also require an email app password for verification codes. Amazon generally requires an authenticator secret.</p></div>
+        <div class="guide-block"><h2>5. Set up IMAP / email app passwords</h2><p>IMAP allows the platform to retrieve one-time verification codes sent by retailers. Use an app password, not your normal email password.</p>
+          <h3>Gmail</h3><ol><li>Turn on Google 2-Step Verification.</li><li>Open Google Account → Security → App passwords.</li><li>Create an app password named “The Shore Shack”.</li><li>Paste the 16-character app password into the profile’s IMAP/App Password field.</li></ol>
+          <h3>Outlook / Hotmail</h3><ol><li>Turn on two-step verification in Microsoft Account Security.</li><li>Open Advanced security options and create an app password.</li><li>Paste it into the IMAP/App Password field.</li></ol>
+          <h3>Yahoo</h3><ol><li>Open Yahoo Account Security.</li><li>Generate an app password for “Other App”.</li><li>Paste it into the IMAP field.</li></ol>
+          <h3>iCloud</h3><ol><li>Open Apple ID account settings.</li><li>Create an app-specific password under Sign-In and Security.</li><li>Paste it into the IMAP field.</li></ol>
         </div>
-        <div class="guide-block">
-          <h2>2. Create your account</h2>
-          <p>Click <strong>Sign Up</strong>, enter your email, password, and invite code if one is required. You will receive a welcome email after signup.</p>
-        </div>
-        <div class="guide-block">
-          <h2>3. Build your store profiles</h2>
-          <p>Create profiles for the stores you want to run:</p>
-          <ul>
-            <li><strong>Amazon</strong> for Amazon-specific checkout details.</li>
-            <li><strong>Target</strong> for Target-specific checkout details.</li>
-            <li><strong>Walmart</strong> for Walmart-specific checkout details.</li>
-            <li><strong>General</strong> for Supreme or any release that does not fit a store-specific profile.</li>
-          </ul>
-          <p>Your saved profiles are what the software uses to shop. They contain the checkout information the platform needs when the release starts.</p>
-        </div>
-        <div class="guide-block">
-          <h2>4. Select your products</h2>
-          <p>Open the <strong>Products</strong> section and switch between the Amazon, Target, Walmart, and General tabs. Mark the products you want the system to run for, then save your preferences.</p>
-          <p><strong>Important:</strong> your profiles tell the platform <em>how</em> to shop, and your selected products tell it <em>what</em> to shop.</p>
-        </div>
-        <div class="guide-block">
-          <h2>5. Request SKUs if something is missing</h2>
-          <p>If a product is not in the list yet, use the SKU request form. The software will try to look up the SKU, add it to the correct catalog, and pull in the best available title and price data automatically.</p>
-        </div>
-        <div class="guide-block">
-          <h2>6. Watch live countdowns</h2>
-          <p>Countdown cards show Walmart, Target, Supreme, and other general release windows. Admins can also post one-off release names for general drops.</p>
-        </div>
-        <div class="guide-block">
-          <h2>7. Password reset</h2>
-          <p>If you forget your password, use the <strong>Forgot Password</strong> page. A reset email will be sent to your inbox with a secure link.</p>
-        </div>
+        <div class="guide-block"><h2>6. Set up authenticator / 2FA</h2><p>The platform needs the permanent setup secret behind the rotating six-digit code.</p><ol><li>Open the retailer’s security settings and choose authenticator app setup.</li><li>When the QR code appears, choose “Can’t scan?”, “Enter setup key”, or “Show secret key”.</li><li>Copy that permanent key into the website’s 2FA Secret field.</li><li>Also scan the QR code into your authenticator app.</li><li>Finish retailer verification and save the profile.</li></ol><p><strong>Do not paste the current six-digit code.</strong> It expires every 30 seconds.</p></div>
+        <div class="guide-block"><h2>7. Turn stores on</h2><p>Open <strong>Store Run Status</strong>. Turn on every store you authorize The Shore Shack to run. A paused store will not run even if profiles and products are configured.</p></div>
+        <div class="guide-block"><h2>8. Select products</h2><p>Open the store page and select the products you want targeted. For Target, selecting an admin checkout list adds every SKU in the list. Unselecting the list removes those products, so reselect individual products you still want afterward.</p><p>Amazon supports multiple products, quantities, and one primary item when those controls are available.</p></div>
+        <div class="guide-block"><h2>9. Understand red and green notices</h2><p><strong>Red:</strong> you changed profiles or product selections and the admin still needs to update the bot export.</p><p><strong>Green:</strong> the admin has copied your latest information.</p></div>
+        <div class="guide-block"><h2>10. Final check before a release</h2><ul><li>At least one complete profile exists.</li><li>The profile is assigned to the correct store.</li><li>Retailer login credentials are complete.</li><li>IMAP or authenticator secret is present when required.</li><li>The store is active in Store Run Status.</li><li>Products are selected.</li><li>Profile and product notices are green.</li><li>Your credit balance is sufficient.</li></ul></div>
+        <div class="guide-block"><h2>Common problems</h2><h3>My store is not running</h3><p>Check Store Run Status, assigned stores, credentials, product selections, and credit balance.</p><h3>Email verification codes fail</h3><p>Generate a fresh app password, confirm the mailbox matches the retailer account, save the profile, and wait for the admin to update the profile export.</p><h3>Amazon 2FA fails</h3><p>Reconfigure authenticator and save the permanent setup key rather than the temporary six-digit code.</p><h3>I changed something</h3><p>A red notice is expected until the admin copies the update.</p></div>
       </article>
 
       <aside class="panel tips-panel">
-        <div class="panel-header"><div><h2>Quick reminders</h2></div></div>
+        <div class="panel-header"><div><h2>Account-ready checklist</h2></div></div>
         <div class="tip-stack">
-          <div class="tip-card"><strong>Profiles first</strong><p>Create your store profiles before you expect the bot to run.</p></div>
-          <div class="tip-card"><strong>Selections matter</strong><p>Only products you select in the Products page are eligible to run for your account.</p></div>
-          <div class="tip-card"><strong>Match store to profile</strong><p>Use the Walmart profile for Walmart drops, the Target profile for Target drops, and so on.</p></div>
-          <div class="tip-card"><strong>General profiles</strong><p>General profiles are used for Supreme and other non-store-specific general releases.</p></div>
+          <div class="tip-card"><strong>1. Profiles</strong><p>Shipping, billing, phone, email, and payment saved.</p></div>
+          <div class="tip-card"><strong>2. Store accounts</strong><p>Retailer login added for each assigned store.</p></div>
+          <div class="tip-card"><strong>3. Verification</strong><p>IMAP app password or authenticator secret saved.</p></div>
+          <div class="tip-card"><strong>4. Run status</strong><p>Stores you want run are active.</p></div>
+          <div class="tip-card"><strong>5. Products</strong><p>Products or checkout lists selected.</p></div>
+          <div class="tip-card"><strong>6. Sync</strong><p>Red notices resolved before the release.</p></div>
         </div>
       </aside>
     </section>
   </div>
-  <script src="script.js?v=20260322b" defer>
-
-// MULTI SKU HELPERS
-function parseMultiSkuValue(rawValue) {
-    if (!rawValue) return [];
-    return String(rawValue)
-        .split(/[
-,]+/)
-        .map(v => v.trim())
-        .filter(Boolean);
-}
-
-function countEffectiveSkus(product) {
-    if (!product) return 0;
-
-    if (Array.isArray(product.multiSkus) && product.multiSkus.length) {
-        return product.multiSkus.length;
-    }
-
-    if (typeof product.sku === "string") {
-        return parseMultiSkuValue(product.sku).length || 1;
-    }
-
-    return 1;
-}
-
-function removeDuplicateSingleSkuProducts(products) {
-    if (!Array.isArray(products)) return [];
-
-    const groupedSkuSet = new Set();
-
-    products.forEach(product => {
-        const skuList = parseMultiSkuValue(product.sku);
-
-        if (skuList.length > 1) {
-            skuList.forEach(sku => groupedSkuSet.add(String(sku).trim()));
-        }
-    });
-
-    return products.filter(product => {
-        const skuList = parseMultiSkuValue(product.sku);
-
-        // keep grouped item
-        if (skuList.length > 1) return true;
-
-        // remove old single sku duplicates
-        return !groupedSkuSet.has(String(product.sku).trim());
-    });
-}
-
-</script>
+  <script src="script.js?v=20260717setup" defer></script>
 </body>
 </html>
