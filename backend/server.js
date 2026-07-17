@@ -93,6 +93,17 @@ const Stripe = require("stripe");
 const cheerio = require("cheerio");
 const registerProductCatalogRoutes = require("./product-catalog-routes");
 const registerShopRoutes = require("./shop-routes");
+let DiscordClient = null;
+let DiscordGatewayIntentBits = null;
+let DiscordChannelType = null;
+try {
+    const discordJs = require("discord.js");
+    DiscordClient = discordJs.Client;
+    DiscordGatewayIntentBits = discordJs.GatewayIntentBits;
+    DiscordChannelType = discordJs.ChannelType;
+} catch (err) {
+    console.warn("discord.js is not installed; Success Network bot is disabled.");
+}
 
 const supabase = require("./database");
 const { encrypt, decrypt } = require("./encryption");
@@ -6622,6 +6633,77 @@ function buildRafflePayload(email, zip, index = 0, zipLocation = {}) {
 }
 
 
+
+async function markProfileSyncChanged(userId, stores = [], reason = "profile_changed") {
+    const cleanStores = [...new Set((stores || []).map(normalizeProfileAccountType).filter((site) => STORE_RUN_STATUS_SITES.includes(site)))];
+    if (!userId || !cleanStores.length) return;
+    const changedAt = new Date().toISOString();
+    const rows = cleanStores.map((site) => ({ user_id: userId, site, changed_at: changedAt, change_reason: reason }));
+    const { error } = await supabase.from("profile_sync_status").upsert(rows, { onConflict: "user_id,site" });
+    if (error && !String(error.message || "").toLowerCase().includes("profile_sync_status")) throw error;
+}
+
+async function loadProfileSyncStatus(userIds = []) {
+    const map = new Map();
+    if (!userIds.length) return map;
+    try {
+        const { data, error } = await supabase
+            .from("profile_sync_status")
+            .select("user_id,site,changed_at,acknowledged_at,change_reason")
+            .in("user_id", userIds);
+        if (error) throw error;
+        (data || []).forEach((row) => {
+            const key = `${row.user_id}:${row.site}`;
+            map.set(key, {
+                changed_at: row.changed_at || null,
+                acknowledged_at: row.acknowledged_at || null,
+                change_reason: row.change_reason || null,
+                changed_since_acknowledged: !!row.changed_at && (!row.acknowledged_at || new Date(row.changed_at) > new Date(row.acknowledged_at))
+            });
+        });
+    } catch (_) {
+        // SQL migration may not be installed yet. Existing profile functionality should continue working.
+    }
+    return map;
+}
+
+app.get("/profile-sync-status", auth, async (req, res) => {
+    try {
+        await ensureUserNotRevoked(req.user_id);
+        const statusMap = await loadProfileSyncStatus([req.user_id]);
+        res.json({ stores: STORE_RUN_STATUS_SITES.map((site) => ({
+            site,
+            label: STORE_RUN_STATUS_LABELS[site] || site,
+            ...(statusMap.get(`${req.user_id}:${site}`) || { changed_at: null, acknowledged_at: null, change_reason: null, changed_since_acknowledged: false })
+        })) });
+    } catch (err) {
+        res.status(500).json({ error: err.message || "Could not load profile update status" });
+    }
+});
+
+app.post("/admin/profile-sync-status/acknowledge", auth, admin, async (req, res) => {
+    try {
+        const currentUser = await getCurrentUser(req);
+        const userId = String(req.body?.user_id || "").trim();
+        const site = normalizeStoreRunSite(req.body?.site || "");
+        if (!userId || !site) return res.status(400).json({ error: "Choose one user and one store." });
+        if (currentUser.role !== "super_admin") {
+            const { data: owned, error: ownedError } = await supabase.from("users").select("id").eq("id", userId).eq("owner_admin_id", currentUser.id).maybeSingle();
+            if (ownedError || !owned) return res.status(403).json({ error: "You cannot update this user." });
+        }
+        const acknowledgedAt = new Date().toISOString();
+        const { error } = await supabase.from("profile_sync_status").upsert({
+            user_id: userId,
+            site,
+            acknowledged_at: acknowledgedAt
+        }, { onConflict: "user_id,site" });
+        if (error) return res.status(500).json({ error: `${error.message}. Run backend/sql/PROFILE_CHANGE_SYNC_STATUS.sql in Supabase.` });
+        res.json({ success: true, user_id: userId, site, acknowledged_at: acknowledgedAt });
+    } catch (err) {
+        res.status(500).json({ error: err.message || "Could not mark profiles updated" });
+    }
+});
+
 app.get("/store-run-status", auth, async (req, res) => {
     try {
         await ensureUserNotRevoked(req.user_id);
@@ -6680,6 +6762,7 @@ app.get("/admin/store-run-status", auth, admin, async (req, res) => {
 
         const userIds = (users || []).map((u) => u.id);
         const statusMap = await loadStoreRunStatusForUsers(userIds);
+        const profileSyncMap = await loadProfileSyncStatus(userIds);
 
         let assignmentRows = [];
         if (userIds.length) {
@@ -6793,7 +6876,8 @@ app.get("/admin/store-run-status", auth, admin, async (req, res) => {
                         is_enabled: !!status[site],
                         updated_at: status[`${site}_updated_at`] || null,
                         profile_count: counts[site] || 0,
-                        profile_updated_at: updated[site] || null
+                        profile_updated_at: updated[site] || null,
+                        ...(profileSyncMap.get(`${user.id}:${site}`) || { changed_at: null, acknowledged_at: null, change_reason: null, changed_since_acknowledged: false })
                     }))
             };
         });
@@ -6943,6 +7027,8 @@ app.post("/profiles/import", auth, async (req, res) => {
             }
         }
 
+        if (imported.length) await markProfileSyncChanged(req.user_id, assignedStores, "profiles_imported");
+
         res.json({
             success: true,
             imported_count: imported.length,
@@ -7033,6 +7119,8 @@ app.post("/profiles/raffle-builder", auth, async (req, res) => {
             }
         }
 
+        if (created.length) await markProfileSyncChanged(req.user_id, ["raffle"], "raffle_profiles_created");
+
         res.json({
             success: true,
             created_count: created.length,
@@ -7058,6 +7146,9 @@ app.delete("/profiles/bulk", auth, async (req, res) => {
             return res.status(400).json({ error: 'No profile ids were provided' });
         }
 
+        const allOwnedProfiles = await getUserProfilesWithRelations(req.user_id);
+        const bulkDeletingProfiles = (allOwnedProfiles || []).filter((profile) => ids.includes(String(profile.id)));
+        const bulkDeletedStores = [...new Set(bulkDeletingProfiles.flatMap((profile) => profileAssignedStores(profile)))];
         const { data: ownedProfiles, error: ownedError } = await supabase
             .from('profiles')
             .select('id')
@@ -7079,6 +7170,7 @@ app.delete("/profiles/bulk", auth, async (req, res) => {
         if (error) {
             return res.status(500).json({ error: error.message });
         }
+        await markProfileSyncChanged(req.user_id, bulkDeletedStores, "profiles_bulk_deleted");
         res.json({ success: true, deleted_count: ownedIds.length });
     } catch (err) {
         const status = err.message === "This account has been revoked" ? 403 : 500;
@@ -7130,6 +7222,7 @@ app.post("/profiles", auth, async (req, res) => {
 
         await upsertProfileRelations(createdProfile.id, data);
         await replaceProfileStoreAssignments(req.user_id, createdProfile.id, assignedStores);
+        await markProfileSyncChanged(req.user_id, assignedStores, "profile_created");
 
         res.json({ success: true });
     } catch (err) {
@@ -7199,6 +7292,7 @@ app.put("/profiles/:id", auth, async (req, res) => {
 
         await upsertProfileRelations(id, data);
         await replaceProfileStoreAssignments(req.user_id, id, assignedStores);
+        await markProfileSyncChanged(req.user_id, [...new Set([...previousStores, ...assignedStores])], "profile_updated");
 
         res.json({ success: true });
     } catch (err) {
@@ -7211,6 +7305,9 @@ app.delete("/profiles/:id", auth, async (req, res) => {
         await ensureUserNotRevoked(req.user_id);
 
         const id = req.params.id;
+        const ownedProfiles = await getUserProfilesWithRelations(req.user_id);
+        const deletingProfile = (ownedProfiles || []).find((profile) => String(profile.id) === String(id));
+        const deletedStores = profileAssignedStores(deletingProfile || {});
 
         await supabase.from("profile_store_assignments").delete().eq("profile_id", id);
         await supabase.from("accounts").delete().eq("profile_id", id);
@@ -7227,6 +7324,7 @@ app.delete("/profiles/:id", auth, async (req, res) => {
             return res.status(500).json({ error: error.message });
         }
 
+        await markProfileSyncChanged(req.user_id, deletedStores, "profile_deleted");
         res.json({ success: true });
     } catch (err) {
         const status = err.message === "This account has been revoked" ? 403 : 500;
@@ -8519,6 +8617,195 @@ async function ensureSuperAdmin() {
     console.log("Super admin account ensured");
 }
 
+
+/* ================= DISCORD SUCCESS NETWORK ================= */
+const discordSuccessBotState = { client: null, ready: false, error: null };
+
+function successBotInstallUrl() {
+    const clientId = String(process.env.DISCORD_BOT_CLIENT_ID || '').trim();
+    if (!clientId) return '';
+    // View Channels, Send Messages, Embed Links, Attach Files, Read Message History, Use Application Commands.
+    const permissions = '274878221376';
+    return `https://discord.com/oauth2/authorize?client_id=${encodeURIComponent(clientId)}&scope=bot%20applications.commands&permissions=${permissions}`;
+}
+
+function discordPermissionHas(value, flag) {
+    try { return (BigInt(value || 0) & BigInt(flag)) === BigInt(flag); } catch (_) { return false; }
+}
+
+async function listEligibleSuccessGuildsForUser(user) {
+    const client = discordSuccessBotState.client;
+    const discordUserId = String(user?.discord_user_id || '').trim();
+    if (!client || !discordSuccessBotState.ready || !discordUserId) return [];
+    const results = [];
+    for (const guild of client.guilds.cache.values()) {
+        try {
+            const member = await guild.members.fetch(discordUserId).catch(() => null);
+            if (!member) continue;
+            const canManage = guild.ownerId === discordUserId || member.permissions.has('Administrator') || member.permissions.has('ManageGuild');
+            if (!canManage) continue;
+            const channels = guild.channels.cache
+                .filter(ch => ch && ch.type === DiscordChannelType.GuildText && ch.viewable)
+                .map(ch => ({ id: ch.id, name: ch.name }))
+                .sort((a,b) => a.name.localeCompare(b.name));
+            results.push({ id: guild.id, name: guild.name, icon_url: guild.iconURL?.() || '', channels });
+        } catch (_) {}
+    }
+    return results.sort((a,b) => a.name.localeCompare(b.name));
+}
+
+async function getSuccessSourceConfig(userId) {
+    const { data, error } = await supabase.from('discord_success_channels').select('*').eq('admin_user_id', userId).maybeSingle();
+    if (error && !String(error.message || '').includes('does not exist')) throw error;
+    return data || null;
+}
+
+async function getSuccessMasterConfig() {
+    const { data, error } = await supabase.from('discord_success_master').select('*').eq('id', 1).maybeSingle();
+    if (error && !String(error.message || '').includes('does not exist')) throw error;
+    return data || null;
+}
+
+app.get('/admin/success-network/options', auth, admin, async (req, res) => {
+    try {
+        const currentUser = await getCurrentUser(req);
+        const guilds = await listEligibleSuccessGuildsForUser(currentUser);
+        const source = await getSuccessSourceConfig(currentUser.id).catch(() => null);
+        const master = currentUser.role === 'super_admin' ? await getSuccessMasterConfig().catch(() => null) : null;
+        const { data: recent } = await supabase.from('discord_success_posts').select('id,source_group_name,author_name,message_text,forwarding_status,forwarding_error,created_at').order('created_at',{ascending:false}).limit(25).catch(() => ({data:[]}));
+        res.json({
+            bot_ready: discordSuccessBotState.ready,
+            bot_error: discordSuccessBotState.error,
+            install_url: successBotInstallUrl(),
+            discord_connected: !!currentUser.discord_user_id,
+            guilds,
+            source,
+            master,
+            is_super_admin: currentUser.role === 'super_admin',
+            recent: recent || []
+        });
+    } catch (err) { res.status(500).json({ error: err.message || String(err) }); }
+});
+
+app.post('/admin/success-network/source', auth, admin, async (req, res) => {
+    try {
+        const currentUser = await getCurrentUser(req);
+        const guildId = String(req.body?.guild_id || '').trim();
+        const channelId = String(req.body?.channel_id || '').trim();
+        const guilds = await listEligibleSuccessGuildsForUser(currentUser);
+        const guild = guilds.find(g => g.id === guildId);
+        const channel = guild?.channels?.find(c => c.id === channelId);
+        if (!guild || !channel) return res.status(400).json({ error: 'Select a Discord server and text channel you manage.' });
+        const payload = {
+            admin_user_id: currentUser.id,
+            group_name: String(currentUser.discord_display_name || currentUser.discord_username || currentUser.email || guild.name),
+            guild_id: guildId,
+            guild_name: guild.name,
+            source_channel_id: channelId,
+            source_channel_name: channel.name,
+            is_active: true,
+            updated_at: new Date().toISOString()
+        };
+        const { error } = await supabase.from('discord_success_channels').upsert(payload, { onConflict: 'admin_user_id' });
+        if (error) throw error;
+        res.json({ success: true, source: payload });
+    } catch (err) { res.status(500).json({ error: err.message || String(err) }); }
+});
+
+app.post('/admin/success-network/master', auth, admin, async (req, res) => {
+    try {
+        const currentUser = await getCurrentUser(req);
+        if (currentUser.role !== 'super_admin') return res.status(403).json({ error: 'Super admin only.' });
+        const guildId = String(req.body?.guild_id || '').trim();
+        const channelId = String(req.body?.channel_id || '').trim();
+        const guilds = await listEligibleSuccessGuildsForUser(currentUser);
+        const guild = guilds.find(g => g.id === guildId);
+        const channel = guild?.channels?.find(c => c.id === channelId);
+        if (!guild || !channel) return res.status(400).json({ error: 'Select a Discord server and destination channel you manage.' });
+        const payload = { id: 1, guild_id: guildId, guild_name: guild.name, destination_channel_id: channelId, destination_channel_name: channel.name, updated_at: new Date().toISOString() };
+        const { error } = await supabase.from('discord_success_master').upsert(payload, { onConflict: 'id' });
+        if (error) throw error;
+        res.json({ success: true, master: payload });
+    } catch (err) { res.status(500).json({ error: err.message || String(err) }); }
+});
+
+async function forwardDiscordSuccessMessage(message, source) {
+    if (!message || message.author?.bot || message.webhookId) return;
+    const master = await getSuccessMasterConfig().catch(() => null);
+    if (!master?.destination_channel_id) return;
+    const destination = await discordSuccessBotState.client.channels.fetch(master.destination_channel_id).catch(() => null);
+    if (!destination?.isTextBased?.()) throw new Error('Master success destination is unavailable.');
+
+    const attachments = [...message.attachments.values()].map(a => ({ name: a.name || 'attachment', url: a.url, content_type: a.contentType || null }));
+    const content = String(message.content || '').trim();
+    const sourceUrl = `https://discord.com/channels/${message.guildId}/${message.channelId}/${message.id}`;
+    const embed = {
+        color: 0x38bdf8,
+        author: { name: message.member?.displayName || message.author?.globalName || message.author?.username || 'Discord member', icon_url: message.author?.displayAvatarURL?.() || undefined },
+        title: `Success from ${source.group_name || source.guild_name || 'partner Discord'}`,
+        description: content || (attachments.length ? 'Shared a success attachment.' : 'Shared a success post.'),
+        fields: [
+            { name: 'Source Discord', value: source.guild_name || message.guild?.name || '-', inline: true },
+            { name: 'Source Channel', value: `#${source.source_channel_name || message.channel?.name || 'success'}`, inline: true },
+            { name: 'Original Post', value: `[Open in Discord](${sourceUrl})`, inline: false }
+        ],
+        timestamp: new Date(message.createdTimestamp || Date.now()).toISOString()
+    };
+    const image = attachments.find(a => String(a.content_type || '').startsWith('image/'));
+    if (image) embed.image = { url: image.url };
+    const extraLinks = attachments.filter(a => !image || a.url !== image.url).map(a => `[${a.name}](${a.url})`).join('\n');
+    if (extraLinks) embed.fields.push({ name: 'Attachments', value: extraLinks.slice(0, 1024), inline: false });
+
+    let status = 'forwarded', forwardingError = null, forwardedMessageId = null;
+    try {
+        const sent = await destination.send({ embeds: [embed] });
+        forwardedMessageId = sent.id;
+    } catch (err) {
+        status = 'failed'; forwardingError = err.message || String(err); throw err;
+    } finally {
+        await supabase.from('discord_success_posts').upsert({
+            discord_message_id: message.id,
+            guild_id: message.guildId,
+            source_channel_id: message.channelId,
+            source_group_name: source.group_name || source.guild_name || '',
+            author_discord_id: message.author?.id || null,
+            author_name: message.member?.displayName || message.author?.globalName || message.author?.username || '',
+            message_text: content,
+            attachments,
+            original_message_url: sourceUrl,
+            forwarded_message_id: forwardedMessageId,
+            forwarding_status: status,
+            forwarding_error: forwardingError,
+            created_at: new Date(message.createdTimestamp || Date.now()).toISOString()
+        }, { onConflict: 'discord_message_id' }).catch(() => null);
+    }
+}
+
+async function startDiscordSuccessBot() {
+    const token = String(process.env.DISCORD_BOT_TOKEN || '').trim();
+    if (!token || !DiscordClient) {
+        discordSuccessBotState.error = !token ? 'DISCORD_BOT_TOKEN is not configured.' : 'discord.js is not installed.';
+        return;
+    }
+    const client = new DiscordClient({ intents: [DiscordGatewayIntentBits.Guilds, DiscordGatewayIntentBits.GuildMembers, DiscordGatewayIntentBits.GuildMessages, DiscordGatewayIntentBits.MessageContent] });
+    discordSuccessBotState.client = client;
+    client.once('ready', () => {
+        discordSuccessBotState.ready = true;
+        discordSuccessBotState.error = null;
+        console.log(`Success Network bot ready as ${client.user.tag}`);
+    });
+    client.on('messageCreate', async (message) => {
+        if (!message.guildId || message.author?.bot || message.webhookId) return;
+        try {
+            const { data: source, error } = await supabase.from('discord_success_channels').select('*').eq('guild_id', message.guildId).eq('source_channel_id', message.channelId).eq('is_active', true).maybeSingle();
+            if (error || !source) return;
+            await forwardDiscordSuccessMessage(message, source);
+        } catch (err) { console.error('Success Network forward failed:', err); }
+    });
+    client.on('error', err => { discordSuccessBotState.error = err.message || String(err); console.error('Discord bot error:', err); });
+    await client.login(token).catch(err => { discordSuccessBotState.error = err.message || String(err); console.error('Discord bot login failed:', err); });
+}
+
 registerProductCatalogRoutes({
     app,
     supabase,
@@ -8550,6 +8837,7 @@ setTimeout(() => {
     replayWebhookFailoverQueue().catch((err) => console.error('Initial failover queue replay failed:', err));
 }, 15000);
 startAnnouncementCatalogScheduler();
+startDiscordSuccessBot().catch((err) => console.error('Success Network startup failed:', err));
 
 const PORT = process.env.PORT || 3000;
 

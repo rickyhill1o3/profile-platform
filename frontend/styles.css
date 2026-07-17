@@ -1054,3 +1054,9 @@ h1,h2,h3,h4,p{margin:0}
 .refund-item-row{display:grid;grid-template-columns:1fr 100px;gap:14px;align-items:center;padding:12px;border:1px solid var(--line);border-radius:12px}
 .store-refund-preview{white-space:pre-wrap;max-height:220px;overflow:auto;padding:14px;background:#0f172a;color:#e2e8f0;border-radius:12px;font-size:13px}
 @media(max-width:720px){.store-order-actions{grid-template-columns:1fr;min-width:135px}.refund-item-row{grid-template-columns:1fr}.store-modal{padding:8px}.store-modal__panel{padding:16px}}
+
+.status-pill.status-danger {
+  background: #fee2e2;
+  color: #991b1b;
+  border: 1px solid #fecaca;
+}

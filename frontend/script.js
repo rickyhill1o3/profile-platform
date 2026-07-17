@@ -4574,11 +4574,18 @@ async function loadStoreRunStatusPanel() {
     if (!panel || !token()) return;
     panel.innerHTML = '<div class="empty-card"><p>Loading store run status...</p></div>';
     try {
-        const data = await authJSON(API + '/store-run-status');
+        const [data, profileSyncData] = await Promise.all([
+            authJSON(API + '/store-run-status'),
+            authJSON(API + '/profile-sync-status').catch(() => ({ stores: [] }))
+        ]);
+        const profileSyncBySite = new Map((profileSyncData.stores || []).map((row) => [row.site, row]));
         const stores = Array.isArray(data.stores) ? data.stores : [];
         const html = `
             <div class="store-run-status-list">
-                ${stores.map((store) => `
+                ${stores.map((store) => {
+                    const sync = profileSyncBySite.get(store.site) || {};
+                    const needsUpdate = !!sync.changed_since_acknowledged;
+                    return `
                     <article class="store-run-card ${store.is_enabled ? 'is-running' : ''}">
                         <div>
                             <h3>${escapeHTML(store.label)}</h3>
@@ -4586,13 +4593,18 @@ async function loadStoreRunStatusPanel() {
                                 ? 'Active: The Shore Shack may attempt checkouts for this store.'
                                 : 'Paused: Your accounts should not be run for this store.'}</p>
                             <p class="subtle-text">Last updated: ${escapeHTML(formatDateTimeShort(store.updated_at))}</p>
+                            <div class="export-sync-banner ${needsUpdate ? 'export-sync-banner--pending' : 'export-sync-banner--synced'}" style="margin-top:8px;">
+                                ${needsUpdate
+                                    ? `🔴 Profiles changed. Your admin still needs to update the ${escapeHTML(store.label)} profiles.`
+                                    : `🟢 Profiles are synced. Your admin has the current ${escapeHTML(store.label)} profiles.`}
+                            </div>
                         </div>
                         <label class="run-toggle">
                             <input type="checkbox" data-store-run-toggle="${escapeHTML(store.site)}" ${store.is_enabled ? 'checked' : ''} />
                             <span>${store.is_enabled ? 'Active' : 'Paused'}</span>
                         </label>
                     </article>
-                `).join('')}
+                `; }).join('')}
             </div>
             <div class="banner banner-soft" style="margin-top:12px;">
                 <strong>Important</strong>
@@ -4635,6 +4647,8 @@ async function initAdminStoreRunStatus() {
     const exportAccountsButton = document.getElementById('adminRunStatusExportAccountsButton');
     const exportGmailButton = document.getElementById('adminRunStatusExportGmailButton');
     const summary = document.getElementById('adminRunStatusSummary');
+    const syncBanner = document.getElementById('adminProfileSyncStatusBanner');
+    const acknowledgeButton = document.getElementById('adminProfileSyncAcknowledgeButton');
     if (!panel || !storeFilter || !userFilter) return;
 
     let lastUsers = [];
@@ -4646,10 +4660,39 @@ async function initAdminStoreRunStatus() {
         (users || []).forEach((user) => {
             if (user && user.id && !byId.has(user.id)) byId.set(user.id, user);
         });
-        userFilter.innerHTML = '<option value="">All Users</option>' + [...byId.values()].map((user) =>
-            `<option value="${escapeHTML(user.id)}">${escapeHTML(user.user_display || user.email || 'User')}</option>`
-        ).join('');
+        userFilter.innerHTML = '<option value="">All Users</option>' + [...byId.values()].map((user) => {
+            const relevantStores = (user.stores || []).filter((store) => !storeFilter.value || store.site === storeFilter.value);
+            const pending = relevantStores.some((store) => store.changed_since_acknowledged);
+            return `<option value="${escapeHTML(user.id)}">${pending ? '🔴' : '🟢'} ${escapeHTML(user.user_display || user.email || 'User')}${pending ? ' - profiles need update' : ' - synced'}</option>`;
+        }).join('');
         if ([...userFilter.options].some((opt) => opt.value === current)) userFilter.value = current;
+    };
+
+    const updateProfileSyncBanner = () => {
+        if (!syncBanner) return;
+        const selectedUser = lastUsers.find((user) => user.id === userFilter.value);
+        const selectedStore = storeFilter.value;
+        syncBanner.className = 'export-sync-banner export-sync-banner--neutral';
+        if (!selectedUser || !selectedStore) {
+            const allStores = lastUsers.flatMap((user) => user.stores || []);
+            const pendingCount = allStores.filter((store) => store.changed_since_acknowledged).length;
+            if (pendingCount) {
+                syncBanner.className = 'export-sync-banner export-sync-banner--pending';
+                syncBanner.textContent = `🔴 ${pendingCount} user/store profile set${pendingCount === 1 ? '' : 's'} need to be updated. Choose a store and user, export the profiles, then click Mark Profiles Updated.`;
+            } else {
+                syncBanner.className = 'export-sync-banner export-sync-banner--synced';
+                syncBanner.textContent = '🟢 All tracked user profiles are synced.';
+            }
+            return;
+        }
+        const row = (selectedUser.stores || []).find((store) => store.site === selectedStore);
+        if (row?.changed_since_acknowledged) {
+            syncBanner.className = 'export-sync-banner export-sync-banner--pending';
+            syncBanner.textContent = `🔴 ${selectedUser.user_display || selectedUser.email} changed ${row.label} profiles. Export the current profiles, then click Mark Profiles Updated.`;
+        } else {
+            syncBanner.className = 'export-sync-banner export-sync-banner--synced';
+            syncBanner.textContent = `🟢 ${selectedUser.user_display || selectedUser.email}'s ${row?.label || selectedStore} profiles are synced.`;
+        }
     };
 
     const activeExportParams = () => {
@@ -4709,6 +4752,7 @@ async function initAdminStoreRunStatus() {
             }
             const activeSummary = STORE_RUN_STATUS_OPTIONS.map((store) => `${store.label}: ${Number(data.summary?.[store.site] || 0)} active`).join(' • ');
             if (summary) summary.textContent = activeSummary;
+            updateProfileSyncBanner();
 
             if (!users.length) {
                 panel.innerHTML = '<div class="empty-card"><p>No users found for this filter.</p></div>';
@@ -4773,7 +4817,8 @@ async function initAdminStoreRunStatus() {
                             <td><span class="status-pill ${store.is_enabled ? 'status-success' : 'status-muted'}">${store.is_enabled ? 'Active' : 'Paused'}</span></td>
                             <td>${Number(store.profile_count || 0)}</td>
                             <td>${escapeHTML(formatDateTimeShort(store.updated_at))}</td>
-                            <td>${escapeHTML(formatDateTimeShort(store.profile_updated_at))}</td>
+                            <td>${escapeHTML(formatDateTimeShort(store.profile_updated_at || store.changed_at))}</td>
+                            <td><span class="status-pill ${store.changed_since_acknowledged ? 'status-danger' : 'status-success'}">${store.changed_since_acknowledged ? '🔴 Needs update' : '🟢 Synced'}</span></td>
                         </tr>
                     `);
                 });
@@ -4789,6 +4834,7 @@ async function initAdminStoreRunStatus() {
                             <th>Assigned Profiles</th>
                             <th>Run Status Changed</th>
                             <th>Profile Changed</th>
+                            <th>Profile Sync</th>
                         </tr>
                     </thead>
                     <tbody>${rows.join('')}</tbody>
@@ -4801,6 +4847,24 @@ async function initAdminStoreRunStatus() {
 
     storeFilter.addEventListener('change', load);
     userFilter.addEventListener('change', load);
+    if (acknowledgeButton) acknowledgeButton.addEventListener('click', async () => {
+        if (!storeFilter.value || !userFilter.value) {
+            alert('Choose one store and one user first. Export their current profiles before marking them updated.');
+            return;
+        }
+        acknowledgeButton.disabled = true;
+        try {
+            await authJSON(API + '/admin/profile-sync-status/acknowledge', {
+                method: 'POST',
+                body: JSON.stringify({ site: storeFilter.value, user_id: userFilter.value })
+            });
+            await load();
+        } catch (err) {
+            alert(err.message || 'Could not mark profiles updated.');
+        } finally {
+            acknowledgeButton.disabled = false;
+        }
+    });
     if (refreshButton) refreshButton.addEventListener('click', load);
     await load();
 }
@@ -4854,6 +4918,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         try { await loadCreditsAdminPane(); } catch (_) { }
         try { await loadWebhookSettings(); } catch (_) { }
         try { await loadAnnouncementSettings(); } catch (_) { }
+        try { await loadSuccessNetwork(); } catch (_) { }
         try { await initAdminStoreRunStatus(); } catch (_) { }
     }
     if (document.getElementById('userDiscordHandle')) {
@@ -4978,3 +5043,49 @@ async function deleteWebhookParserRule(id) {
 }
 
 window.addEventListener('DOMContentLoaded', () => { try { loadWebhookParserRules(); } catch (_) {} });
+
+
+/* ================= DISCORD SUCCESS NETWORK ================= */
+let successNetworkData = null;
+function successOptionMarkup(items, selected) {
+    return '<option value="">Choose</option>' + (items || []).map(x => `<option value="${escapeHTML(x.id)}" ${String(x.id)===String(selected||'')?'selected':''}>${escapeHTML(x.name)}</option>`).join('');
+}
+function populateSuccessChannels(kind) {
+    if (!successNetworkData) return;
+    const guildSelect = document.getElementById(kind === 'master' ? 'successMasterGuild' : 'successSourceGuild');
+    const channelSelect = document.getElementById(kind === 'master' ? 'successMasterChannel' : 'successSourceChannel');
+    if (!guildSelect || !channelSelect) return;
+    const guild = (successNetworkData.guilds || []).find(g => g.id === guildSelect.value);
+    const selected = kind === 'master' ? successNetworkData.master?.destination_channel_id : successNetworkData.source?.source_channel_id;
+    channelSelect.innerHTML = successOptionMarkup(guild?.channels || [], selected);
+}
+async function loadSuccessNetwork() {
+    const status = document.getElementById('successNetworkStatus');
+    const msg = document.getElementById('successNetworkMessage');
+    if (!status) return;
+    try {
+        status.textContent = 'Loading Discord servers and channels...';
+        const data = await authJSON(API + '/admin/success-network/options');
+        successNetworkData = data;
+        const install = document.getElementById('successBotInstallLink');
+        if (install) { install.href = data.install_url || '#'; install.style.display = data.install_url ? '' : 'none'; }
+        const sourceGuild = document.getElementById('successSourceGuild');
+        const masterGuild = document.getElementById('successMasterGuild');
+        if (sourceGuild) sourceGuild.innerHTML = successOptionMarkup(data.guilds, data.source?.guild_id);
+        if (masterGuild) masterGuild.innerHTML = successOptionMarkup(data.guilds, data.master?.guild_id);
+        populateSuccessChannels('source'); populateSuccessChannels('master');
+        const masterSection = document.getElementById('successMasterSection'); if (masterSection) masterSection.style.display = data.is_super_admin ? '' : 'none';
+        status.innerHTML = `<strong>Bot:</strong> ${data.bot_ready ? 'Connected' : 'Not connected'}<br><strong>Discord account:</strong> ${data.discord_connected ? 'Connected to website' : 'Connect Discord in your profile first'}<br><strong>Your source:</strong> ${data.source ? `${escapeHTML(data.source.guild_name)} / #${escapeHTML(data.source.source_channel_name)}` : 'Not configured'}${data.is_super_admin ? `<br><strong>Master destination:</strong> ${data.master ? `${escapeHTML(data.master.guild_name)} / #${escapeHTML(data.master.destination_channel_name)}` : 'Not configured'}` : ''}${data.bot_error ? `<br><span class="error-text">${escapeHTML(data.bot_error)}</span>` : ''}`;
+        const recent = document.getElementById('successNetworkRecent');
+        if (recent) recent.innerHTML = (data.recent || []).length ? `<div class="table-wrap"><table class="data-table"><thead><tr><th>Time</th><th>Group</th><th>Author</th><th>Post</th><th>Status</th></tr></thead><tbody>${data.recent.map(r=>`<tr><td>${escapeHTML(new Date(r.created_at).toLocaleString())}</td><td>${escapeHTML(r.source_group_name||'-')}</td><td>${escapeHTML(r.author_name||'-')}</td><td>${escapeHTML((r.message_text||'Attachment post').slice(0,120))}</td><td>${escapeHTML(r.forwarding_status||'-')}${r.forwarding_error?`<br><small>${escapeHTML(r.forwarding_error)}</small>`:''}</td></tr>`).join('')}</tbody></table></div>` : 'No success posts have been forwarded yet.';
+        if (msg) msg.textContent = '';
+    } catch (err) { status.textContent = err.message; }
+}
+async function saveSuccessSourceChannel() {
+    const msg=document.getElementById('successNetworkMessage');
+    try { if(msg)msg.textContent='Saving...'; await authJSON(API+'/admin/success-network/source',{method:'POST',body:JSON.stringify({guild_id:document.getElementById('successSourceGuild')?.value||'',channel_id:document.getElementById('successSourceChannel')?.value||''})}); if(msg)msg.textContent='Success channel saved. Every human post in this channel will forward to the master success channel.'; await loadSuccessNetwork(); } catch(err){if(msg)msg.textContent=err.message;}
+}
+async function saveSuccessMasterChannel() {
+    const msg=document.getElementById('successNetworkMessage');
+    try { if(msg)msg.textContent='Saving master destination...'; await authJSON(API+'/admin/success-network/master',{method:'POST',body:JSON.stringify({guild_id:document.getElementById('successMasterGuild')?.value||'',channel_id:document.getElementById('successMasterChannel')?.value||''})}); if(msg)msg.textContent='Master success destination saved.'; await loadSuccessNetwork(); } catch(err){if(msg)msg.textContent=err.message;}
+}
