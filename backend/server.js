@@ -4845,7 +4845,8 @@ app.post("/admin/orders/:id/refund-credits", auth, admin, async (req, res) => {
 
 
 function parseTargetCheckoutSkuLines(rawValue = "") {
-    const lines = String(rawValue || "")
+    const raw = String(rawValue || "").trim();
+    const lines = raw
         .split(/\r?\n/)
         .map((line) => line.trim())
         .filter(Boolean);
@@ -4853,23 +4854,32 @@ function parseTargetCheckoutSkuLines(rawValue = "") {
     const items = [];
     const errors = [];
 
+    // Accept either Stellar lines (sku;name;price) or Shikari SKU lists
+    // (sku1,sku2,sku3). Mixed input is also supported.
     lines.forEach((line, index) => {
-        const parts = line.split(";").map((part) => String(part || "").trim());
-        if (parts.length < 3) {
-            errors.push(`Line ${index + 1}: expected sku;name;price`);
+        if (!line.includes(";") && line.includes(",")) {
+            line.split(",").map((part) => part.trim()).filter(Boolean).forEach((sku) => {
+                items.push({ sku, name: sku, price: null, price_source: "catalog" });
+            });
             return;
         }
 
-        const [sku, name, priceRaw] = parts;
-        const cleanPrice = String(priceRaw || "").replace(/[^0-9.]/g, "");
+        if (!line.includes(";")) {
+            const sku = line.trim();
+            if (!sku) errors.push(`Line ${index + 1}: SKU is required`);
+            else items.push({ sku, name: sku, price: null, price_source: "catalog" });
+            return;
+        }
+
+        const parts = line.split(";").map((part) => String(part || "").trim());
+        const sku = parts[0] || "";
+        const name = parts[1] || sku;
+        const priceRaw = parts[2] || "";
+        const cleanPrice = String(priceRaw).replace(/[^0-9.]/g, "");
         const price = cleanPrice === "" ? null : Number(cleanPrice);
 
         if (!sku) {
             errors.push(`Line ${index + 1}: SKU is required`);
-            return;
-        }
-        if (!name) {
-            errors.push(`Line ${index + 1}: name is required`);
             return;
         }
         if (price !== null && (!Number.isFinite(price) || price < 0)) {
@@ -4881,11 +4891,20 @@ function parseTargetCheckoutSkuLines(rawValue = "") {
             sku,
             name,
             price: price === null ? null : Number(price.toFixed(2)),
-            price_source: price === null ? "blank" : "input"
+            price_source: price === null ? "catalog" : "input"
         });
     });
 
-    return { items, errors };
+    const unique = [];
+    const seen = new Set();
+    items.forEach((item) => {
+        const key = String(item.sku || "").trim();
+        if (!key || seen.has(key)) return;
+        seen.add(key);
+        unique.push(item);
+    });
+
+    return { items: unique, errors };
 }
 
 async function ensureTargetCatalogForCheckoutLists() {
@@ -5048,12 +5067,88 @@ app.post('/target-checkout-lists/selections', auth, async (req, res) => {
         await ensureUserNotRevoked(req.user_id);
         const lists = normalizeTargetCheckoutLists(await getAppSetting('target_checkout_lists', []));
         const allowed = new Set(lists.map((list) => String(list.id)));
-        const selected = Array.isArray(req.body?.selected_list_ids) ? req.body.selected_list_ids.map(String).filter((id) => allowed.has(id)) : [];
+        const selected = [...new Set(Array.isArray(req.body?.selected_list_ids)
+            ? req.body.selected_list_ids.map(String).filter((id) => allowed.has(id))
+            : [])];
+
+        const previousSettings = await getAppSetting(`target_checkout_list_selections:${req.user_id}`, { selected_list_ids: [] });
+        const previousIds = new Set(Array.isArray(previousSettings?.selected_list_ids) ? previousSettings.selected_list_ids.map(String) : []);
+        const nextIds = new Set(selected);
+
+        const skuSetFor = (idSet) => new Set(lists
+            .filter((list) => idSet.has(String(list.id)))
+            .flatMap((list) => (list.items || []).map((item) => String(item.sku || '').trim()))
+            .filter(Boolean));
+
+        const previousSkus = skuSetFor(previousIds);
+        const nextSkus = skuSetFor(nextIds);
+        const allListSkus = [...new Set([...previousSkus, ...nextSkus])];
+
+        let catalogRows = [];
+        if (allListSkus.length) {
+            const { data, error } = await supabase
+                .from('catalog_products')
+                .select('id, sku, default_max_price, release_mode_default')
+                .eq('site', 'target')
+                .eq('is_enabled', true)
+                .in('sku', allListSkus);
+            if (error) throw new Error(error.message);
+            catalogRows = data || [];
+        }
+
+        const productBySku = new Map(catalogRows.map((row) => [String(row.sku || '').trim(), row]));
+        const previousProductIds = new Set([...previousSkus].map((sku) => productBySku.get(sku)?.id).filter(Boolean).map(String));
+        const nextProducts = [...nextSkus].map((sku) => productBySku.get(sku)).filter(Boolean);
+        const nextProductIds = new Set(nextProducts.map((row) => String(row.id)));
+
+        const { data: existingRows, error: existingError } = await supabase
+            .from('user_product_preferences')
+            .select('catalog_product_id, selected')
+            .eq('user_id', req.user_id)
+            .eq('selected', true);
+        if (existingError) throw new Error(existingError.message);
+        const existingIds = new Set((existingRows || []).map((row) => String(row.catalog_product_id)));
+
+        // Remove only products that were supplied by a previously selected checkout list
+        // and are no longer supplied by any selected checkout list. Manual selections that
+        // were never part of a selected list remain untouched.
+        const removeIds = [...previousProductIds].filter((id) => !nextProductIds.has(id));
+        if (removeIds.length) {
+            const { error } = await supabase
+                .from('user_product_preferences')
+                .delete()
+                .eq('user_id', req.user_id)
+                .in('catalog_product_id', removeIds);
+            if (error) throw new Error(error.message);
+        }
+
+        const addProducts = nextProducts.filter((product) => !existingIds.has(String(product.id)));
+        if (addProducts.length) {
+            const { error } = await supabase.from('user_product_preferences').insert(addProducts.map((product) => ({
+                user_id: req.user_id,
+                catalog_product_id: product.id,
+                selected: true,
+                run_mode: product.release_mode_default || 'current',
+                max_price: product.default_max_price ?? null,
+                quantity: 1,
+                is_primary: false
+            })));
+            if (error) throw new Error(error.message);
+        }
+
         const saved = await setAppSetting(`target_checkout_list_selections:${req.user_id}`, {
-            selected_list_ids: [...new Set(selected)],
+            selected_list_ids: selected,
             updated_at: new Date().toISOString()
         });
-        res.json({ success: true, ...saved });
+
+        res.json({
+            success: true,
+            ...saved,
+            products_added: addProducts.length,
+            products_removed: removeIds.length,
+            products_selected_from_lists: nextProductIds.size,
+            missing_skus: [...nextSkus].filter((sku) => !productBySku.has(sku))
+        });
     } catch (err) {
         const status = err.message === 'This account has been revoked' ? 403 : 500;
         res.status(status).json({ error: err.message });

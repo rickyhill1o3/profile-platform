@@ -3250,6 +3250,31 @@ async function disconnectDiscord() {
 
 
 
+
+async function clearMyTargetProductSelections() {
+    if (!confirm("Clear all of your saved Target product selections and selected Target checkout lists? You will start again with 0 selected Target products.")) return;
+    const button = document.getElementById("clearMyTargetProductSelections");
+    const message = document.getElementById("targetCheckoutListSelectionMessage");
+    if (button) button.disabled = true;
+    try {
+        await authJSON(API + "/product-preferences", {
+            method: "PUT",
+            body: JSON.stringify({ site: "target", selected_product_ids: [], preferences: [] })
+        });
+        await authJSON(API + "/target-checkout-lists/selections", {
+            method: "POST",
+            body: JSON.stringify({ selected_list_ids: [] })
+        });
+        if (message) message.textContent = "All Target product and checkout-list selections were cleared.";
+        await loadTargetCheckoutListsForUser();
+        await loadStoreProducts("target");
+    } catch (err) {
+        if (message) message.textContent = err.message || "Could not clear Target selections.";
+    } finally {
+        if (button) button.disabled = false;
+    }
+}
+
 const storeProductCache = {};
 const storeSelectedProductIds = {};
 const storeProductAutosaveTimers = {};
@@ -3796,11 +3821,15 @@ function renderTargetCheckoutListCard(list, options = {}) {
     const checked = options.selected ? "checked" : "";
     const selectable = options.selectable !== false;
     const controls = selectable
-        ? `<label class="checkbox-inline"><input type="checkbox" data-target-checkout-list-select="${escapeHTML(list.id)}" ${checked} /><span>Select this list</span></label>`
+        ? `<label class="checkbox-inline"><input type="checkbox" data-target-checkout-list-select="${escapeHTML(list.id)}" ${checked} /><span>${options.selected ? "Selected" : "Select this list"}</span></label>`
         : "";
+    const stellarLines = items.map((item) => {
+        const price = item.price === null || item.price === undefined || item.price === "" ? "" : Number(item.price).toFixed(2);
+        return `${item.sku || ""};${item.name || item.sku || ""};${price}`;
+    }).join("\n");
 
     return `
-        <article class="target-checkout-list-card">
+        <article class="target-checkout-list-card ${options.selected ? "target-checkout-list-card--selected" : ""}">
             <div class="target-checkout-list-card__header">
                 <div>
                     <h3>${escapeHTML(list.title || "Untitled List")}</h3>
@@ -3808,22 +3837,29 @@ function renderTargetCheckoutListCard(list, options = {}) {
                 </div>
                 ${controls}
             </div>
-            <div class="target-checkout-sku-scroll">
-                <table class="mini-table">
-                    <thead><tr><th>SKU</th><th>Product</th><th>Price</th></tr></thead>
-                    <tbody>
-                        ${items.map((item) => `
-                            <tr>
-                                <td>${escapeHTML(item.sku || "-")}</td>
-                                <td>${escapeHTML(item.name || "-")}</td>
-                                <td>${item.price === null || item.price === undefined || item.price === "" ? '<span class="subtle-text">No limit</span>' : escapeHTML(formatMoney(item.price))}</td>
-                            </tr>
-                        `).join("")}
-                    </tbody>
-                </table>
-            </div>
+            <textarea class="input target-checkout-stellar-list" rows="${Math.min(12, Math.max(4, items.length + 1))}" readonly>${escapeHTML(stellarLines)}</textarea>
         </article>
     `;
+}
+
+async function saveTargetCheckoutListSelectionsFromPage() {
+    const message = document.getElementById("targetCheckoutListSelectionMessage");
+    const selectedIds = Array.from(document.querySelectorAll("[data-target-checkout-list-select]:checked"))
+        .map((input) => input.dataset.targetCheckoutListSelect)
+        .filter(Boolean);
+    if (message) message.textContent = "Saving list selection and updating your Target products...";
+    const data = await authJSON(API + "/target-checkout-lists/selections", {
+        method: "POST",
+        body: JSON.stringify({ selected_list_ids: selectedIds })
+    });
+    if (message) {
+        const added = Number(data.products_added || 0);
+        const removed = Number(data.products_removed || 0);
+        const missing = Array.isArray(data.missing_skus) ? data.missing_skus.length : 0;
+        message.textContent = `Saved automatically. ${Number(data.products_selected_from_lists || 0)} Target product${Number(data.products_selected_from_lists || 0) === 1 ? "" : "s"} supplied by selected lists.${added ? ` Added ${added}.` : ""}${removed ? ` Removed ${removed}.` : ""}${missing ? ` ${missing} SKU${missing === 1 ? " is" : "s are"} not yet in the catalog.` : ""}`;
+    }
+    await loadStoreProducts("target");
+    return data;
 }
 
 async function loadTargetCheckoutListsForUser() {
@@ -3848,28 +3884,25 @@ async function loadTargetCheckoutListsForUser() {
             selectable: true
         })).join("");
 
-        const saveButton = document.getElementById("saveTargetCheckoutListSelections");
-        if (saveButton && !saveButton.dataset.bound) {
-            saveButton.dataset.bound = "1";
-            saveButton.addEventListener("click", async () => {
-                const selectedIds = Array.from(document.querySelectorAll("[data-target-checkout-list-select]:checked"))
-                    .map((input) => input.dataset.targetCheckoutListSelect)
-                    .filter(Boolean);
-                saveButton.disabled = true;
-                if (message) message.textContent = "Saving selected Target lists...";
+        panel.querySelectorAll("[data-target-checkout-list-select]").forEach((input) => {
+            input.addEventListener("change", async () => {
+                const card = input.closest(".target-checkout-list-card");
+                const label = input.closest("label")?.querySelector("span");
+                if (card) card.classList.toggle("target-checkout-list-card--selected", input.checked);
+                if (label) label.textContent = input.checked ? "Selected" : "Select this list";
+                panel.querySelectorAll("[data-target-checkout-list-select]").forEach((box) => { box.disabled = true; });
                 try {
-                    await authJSON(API + "/target-checkout-lists/selections", {
-                        method: "POST",
-                        body: JSON.stringify({ selected_list_ids: selectedIds })
-                    });
-                    if (message) message.textContent = `Saved ${selectedIds.length} selected Target checkout list${selectedIds.length === 1 ? "" : "s"}.`;
+                    await saveTargetCheckoutListSelectionsFromPage();
                 } catch (err) {
+                    input.checked = !input.checked;
+                    if (card) card.classList.toggle("target-checkout-list-card--selected", input.checked);
+                    if (label) label.textContent = input.checked ? "Selected" : "Select this list";
                     if (message) message.textContent = err.message || "Could not save selected lists.";
                 } finally {
-                    saveButton.disabled = false;
+                    panel.querySelectorAll("[data-target-checkout-list-select]").forEach((box) => { box.disabled = false; });
                 }
             });
-        }
+        });
     } catch (err) {
         panel.innerHTML = `<div class="empty-card"><p>${escapeHTML(err.message || "Could not load Target checkout lists.")}</p></div>`;
     }
@@ -5043,3 +5076,9 @@ async function deleteWebhookParserRule(id) {
 }
 
 window.addEventListener('DOMContentLoaded', () => { try { loadWebhookParserRules(); } catch (_) {} });
+
+
+document.addEventListener("click", (event) => {
+    const button = event.target.closest("#clearMyTargetProductSelections");
+    if (button) clearMyTargetProductSelections();
+});

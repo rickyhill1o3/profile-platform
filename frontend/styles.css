@@ -1060,3 +1060,18 @@ h1,h2,h3,h4,p{margin:0}
   color: #991b1b;
   border: 1px solid #fecaca;
 }
+
+/* Target checkout lists: auto-save selection and Stellar-format preview */
+.target-checkout-list-card--selected {
+  border-color: #2563eb;
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.12);
+}
+.target-checkout-stellar-list {
+  width: 100%;
+  resize: vertical;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre;
+  overflow: auto;
+}

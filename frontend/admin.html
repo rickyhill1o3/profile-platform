@@ -350,7 +350,7 @@ placeholder="Enter one SKU per line&#10;12345678&#10;87654321"></textarea>
             <div class="panel-header">
               <div>
                 <h2>Target Checkout Lists</h2>
-                <p class="subtle-text">Create active Target checkout lists that users can choose from. Each list supports up to 29 SKUs in <code>sku;name;price</code> format. The SKU is matched to the website catalog name. If your price is blank, the website catalog price is used when available; otherwise it stays blank/no limit.</p>
+                <p class="subtle-text">Create active Target checkout lists that users can choose from. Each list supports up to 29 SKUs in Stellar <code>sku;name;price</code> format or Shikari <code>sku1,sku2,sku3</code> format. The SKU is matched to the website catalog name. If your price is blank, the website catalog price is used when available; otherwise it stays blank/no limit.</p>
               </div>
             </div>
             <form id="targetCheckoutListForm" class="form-grid">
@@ -362,7 +362,7 @@ placeholder="Enter one SKU per line&#10;12345678&#10;87654321"></textarea>
               <div class="field field--full">
                 <label for="targetCheckoutSkuList">SKU List</label>
                 <textarea class="input" id="targetCheckoutSkuList" rows="10" placeholder="94619824;NeeDoh Nice Cube Glitter and Glow;$5.99&#10;94856729;NeeDoh Teenie Funky Pups - 3pk;$5.99"></textarea>
-                <div class="subtle-text">One item per line. Maximum 29 lines per checkout list. Product names are corrected from the website catalog by SKU when available. Missing SKUs are automatically added as catalog placeholders so you can finish the product name/credits.</div>
+                <div class="subtle-text">Paste Stellar lines (one <code>sku;name;price</code> item per line) or a Shikari comma-separated SKU list. Maximum 29 unique SKUs per checkout list. Product names and prices are corrected from the website catalog by SKU when available. Missing SKUs are automatically added as catalog placeholders so you can finish the product name/credits.</div>
               </div>
               <div class="field field--full panel-actions">
                 <button class="btn btn-primary" type="submit">Save Checkout List</button>
