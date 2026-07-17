@@ -805,6 +805,10 @@ async function adjustUserCredits({ userId, delta, reason, note = "", metadata = 
 }
 
 async function getProductCreditCost({ productId = null, site = "", sku = "", productName = "" }) {
+    const normalizedSite = String(site || "").trim().toLowerCase();
+    const normalizedSku = String(sku || "").trim();
+    const cleanName = decodeHtmlEntities(String(productName || "")).trim();
+
     if (productId) {
         const { data, error } = await supabase
             .from("catalog_products")
@@ -815,12 +819,12 @@ async function getProductCreditCost({ productId = null, site = "", sku = "", pro
         if (data?.id) return { credits: asWholeCredits(data.credit_cost, 0), product: data };
     }
 
-    if (site && sku) {
+    if (normalizedSite && normalizedSku) {
         const { data, error } = await supabase
             .from("catalog_products")
             .select("id, credit_cost, site, sku, product_name")
-            .eq("site", String(site).toLowerCase())
-            .ilike("sku", String(sku).trim())
+            .eq("site", normalizedSite)
+            .ilike("sku", normalizedSku)
             .order("created_at", { ascending: false })
             .limit(1)
             .maybeSingle();
@@ -828,8 +832,27 @@ async function getProductCreditCost({ productId = null, site = "", sku = "", pro
         if (data?.id) return { credits: asWholeCredits(data.credit_cost, 0), product: data };
     }
 
-    const cleanName = decodeHtmlEntities(String(productName || "")).trim();
-    if (site && cleanName) {
+    // When a bot omits the SKU, first require an exact normalized catalog title match.
+    // This prevents a broad fuzzy search from selecting a different similarly named product
+    // with a different credit cost (for example, another Mega Gengar product).
+    if (normalizedSite && cleanName) {
+        const { data, error } = await supabase
+            .from("catalog_products")
+            .select("id, credit_cost, site, sku, product_name, created_at")
+            .eq("site", normalizedSite)
+            .order("created_at", { ascending: false })
+            .limit(1000);
+        if (error) throw new Error(error.message);
+        const exactNeedle = normalizeProductMatchText(cleanName);
+        const exactMatch = (Array.isArray(data) ? data : []).find((row) =>
+            normalizeProductMatchText(row.product_name || "") === exactNeedle
+        );
+        if (exactMatch?.id) {
+            return { credits: asWholeCredits(exactMatch.credit_cost, 0), product: exactMatch, match_type: "exact_name" };
+        }
+    }
+
+    if (normalizedSite && cleanName) {
         const tokens = cleanName
             .toLowerCase()
             .replace(/[^a-z0-9]+/g, ' ')
@@ -839,7 +862,7 @@ async function getProductCreditCost({ productId = null, site = "", sku = "", pro
         let query = supabase
             .from("catalog_products")
             .select("id, credit_cost, site, sku, product_name")
-            .eq("site", String(site).toLowerCase())
+            .eq("site", normalizedSite)
             .order("created_at", { ascending: false })
             .limit(25);
         if (tokens.length) {
@@ -857,7 +880,7 @@ async function getProductCreditCost({ productId = null, site = "", sku = "", pro
         const { data, error } = await supabase
             .from("catalog_products")
             .select("id, credit_cost, site, sku, product_name")
-            .eq("site", String(site).toLowerCase())
+            .eq("site", normalizedSite)
             .order("created_at", { ascending: false })
             .limit(250);
         if (error) throw new Error(error.message);
@@ -1035,7 +1058,7 @@ async function getCountdownCreditCost({ countdownId = null, productId = null, si
         const { data: product } = await supabase
             .from("catalog_products")
             .select("id")
-            .eq("site", String(site).toLowerCase())
+            .eq("site", normalizedSite)
             .ilike("sku", String(sku).trim())
             .order("created_at", { ascending: false })
             .limit(1)
@@ -5313,7 +5336,16 @@ async function recheckSuccessfulOrderCredits({ currentUser, order = null, webhoo
     if (checkoutType === 'error') throw new Error('Declined/error checkout logs do not charge credits.');
 
     const normalized = normalizeIncomingOrderPayload(payload);
-    const resolvedCost = await resolveOrderCreditCost({ ...payload, ...normalized });
+    // Older Shikari/Target payloads may omit a SKU in the raw webhook. Preserve the
+    // SKU/site/product already stored on the order instead of replacing them with blanks.
+    const creditLookupInput = {
+        ...payload,
+        ...normalized,
+        site: normalized.site || targetOrder.site || payload.site || '',
+        sku: normalized.sku || targetOrder.sku || payload.sku || payload.product_sku || '',
+        product_name: normalized.product_name || targetOrder.product_name || payload.product_name || ''
+    };
+    const resolvedCost = await resolveOrderCreditCost(creditLookupInput);
     const expectedCredits = asWholeCredits(resolvedCost.credits, 0);
     const existingCredits = asWholeCredits(targetOrder.credits_charged, 0);
     const deltaNeeded = expectedCredits - existingCredits;
@@ -5332,6 +5364,8 @@ async function recheckSuccessfulOrderCredits({ currentUser, order = null, webhoo
                 previous_credits_charged: existingCredits,
                 corrected_credits_charged: expectedCredits,
                 pokemon_credit_items: resolvedCost.pokemonMultiItemMatch?.items || [],
+                catalog_credit_match: resolvedCost.productMatch?.product || null,
+                catalog_credit_match_type: resolvedCost.productMatch?.match_type || (resolvedCost.productMatch?.product?.id ? 'catalog' : 'none'),
                 webhook_log_id: webhookLogRow?.id || null
             },
             orderId: targetOrder.id,
@@ -5368,6 +5402,8 @@ async function recheckSuccessfulOrderCredits({ currentUser, order = null, webhoo
                 corrected_credits_charged: expectedCredits,
                 refunded_credits: refundAmount,
                 pokemon_credit_items: resolvedCost.pokemonMultiItemMatch?.items || [],
+                catalog_credit_match: resolvedCost.productMatch?.product || null,
+                catalog_credit_match_type: resolvedCost.productMatch?.match_type || (resolvedCost.productMatch?.product?.id ? 'catalog' : 'none'),
                 webhook_log_id: webhookLogRow?.id || null
             },
             orderId: targetOrder.id,
