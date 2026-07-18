@@ -4474,7 +4474,27 @@ app.post(["/webhooks/orders", "/webhooks/orders/:token"], async (req, res) => {
                 product: String(normalized.product_name || payload.product_name || ''),
                 sku: String(normalized.sku || payload.sku || ''),
                 payload,
-                parsed_items: getIndexedCheckoutItems(payload).map((x) => ({ title: x.product_name, price: x.price, quantity: x.quantity })),
+                parsed_items: (() => {
+                    const indexed = getIndexedCheckoutItems(payload).map((x) => ({
+                        title: x.product_name,
+                        price: x.price,
+                        quantity: x.quantity,
+                        sku: x.sku || normalized.sku || '',
+                        site: normalized.site || '',
+                        url: x.product_url || normalized.product_url || '',
+                        image: x.image_url || x.image || normalized.image_url || ''
+                    }));
+                    if (indexed.length) return indexed;
+                    return [{
+                        title: normalized.product_name || payload.product_name || '',
+                        price: normalized.price,
+                        quantity: normalized.quantity || 1,
+                        sku: normalized.sku || '',
+                        site: normalized.site || '',
+                        url: normalized.product_url || '',
+                        image: normalized.image_url || ''
+                    }];
+                })(),
                 fingerprint
             });
             durableLogId = saved?.id || null;

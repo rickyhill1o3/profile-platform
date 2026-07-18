@@ -360,7 +360,7 @@ module.exports = function registerSuccessNetwork({ app, supabase, auth, admin, g
 
   app.get('/public/checkout-success-feed', async (req, res) => {
     const { data, error } = await supabase.from('webhook_events')
-      .select('id,site,product,product_name,sku,parsed_items,created_at,status,type,webhook_type')
+      .select('id,site,product,product_name,sku,parsed_items,payload,created_at,status,type,webhook_type')
       .order('created_at', { ascending: false }).limit(100);
     if (error) return res.json([]);
 
@@ -369,40 +369,83 @@ module.exports = function registerSuccessNetwork({ app, supabase, auth, admin, g
       .slice(0, 24)
       .map(r => {
         const item = Array.isArray(r.parsed_items) ? (r.parsed_items[0] || {}) : {};
+        const payload = r.payload && typeof r.payload === 'object' ? r.payload : {};
+        const firstEmbed = Array.isArray(payload.embeds) ? (payload.embeds[0] || {}) : (payload.embed || {});
+        const payloadProduct = payload.product && typeof payload.product === 'object' ? payload.product : {};
+        const image = item.image || item.image_url || item.thumbnail || item.thumbnail_url
+          || payload.image_url || payload.image || payload.thumbnail_url
+          || payloadProduct.image_url || payloadProduct.image
+          || firstEmbed?.thumbnail?.url || firstEmbed?.image?.url || '';
         return {
           id: r.id,
-          site: cleanText(r.site || item.site || 'store', 80),
-          product: cleanText(r.product || r.product_name || item.title || item.product_name || 'Successful checkout', 500),
-          sku: cleanText(r.sku || item.sku || item.tcin || item.asin || '', 160),
+          site: cleanText(r.site || item.site || payload.site || payload.source || 'store', 80),
+          product: cleanText(r.product || r.product_name || item.title || item.product_name || payload.product_name || payloadProduct.name || firstEmbed?.title || 'Successful checkout', 500),
+          sku: cleanText(r.sku || item.sku || item.tcin || item.asin || payload.sku || payload.product_sku || '', 160),
           created_at: r.created_at,
-          image: cleanText(item.image || item.image_url || item.thumbnail || item.thumbnail_url || '', 2000)
+          image: cleanText(image, 2000)
         };
       });
 
     // Older webhook rows often did not save the image in parsed_items. Fill those
-    // images from the product catalog/storefront so the public homepage remains visual.
-    const missing = rows.filter(r => !r.image && r.sku);
+    // images from the original webhook payload first, then the catalog/storefront.
+    // SKU matching is preferred, with a normalized product-name fallback for legacy rows.
+    const missing = rows.filter(r => !r.image);
     if (missing.length) {
       const skus = [...new Set(missing.map(r => String(r.sku).trim()).filter(Boolean))].slice(0, 100);
+      const names = [...new Set(missing.map(r => String(r.product).trim()).filter(Boolean))].slice(0, 100);
       const imageMap = new Map();
+      const nameMap = new Map();
       const key = (site, sku) => `${String(site || '').toLowerCase().replace(/[^a-z0-9]/g, '')}:${String(sku || '').toLowerCase().trim()}`;
-      try {
-        const { data: catalogRows } = await supabase.from('catalog_products')
-          .select('site,sku,product_name,image_url,product_url').in('sku', skus);
-        for (const product of catalogRows || []) {
-          if (product.image_url) imageMap.set(key(product.site, product.sku), product.image_url);
-          if (product.image_url) imageMap.set(key('', product.sku), product.image_url);
+      const nameKey = (site, name) => `${String(site || '').toLowerCase().replace(/[^a-z0-9]/g, '')}:${String(name || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()}`;
+      const remember = (site, sku, name, image) => {
+        const url = String(image || '').trim();
+        if (!url) return;
+        if (sku) {
+          imageMap.set(key(site, sku), url);
+          imageMap.set(key('', sku), url);
         }
-      } catch (_) {}
-      try {
-        const { data: storeRows } = await supabase.from('storefront_products')
-          .select('primary_site,primary_sku,image_url').in('primary_sku', skus);
-        for (const product of storeRows || []) {
-          if (product.image_url) imageMap.set(key(product.primary_site, product.primary_sku), product.image_url);
-          if (product.image_url) imageMap.set(key('', product.primary_sku), product.image_url);
+        if (name) {
+          nameMap.set(nameKey(site, name), url);
+          nameMap.set(nameKey('', name), url);
         }
-      } catch (_) {}
-      for (const row of missing) row.image = imageMap.get(key(row.site, row.sku)) || imageMap.get(key('', row.sku)) || '';
+      };
+      if (skus.length) {
+        try {
+          const { data: catalogRows } = await supabase.from('catalog_products')
+            .select('site,sku,product_name,image_url,product_url').in('sku', skus);
+          for (const product of catalogRows || []) remember(product.site, product.sku, product.product_name, product.image_url);
+        } catch (_) {}
+      }
+      // A second name-based query helps old Shikari/Target records whose SKU was absent
+      // from webhook_events even though Discord received a thumbnail.
+      if (names.length) {
+        try {
+          const { data: catalogByName } = await supabase.from('catalog_products')
+            .select('site,sku,product_name,image_url').in('product_name', names);
+          for (const product of catalogByName || []) remember(product.site, product.sku, product.product_name, product.image_url);
+        } catch (_) {}
+      }
+      if (skus.length) {
+        try {
+          const { data: storeRows } = await supabase.from('storefront_products')
+            .select('primary_site,primary_sku,title,image_url').in('primary_sku', skus);
+          for (const product of storeRows || []) remember(product.primary_site, product.primary_sku, product.title, product.image_url);
+        } catch (_) {}
+      }
+      if (names.length) {
+        try {
+          const { data: storeByName } = await supabase.from('storefront_products')
+            .select('primary_site,primary_sku,title,image_url').in('title', names);
+          for (const product of storeByName || []) remember(product.primary_site, product.primary_sku, product.title, product.image_url);
+        } catch (_) {}
+      }
+      for (const row of missing) {
+        row.image = imageMap.get(key(row.site, row.sku))
+          || imageMap.get(key('', row.sku))
+          || nameMap.get(nameKey(row.site, row.product))
+          || nameMap.get(nameKey('', row.product))
+          || '';
+      }
     }
 
     res.set('Cache-Control', 'public, max-age=30');
