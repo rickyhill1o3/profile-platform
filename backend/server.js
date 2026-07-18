@@ -93,6 +93,7 @@ const Stripe = require("stripe");
 const cheerio = require("cheerio");
 const registerProductCatalogRoutes = require("./product-catalog-routes");
 const registerShopRoutes = require("./shop-routes");
+const registerSuccessNetwork = require("./success-network");
 const supabase = require("./database");
 const { encrypt, decrypt } = require("./encryption");
 
@@ -8965,6 +8966,15 @@ setTimeout(() => {
     replayWebhookFailoverQueue().catch((err) => console.error('Initial failover queue replay failed:', err));
 }, 15000);
 startAnnouncementCatalogScheduler();
+
+registerSuccessNetwork({
+    app,
+    supabase,
+    auth,
+    admin,
+    getCurrentUser,
+    SUPER_ADMIN_EMAIL
+});
 
 const PORT = process.env.PORT || 3000;
 
