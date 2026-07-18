@@ -1,4 +1,4 @@
-const { Client, GatewayIntentBits, Partials, ChannelType, EmbedBuilder } = require('discord.js');
+const { Client, GatewayIntentBits, Partials, ChannelType, EmbedBuilder, PermissionsBitField } = require('discord.js');
 const jwt = require('jsonwebtoken');
 
 function cleanText(v, n = 2000) { return String(v || '').replace(/\u0000/g, '').slice(0, n); }
@@ -57,6 +57,60 @@ module.exports = function registerSuccessNetwork({ app, supabase, auth, admin, g
     return data || null;
   }
 
+
+  function botChannelPermissionProblem(channel, guild) {
+    try {
+      const me = guild?.members?.me;
+      if (!me || !channel?.permissionsFor) return null;
+      const permissions = channel.permissionsFor(me);
+      const missing = [];
+      if (!permissions?.has(PermissionsBitField.Flags.ViewChannel)) missing.push('View Channel');
+      if (!permissions?.has(PermissionsBitField.Flags.ReadMessageHistory)) missing.push('Read Message History');
+      if (!permissions?.has(PermissionsBitField.Flags.SendMessages)) missing.push('Send Messages');
+      if (!permissions?.has(PermissionsBitField.Flags.EmbedLinks)) missing.push('Embed Links');
+      return missing.length ? `Give the Success Bot these permissions in #${channel.name}: ${missing.join(', ')}.` : null;
+    } catch (_) { return null; }
+  }
+
+  async function sendConnectionTest({ source, requestedBy }) {
+    await ensureClient();
+    if (!client || !ready) throw new Error('Discord bot is not connected. Check DISCORD_BOT_TOKEN and the Render logs.');
+    const sourceGuild = await client.guilds.fetch(source.guild_id);
+    const sourceChannel = await sourceGuild.channels.fetch(source.source_channel_id);
+    if (!sourceChannel?.isTextBased()) throw new Error('The selected success channel is no longer available.');
+    const sourcePermissionProblem = botChannelPermissionProblem(sourceChannel, sourceGuild);
+    if (sourcePermissionProblem) throw new Error(sourcePermissionProblem);
+
+    const sourceEmbed = new EmbedBuilder()
+      .setColor(0x2ecc71)
+      .setTitle('Success channel connected successfully')
+      .setDescription('The Shore Shack Success Bot can read this channel, save success posts to the website, and include approved posts on the public success wall.')
+      .addFields({ name: 'Connected channel', value: `#${source.source_channel_name}`, inline: true })
+      .setTimestamp();
+    await sourceChannel.send({ embeds: [sourceEmbed] });
+
+    const master = await getMasterDestination();
+    let masterNotified = false;
+    const sameDestination = master && String(master.guild_id) === String(source.guild_id) && String(master.channel_id) === String(source.source_channel_id);
+    if (master?.guild_id && master?.channel_id && !sameDestination) {
+      const masterGuild = await client.guilds.fetch(master.guild_id);
+      const masterChannel = await masterGuild.channels.fetch(master.channel_id);
+      if (masterChannel?.isTextBased()) {
+        const masterPermissionProblem = botChannelPermissionProblem(masterChannel, masterGuild);
+        if (masterPermissionProblem) throw new Error(`Master destination problem: ${masterPermissionProblem}`);
+        const masterEmbed = new EmbedBuilder()
+          .setColor(0x5865f2)
+          .setTitle('Admin success channel connected')
+          .setDescription(`${source.guild_name} has connected #${source.source_channel_name} to The Shore Shack Success Network.`)
+          .addFields({ name: 'Connected by', value: cleanText(requestedBy?.email || requestedBy?.name || 'Admin', 250), inline: true })
+          .setTimestamp();
+        await masterChannel.send({ embeds: [masterEmbed] });
+        masterNotified = true;
+      }
+    }
+    return { ok: true, same_destination: !!sameDestination, master_notified: masterNotified };
+  }
+
   async function handleMessage(message) {
     try {
       if (!message.guild || message.author?.bot || message.webhookId) return;
@@ -96,9 +150,23 @@ module.exports = function registerSuccessNetwork({ app, supabase, auth, admin, g
         await supabase.from('discord_success_posts').update({ forwarding_status: 'waiting_for_master' }).eq('id', inserted.id);
         return;
       }
+
+      // The Super Admin can use the same channel as both the source and master hub.
+      // In that case the original human post is already in the master destination, so
+      // saving it to the database is sufficient and a duplicate Discord post is avoided.
+      if (String(master.guild_id) === String(message.guild.id) && String(master.channel_id) === String(message.channel.id)) {
+        await supabase.from('discord_success_posts').update({
+          forwarding_status: 'already_in_master', forwarded_message_id: message.id,
+          forwarded_at: new Date().toISOString(), forwarding_error: null
+        }).eq('id', inserted.id);
+        return;
+      }
+
       const guild = await client.guilds.fetch(master.guild_id);
       const channel = await guild.channels.fetch(master.channel_id);
       if (!channel?.isTextBased()) throw new Error('Master success destination is not a text channel');
+      const masterPermissionProblem = botChannelPermissionProblem(channel, guild);
+      if (masterPermissionProblem) throw new Error(masterPermissionProblem);
 
       const embed = new EmbedBuilder()
         .setColor(0x2ecc71)
@@ -230,11 +298,28 @@ module.exports = function registerSuccessNetwork({ app, supabase, auth, admin, g
       await requireAllowedGuild(user, guildId);
       const guild = await client.guilds.fetch(guildId); const channel = await guild.channels.fetch(channelId);
       if (!channel?.isTextBased()) return res.status(400).json({ error: 'Choose a text channel' });
+      const permissionProblem = botChannelPermissionProblem(channel, guild);
+      if (permissionProblem) return res.status(400).json({ error: permissionProblem });
       await supabase.from('discord_success_channels').update({ is_active: false, updated_at: new Date().toISOString() }).eq('admin_user_id', user.id);
       const row = { admin_user_id: user.id, guild_id: guild.id, guild_name: guild.name, source_channel_id: channel.id, source_channel_name: channel.name, allow_public_homepage: req.body.allow_public_homepage === true, is_active: true, updated_at: new Date().toISOString() };
       const { data, error } = await supabase.from('discord_success_channels').upsert(row, { onConflict: 'guild_id' }).select('*').single();
       if (error) return res.status(500).json({ error: error.message }); res.json(data);
     } catch (err) { res.status(403).json({ error: err.message }); }
+  });
+
+  app.post('/admin/success-network/test', auth, admin, async (req, res) => {
+    try {
+      const user = await getCurrentUser(req);
+      let q = supabase.from('discord_success_channels').select('*').eq('is_active', true);
+      if (req.body?.source_id) q = q.eq('id', cleanText(req.body.source_id, 80));
+      else q = q.eq('admin_user_id', user.id);
+      if (!isSuper(user, SUPER_ADMIN_EMAIL)) q = q.eq('admin_user_id', user.id);
+      const { data: source, error } = await q.maybeSingle();
+      if (error) throw error;
+      if (!source) return res.status(400).json({ error: 'Save a success channel before sending a test.' });
+      const result = await sendConnectionTest({ source, requestedBy: user });
+      res.json(result);
+    } catch (err) { res.status(400).json({ error: err.message }); }
   });
 
   app.post('/admin/success-network/public-setting', auth, admin, async (req, res) => {
@@ -269,7 +354,7 @@ module.exports = function registerSuccessNetwork({ app, supabase, auth, admin, g
   });
 
   app.get('/public/success-feed', async (req, res) => {
-    const { data, error } = await supabase.from('discord_success_posts').select('id,guild_name,author_name,author_avatar_url,message_text,attachments,posted_at').eq('forwarding_status', 'forwarded').eq('public_approved', true).order('posted_at', { ascending: false }).limit(24);
+    const { data, error } = await supabase.from('discord_success_posts').select('id,guild_name,author_name,author_avatar_url,message_text,attachments,posted_at').in('forwarding_status', ['forwarded', 'already_in_master']).eq('public_approved', true).order('posted_at', { ascending: false }).limit(24);
     if (error) return res.json([]); res.set('Cache-Control', 'public, max-age=60'); res.json(data || []);
   });
 
