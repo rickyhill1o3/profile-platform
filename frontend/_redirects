@@ -1,0 +1,14 @@
+/admin              /admin.html             200
+/admin/             /admin.html             200
+/dashboard          /dashboard.html         200
+/dashboard/         /dashboard.html         200
+/discord-success    /success-network.html   200
+/discord-success/   /success-network.html   200
+/shop               /shop.html              200
+/shop/              /shop.html              200
+/guide              /guide.html             200
+/guide/              /guide.html             200
+/login              /login.html             200
+/login/              /login.html             200
+/signup             /signup.html            200
+/signup/             /signup.html            200

@@ -274,12 +274,54 @@ module.exports = function registerSuccessNetwork({ app, supabase, auth, admin, g
   });
 
   app.get('/public/checkout-success-feed', async (req, res) => {
-    const { data, error } = await supabase.from('webhook_events').select('id,site,product,product_name,sku,parsed_items,created_at,status,type,webhook_type').order('created_at', { ascending: false }).limit(80);
+    const { data, error } = await supabase.from('webhook_events')
+      .select('id,site,product,product_name,sku,parsed_items,created_at,status,type,webhook_type')
+      .order('created_at', { ascending: false }).limit(100);
     if (error) return res.json([]);
-    const rows = (data || []).filter(r => String(r.type || r.webhook_type || '').includes('checkout') && !String(r.status || '').includes('error')).slice(0, 18).map(r => ({
-      id: r.id, site: r.site || 'store', product: r.product || r.product_name || r.parsed_items?.[0]?.title || 'Successful checkout', sku: r.sku || r.parsed_items?.[0]?.sku || '', created_at: r.created_at, image: r.parsed_items?.[0]?.image || ''
-    }));
-    res.set('Cache-Control', 'public, max-age=60'); res.json(rows);
+
+    const rows = (data || [])
+      .filter(r => String(r.type || r.webhook_type || '').toLowerCase().includes('checkout') && !String(r.status || '').toLowerCase().includes('error'))
+      .slice(0, 24)
+      .map(r => {
+        const item = Array.isArray(r.parsed_items) ? (r.parsed_items[0] || {}) : {};
+        return {
+          id: r.id,
+          site: cleanText(r.site || item.site || 'store', 80),
+          product: cleanText(r.product || r.product_name || item.title || item.product_name || 'Successful checkout', 500),
+          sku: cleanText(r.sku || item.sku || item.tcin || item.asin || '', 160),
+          created_at: r.created_at,
+          image: cleanText(item.image || item.image_url || item.thumbnail || item.thumbnail_url || '', 2000)
+        };
+      });
+
+    // Older webhook rows often did not save the image in parsed_items. Fill those
+    // images from the product catalog/storefront so the public homepage remains visual.
+    const missing = rows.filter(r => !r.image && r.sku);
+    if (missing.length) {
+      const skus = [...new Set(missing.map(r => String(r.sku).trim()).filter(Boolean))].slice(0, 100);
+      const imageMap = new Map();
+      const key = (site, sku) => `${String(site || '').toLowerCase().replace(/[^a-z0-9]/g, '')}:${String(sku || '').toLowerCase().trim()}`;
+      try {
+        const { data: catalogRows } = await supabase.from('catalog_products')
+          .select('site,sku,product_name,image_url,product_url').in('sku', skus);
+        for (const product of catalogRows || []) {
+          if (product.image_url) imageMap.set(key(product.site, product.sku), product.image_url);
+          if (product.image_url) imageMap.set(key('', product.sku), product.image_url);
+        }
+      } catch (_) {}
+      try {
+        const { data: storeRows } = await supabase.from('storefront_products')
+          .select('primary_site,primary_sku,image_url').in('primary_sku', skus);
+        for (const product of storeRows || []) {
+          if (product.image_url) imageMap.set(key(product.primary_site, product.primary_sku), product.image_url);
+          if (product.image_url) imageMap.set(key('', product.primary_sku), product.image_url);
+        }
+      } catch (_) {}
+      for (const row of missing) row.image = imageMap.get(key(row.site, row.sku)) || imageMap.get(key('', row.sku)) || '';
+    }
+
+    res.set('Cache-Control', 'public, max-age=30');
+    res.json(rows);
   });
 
   if (token) setTimeout(() => ensureClient().catch(err => console.error('[success-network] startup failed', err)), 3000);
