@@ -353,6 +353,60 @@ module.exports = function registerSuccessNetwork({ app, supabase, auth, admin, g
     const { data, error } = await q; if (error) return res.status(500).json({ error: error.message }); res.json(data || []);
   });
 
+
+  app.delete('/admin/success-network/posts/:postId', auth, admin, async (req, res) => {
+    try {
+      const user = await getCurrentUser(req);
+      let q = supabase.from('discord_success_posts').select('*').eq('id', cleanText(req.params.postId, 120));
+      if (!isSuper(user, SUPER_ADMIN_EMAIL)) q = q.eq('source_admin_user_id', user.id);
+      const { data: post, error: readError } = await q.maybeSingle();
+      if (readError) throw readError;
+      if (!post) return res.status(404).json({ error: 'Success post not found or you do not have permission to delete it.' });
+
+      const warnings = [];
+      await ensureClient().catch(err => warnings.push(`Discord connection unavailable: ${err.message}`));
+
+      // Remove the original source message when the bot has permission. This is best-effort:
+      // the website/database deletion still succeeds even when Discord permissions prevent it.
+      if (client && ready && post.guild_id && post.source_channel_id && post.discord_message_id) {
+        try {
+          const guild = await client.guilds.fetch(String(post.guild_id));
+          const channel = await guild.channels.fetch(String(post.source_channel_id));
+          if (channel?.isTextBased()) {
+            const sourceMessage = await channel.messages.fetch(String(post.discord_message_id));
+            if (sourceMessage) await sourceMessage.delete();
+          }
+        } catch (err) {
+          warnings.push(`Original Discord message was not removed: ${cleanText(err.message, 300)}`);
+        }
+      }
+
+      // Remove the copied master-hub message when one was created. If source and master were
+      // the same channel, forwarded_message_id points to the original and has already been handled.
+      if (client && ready && post.forwarded_message_id && post.forwarding_status === 'forwarded') {
+        try {
+          const master = await getMasterDestination();
+          if (master?.guild_id && master?.channel_id) {
+            const guild = await client.guilds.fetch(String(master.guild_id));
+            const channel = await guild.channels.fetch(String(master.channel_id));
+            if (channel?.isTextBased()) {
+              const forwardedMessage = await channel.messages.fetch(String(post.forwarded_message_id));
+              if (forwardedMessage) await forwardedMessage.delete();
+            }
+          }
+        } catch (err) {
+          warnings.push(`Forwarded master Discord message was not removed: ${cleanText(err.message, 300)}`);
+        }
+      }
+
+      const { error: deleteError } = await supabase.from('discord_success_posts').delete().eq('id', post.id);
+      if (deleteError) throw deleteError;
+      res.json({ ok: true, warnings });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   app.get('/public/success-feed', async (req, res) => {
     const { data, error } = await supabase.from('discord_success_posts').select('id,guild_name,author_name,author_avatar_url,message_text,attachments,posted_at').in('forwarding_status', ['forwarded', 'already_in_master']).eq('public_approved', true).order('posted_at', { ascending: false }).limit(24);
     if (error) return res.json([]); res.set('Cache-Control', 'public, max-age=60'); res.json(data || []);

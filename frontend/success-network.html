@@ -1,6 +1,6 @@
 <!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Discord Success | The Shore Shack</title><link rel="stylesheet" href="styles.css"><style>
 .success-shell{max-width:1180px;margin:0 auto;padding:24px}.success-hero{background:linear-gradient(135deg,#111827,#312e81);color:#fff;border-radius:24px;padding:28px;margin-bottom:20px}.success-grid{display:grid;grid-template-columns:1fr 1fr;gap:18px}.success-card{background:#fff;border:1px solid #e5e7eb;border-radius:18px;padding:20px;box-shadow:0 10px 30px rgba(15,23,42,.07)}.status-dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:7px}.green{background:#22c55e}.red{background:#ef4444}.field{margin:12px 0}.field label{display:block;font-weight:700;margin-bottom:6px}.field select{width:100%;padding:11px;border:1px solid #cbd5e1;border-radius:10px}.post-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}.post{border:1px solid #e5e7eb;border-radius:15px;overflow:hidden;background:#fff}.post img{width:100%;height:190px;object-fit:cover;background:#f1f5f9}.post-body{padding:13px}.muted{color:#64748b}.top-actions{display:flex;gap:10px;flex-wrap:wrap}.source-row{padding:10px 0;border-bottom:1px solid #e5e7eb}.connection-box{display:flex;align-items:center;justify-content:space-between;gap:15px;flex-wrap:wrap;padding:15px;border-radius:14px;background:#f8fafc;border:1px solid #e2e8f0}.toggle-row{display:flex;align-items:flex-start;gap:10px;margin:16px 0}.notice{padding:12px 14px;border-radius:12px;margin:12px 0;background:#ecfdf5;color:#166534}.notice.error{background:#fef2f2;color:#991b1b}@media(max-width:800px){.success-grid,.post-grid{grid-template-columns:1fr}.success-shell{padding:12px}}
-</style></head><body><div class="success-shell"><div class="top-actions"><a class="btn" href="admin.html">← Admin Dashboard</a><a class="btn" href="index.html">Homepage</a></div>
+.btn-danger{border-color:#fecaca!important;color:#b91c1c!important;background:#fff!important}.btn-danger:hover{background:#fef2f2!important}.post-actions{display:flex;justify-content:flex-end;margin-top:10px}</style></head><body><div class="success-shell"><div class="top-actions"><a class="btn" href="admin.html">← Admin Dashboard</a><a class="btn" href="index.html">Homepage</a></div>
 <section class="success-hero"><p class="eyebrow">Admin Discord Success</p><h1>Connect your Discord success channel in a few clicks.</h1><p>Authorize the bot, choose one channel, and every success posted there will be saved to the website and forwarded to the Super Admin success hub.</p><div id="botStatus">Loading bot status…</div></section>
 <div id="pageNotice"></div>
 <div class="success-grid">
@@ -30,6 +30,22 @@ async function sendTest(sourceId,button){try{const btn=button||testSource;btn.di
 testSource.onclick=()=>sendTest();
 allowPublic.onchange=async()=>{if(!(state.sources||[]).some(s=>s.is_active))return;try{await call('/admin/success-network/public-setting',{method:'POST',body:JSON.stringify({allow_public_homepage:allowPublic.checked})});sourceResult.textContent='Homepage sharing preference updated.';await load()}catch(e){sourceResult.textContent=e.message}};
 saveMaster.onclick=async()=>{try{masterResult.textContent='Saving…';await call('/admin/success-network/master',{method:'POST',body:JSON.stringify({guild_id:masterGuild.value,channel_id:masterChannel.value})});masterResult.textContent='Master success destination saved.';await load()}catch(e){masterResult.textContent=e.message}};
-async function loadPosts(){try{const rows=await call('/admin/success-network/posts?limit=60');posts.innerHTML=rows.length?rows.map(p=>{const img=(p.attachments||[]).find(a=>String(a.content_type||'').startsWith('image/'));return `<article class="post">${img?`<img src="${esc(img.url)}" alt="Success photo">`:''}<div class="post-body"><strong>${esc(p.author_name||'Discord member')}</strong><div class="muted">${esc(p.guild_name)} • #${esc(p.source_channel_name)}</div><p>${esc(p.message_text||'Shared a success')}</p><small class="muted">${new Date(p.posted_at).toLocaleString()} • ${esc(p.forwarding_status)}</small></div></article>`}).join(''):'No success posts yet.'}catch(e){posts.textContent=e.message}}
+async function deleteSuccessPost(postId,button){
+  if(!confirm('Delete this success post? It will be removed from the website history and public homepage. The bot will also try to remove the original and forwarded Discord messages.'))return;
+  const old=button.textContent;
+  button.disabled=true;
+  button.textContent='Deleting…';
+  try{
+    const result=await call('/admin/success-network/posts/'+encodeURIComponent(postId),{method:'DELETE'});
+    await loadPosts();
+    await load();
+    if(result.warnings&&result.warnings.length)alert('The website post was deleted. Discord warning:\n\n'+result.warnings.join('\n'));
+  }catch(e){
+    alert(e.message);
+    button.disabled=false;
+    button.textContent=old;
+  }
+}
+async function loadPosts(){try{const rows=await call('/admin/success-network/posts?limit=60');posts.innerHTML=rows.length?rows.map(p=>{const img=(p.attachments||[]).find(a=>String(a.content_type||'').startsWith('image/'));return `<article class="post">${img?`<img src="${esc(img.url)}" alt="Success photo">`:''}<div class="post-body"><strong>${esc(p.author_name||'Discord member')}</strong><div class="muted">${esc(p.guild_name)} • #${esc(p.source_channel_name)}</div><p>${esc(p.message_text||'Shared a success')}</p><small class="muted">${new Date(p.posted_at).toLocaleString()} • ${esc(p.forwarding_status)}</small><div class="post-actions"><button class="btn btn-danger" onclick="deleteSuccessPost('${esc(p.id)}',this)">Delete Post</button></div></div></article>`}).join(''):'No success posts yet.'}catch(e){posts.textContent=e.message}}
 showQueryNotice();load();
 </script></body></html>
