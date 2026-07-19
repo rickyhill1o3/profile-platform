@@ -199,20 +199,19 @@ module.exports = function registerSuccessNetwork({ app, supabase, auth, admin, g
   app.get('/admin/success-network/connect-url', auth, admin, async (req, res) => {
     try {
       const user = await getCurrentUser(req);
-      if (!clientId || !clientSecret || !jwtSecret) return res.status(500).json({ error: 'Discord OAuth is not fully configured.' });
+      if (!clientId || !jwtSecret) return res.status(500).json({ error: 'Discord bot installation is not fully configured.' });
       const state = jwt.sign({ purpose: 'discord_success_install', user_id: user.id }, jwtSecret, { expiresIn: '15m' });
       const url = new URL('https://discord.com/oauth2/authorize');
       url.searchParams.set('client_id', clientId);
       url.searchParams.set('redirect_uri', oauthRedirect(req));
-      url.searchParams.set('response_type', 'code');
-      url.searchParams.set('scope', 'identify guilds bot applications.commands');
-      // Requested bot permissions:
-      // View Channel (1024) + Send Messages (2048) + Manage Messages (8192) +
-      // Embed Links (16384) + Attach Files (32768) + Read Message History (65536).
-      // Discord applies these to the managed bot role when the admin authorizes/reconnects.
+      // Bot-only install flow. No user OAuth token exchange is required, so admins
+      // cannot receive an invalid_client error from a mismatched client secret.
+      url.searchParams.set('scope', 'bot applications.commands');
+      // View Channel + Send Messages + Manage Messages + Embed Links +
+      // Attach Files + Read Message History.
       url.searchParams.set('permissions', '125952');
       url.searchParams.set('state', state);
-      url.searchParams.set('prompt', 'consent');
+      url.searchParams.set('disable_guild_select', 'false');
       res.json({ url: url.toString() });
     } catch (err) { res.status(500).json({ error: err.message }); }
   });
@@ -220,40 +219,38 @@ module.exports = function registerSuccessNetwork({ app, supabase, auth, admin, g
   app.get('/auth/discord-success/callback', async (req, res) => {
     const base = frontendBase(req);
     try {
+      if (req.query.error) throw new Error(cleanText(req.query.error_description || req.query.error, 300));
       const decoded = jwt.verify(String(req.query.state || ''), jwtSecret);
       if (decoded?.purpose !== 'discord_success_install' || !decoded.user_id) throw new Error('Invalid or expired Discord connection request.');
-      const code = String(req.query.code || '').trim();
-      if (!code) throw new Error('Discord did not return an authorization code.');
-      const tokenRes = await fetch('https://discord.com/api/oauth2/token', {
-        method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: new URLSearchParams({ client_id: clientId, client_secret: clientSecret, grant_type: 'authorization_code', code, redirect_uri: oauthRedirect(req) })
-      });
-      const tokenJson = await tokenRes.json().catch(() => ({}));
-      if (!tokenRes.ok || !tokenJson.access_token) throw new Error(tokenJson.error_description || tokenJson.error || 'Discord authorization failed.');
-      const headers = { Authorization: `Bearer ${tokenJson.access_token}` };
-      const [userRes, guildsRes] = await Promise.all([
-        fetch('https://discord.com/api/users/@me', { headers }),
-        fetch('https://discord.com/api/users/@me/guilds', { headers })
-      ]);
-      const discordUser = await userRes.json().catch(() => ({}));
-      const oauthGuilds = await guildsRes.json().catch(() => ([]));
-      if (!userRes.ok || !discordUser.id) throw new Error('Could not read your Discord account.');
+      const guildId = String(req.query.guild_id || '').trim();
+      if (!guildId) throw new Error('Discord did not return the server that was selected. Please click Connect Discord and choose a server again.');
+
       await ensureClient();
-      const manageable = (Array.isArray(oauthGuilds) ? oauthGuilds : [])
-        .filter(g => g.owner || hasManageGuild(g.permissions))
-        .filter(g => client?.guilds?.cache?.has(String(g.id)))
-        .map(g => ({ id: String(g.id), name: cleanText(g.name, 200), icon: g.icon || null }));
+      if (!client || !ready) throw new Error('The Discord bot is starting. Wait a few seconds and reconnect.');
+
+      let guild = null;
+      // Discord may redirect a fraction of a second before the gateway receives the
+      // guild-create event. Retry briefly so the website reliably records the install.
+      for (let attempt = 0; attempt < 6 && !guild; attempt += 1) {
+        guild = client.guilds.cache.get(guildId) || await client.guilds.fetch(guildId).catch(() => null);
+        if (!guild) await new Promise(resolve => setTimeout(resolve, 1000));
+      }
+      if (!guild) throw new Error('The bot was not found in the selected Discord server. Confirm the installation and try again.');
+
+      const existing = await getConnection(decoded.user_id);
+      const manageableMap = new Map((Array.isArray(existing?.manageable_guilds) ? existing.manageable_guilds : []).map(g => [String(g.id), g]));
+      manageableMap.set(String(guild.id), { id: String(guild.id), name: cleanText(guild.name, 200), icon: guild.icon || null });
       const row = {
         admin_user_id: decoded.user_id,
-        discord_user_id: String(discordUser.id),
-        discord_username: cleanText(discordUser.global_name || discordUser.username, 200),
-        manageable_guilds: manageable,
-        connected_at: new Date().toISOString(),
+        discord_user_id: existing?.discord_user_id || null,
+        discord_username: existing?.discord_username || 'Discord server connected',
+        manageable_guilds: [...manageableMap.values()],
+        connected_at: existing?.connected_at || new Date().toISOString(),
         updated_at: new Date().toISOString()
       };
       const { error } = await supabase.from('discord_success_connections').upsert(row, { onConflict: 'admin_user_id' });
       if (error) throw error;
-      return res.redirect(`${base}/success-network.html?discord_success_connected=1`);
+      return res.redirect(`${base}/success-network.html?discord_success_connected=1&guild_id=${encodeURIComponent(guild.id)}`);
     } catch (err) {
       return res.redirect(`${base}/success-network.html?discord_success_error=${encodeURIComponent(err.message || 'Discord connection failed')}`);
     }
@@ -270,7 +267,7 @@ module.exports = function registerSuccessNetwork({ app, supabase, auth, admin, g
       supabase.from('discord_success_posts').select('*', { count: 'exact', head: true }),
       getConnection(user.id)
     ]);
-    res.json({ bot_ready: ready, configured: !!token, oauth_configured: !!(clientId && clientSecret), client_id: clientId, is_super_admin: superAdmin, connection, sources, master, total_posts: count || 0 });
+    res.json({ bot_ready: ready, configured: !!token, oauth_configured: !!clientId, client_id: clientId, is_super_admin: superAdmin, connection, sources, master, total_posts: count || 0 });
   });
 
   app.get('/admin/success-network/guilds', auth, admin, async (req, res) => {
@@ -293,7 +290,18 @@ module.exports = function registerSuccessNetwork({ app, supabase, auth, admin, g
       await requireAllowedGuild(user, req.params.guildId);
       const guild = await client.guilds.fetch(req.params.guildId);
       const channels = await guild.channels.fetch();
-      res.json([...channels.values()].filter(c => c && (c.type === ChannelType.GuildText || c.type === ChannelType.GuildAnnouncement)).map(c => ({ id: c.id, name: c.name, type: c.type })).sort((a, b) => a.name.localeCompare(b.name)));
+      const me = guild.members.me || await guild.members.fetchMe().catch(() => null);
+      const visibleChannels = [...channels.values()].filter(c => {
+        if (!c || (c.type !== ChannelType.GuildText && c.type !== ChannelType.GuildAnnouncement)) return false;
+        if (!me || !c.permissionsFor) return false;
+        return c.permissionsFor(me)?.has(PermissionsBitField.Flags.ViewChannel) === true;
+      });
+      res.json(visibleChannels.map(c => ({
+        id: c.id,
+        name: c.name,
+        type: c.type,
+        can_manage_messages: c.permissionsFor(me)?.has(PermissionsBitField.Flags.ManageMessages) === true
+      })).sort((a, b) => a.name.localeCompare(b.name)));
     } catch (err) { res.status(403).json({ error: err.message }); }
   });
 
