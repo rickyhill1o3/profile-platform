@@ -68,6 +68,8 @@ module.exports = function registerSuccessNetwork({ app, supabase, auth, admin, g
       if (!permissions?.has(PermissionsBitField.Flags.ReadMessageHistory)) missing.push('Read Message History');
       if (!permissions?.has(PermissionsBitField.Flags.SendMessages)) missing.push('Send Messages');
       if (!permissions?.has(PermissionsBitField.Flags.EmbedLinks)) missing.push('Embed Links');
+      if (!permissions?.has(PermissionsBitField.Flags.AttachFiles)) missing.push('Attach Files');
+      if (!permissions?.has(PermissionsBitField.Flags.ManageMessages)) missing.push('Manage Messages');
       return missing.length ? `Give the Success Bot these permissions in #${channel.name}: ${missing.join(', ')}.` : null;
     } catch (_) { return null; }
   }
@@ -204,7 +206,11 @@ module.exports = function registerSuccessNetwork({ app, supabase, auth, admin, g
       url.searchParams.set('redirect_uri', oauthRedirect(req));
       url.searchParams.set('response_type', 'code');
       url.searchParams.set('scope', 'identify guilds bot applications.commands');
-      url.searchParams.set('permissions', '68608');
+      // Requested bot permissions:
+      // View Channel (1024) + Send Messages (2048) + Manage Messages (8192) +
+      // Embed Links (16384) + Attach Files (32768) + Read Message History (65536).
+      // Discord applies these to the managed bot role when the admin authorizes/reconnects.
+      url.searchParams.set('permissions', '125952');
       url.searchParams.set('state', state);
       url.searchParams.set('prompt', 'consent');
       res.json({ url: url.toString() });
