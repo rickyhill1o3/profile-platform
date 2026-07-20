@@ -9,6 +9,12 @@ let backgroundAccountCursor = 0;
 
 function clean(v) { return String(v || '').trim(); }
 function lower(v) { return clean(v).toLowerCase(); }
+function normalizeMailboxPassword(v, providerName = '') {
+  const value = clean(v);
+  // Google displays 16-character app passwords in four groups. IMAP expects the same password without spaces.
+  if (providerName === 'gmail') return value.replace(/\s+/g, '');
+  return value;
+}
 function money(v) {
   const n = Number(String(v || '').replace(/[^0-9.-]/g, ''));
   return Number.isFinite(n) ? Math.round(n * 100) / 100 : null;
@@ -111,19 +117,38 @@ async function loadScanAccounts(supabase, onlyUserId = null) {
   if (pe) throw pe;
   const ids = (profiles || []).map(p => p.id);
   if (!ids.length) return [];
-  const { data: creds, error: ce } = await supabase.from('profile_store_credentials').select('*').in('profile_id', ids);
-  if (ce) throw ce;
+
   const pmap = new Map((profiles || []).map(p => [String(p.id), p]));
   const byKey = new Map();
-  for (const c of creds || []) {
+  const addCredential = (c = {}) => {
     const p = pmap.get(String(c.profile_id));
     const email = lower(c.login_email);
-    const pass = clean(c.gmail_app_password);
     const provider = providerForEmail(email);
-    if (!p || !email || !pass || !provider) continue;
+    const pass = normalizeMailboxPassword(c.gmail_app_password, provider?.name);
+    if (!p || !email || !pass || !provider) return;
     const key = `${p.user_id}:${email}`;
     if (!byKey.has(key)) byKey.set(key, { user_id: p.user_id, profile_id: p.id, email, password: pass, provider });
+  };
+
+  // Current multi-store credential table. Older deployments may not have this migration installed yet.
+  try {
+    const { data: creds, error: ce } = await supabase.from('profile_store_credentials').select('*').in('profile_id', ids);
+    if (ce) throw ce;
+    for (const c of creds || []) addCredential(c);
+  } catch (err) {
+    console.warn('IMAP credential table unavailable; checking legacy accounts table:', err.message);
   }
+
+  // Legacy/fallback account row used by the profile editor. This also covers profiles saved before
+  // profile_store_credentials was installed or when that migration silently failed.
+  try {
+    const { data: accounts, error: ae } = await supabase.from('accounts').select('profile_id,login_email,gmail_app_password').in('profile_id', ids);
+    if (ae) throw ae;
+    for (const account of accounts || []) addCredential(account);
+  } catch (err) {
+    console.warn('Legacy IMAP accounts lookup failed:', err.message);
+  }
+
   return [...byKey.values()];
 }
 

@@ -556,7 +556,7 @@ async function upsertProfileRelations(profileId, payload) {
         provider: normalizeProfileAccountType(payload.account_type || (payload.assigned_stores || [])[0] || "general"),
         login_email: payload.account_login_email || null,
         login_password: payload.account_login_password || null,
-        gmail_app_password: payload.gmail_app_password || null,
+        gmail_app_password: normalizeStoredGmailAppPassword(payload.gmail_app_password) || null,
         amazon_2fa_secret: payload.amazon_2fa_secret || null
     };
 
@@ -6634,13 +6634,18 @@ async function replaceProfileStoreAssignments(userId, profileId, stores) {
     }
 }
 
+function normalizeStoredGmailAppPassword(value = "") {
+    // Google displays app passwords as "xxxx xxxx xxxx xxxx". Store the IMAP-ready 16-character value.
+    return String(value || "").trim().replace(/\s+/g, "");
+}
+
 function normalizeStoreCredentialsPayload(payload = {}) {
     const raw = payload.store_credentials && typeof payload.store_credentials === 'object' ? payload.store_credentials : {};
     const stores = normalizeAssignedStores(payload.assigned_stores, payload.account_type);
     const out = {};
     const imapStores = new Set(['target', 'walmart', 'samsclub']);
-    const sharedGmailAppPassword = String(payload.gmail_app_password || '').trim()
-        || Object.values(raw).map((item) => String(item?.gmail_app_password || '').trim()).find(Boolean)
+    const sharedGmailAppPassword = normalizeStoredGmailAppPassword(payload.gmail_app_password)
+        || Object.values(raw).map((item) => normalizeStoredGmailAppPassword(item?.gmail_app_password)).find(Boolean)
         || '';
 
     stores.forEach((store) => {
@@ -6650,7 +6655,7 @@ function normalizeStoreCredentialsPayload(payload = {}) {
             store,
             login_email: String(item.login_email || '').trim() || String(payload.account_login_email || payload.email || '').trim(),
             login_password: String(item.login_password || '').trim() || String(payload.account_login_password || '').trim(),
-            gmail_app_password: String(item.gmail_app_password || '').trim() || (isImapStore ? sharedGmailAppPassword : String(payload.gmail_app_password || '').trim()),
+            gmail_app_password: normalizeStoredGmailAppPassword(item.gmail_app_password) || (isImapStore ? sharedGmailAppPassword : normalizeStoredGmailAppPassword(payload.gmail_app_password)),
             amazon_2fa_secret: String(item.amazon_2fa_secret || item.two_fa_secret || '').trim() || String(payload.amazon_2fa_secret || '').trim()
         };
     });

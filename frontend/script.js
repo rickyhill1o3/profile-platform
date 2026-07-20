@@ -491,7 +491,7 @@ function collectStoreCredentials(assignedStores = []) {
             store,
             login_email: document.getElementById(`${prefix}_login_email`)?.value.trim() || '',
             login_password: document.getElementById(`${prefix}_login_password`)?.value.trim() || '',
-            gmail_app_password: document.getElementById(`${prefix}_gmail_app_password`)?.value.trim() || '',
+            gmail_app_password: (document.getElementById(`${prefix}_gmail_app_password`)?.value || '').replace(/\s+/g, ''),
             amazon_2fa_secret: document.getElementById(`${prefix}_amazon_2fa_secret`)?.value.trim() || ''
         };
     });
