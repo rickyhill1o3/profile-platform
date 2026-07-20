@@ -12,3 +12,7 @@
 /login/              /login.html             200
 /signup             /signup.html            200
 /signup/             /signup.html            200
+
+/orders /order-tracker.html 200
+/order-tracker /order-tracker.html 200
+/investment /investment.html 200

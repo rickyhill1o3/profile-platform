@@ -27,6 +27,8 @@
     "playwright": "^1.58.2",
     "stripe": "^18.1.1",
     "uuid": "^13.0.0",
-    "discord.js": "^14.22.1"
+    "discord.js": "^14.22.1",
+    "imapflow": "^1.0.181",
+    "mailparser": "^3.7.4"
   }
 }

@@ -94,6 +94,7 @@ const cheerio = require("cheerio");
 const registerProductCatalogRoutes = require("./product-catalog-routes");
 const registerShopRoutes = require("./shop-routes");
 const registerSuccessNetwork = require("./success-network");
+const { registerOrderTracker } = require("./order-tracker");
 const supabase = require("./database");
 const { encrypt, decrypt } = require("./encryption");
 
@@ -8995,6 +8996,8 @@ registerSuccessNetwork({
     getCurrentUser,
     SUPER_ADMIN_EMAIL
 });
+
+registerOrderTracker({ app, supabase, auth, admin });
 
 const PORT = process.env.PORT || 3000;
 
