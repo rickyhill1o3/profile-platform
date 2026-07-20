@@ -45,6 +45,7 @@
         <button class="admin-nav-button" type="button" data-admin-nav="exports">Exports</button>
         <button class="admin-nav-button" type="button" data-admin-nav="selections">User Product Selections</button>
         <button class="admin-nav-button" type="button" data-admin-nav="users">Current Users</button>
+        <button class="admin-nav-button" type="button" data-admin-nav="organizations" onclick="loadAdminOrganizations()">Admin Organizations</button>
         <button class="admin-nav-button" type="button" data-admin-nav="run-status">Store Run Status</button>
         <button class="admin-nav-button" type="button" data-admin-nav="credits">Credits + Orders</button>
         <button class="admin-nav-button" type="button" data-admin-nav="webhooks">Webhooks</button>
@@ -794,6 +795,20 @@ placeholder="Enter one SKU per line&#10;12345678&#10;87654321"></textarea>
           </section>
         </section>
 
+
+        <section class="admin-pane" data-admin-pane="organizations">
+          <section class="panel">
+            <div class="panel-header"><div><h2>Admin Organizations</h2><p class="subtle-text">Merge multiple admin logins into one shared admin group without deleting either login or overwriting existing Discord webhooks.</p></div></div>
+            <div class="form-grid">
+              <div class="field"><label for="orgName">Organization Name</label><input class="input" id="orgName" placeholder="Guppie" /></div>
+              <div class="field"><label for="orgOwner">Main Admin / Owner</label><select class="input" id="orgOwner"></select></div>
+              <div class="field"><label for="orgWebhookOwner">Use Webhooks From</label><select class="input" id="orgWebhookOwner"></select><div class="subtle-text">Choose the account that already has the correct Discord webhooks. Those settings remain untouched and become shared by the organization.</div></div>
+              <div class="field field--full"><label>Organization Members</label><div id="orgMemberChoices" class="panel" style="padding:12px"></div></div>
+              <div class="field field--full panel-actions"><button class="btn btn-primary" type="button" onclick="mergeAdminOrganization()">Create / Merge Organization</button></div>
+            </div>
+            <div class="table-wrap"><table class="admin-table"><thead><tr><th>Organization</th><th>Owner</th><th>Shared Webhooks From</th><th>Members</th></tr></thead><tbody id="organizationsTableBody"><tr><td colspan="4">Open this page to load organizations.</td></tr></tbody></table></div>
+          </section>
+        </section>
 
         <section class="admin-pane" data-admin-pane="announcements">
           <section class="panel">

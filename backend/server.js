@@ -384,17 +384,49 @@ async function getScopeUserIdsForAdmin(currentUser) {
         return null;
     }
 
+    const memberIds = await getAdminOrganizationMemberIds(currentUser.id);
     const { data: ownedUsers, error } = await supabase
         .from("users")
         .select("id")
-        .eq("owner_admin_id", currentUser.id);
+        .in("owner_admin_id", safeIn(memberIds));
 
-    if (error) {
-        throw new Error(error.message);
-    }
-
+    if (error) throw new Error(error.message);
     const ids = (ownedUsers || []).map((user) => user.id);
-    return [...new Set([currentUser.id, ...ids])];
+    return [...new Set([...memberIds, ...ids])];
+}
+
+
+async function getAdminOrganizationForUser(userId) {
+    if (!userId) return null;
+    try {
+        const { data: membership, error } = await supabase
+            .from('admin_organization_members')
+            .select('member_role, organization_id, admin_organizations(*)')
+            .eq('user_id', userId)
+            .maybeSingle();
+        if (error || !membership) return null;
+        const organization = membership.admin_organizations || null;
+        return organization ? { ...organization, member_role: membership.member_role } : null;
+    } catch (_) { return null; }
+}
+
+async function getEffectiveAdminSettingsUserId(userId) {
+    const org = await getAdminOrganizationForUser(userId);
+    return org?.webhook_owner_user_id || userId;
+}
+
+async function getAdminOrganizationMemberIds(userId) {
+    const org = await getAdminOrganizationForUser(userId);
+    if (!org?.id) return [userId];
+    const { data } = await supabase.from('admin_organization_members').select('user_id').eq('organization_id', org.id);
+    return [...new Set((data || []).map(r => r.user_id).filter(Boolean))];
+}
+
+async function getAdminOrganizationDestinations(user) {
+    if (!user?.id) return [];
+    const org = await getAdminOrganizationForUser(user.id);
+    if (!org?.webhook_owner_user_id) return [];
+    return [{ organization_id: org.id, organization_name: org.name, webhook_owner_user_id: org.webhook_owner_user_id }];
 }
 
 async function getUserProfilesWithRelations(userId) {
@@ -1700,20 +1732,21 @@ async function migrateWebhookSettingsToSupabase({ currentUser, globalSettings = 
     }
 
     if (currentUser?.id) {
-        const existingAdminSuccess = await getWebhookRouteFromDb({ scope: 'admin', userId: currentUser.id, webhookType: 'checkout_success', category: 'all' }).catch(() => null);
-        const existingAdminError = await getWebhookRouteFromDb({ scope: 'admin', userId: currentUser.id, webhookType: 'checkout_error', category: 'all' }).catch(() => null);
+        const effectiveAdminUserId = currentUser.role === 'super_admin' ? currentUser.id : await getEffectiveAdminSettingsUserId(currentUser.id);
+        const existingAdminSuccess = await getWebhookRouteFromDb({ scope: 'admin', userId: effectiveAdminUserId, webhookType: 'checkout_success', category: 'all' }).catch(() => null);
+        const existingAdminError = await getWebhookRouteFromDb({ scope: 'admin', userId: effectiveAdminUserId, webhookType: 'checkout_error', category: 'all' }).catch(() => null);
         if (!existingAdminSuccess && String(adminSettings?.discord_webhook_url || '').trim()) {
-            await upsertDiscordWebhookRoute({ scope: 'admin', userId: currentUser.id, webhookType: 'checkout_success', category: 'all', webhookUrl: adminSettings.discord_webhook_url });
+            await upsertDiscordWebhookRoute({ scope: 'admin', userId: effectiveAdminUserId, webhookType: 'checkout_success', category: 'all', webhookUrl: adminSettings.discord_webhook_url });
         }
         if (!existingAdminError && String(adminSettings?.checkout_error_webhook_url || '').trim()) {
-            await upsertDiscordWebhookRoute({ scope: 'admin', userId: currentUser.id, webhookType: 'checkout_error', category: 'all', webhookUrl: adminSettings.checkout_error_webhook_url });
+            await upsertDiscordWebhookRoute({ scope: 'admin', userId: effectiveAdminUserId, webhookType: 'checkout_error', category: 'all', webhookUrl: adminSettings.checkout_error_webhook_url });
         }
         const adminGroups = adminSettings?.monitor_groups || {};
         for (const category of ['pokemon','onepiece','sports','othertcg','lowkey']) {
             const cfg = normalizeMonitorGroupConfig(adminGroups?.[category]);
-            const existing = await getWebhookRouteFromDb({ scope: 'admin', userId: currentUser.id, webhookType: 'monitor', category }).catch(() => null);
+            const existing = await getWebhookRouteFromDb({ scope: 'admin', userId: effectiveAdminUserId, webhookType: 'monitor', category }).catch(() => null);
             if (!existing && String(cfg.webhook_url || '').trim()) {
-                await upsertDiscordWebhookRoute({ scope: 'admin', userId: currentUser.id, webhookType: 'monitor', category, webhookUrl: cfg.webhook_url, pingMode: cfg.ping_mode, roleMention: cfg.role_mention });
+                await upsertDiscordWebhookRoute({ scope: 'admin', userId: effectiveAdminUserId, webhookType: 'monitor', category, webhookUrl: cfg.webhook_url, pingMode: cfg.ping_mode, roleMention: cfg.role_mention });
             }
         }
     }
@@ -3896,6 +3929,19 @@ async function sendCheckoutDiscordNotifications(order, user) {
         addDestination('owner_admin', adminWebhookUrl, { admin_user_id: user.owner_admin_id, brandLabel, username: brandLabel || 'The Shore Shack' });
     }
 
+
+    // An admin may belong to an organization while retaining an upstream owner admin.
+    // This sends the checkout to the organization's shared Discord in addition to the inviter's Discord.
+    const organizationDestinations = await getAdminOrganizationDestinations(user);
+    for (const orgDest of organizationDestinations) {
+        const settingsUserId = orgDest.webhook_owner_user_id;
+        const orgSettings = await getAdminWebhookSettings(settingsUserId).catch(() => ({}));
+        const orgRoute = await getWebhookRouteFromDb({ scope: 'admin', userId: settingsUserId, webhookType: checkoutType === 'error' ? 'checkout_error' : 'checkout_success', category: 'all' }).catch(() => null);
+        const orgWebhookUrl = String((orgRoute?.webhook_url || (checkoutType === 'error' ? orgSettings?.checkout_error_webhook_url : orgSettings?.discord_webhook_url)) || '').trim();
+        const brandLabel = String(orgSettings?.brand_label || orgDest.organization_name || '').trim();
+        addDestination('admin_organization', orgWebhookUrl, { admin_user_id: settingsUserId, organization_id: orgDest.organization_id, brandLabel, username: brandLabel || 'The Shore Shack' });
+    }
+
     if (!destinations.length) {
         return [{ scope: 'none', skipped: 'discord_webhook_not_configured' }];
     }
@@ -5245,16 +5291,17 @@ app.get('/admin/webhooks/settings', auth, admin, async (req, res) => {
         const active = await getActiveInboundWebhook();
         const globalSettings = await getAppSetting('webhook_settings', {});
         const monitorSettings = await getAppSetting('monitor_webhook_settings', {});
-        const adminSettings = await getAdminWebhookSettings(currentUser.id);
+        const effectiveAdminUserId = currentUser.role === 'super_admin' ? currentUser.id : await getEffectiveAdminSettingsUserId(currentUser.id);
+        const adminSettings = await getAdminWebhookSettings(effectiveAdminUserId);
         await migrateWebhookSettingsToSupabase({ currentUser, globalSettings, adminSettings }).catch(() => null);
 
         const superSuccess = await getWebhookRouteFromDb({ scope: 'super_admin', webhookType: 'checkout_success', category: 'all' }).catch(() => null);
         const superPublicSuccess = await getWebhookRouteFromDb({ scope: 'super_admin_public', webhookType: 'checkout_success', category: 'all' }).catch(() => null);
         const superError = await getWebhookRouteFromDb({ scope: 'super_admin', webhookType: 'checkout_error', category: 'all' }).catch(() => null);
-        const adminSuccess = currentUser.role === 'super_admin' ? null : await getWebhookRouteFromDb({ scope: 'admin', userId: currentUser.id, webhookType: 'checkout_success', category: 'all' }).catch(() => null);
-        const adminError = currentUser.role === 'super_admin' ? null : await getWebhookRouteFromDb({ scope: 'admin', userId: currentUser.id, webhookType: 'checkout_error', category: 'all' }).catch(() => null);
+        const adminSuccess = currentUser.role === 'super_admin' ? null : await getWebhookRouteFromDb({ scope: 'admin', userId: effectiveAdminUserId, webhookType: 'checkout_success', category: 'all' }).catch(() => null);
+        const adminError = currentUser.role === 'super_admin' ? null : await getWebhookRouteFromDb({ scope: 'admin', userId: effectiveAdminUserId, webhookType: 'checkout_error', category: 'all' }).catch(() => null);
         const superMonitorRows = currentUser.role === 'super_admin' ? await listDiscordWebhookRoutes({ scope: 'super_admin', webhookType: 'monitor' }).catch(() => []) : [];
-        const adminMonitorRows = currentUser.role === 'super_admin' ? [] : await listDiscordWebhookRoutes({ scope: 'admin', userId: currentUser.id, webhookType: 'monitor' }).catch(() => []);
+        const adminMonitorRows = currentUser.role === 'super_admin' ? [] : await listDiscordWebhookRoutes({ scope: 'admin', userId: effectiveAdminUserId, webhookType: 'monitor' }).catch(() => []);
         const superMonitorGroups = {};
         for (const row of superMonitorRows) superMonitorGroups[row.category] = { webhook_url: row.webhook_url, ping_mode: row.ping_mode, role_mention: row.role_mention };
         const adminMonitorGroups = {};
@@ -5952,19 +5999,20 @@ app.post('/admin/webhooks/settings', auth, admin, async (req, res) => {
         const adminBrandLabel = String(req.body?.admin_brand_label || '').trim();
 
         if (currentUser.role !== 'super_admin') {
-            const currentAdminSettings = await getAdminWebhookSettings(currentUser.id).catch(() => ({}));
-            await setAdminWebhookSettings(currentUser.id, {
+            const effectiveAdminUserId = await getEffectiveAdminSettingsUserId(currentUser.id);
+            const currentAdminSettings = await getAdminWebhookSettings(effectiveAdminUserId).catch(() => ({}));
+            await setAdminWebhookSettings(effectiveAdminUserId, {
                 ...(currentAdminSettings || {}),
                 discord_webhook_url: adminDiscordWebhookUrl,
                 checkout_error_webhook_url: adminErrorDiscordWebhookUrl,
                 brand_label: adminBrandLabel,
                 monitor_groups: req.body?.admin_monitor_groups || {}
             });
-            await upsertDiscordWebhookRoute({ scope: 'admin', userId: currentUser.id, webhookType: 'checkout_success', category: 'all', webhookUrl: adminDiscordWebhookUrl, isActive: !!adminDiscordWebhookUrl });
-            await upsertDiscordWebhookRoute({ scope: 'admin', userId: currentUser.id, webhookType: 'checkout_error', category: 'all', webhookUrl: adminErrorDiscordWebhookUrl, isActive: !!adminErrorDiscordWebhookUrl });
+            await upsertDiscordWebhookRoute({ scope: 'admin', userId: effectiveAdminUserId, webhookType: 'checkout_success', category: 'all', webhookUrl: adminDiscordWebhookUrl, isActive: !!adminDiscordWebhookUrl });
+            await upsertDiscordWebhookRoute({ scope: 'admin', userId: effectiveAdminUserId, webhookType: 'checkout_error', category: 'all', webhookUrl: adminErrorDiscordWebhookUrl, isActive: !!adminErrorDiscordWebhookUrl });
             for (const category of ['pokemon','onepiece','sports','othertcg','lowkey']) {
                 const cfg = normalizeMonitorGroupConfig(req.body?.admin_monitor_groups?.[category]);
-                await upsertDiscordWebhookRoute({ scope: 'admin', userId: currentUser.id, webhookType: 'monitor', category, webhookUrl: cfg.webhook_url, pingMode: cfg.ping_mode, roleMention: cfg.role_mention, isActive: !!cfg.webhook_url });
+                await upsertDiscordWebhookRoute({ scope: 'admin', userId: effectiveAdminUserId, webhookType: 'monitor', category, webhookUrl: cfg.webhook_url, pingMode: cfg.ping_mode, roleMention: cfg.role_mention, isActive: !!cfg.webhook_url });
             }
         }
 
@@ -7893,6 +7941,51 @@ app.patch("/admin/users/:id/restore", auth, admin, async (req, res) => {
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
+});
+
+
+app.get('/admin/organizations', auth, admin, async (req, res) => {
+    try {
+        const currentUser = await getCurrentUser(req);
+        if (currentUser.role !== 'super_admin') return res.status(403).json({ error: 'Only super admin can manage admin organizations.' });
+        const { data: orgs, error } = await supabase.from('admin_organizations').select('*').order('name');
+        if (error) throw error;
+        const { data: members } = await supabase.from('admin_organization_members').select('organization_id,user_id,member_role,users(id,email,role)');
+        res.json((orgs || []).map(org => ({ ...org, members: (members || []).filter(m => m.organization_id === org.id).map(m => ({ ...m.users, member_role: m.member_role })) })));
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/admin/organizations/merge', auth, admin, async (req, res) => {
+    try {
+        const currentUser = await getCurrentUser(req);
+        if (currentUser.role !== 'super_admin') return res.status(403).json({ error: 'Only super admin can merge admin accounts.' });
+        const name = String(req.body?.name || '').trim();
+        const ownerUserId = String(req.body?.owner_user_id || '').trim();
+        const webhookOwnerUserId = String(req.body?.webhook_owner_user_id || '').trim();
+        const memberUserIds = [...new Set([ownerUserId, webhookOwnerUserId, ...(Array.isArray(req.body?.member_user_ids) ? req.body.member_user_ids : [])].filter(Boolean))];
+        if (!name || !ownerUserId || !webhookOwnerUserId || memberUserIds.length < 2) return res.status(400).json({ error: 'Organization name, owner, webhook source, and at least two members are required.' });
+        const { data: users, error: usersError } = await supabase.from('users').select('id,email,role').in('id', memberUserIds);
+        if (usersError) throw usersError;
+        if ((users || []).length !== memberUserIds.length || (users || []).some(u => u.role !== 'admin')) return res.status(400).json({ error: 'Every organization member must be an existing admin account.' });
+        const { data: existingMemberships } = await supabase.from('admin_organization_members').select('organization_id,user_id').in('user_id', memberUserIds);
+        const existingOrgIds = [...new Set((existingMemberships || []).map(x => x.organization_id))];
+        let org;
+        if (existingOrgIds.length) {
+            const { data, error } = await supabase.from('admin_organizations').update({ name, owner_user_id: ownerUserId, webhook_owner_user_id: webhookOwnerUserId, updated_at: new Date().toISOString() }).eq('id', existingOrgIds[0]).select('*').single();
+            if (error) throw error; org = data;
+            if (existingOrgIds.length > 1) await supabase.from('admin_organizations').delete().in('id', existingOrgIds.slice(1));
+        } else {
+            const { data, error } = await supabase.from('admin_organizations').insert({ name, owner_user_id: ownerUserId, webhook_owner_user_id: webhookOwnerUserId }).select('*').single();
+            if (error) throw error; org = data;
+        }
+        await supabase.from('admin_organization_members').delete().in('user_id', memberUserIds);
+        const rows = memberUserIds.map(id => ({ organization_id: org.id, user_id: id, member_role: id === ownerUserId ? 'owner' : 'admin' }));
+        const { error: memberError } = await supabase.from('admin_organization_members').insert(rows);
+        if (memberError) throw memberError;
+        // Preserve Lord Fumbler (or selected source) webhook settings exactly where they are.
+        // The organization points at that account as its shared webhook owner; no URLs are overwritten or deleted.
+        res.json({ success: true, organization: org, webhook_source_preserved: webhookOwnerUserId });
+    } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 app.patch("/admin/users/:id/promote", auth, admin, async (req, res) => {

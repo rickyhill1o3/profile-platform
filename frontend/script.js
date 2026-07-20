@@ -5401,3 +5401,55 @@ async function initGuidedSetup() {
         }
     }
 }
+
+
+async function loadAdminOrganizations() {
+    const activeUser = currentUser();
+    const body = document.getElementById('organizationsTableBody');
+    if (!body) return;
+    if (activeUser?.role !== 'super_admin') {
+        body.innerHTML = '<tr><td colspan="4">Only the super admin can manage organizations.</td></tr>';
+        return;
+    }
+    const [usersRes, orgRes] = await Promise.all([
+        fetch(API + '/admin/users?all=1&role=admin', { headers: { Authorization: 'Bearer ' + token() } }),
+        fetch(API + '/admin/organizations', { headers: { Authorization: 'Bearer ' + token() } })
+    ]);
+    const usersPayload = await usersRes.json();
+    const admins = Array.isArray(usersPayload) ? usersPayload : (usersPayload.items || []);
+    const orgs = await orgRes.json();
+    if (orgs.error) { body.innerHTML = `<tr><td colspan="4">${escapeHTML(orgs.error)} Run backend/sql/ADMIN_ORGANIZATIONS.sql in Supabase first.</td></tr>`; return; }
+    const options = admins.map(u => `<option value="${u.id}">${escapeHTML(u.email)}</option>`).join('');
+    const owner = document.getElementById('orgOwner');
+    const webhookOwner = document.getElementById('orgWebhookOwner');
+    if (owner) owner.innerHTML = options;
+    if (webhookOwner) webhookOwner.innerHTML = options;
+    const choices = document.getElementById('orgMemberChoices');
+    if (choices) choices.innerHTML = admins.map(u => `<label style="display:block;margin:6px 0"><input type="checkbox" class="org-member-check" value="${u.id}"> ${escapeHTML(u.email)}</label>`).join('');
+    body.innerHTML = (orgs || []).length ? orgs.map(org => {
+        const ownerMember = (org.members || []).find(m => m.id === org.owner_user_id);
+        const webhookMember = (org.members || []).find(m => m.id === org.webhook_owner_user_id);
+        return `<tr><td>${escapeHTML(org.name)}</td><td>${escapeHTML(ownerMember?.email || org.owner_user_id)}</td><td>${escapeHTML(webhookMember?.email || org.webhook_owner_user_id)}</td><td>${(org.members || []).map(m => escapeHTML(m.email)).join('<br>')}</td></tr>`;
+    }).join('') : '<tr><td colspan="4">No organizations created yet.</td></tr>';
+}
+
+async function mergeAdminOrganization() {
+    const name = document.getElementById('orgName')?.value.trim();
+    const owner_user_id = document.getElementById('orgOwner')?.value;
+    const webhook_owner_user_id = document.getElementById('orgWebhookOwner')?.value;
+    const member_user_ids = [...document.querySelectorAll('.org-member-check:checked')].map(x => x.value);
+    if (!name || !owner_user_id || !webhook_owner_user_id) return alert('Enter a name, owner, and webhook source.');
+    if (!member_user_ids.includes(owner_user_id)) member_user_ids.push(owner_user_id);
+    if (!member_user_ids.includes(webhook_owner_user_id)) member_user_ids.push(webhook_owner_user_id);
+    if (member_user_ids.length < 2) return alert('Select at least two admin accounts to merge.');
+    const sourceLabel = document.getElementById('orgWebhookOwner')?.selectedOptions?.[0]?.textContent || 'selected account';
+    if (!confirm(`Create ${name} and share the existing webhooks from ${sourceLabel}? No webhook URLs will be deleted or overwritten.`)) return;
+    const res = await fetch(API + '/admin/organizations/merge', {
+        method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token() },
+        body: JSON.stringify({ name, owner_user_id, webhook_owner_user_id, member_user_ids })
+    });
+    const data = await res.json();
+    if (!res.ok || data.error) return alert(data.error || 'Could not merge organization.');
+    alert('Organization saved. Existing webhook settings were preserved and are now shared.');
+    loadAdminOrganizations();
+}
