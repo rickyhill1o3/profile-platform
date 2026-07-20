@@ -26,7 +26,6 @@ require("dotenv").config();
 
 const { createClient } = require("@supabase/supabase-js");
 const cheerio = require("cheerio");
-const { chromium } = require("playwright");
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -183,6 +182,13 @@ async function main() {
   const site = normalizeSite(getArg("site"));
   const headless = getArg("headless", "true") !== "false";
   const limit = Number(getArg("limit", "0")) || 0;
+
+  let chromium;
+  try {
+    ({ chromium } = require("playwright"));
+  } catch {
+    throw new Error("This optional catalog enrichment utility requires Playwright. It is not used by the deployed website. Install it locally with: npm install --no-save playwright");
+  }
 
   const browser = await chromium.launch({
     headless,
