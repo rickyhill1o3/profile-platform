@@ -333,13 +333,13 @@ function registerOrderTracker({ app, supabase, auth, admin }) {
   });
 
   app.post('/investment', auth, async (req, res) => {
-    const row = { user_id:req.user_id, product_name:clean(req.body.product_name), store:clean(req.body.store), order_number:clean(req.body.order_number), sku:clean(req.body.sku)||null, quantity:Number(req.body.quantity||1), purchase_price:Number(req.body.purchase_price||0), credits_value:Number(req.body.credits_value||0), market_price:req.body.market_price===''?null:Number(req.body.market_price), market_source:clean(req.body.market_source)||'manual', tcgplayer_product_id:req.body.tcgplayer_product_id||null, tcgplayer_sku:req.body.tcgplayer_sku||null, image_url:clean(req.body.image_url)||null };
+    const row = { user_id:req.user_id, product_name:clean(req.body.product_name), store:clean(req.body.store), order_number:clean(req.body.order_number), sku:clean(req.body.sku)||null, category:clean(req.body.category)||null, upc:clean(req.body.upc)||null, condition:clean(req.body.condition)||'sealed', quantity:Number(req.body.quantity||1), purchase_price:Number(req.body.purchase_price||0), credits_value:Number(req.body.credits_value||0), market_price:req.body.market_price===''?null:Number(req.body.market_price), market_source:clean(req.body.market_source)||'manual', tcgplayer_product_id:req.body.tcgplayer_product_id||null, tcgplayer_sku:req.body.tcgplayer_sku||null, image_url:clean(req.body.image_url)||null };
     if (!row.product_name) return res.status(400).json({ error:'Product name is required' });
     const { data,error }=await supabase.from('investment_products').insert(row).select().single(); if(error)return res.status(500).json({error:error.message}); res.json({item:data});
   });
 
   app.patch('/investment/:id', auth, async (req,res)=>{
-    const allowed=['product_name','store','order_number','sku','quantity','purchase_price','credits_value','market_price','market_source','tcgplayer_product_id','tcgplayer_sku','image_url']; const patch={updated_at:new Date().toISOString()};
+    const allowed=['product_name','store','order_number','sku','category','upc','condition','quantity','purchase_price','credits_value','market_price','market_source','tcgplayer_product_id','tcgplayer_sku','image_url']; const patch={updated_at:new Date().toISOString()};
     for(const k of allowed) if(Object.prototype.hasOwnProperty.call(req.body||{},k)) patch[k]=req.body[k]===''?null:req.body[k];
     if(Object.prototype.hasOwnProperty.call(patch,'market_price')) patch.market_updated_at=new Date().toISOString();
     const {data,error}=await supabase.from('investment_products').update(patch).eq('id',req.params.id).eq('user_id',req.user_id).select().single(); if(error)return res.status(500).json({error:error.message}); res.json({item:data});
