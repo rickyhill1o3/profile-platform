@@ -96,6 +96,7 @@ const registerShopRoutes = require("./shop-routes");
 const registerSuccessNetwork = require("./success-network");
 const { registerOrderTracker } = require("./order-tracker");
 const { registerMarketValueEngine } = require("./market-value-engine");
+const { registerMasterProductCatalog } = require("./master-product-catalog");
 const supabase = require("./database");
 const { encrypt, decrypt } = require("./encryption");
 
@@ -9000,6 +9001,7 @@ registerSuccessNetwork({
 
 registerOrderTracker({ app, supabase, auth, admin });
 registerMarketValueEngine({ app, supabase, auth, admin });
+registerMasterProductCatalog({ app, supabase, auth, admin });
 
 const PORT = process.env.PORT || 3000;
 

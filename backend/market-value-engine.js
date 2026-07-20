@@ -1,11 +1,17 @@
 const crypto = require('crypto');
+const cheerio = require('cheerio');
 
 const clean = v => String(v || '').trim();
-const num = v => { const n = Number(v); return Number.isFinite(n) ? n : null; };
+const num = v => { const n = Number(String(v ?? '').replace(/[$,]/g, '')); return Number.isFinite(n) ? n : null; };
 const now = () => new Date().toISOString();
 const REFRESH_HOURS = Math.max(1, Number(process.env.MARKET_VALUE_REFRESH_HOURS || 24));
 const MAX_PRODUCTS_PER_RUN = Math.max(1, Number(process.env.MARKET_VALUE_MAX_PRODUCTS_PER_RUN || 40));
+const PUBLIC_LOOKUP_ENABLED = process.env.PUBLIC_MARKET_LOOKUP_ENABLED !== 'false';
+const TCG_PUBLIC_LOOKUP_ENABLED = PUBLIC_LOOKUP_ENABLED && process.env.TCGPLAYER_PUBLIC_LOOKUP_ENABLED !== 'false';
+const PUBLIC_LOOKUP_TIMEOUT_MS = Math.max(5000, Number(process.env.PUBLIC_MARKET_LOOKUP_TIMEOUT_MS || 18000));
+const PUBLIC_LOOKUP_DELAY_MS = Math.max(1000, Number(process.env.PUBLIC_MARKET_LOOKUP_DELAY_MS || 2500));
 const SOURCE_WEIGHTS = { tcgplayer: 1.0, ebay: 0.9, stockx: 0.85, tradepost: 0.75, pricecharting: 0.8, cardmarket: 0.75, manual: 0.7 };
+const hostLastRequest = new Map();
 
 function normalizeName(value) {
   return clean(value).toLowerCase().replace(/[^a-z0-9]+/g, ' ').replace(/\b(the|and|with|for|edition|new|sealed)\b/g, ' ').replace(/\s+/g, ' ').trim();
@@ -35,6 +41,102 @@ function searchLinks(name){
     cardmarket:`https://www.cardmarket.com/en/Pokemon/Products/Search?searchString=${q}`
   };
 }
+function safeTcgUrl(value){
+  try{
+    const u=new URL(clean(value));
+    if(!/(^|\.)tcgplayer\.com$/i.test(u.hostname))return null;
+    u.protocol='https:';
+    return u.toString();
+  }catch{return null;}
+}
+async function politeFetch(url, options={}){
+  const u=new URL(url); const last=hostLastRequest.get(u.hostname)||0; const wait=PUBLIC_LOOKUP_DELAY_MS-(Date.now()-last);
+  if(wait>0)await new Promise(r=>setTimeout(r,wait));
+  const controller=new AbortController(); const timer=setTimeout(()=>controller.abort(),PUBLIC_LOOKUP_TIMEOUT_MS);
+  try{
+    const response=await fetch(url,{redirect:'follow',...options,signal:controller.signal,headers:{
+      'User-Agent':'TheShoreShackTCG/1.0 market-value lookup (+https://theshoreshacktcg.com)',
+      'Accept':'text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.7',
+      'Accept-Language':'en-US,en;q=0.9',
+      ...(options.headers||{})
+    }});
+    hostLastRequest.set(u.hostname,Date.now());
+    if(response.status===403||response.status===429)throw new Error(`TCGplayer temporarily blocked automated lookup (${response.status}). Use Open TCGplayer and paste the exact product URL.`);
+    if(!response.ok)throw new Error(`Public lookup failed (${response.status})`);
+    return response;
+  } finally { clearTimeout(timer); }
+}
+function flattenJson(value, out=[]){
+  if(Array.isArray(value))value.forEach(v=>flattenJson(v,out));
+  else if(value&&typeof value==='object'){out.push(value);Object.values(value).forEach(v=>flattenJson(v,out));}
+  return out;
+}
+function parseJsonScripts($){
+  const objects=[];
+  $('script[type="application/ld+json"],script#__NEXT_DATA__,script[type="application/json"]').each((_,el)=>{
+    const text=$(el).html(); if(!text||text.length>8_000_000)return;
+    try{objects.push(...flattenJson(JSON.parse(text)));}catch{}
+  });
+  return objects;
+}
+function extractPriceObject(obj){
+  const direct=[obj.marketPrice,obj.market_price,obj.lowPrice,obj.low_price,obj.price,obj.salePrice,obj.sale_price,obj.currentPrice,obj.current_price,obj.listPrice,obj.list_price];
+  for(const v of direct){const n=num(typeof v==='object'?(v.value??v.amount):v);if(n&&n>0)return n;}
+  const offers=Array.isArray(obj.offers)?obj.offers:[obj.offers];
+  for(const offer of offers){if(!offer)continue;const n=num(offer.price??offer.lowPrice??offer.highPrice);if(n&&n>0)return n;}
+  return null;
+}
+function uniqueResults(rows){
+  const seen=new Set(); return rows.filter(r=>{const key=(r.url||r.title||'').toLowerCase();if(!key||seen.has(key))return false;seen.add(key);return true;});
+}
+function parseTcgSearchHtml(html, query){
+  const $=cheerio.load(html); const rows=[]; const objects=parseJsonScripts($);
+  for(const obj of objects){
+    const title=clean(obj.name||obj.title||obj.productName||obj.product_name);
+    let url=clean(obj.url||obj.productUrl||obj.product_url);
+    if(url&&url.startsWith('/'))url=`https://www.tcgplayer.com${url}`;
+    const price=extractPriceObject(obj);
+    const image=clean(Array.isArray(obj.image)?obj.image[0]:obj.image||obj.imageUrl||obj.image_url);
+    if(title&&url&&/tcgplayer\.com/i.test(url)&&similarity(query,title)>=.28){rows.push({source:'tcgplayer',title,url:safeTcgUrl(url),price,image_url:image,score:similarity(query,title)});}
+  }
+  $('a[href*="/product/"]').each((_,a)=>{
+    const href=$(a).attr('href'); const url=safeTcgUrl(href?.startsWith('http')?href:`https://www.tcgplayer.com${href}`); if(!url)return;
+    const card=$(a).closest('section,article,li,div');
+    const title=clean($(a).attr('aria-label')||$(a).attr('title')||card.find('h1,h2,h3,h4,[class*="title"],[class*="name"]').first().text()||$(a).text());
+    if(!title||similarity(query,title)<.25)return;
+    const text=card.text(); const prices=[...text.matchAll(/\$\s*([0-9]+(?:,[0-9]{3})*(?:\.[0-9]{2})?)/g)].map(m=>num(m[1])).filter(Boolean);
+    const image=clean(card.find('img').first().attr('src')||card.find('img').first().attr('data-src'));
+    rows.push({source:'tcgplayer',title,url,price:prices[0]||null,image_url:image,score:similarity(query,title)});
+  });
+  return uniqueResults(rows).sort((a,b)=>(b.score||0)-(a.score||0)).slice(0,20);
+}
+function parseTcgProductHtml(html, url, fallbackTitle=''){
+  const $=cheerio.load(html); const objects=parseJsonScripts($); const candidates=[];
+  for(const obj of objects){
+    const title=clean(obj.name||obj.title||obj.productName||obj.product_name||fallbackTitle);
+    const price=extractPriceObject(obj); if(price)candidates.push({title,price,image_url:clean(Array.isArray(obj.image)?obj.image[0]:obj.image||obj.imageUrl||obj.image_url)});
+  }
+  const bodyText=$('body').text().replace(/\s+/g,' ');
+  const labeled=[
+    /Market Price\s*\$\s*([0-9,]+(?:\.\d{2})?)/i,
+    /Market\s*\$\s*([0-9,]+(?:\.\d{2})?)/i,
+    /marketPrice["'\s:]+\$?([0-9,]+(?:\.\d{2})?)/i
+  ];
+  for(const re of labeled){const m=bodyText.match(re)||html.match(re);if(m)candidates.push({title:fallbackTitle,price:num(m[1])});}
+  const best=candidates.find(x=>x.price&&x.price>0);
+  return best?{source:'tcgplayer',title:best.title||clean($('h1').first().text())||fallbackTitle,price:best.price,currency:'USD',confidence:.9,listing_url:url,image_url:best.image_url||clean($('meta[property="og:image"]').attr('content')),raw:{public_page:true}}:null;
+}
+async function publicTcgSearch(query){
+  if(!TCG_PUBLIC_LOOKUP_ENABLED)throw new Error('Public TCGplayer lookup is disabled.');
+  const url=searchLinks(query).tcgplayer; const r=await politeFetch(url); const html=await r.text();
+  return {search_url:url,results:parseTcgSearchHtml(html,query)};
+}
+async function publicTcgProduct(url,title=''){
+  const safe=safeTcgUrl(url); if(!safe)throw new Error('Enter a valid TCGplayer URL.');
+  const r=await politeFetch(safe); const html=await r.text(); const row=parseTcgProductHtml(html,safe,title);
+  if(!row)throw new Error('TCGplayer loaded, but a market price was not found on that page. You can still enter the price manually.');
+  return row;
+}
 async function tcgToken(){
   const publicKey=clean(process.env.TCGPLAYER_PUBLIC_KEY), privateKey=clean(process.env.TCGPLAYER_PRIVATE_KEY);
   if(!publicKey||!privateKey)return null;
@@ -43,12 +145,16 @@ async function tcgToken(){
   if(!r.ok)throw new Error(`TCGplayer authorization failed (${r.status})`); return (await r.json()).access_token;
 }
 async function fetchTcg(item){
-  if(!item.tcgplayer_sku&&!item.tcgplayer_product_id)return [];
-  const token=await tcgToken(); if(!token)return [];
-  const url=item.tcgplayer_sku?`https://api.tcgplayer.com/pricing/marketprices/${item.tcgplayer_sku}`:`https://api.tcgplayer.com/pricing/product/${item.tcgplayer_product_id}`;
-  const r=await fetch(url,{headers:{Authorization:`bearer ${token}`,Accept:'application/json'}}); if(!r.ok)return [];
-  const results=(await r.json()).results||[];
-  return results.map(x=>({source:'tcgplayer',price:num(x.marketPrice??x.lowPrice),currency:'USD',confidence:.98,listing_url:searchLinks(item.product_name).tcgplayer,raw:x})).filter(x=>x.price);
+  const token=await tcgToken();
+  if(token&&(item.tcgplayer_sku||item.tcgplayer_product_id)){
+    const url=item.tcgplayer_sku?`https://api.tcgplayer.com/pricing/marketprices/${item.tcgplayer_sku}`:`https://api.tcgplayer.com/pricing/product/${item.tcgplayer_product_id}`;
+    const r=await fetch(url,{headers:{Authorization:`bearer ${token}`,Accept:'application/json'}}); if(!r.ok)return [];
+    const results=(await r.json()).results||[];
+    return results.map(x=>({source:'tcgplayer',price:num(x.marketPrice??x.lowPrice),currency:'USD',confidence:.98,listing_url:searchLinks(item.product_name).tcgplayer,raw:x})).filter(x=>x.price);
+  }
+  const mapped=item.source_product_urls?.tcgplayer;
+  if(TCG_PUBLIC_LOOKUP_ENABLED&&mapped){try{return [await publicTcgProduct(mapped,item.product_name)];}catch{return [];}}
+  return [];
 }
 async function ebayToken(){
   const id=clean(process.env.EBAY_CLIENT_ID), secret=clean(process.env.EBAY_CLIENT_SECRET); if(!id||!secret)return null;
@@ -84,18 +190,22 @@ async function saveObservation(supabase,item,row){
   const fingerprint=crypto.createHash('sha1').update(`${item.id}|${row.source}|${row.title||''}|${row.price}|${new Date().toISOString().slice(0,10)}`).digest('hex');
   await supabase.from('market_price_observations').upsert({investment_product_id:item.id,user_id:item.user_id,source:row.source,price:row.price,currency:row.currency||'USD',confidence:row.confidence||.7,title:row.title||item.product_name,listing_url:row.listing_url||null,image_url:row.image_url||null,observed_at:now(),fingerprint,raw_data:row.raw||null},{onConflict:'fingerprint',ignoreDuplicates:true});
 }
+async function recalculateItem(supabase,item){
+  const cutoff=new Date(Date.now()-30*86400000).toISOString();
+  const {data:obs}=await supabase.from('market_price_observations').select('*').eq('investment_product_id',item.id).gte('observed_at',cutoff);
+  const grouped={}; (obs||[]).forEach(x=>(grouped[x.source]||(grouped[x.source]=[])).push(x));
+  const sourcePrices=Object.entries(grouped).map(([source,rows])=>({source,price:median(rows.map(x=>Number(x.price))),confidence:Math.max(...rows.map(x=>Number(x.confidence||.7))),count:rows.length}));
+  const price=trimmedWeightedPrice(sourcePrices);
+  if(price!=null)await supabase.from('investment_products').update({market_price:price,market_source:sourcePrices.map(x=>x.source).join('+'),market_updated_at:now(),updated_at:now()}).eq('id',item.id);
+  return {price,sourcePrices};
+}
 async function refreshOne(supabase,item){
   const providers=[fetchTcg,fetchEbay,fetchStockx]; let observations=[]; const errors=[];
   for(const fn of providers){try{observations.push(...await fn(item))}catch(e){errors.push(e.message)}}
   for(const row of observations)await saveObservation(supabase,item,row);
-  const grouped={}; observations.forEach(x=>(grouped[x.source]||(grouped[x.source]=[])).push(x));
-  const sourcePrices=Object.entries(grouped).map(([source,rows])=>({source,price:median(rows.map(x=>x.price)),confidence:Math.max(...rows.map(x=>x.confidence||.7)),count:rows.length}));
-  const price=trimmedWeightedPrice(sourcePrices);
-  if(price!=null){
-    const top=observations.sort((a,b)=>(b.confidence||0)-(a.confidence||0))[0];
-    await supabase.from('investment_products').update({market_price:price,market_source:sourcePrices.map(x=>x.source).join('+'),market_updated_at:now(),image_url:item.image_url||top?.image_url||null,updated_at:now()}).eq('id',item.id);
-  }
-  return {id:item.id,name:item.product_name,price,sources:sourcePrices,errors};
+  const result=await recalculateItem(supabase,item);
+  if(result.price!=null&&observations.length){const top=observations.sort((a,b)=>(b.confidence||0)-(a.confidence||0))[0];if(!item.image_url&&top?.image_url)await supabase.from('investment_products').update({image_url:top.image_url}).eq('id',item.id);}
+  return {id:item.id,name:item.product_name,price:result.price,sources:result.sourcePrices,errors};
 }
 async function createSnapshot(supabase,userId){
   const {data}=await supabase.from('investment_products').select('*').eq('user_id',userId);
@@ -113,15 +223,17 @@ async function refreshUser(supabase,userId,force=false){
   const {data,error}=await q;if(error)throw error;const results=[];for(const item of data||[])results.push(await refreshOne(supabase,item));await createSnapshot(supabase,userId);await checkAlerts(supabase,userId);return results;
 }
 function registerMarketValueEngine({app,supabase,auth}){
-  app.get('/market-value/config',auth,(req,res)=>res.json({providers:{tcgplayer:!!(process.env.TCGPLAYER_PUBLIC_KEY&&process.env.TCGPLAYER_PRIVATE_KEY),ebay:!!(process.env.EBAY_CLIENT_ID&&process.env.EBAY_CLIENT_SECRET),stockx:!!(process.env.STOCKX_ACCESS_TOKEN&&process.env.STOCKX_API_KEY),tradepost:false,pricecharting:false,cardmarket:false},refresh_hours:REFRESH_HOURS}));
+  app.get('/market-value/config',auth,(req,res)=>res.json({providers:{tcgplayer:!!(process.env.TCGPLAYER_PUBLIC_KEY&&process.env.TCGPLAYER_PRIVATE_KEY),tcgplayer_public:TCG_PUBLIC_LOOKUP_ENABLED,ebay:!!(process.env.EBAY_CLIENT_ID&&process.env.EBAY_CLIENT_SECRET),stockx:!!(process.env.STOCKX_ACCESS_TOKEN&&process.env.STOCKX_API_KEY),tradepost:false,pricecharting:false,cardmarket:false},refresh_hours:REFRESH_HOURS}));
   app.get('/market-value/search-links',auth,(req,res)=>res.json({links:searchLinks(req.query.q)}));
   app.get('/market-value/history',auth,async(req,res)=>{const {data,error}=await supabase.from('portfolio_value_snapshots').select('*').eq('user_id',req.user_id).order('snapshot_date',{ascending:true}).limit(730);if(error)return res.status(500).json({error:error.message});res.json({history:data||[]})});
   app.get('/market-value/sources/:id',auth,async(req,res)=>{const {data:item}=await supabase.from('investment_products').select('*').eq('id',req.params.id).eq('user_id',req.user_id).maybeSingle();if(!item)return res.status(404).json({error:'Product not found'});const {data,error}=await supabase.from('market_price_observations').select('*').eq('investment_product_id',item.id).order('observed_at',{ascending:false}).limit(100);if(error)return res.status(500).json({error:error.message});res.json({item,observations:data||[],links:searchLinks(item.product_name)})});
-  app.post('/market-value/observations',auth,async(req,res)=>{const {data:item}=await supabase.from('investment_products').select('*').eq('id',req.body.investment_product_id).eq('user_id',req.user_id).maybeSingle();if(!item)return res.status(404).json({error:'Product not found'});const price=num(req.body.price);if(!price||price<=0)return res.status(400).json({error:'Valid price required'});const row={source:clean(req.body.source)||'manual',price,currency:'USD',confidence:num(req.body.confidence)||.8,title:clean(req.body.title)||item.product_name,listing_url:clean(req.body.listing_url)||null,image_url:clean(req.body.image_url)||null,raw:{manual:true}};await saveObservation(supabase,item,row);const {data:obs}=await supabase.from('market_price_observations').select('*').eq('investment_product_id',item.id).gte('observed_at',new Date(Date.now()-30*86400000).toISOString());const current=trimmedWeightedPrice(obs||[]);await supabase.from('investment_products').update({market_price:current,market_source:'multi-source',market_updated_at:now(),updated_at:now()}).eq('id',item.id);await createSnapshot(supabase,req.user_id);res.json({success:true,market_price:current})});
+  app.post('/market-value/public-search/:id',auth,async(req,res)=>{try{const {data:item}=await supabase.from('investment_products').select('*').eq('id',req.params.id).eq('user_id',req.user_id).maybeSingle();if(!item)return res.status(404).json({error:'Product not found'});const query=clean(req.body?.query)||item.product_name;const result=await publicTcgSearch(query);res.json({...result,query});}catch(e){res.status(502).json({error:e.message})}});
+  app.post('/market-value/public-match/:id',auth,async(req,res)=>{try{const {data:item}=await supabase.from('investment_products').select('*').eq('id',req.params.id).eq('user_id',req.user_id).maybeSingle();if(!item)return res.status(404).json({error:'Product not found'});const url=safeTcgUrl(req.body?.url);if(!url)return res.status(400).json({error:'Valid TCGplayer product URL required'});let row;const supplied=num(req.body?.price);if(supplied&&supplied>0)row={source:'tcgplayer',title:clean(req.body?.title)||item.product_name,price:supplied,currency:'USD',confidence:.88,listing_url:url,image_url:clean(req.body?.image_url)||null,raw:{public_search_selection:true}};else row=await publicTcgProduct(url,clean(req.body?.title)||item.product_name);await saveObservation(supabase,item,row);const sourceUrls={...(item.source_product_urls||{}),tcgplayer:url};await supabase.from('investment_products').update({source_product_urls:sourceUrls,price_match_status:'matched',image_url:item.image_url||row.image_url||null,updated_at:now()}).eq('id',item.id);const calculated=await recalculateItem(supabase,item);await createSnapshot(supabase,req.user_id);res.json({success:true,market_price:calculated.price,row});}catch(e){res.status(502).json({error:e.message})}});
+  app.post('/market-value/observations',auth,async(req,res)=>{const {data:item}=await supabase.from('investment_products').select('*').eq('id',req.body.investment_product_id).eq('user_id',req.user_id).maybeSingle();if(!item)return res.status(404).json({error:'Product not found'});const price=num(req.body.price);if(!price||price<=0)return res.status(400).json({error:'Valid price required'});const row={source:clean(req.body.source)||'manual',price,currency:'USD',confidence:num(req.body.confidence)||.8,title:clean(req.body.title)||item.product_name,listing_url:clean(req.body.listing_url)||null,image_url:clean(req.body.image_url)||null,raw:{manual:true}};await saveObservation(supabase,item,row);const current=await recalculateItem(supabase,item);await createSnapshot(supabase,req.user_id);res.json({success:true,market_price:current.price})});
   app.post('/market-value/refresh',auth,async(req,res)=>{try{const results=await refreshUser(supabase,req.user_id,true);res.json({success:true,updated:results.filter(x=>x.price!=null).length,results})}catch(e){res.status(500).json({error:e.message})}});
   app.get('/market-value/alerts',auth,async(req,res)=>{const {data,error}=await supabase.from('market_value_alerts').select('*,investment_products(product_name,market_price)').eq('user_id',req.user_id).order('created_at',{ascending:false});if(error)return res.status(500).json({error:error.message});res.json({alerts:data||[]})});
   app.post('/market-value/alerts',auth,async(req,res)=>{const row={user_id:req.user_id,investment_product_id:req.body.investment_product_id,direction:req.body.direction==='below'?'below':'above',target_price:Number(req.body.target_price),is_active:true};const {data,error}=await supabase.from('market_value_alerts').insert(row).select().single();if(error)return res.status(500).json({error:error.message});res.json({alert:data})});
   app.delete('/market-value/alerts/:id',auth,async(req,res)=>{const {error}=await supabase.from('market_value_alerts').delete().eq('id',req.params.id).eq('user_id',req.user_id);if(error)return res.status(500).json({error:error.message});res.json({success:true})});
   if(process.env.MARKET_VALUE_ENGINE_ENABLED!=='false')setInterval(async()=>{try{const {data:users}=await supabase.from('investment_products').select('user_id').limit(5000);const ids=[...new Set((users||[]).map(x=>x.user_id))];for(const id of ids)await refreshUser(supabase,id,false)}catch(e){console.error('Market value refresh failed:',e.message)}},Math.max(3600000,REFRESH_HOURS*3600000));
 }
-module.exports={registerMarketValueEngine,refreshUser,searchLinks};
+module.exports={registerMarketValueEngine,refreshUser,searchLinks,publicTcgSearch,publicTcgProduct};
