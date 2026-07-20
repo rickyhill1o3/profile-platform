@@ -464,9 +464,8 @@ module.exports = function registerSuccessNetwork({ app, supabase, auth, admin, g
       .order('created_at', { ascending: false }).limit(100);
     if (error) return res.json([]);
 
-    const rows = (data || [])
+    const normalizedRows = (data || [])
       .filter(r => String(r.type || r.webhook_type || '').toLowerCase().includes('checkout') && !String(r.status || '').toLowerCase().includes('error'))
-      .slice(0, 24)
       .map(r => {
         const item = Array.isArray(r.parsed_items) ? (r.parsed_items[0] || {}) : {};
         const payload = r.payload && typeof r.payload === 'object' ? r.payload : {};
@@ -485,6 +484,33 @@ module.exports = function registerSuccessNetwork({ app, supabase, auth, admin, g
           image: cleanText(image, 2000)
         };
       });
+
+    // Group repeated successes so one high-volume release cannot crowd every other
+    // product off the homepage. SKU is the strongest identity; legacy rows without
+    // a SKU fall back to normalized site + product name.
+    const normalizeIdentity = value => String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+    const grouped = new Map();
+    for (const row of normalizedRows) {
+      const siteKey = normalizeIdentity(row.site);
+      const skuKey = normalizeIdentity(row.sku);
+      const productKey = normalizeIdentity(row.product);
+      const groupKey = skuKey ? `${siteKey}:sku:${skuKey}` : `${siteKey}:product:${productKey}`;
+      const existing = grouped.get(groupKey);
+      if (!existing) {
+        grouped.set(groupKey, { ...row, checkout_count: 1, first_checkout_at: row.created_at, latest_checkout_at: row.created_at });
+        continue;
+      }
+      existing.checkout_count += 1;
+      existing.first_checkout_at = new Date(row.created_at) < new Date(existing.first_checkout_at) ? row.created_at : existing.first_checkout_at;
+      existing.latest_checkout_at = new Date(row.created_at) > new Date(existing.latest_checkout_at) ? row.created_at : existing.latest_checkout_at;
+      if (!existing.image && row.image) existing.image = row.image;
+      if (!existing.sku && row.sku) existing.sku = row.sku;
+    }
+
+    const rows = [...grouped.values()]
+      .sort((a, b) => new Date(b.latest_checkout_at || b.created_at) - new Date(a.latest_checkout_at || a.created_at))
+      .slice(0, 24)
+      .map(row => ({ ...row, created_at: row.latest_checkout_at || row.created_at }));
 
     // Older webhook rows often did not save the image in parsed_items. Fill those
     // images from the original webhook payload first, then the catalog/storefront.
