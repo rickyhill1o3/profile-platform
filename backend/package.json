@@ -30,7 +30,7 @@
     "mailparser": "^3.7.4"
   },
   "engines": {
-    "node": "20.x",
+    "node": "22.x",
     "npm": "10.x"
   }
 }
