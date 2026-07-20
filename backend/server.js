@@ -9004,7 +9004,7 @@ registerSuccessNetwork({
     SUPER_ADMIN_EMAIL
 });
 
-registerOrderTracker({ app, supabase, auth, admin });
+registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits });
 registerMarketValueEngine({ app, supabase, auth, admin });
 registerMasterProductCatalog({ app, supabase, auth, admin });
 

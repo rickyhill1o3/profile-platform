@@ -110,6 +110,96 @@ function statusRank(s) {
   return ({unknown:0,confirmed:1,processing:2,shipped:3,delivered:4,canceled:5,refunded:6})[s] || 0;
 }
 
+function normalizeOrderRef(value) {
+  return String(value || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+}
+
+function collectOrderRefs(order = {}) {
+  const refs = new Set();
+  const add = (value) => {
+    const raw = clean(value);
+    const normalized = normalizeOrderRef(raw);
+    if (raw && normalized.length >= 6) refs.add(normalized);
+  };
+  add(order.external_order_id);
+  const walk = (value, key = '', depth = 0) => {
+    if (depth > 5 || value == null) return;
+    if (Array.isArray(value)) return value.forEach(v => walk(v, key, depth + 1));
+    if (typeof value === 'object') return Object.entries(value).forEach(([k,v]) => walk(v, k, depth + 1));
+    if (/(order|purchase|confirmation).*(id|number|no|#)|^(order_id|order_number|purchase_id)$/i.test(key)) add(value);
+  };
+  walk(order.metadata || {});
+  walk(order.raw_payload || {});
+  return [...refs];
+}
+
+function serviceOrderNumber(order = {}) {
+  const preferred = [
+    order.metadata?.order_number, order.metadata?.order_id, order.metadata?.purchase_id,
+    order.raw_payload?.order_number, order.raw_payload?.order_id, order.raw_payload?.purchase_id,
+    order.raw_payload?.purchaseId, order.external_order_id
+  ].map(clean).find(v => normalizeOrderRef(v).length >= 6);
+  return preferred || clean(order.external_order_id || order.id);
+}
+
+async function loadServiceOrders(supabase, userId) {
+  const { data, error } = await supabase.from('orders').select('*').eq('user_id', userId).order('created_at', { ascending: false }).limit(2000);
+  if (error) throw error;
+  return data || [];
+}
+
+async function ensureInvestmentRow(supabase, tracked, serviceOrder, active = true) {
+  const { data: existing } = await supabase.from('investment_products').select('id').eq('user_id', tracked.user_id).eq('source_order_id', serviceOrder.id).maybeSingle();
+  const payload = {
+    user_id: tracked.user_id, order_id: tracked.id, source_order_id: serviceOrder.id,
+    store: tracked.store, order_number: tracked.order_number,
+    product_name: clean(serviceOrder.product_name || tracked.product_summary || 'Tracked product').slice(0, 500),
+    sku: clean(serviceOrder.sku), quantity: Number(serviceOrder.metadata?.quantity || serviceOrder.raw_payload?.quantity || 1) || 1,
+    purchase_price: Number(serviceOrder.metadata?.purchase_price || serviceOrder.raw_payload?.price || 0) || 0,
+    credits_value: Number(serviceOrder.credits_charged || 0) || 0,
+    is_active: active, canceled_at: active ? null : new Date().toISOString(), updated_at: new Date().toISOString()
+  };
+  if (existing?.id) await supabase.from('investment_products').update(payload).eq('id', existing.id);
+  else await supabase.from('investment_products').insert(payload);
+}
+
+async function syncServiceOrders(supabase, userId, accounts = []) {
+  const serviceOrders = await loadServiceOrders(supabase, userId);
+  const defaultEmail = accounts[0]?.email || 'waiting-for-imap@local';
+  for (const source of serviceOrders) {
+    const store = lower(source.site || source.metadata?.site || source.raw_payload?.site || 'unknown').replace(/[^a-z0-9]/g, '');
+    const orderNumber = serviceOrderNumber(source);
+    if (!orderNumber) continue;
+    const { data: prior } = await supabase.from('tracked_orders').select('*').eq('source_order_id', source.id).maybeSingle();
+    const payload = {
+      user_id: userId, source_order_id: source.id, service_order_external_id: source.external_order_id || null,
+      profile_id: prior?.profile_id || accounts[0]?.profile_id || null, source_email: prior?.source_email || defaultEmail,
+      store, order_number: prior?.order_number || orderNumber, status: prior?.status || 'confirmed',
+      order_date: prior?.order_date || source.created_at || new Date().toISOString(),
+      last_status_at: prior?.last_status_at || source.created_at || new Date().toISOString(),
+      credits_spent: Number(source.credits_charged || 0), product_summary: clean(source.product_name || source.sku || 'Checkout').slice(0,500),
+      updated_at: new Date().toISOString()
+    };
+    let tracked;
+    if (prior?.id) { const r=await supabase.from('tracked_orders').update(payload).eq('id', prior.id).select().single(); tracked=r.data; }
+    else {
+      const r=await supabase.from('tracked_orders').insert(payload).select().single();
+      if (r.error && !/duplicate|unique/i.test(r.error.message||'')) throw r.error;
+      tracked=r.data;
+      if (!tracked) {
+        const fallback=await supabase.from('tracked_orders').select('*').eq('user_id', userId).eq('store', store).eq('order_number', orderNumber).maybeSingle();
+        tracked=fallback.data;
+        if (tracked?.id && !tracked.source_order_id) {
+          const linked=await supabase.from('tracked_orders').update({ source_order_id: source.id, service_order_external_id: source.external_order_id || null }).eq('id', tracked.id).select().single();
+          tracked=linked.data || tracked;
+        }
+      }
+    }
+    if (tracked) await ensureInvestmentRow(supabase, tracked, source, !['canceled','refunded'].includes(tracked.status));
+  }
+  return serviceOrders;
+}
+
 async function loadScanAccounts(supabase, onlyUserId = null) {
   let profileQuery = supabase.from('profiles').select('id,user_id,profile_name');
   if (onlyUserId) profileQuery = profileQuery.eq('user_id', onlyUserId);
@@ -159,7 +249,7 @@ async function upsertScanState(supabase, account, patch) {
   }, { onConflict: 'user_id,email' });
 }
 
-async function saveParsedMessage(supabase, account, parsed, uid) {
+async function saveParsedMessage(supabase, account, parsed, uid, adjustCredits = null) {
   const subject = clean(parsed.subject);
   const from = parsed.from?.text || '';
   const text = clean(parsed.text || parsed.html || '').replace(/\u0000/g, '');
@@ -175,12 +265,22 @@ async function saveParsedMessage(supabase, account, parsed, uid) {
   const productSummary = extractProductSummary(subject, text, store);
   const receiptHtml = parsed.html ? sanitizeReceiptHtml(String(parsed.html).slice(0, 250000)) : `<pre>${htmlEscape(text.slice(0, 250000))}</pre>`;
 
-  const { data: existing } = await supabase.from('tracked_orders').select('*')
-    .eq('user_id', account.user_id).eq('store', store).eq('order_number', orderNumber).maybeSingle();
+  const serviceOrders = await loadServiceOrders(supabase, account.user_id);
+  const incomingRef = normalizeOrderRef(orderNumber);
+  const serviceOrder = serviceOrders.find(o => collectOrderRefs(o).includes(incomingRef));
+  // Only track retailer emails that correspond to a checkout recorded by this platform.
+  if (!serviceOrder) return { ignored: true, reason: 'not_a_platform_order' };
 
-  const shouldAdvance = !existing || statusRank(status) >= statusRank(existing.status) || ['canceled','refunded'].includes(status);
+  let { data: existing } = await supabase.from('tracked_orders').select('*').eq('source_order_id', serviceOrder.id).maybeSingle();
+  if (!existing) {
+    await syncServiceOrders(supabase, account.user_id, [account]);
+    const lookup = await supabase.from('tracked_orders').select('*').eq('source_order_id', serviceOrder.id).maybeSingle();
+    existing = lookup.data;
+  }
+  if (!existing) return { ignored: true, reason: 'service_order_sync_failed' };
+  const shouldAdvance = statusRank(status) >= statusRank(existing.status) || ['canceled','refunded'].includes(status);
   const patch = {
-    user_id: account.user_id, profile_id: existing?.profile_id || account.profile_id,
+    user_id: account.user_id, source_order_id: serviceOrder.id, service_order_external_id: serviceOrder.external_order_id || null, profile_id: existing?.profile_id || account.profile_id,
     source_email: account.email, store, order_number: orderNumber,
     status: shouldAdvance ? status : existing.status,
     order_date: existing?.order_date || eventAt,
@@ -197,25 +297,25 @@ async function saveParsedMessage(supabase, account, parsed, uid) {
     last_message_id: messageId,
     updated_at: new Date().toISOString()
   };
-  const { data: order, error } = await supabase.from('tracked_orders').upsert(patch, { onConflict: 'user_id,store,order_number' }).select().single();
+  const { data: order, error } = await supabase.from('tracked_orders').update(patch).eq('id', existing.id).select().single();
   if (error) throw error;
   await supabase.from('tracked_order_events').upsert({
     order_id: order.id, user_id: account.user_id, status, event_at: eventAt, subject,
     message_id: messageId, source_email: account.email, body_excerpt: text.slice(0, 1000)
   }, { onConflict: 'user_id,message_id', ignoreDuplicates: true });
 
-  if (!existing && status === 'confirmed') {
-    await supabase.from('investment_products').insert({
-      user_id: account.user_id, order_id: order.id, store, order_number: orderNumber,
-      product_name: productSummary.slice(0, 500), quantity: 1,
-      purchase_price: amounts.subtotal ?? amounts.total ?? 0,
-      credits_value: 0
-    });
+  const inactive = ['canceled','refunded'].includes(status);
+  await ensureInvestmentRow(supabase, order, serviceOrder, !inactive);
+  if (inactive && !existing.credits_refunded && Number(serviceOrder.credits_charged || 0) > 0 && typeof adjustCredits === 'function') {
+    const refund = Number(serviceOrder.credits_charged || 0);
+    await adjustCredits({ userId: account.user_id, delta: refund, reason: 'imap_order_canceled_refund', note: `Credits refunded after ${store} order ${orderNumber} was ${status}`, metadata: { tracked_order_id: order.id, source_order_id: serviceOrder.id, imap_status: status }, orderId: serviceOrder.id });
+    await supabase.from('tracked_orders').update({ credits_refunded: true, credits_refunded_at: new Date().toISOString() }).eq('id', order.id);
+    await supabase.from('orders').update({ status: 'canceled', metadata: { ...(serviceOrder.metadata || {}), imap_status: status, imap_canceled_at: new Date().toISOString(), credits_refunded_by_imap: refund } }).eq('id', serviceOrder.id);
   }
   return { saved: true, order_id: order.id, status };
 }
 
-async function scanAccount(supabase, account) {
+async function scanAccount(supabase, account, adjustCredits = null) {
   const stateResp = await supabase.from('imap_scan_accounts').select('*').eq('user_id', account.user_id).eq('email', account.email).maybeSingle();
   const state = stateResp.data || {};
   const client = new ImapFlow({
@@ -248,7 +348,7 @@ async function scanAccount(supabase, account) {
         checked += 1; highestUid = Math.max(highestUid, Number(msg.uid || 0));
         try {
           const parsed = await simpleParser(msg.source);
-          const result = await saveParsedMessage(supabase, account, parsed, msg.uid);
+          const result = await saveParsedMessage(supabase, account, parsed, msg.uid, adjustCredits);
           if (result.saved) saved += 1;
         } catch (e) { console.error('IMAP message parse failed', account.email, msg.uid, e.message); }
         if (checked >= MAX_MESSAGES_PER_SCAN) break;
@@ -263,11 +363,12 @@ async function scanAccount(supabase, account) {
 }
 
 let scanRunning = false;
-async function scanAll(supabase, userId = null) {
+async function scanAll(supabase, userId = null, adjustCredits = null) {
   if (scanRunning && !userId) return { skipped: true };
   if (!userId) scanRunning = true;
   try {
     let accounts = await loadScanAccounts(supabase, userId);
+    if (userId) await syncServiceOrders(supabase, userId, accounts);
     if (!userId && accounts.length > MAX_ACCOUNTS_PER_CYCLE) {
       const start = backgroundAccountCursor % accounts.length;
       accounts = [...accounts.slice(start), ...accounts.slice(0, start)].slice(0, MAX_ACCOUNTS_PER_CYCLE);
@@ -275,7 +376,7 @@ async function scanAll(supabase, userId = null) {
     }
     const results = [];
     for (const account of accounts) {
-      try { results.push({ email: account.email, ...(await scanAccount(supabase, account)) }); }
+      try { results.push({ email: account.email, ...(await scanAccount(supabase, account, adjustCredits)) }); }
       catch (err) { results.push({ email: account.email, error: err.message }); }
     }
     return { accounts: accounts.length, results };
@@ -292,7 +393,7 @@ async function tcgToken() {
   return (await resp.json()).access_token;
 }
 
-function registerOrderTracker({ app, supabase, auth, admin }) {
+function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits }) {
   app.post('/orders/imap-test', auth, async (req, res) => {
     const email = lower(req.body?.email);
     const provider = providerForEmail(email);
@@ -348,17 +449,22 @@ function registerOrderTracker({ app, supabase, auth, admin }) {
   });
 
   app.post('/orders/scan', auth, async (req, res) => {
-    try { res.json({ success: true, ...(await scanAll(supabase, req.user_id)) }); }
+    try { res.json({ success: true, ...(await scanAll(supabase, req.user_id, adjustUserCredits)) }); }
     catch (e) { res.status(500).json({ error: e.message }); }
   });
 
   app.get('/orders/scan-status', auth, async (req, res) => {
+    const discovered = await loadScanAccounts(supabase, req.user_id);
+    await syncServiceOrders(supabase, req.user_id, discovered);
+    for (const account of discovered) await upsertScanState(supabase, account, { is_enabled: true });
     const { data, error } = await supabase.from('imap_scan_accounts').select('*').eq('user_id', req.user_id).order('email');
     if (error) return res.status(500).json({ error: error.message });
     res.json({ accounts: data || [] });
   });
 
   app.get('/orders/tracked', auth, async (req, res) => {
+    const discovered = await loadScanAccounts(supabase, req.user_id);
+    await syncServiceOrders(supabase, req.user_id, discovered);
     let q = supabase.from('tracked_orders').select('*, tracked_order_events(*)').eq('user_id', req.user_id).order('order_date', { ascending: false }).limit(1000);
     if (req.query.status) q = q.eq('status', clean(req.query.status));
     if (req.query.year) {
