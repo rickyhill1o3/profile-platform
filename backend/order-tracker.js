@@ -517,6 +517,8 @@ function aycdConfig() {
   const apiKey = clean(process.env.AYCD_INBOX_API_KEY);
   const searchPath = clean(process.env.AYCD_INBOX_SEARCH_PATH || '/mail/search');
   return {
+    // AYCD's Inbox API key alone is intended for supported local AYCD clients. A Render service also
+    // needs an externally reachable endpoint (UpLink/bridge). Never treat the key by itself as remote access.
     enabled: lower(process.env.AYCD_INBOX_ENABLED || 'false') === 'true' && !!baseUrl && !!apiKey,
     baseUrl,
     apiKey,
