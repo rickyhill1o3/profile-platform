@@ -5353,13 +5353,13 @@ async function testProfileImapConnection(store, button) {
                 'Content-Type': 'application/json',
                 Authorization: 'Bearer ' + token()
             },
-            body: JSON.stringify({ email, password })
+            body: JSON.stringify({ email, password, profile_id: localStorage.getItem('edit') || null })
         });
         const data = await response.json().catch(() => ({}));
         if (!response.ok) throw new Error(data.error || 'IMAP connection failed.');
         const count = Number(data.mailbox?.messages || 0);
         if (status) {
-            status.textContent = `✓ Connected to ${data.email}. Inbox contains ${count.toLocaleString()} message${count === 1 ? '' : 's'}. Save the profile to use this mailbox in Order Tracker.`;
+            status.textContent = data.saved ? `✓ Connected and linked to Order Tracker: ${data.email}. Inbox contains ${count.toLocaleString()} message${count === 1 ? '' : 's'}.` : `✓ Connected to ${data.email}. Inbox contains ${count.toLocaleString()} message${count === 1 ? '' : 's'}. Save the profile, then test again to link it.`;
             status.style.color = '#067647';
         }
         if (passwordInput) passwordInput.value = password;

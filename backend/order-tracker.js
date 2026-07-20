@@ -393,6 +393,64 @@ async function tcgToken() {
   return (await resp.json()).access_token;
 }
 
+
+async function persistVerifiedMailbox(supabase, userId, profileId, email, password) {
+  const cleanProfileId = clean(profileId);
+  if (!cleanProfileId) return { saved: false, reason: 'profile_id_missing' };
+
+  const { data: profile, error: profileError } = await supabase
+    .from('profiles')
+    .select('id,user_id,account_type')
+    .eq('id', cleanProfileId)
+    .eq('user_id', userId)
+    .maybeSingle();
+  if (profileError || !profile) return { saved: false, reason: 'profile_not_found' };
+
+  // Always keep the legacy account row synchronized because every deployment has this table.
+  const { data: existingRows, error: existingError } = await supabase
+    .from('accounts')
+    .select('id')
+    .eq('profile_id', cleanProfileId)
+    .limit(1);
+  if (existingError) throw existingError;
+  const payload = {
+    profile_id: cleanProfileId,
+    provider: clean(profile.account_type || 'target'),
+    login_email: email,
+    gmail_app_password: password
+  };
+  if (existingRows?.[0]?.id) {
+    const { error } = await supabase.from('accounts').update(payload).eq('id', existingRows[0].id);
+    if (error) throw error;
+  } else {
+    const { error } = await supabase.from('accounts').insert(payload);
+    if (error) throw error;
+  }
+
+  // Keep the newer per-store credential row synchronized when that migration exists.
+  try {
+    const store = lower(profile.account_type || 'target') || 'target';
+    const { data: existingCredential } = await supabase
+      .from('profile_store_credentials')
+      .select('id')
+      .eq('profile_id', cleanProfileId)
+      .eq('store', store)
+      .maybeSingle();
+    const credentialPayload = {
+      profile_id: cleanProfileId,
+      store,
+      login_email: email,
+      gmail_app_password: password
+    };
+    if (existingCredential?.id) await supabase.from('profile_store_credentials').update(credentialPayload).eq('id', existingCredential.id);
+    else await supabase.from('profile_store_credentials').insert(credentialPayload);
+  } catch (_) {
+    // The legacy accounts row above remains the canonical fallback.
+  }
+
+  return { saved: true, profile_id: cleanProfileId };
+}
+
 function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits }) {
   app.post('/orders/imap-test', auth, async (req, res) => {
     const email = lower(req.body?.email);
@@ -426,12 +484,22 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits })
         lock.release();
       }
       await client.logout();
+      const persisted = await persistVerifiedMailbox(supabase, req.user_id, req.body?.profile_id, email, password);
+      if (persisted.saved) {
+        const discovered = await loadScanAccounts(supabase, req.user_id);
+        const matched = discovered.find((item) => item.email === email);
+        if (matched) await upsertScanState(supabase, matched, { is_enabled: true, last_error: null });
+      }
       return res.json({
         success: true,
         provider: provider.name,
         email,
         mailbox,
-        message: `IMAP connected successfully to ${email}.`
+        saved: persisted.saved,
+        profile_id: persisted.profile_id || null,
+        message: persisted.saved
+          ? `IMAP connected and linked to this profile for ${email}.`
+          : `IMAP connected successfully to ${email}. Save the profile, then test again to link it.`
       });
     } catch (err) {
       try { client.close(); } catch (_) {}
@@ -454,12 +522,32 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits })
   });
 
   app.get('/orders/scan-status', auth, async (req, res) => {
-    const discovered = await loadScanAccounts(supabase, req.user_id);
-    await syncServiceOrders(supabase, req.user_id, discovered);
-    for (const account of discovered) await upsertScanState(supabase, account, { is_enabled: true });
-    const { data, error } = await supabase.from('imap_scan_accounts').select('*').eq('user_id', req.user_id).order('email');
-    if (error) return res.status(500).json({ error: error.message });
-    res.json({ accounts: data || [] });
+    try {
+      const discovered = await loadScanAccounts(supabase, req.user_id);
+      await syncServiceOrders(supabase, req.user_id, discovered);
+      for (const account of discovered) {
+        try { await upsertScanState(supabase, account, { is_enabled: true }); } catch (_) {}
+      }
+
+      let states = [];
+      try {
+        const stateResult = await supabase.from('imap_scan_accounts').select('*').eq('user_id', req.user_id).order('email');
+        if (!stateResult.error) states = stateResult.data || [];
+      } catch (_) {}
+      const stateByEmail = new Map(states.map(row => [lower(row.email), row]));
+      const accounts = discovered.map(account => ({
+        ...(stateByEmail.get(account.email) || {}),
+        user_id: account.user_id,
+        profile_id: account.profile_id,
+        email: account.email,
+        provider: account.provider.name,
+        is_enabled: true,
+        connected: true
+      }));
+      res.json({ accounts, connected_count: accounts.length });
+    } catch (error) {
+      res.status(500).json({ error: error.message });
+    }
   });
 
   app.get('/orders/tracked', auth, async (req, res) => {
