@@ -205,10 +205,30 @@ async function loadScanAccounts(supabase, onlyUserId = null) {
   if (onlyUserId) profileQuery = profileQuery.eq('user_id', onlyUserId);
   const { data: profiles, error: pe } = await profileQuery;
   if (pe) throw pe;
-  const ids = (profiles || []).map(p => p.id);
+
+  // Verified mailbox rows are also treated as a durable link between Order Tracker and a profile.
+  // This prevents a successfully tested mailbox from disappearing from the tracker when one of the
+  // optional credential tables is unavailable or a legacy profile row is shaped differently.
+  let verifiedStates = [];
+  try {
+    let stateQuery = supabase.from('imap_scan_accounts').select('*');
+    if (onlyUserId) stateQuery = stateQuery.eq('user_id', onlyUserId);
+    const stateResult = await stateQuery;
+    if (!stateResult.error) verifiedStates = stateResult.data || [];
+  } catch (_) {}
+
+  const ids = [...new Set([
+    ...(profiles || []).map(p => p.id),
+    ...verifiedStates.map(row => row.profile_id).filter(Boolean)
+  ])];
   if (!ids.length) return [];
 
   const pmap = new Map((profiles || []).map(p => [String(p.id), p]));
+  for (const state of verifiedStates) {
+    if (state.profile_id && !pmap.has(String(state.profile_id))) {
+      pmap.set(String(state.profile_id), { id: state.profile_id, user_id: state.user_id });
+    }
+  }
   const byKey = new Map();
   const addCredential = (c = {}) => {
     const p = pmap.get(String(c.profile_id));
@@ -237,6 +257,46 @@ async function loadScanAccounts(supabase, onlyUserId = null) {
     for (const account of accounts || []) addCredential(account);
   } catch (err) {
     console.warn('Legacy IMAP accounts lookup failed:', err.message);
+  }
+
+  // Final fallback: rebuild verified mailbox credentials directly from their linked profile.
+  // This is intentionally done after the normal table scans so current credentials remain canonical.
+  for (const state of verifiedStates) {
+    const email = lower(state.email);
+    if (!email || !state.profile_id || (onlyUserId && String(state.user_id) !== String(onlyUserId))) continue;
+    const key = `${state.user_id}:${email}`;
+    if (byKey.has(key)) continue;
+    const provider = providerForEmail(email);
+    if (!provider) continue;
+
+    let credential = null;
+    try {
+      const r = await supabase.from('profile_store_credentials')
+        .select('profile_id,login_email,gmail_app_password')
+        .eq('profile_id', state.profile_id)
+        .not('gmail_app_password', 'is', null)
+        .limit(1);
+      credential = r.data?.[0] || null;
+    } catch (_) {}
+    if (!credential) {
+      try {
+        const r = await supabase.from('accounts')
+          .select('profile_id,login_email,gmail_app_password')
+          .eq('profile_id', state.profile_id)
+          .limit(1);
+        credential = r.data?.[0] || null;
+      } catch (_) {}
+    }
+    const password = normalizeMailboxPassword(credential?.gmail_app_password, provider.name);
+    if (password) {
+      byKey.set(key, {
+        user_id: state.user_id,
+        profile_id: state.profile_id,
+        email,
+        password,
+        provider
+      });
+    }
   }
 
   return [...byKey.values()];
@@ -486,9 +546,14 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits })
       await client.logout();
       const persisted = await persistVerifiedMailbox(supabase, req.user_id, req.body?.profile_id, email, password);
       if (persisted.saved) {
-        const discovered = await loadScanAccounts(supabase, req.user_id);
-        const matched = discovered.find((item) => item.email === email);
-        if (matched) await upsertScanState(supabase, matched, { is_enabled: true, last_error: null });
+        // Register the verified mailbox immediately. Do not depend on a second discovery pass before
+        // the Order Tracker page can display the connected account.
+        await upsertScanState(supabase, {
+          user_id: req.user_id,
+          profile_id: persisted.profile_id,
+          email,
+          provider
+        }, { is_enabled: true, last_error: null });
       }
       return res.json({
         success: true,
@@ -535,15 +600,32 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits })
         if (!stateResult.error) states = stateResult.data || [];
       } catch (_) {}
       const stateByEmail = new Map(states.map(row => [lower(row.email), row]));
-      const accounts = discovered.map(account => ({
-        ...(stateByEmail.get(account.email) || {}),
-        user_id: account.user_id,
-        profile_id: account.profile_id,
-        email: account.email,
-        provider: account.provider.name,
-        is_enabled: true,
-        connected: true
-      }));
+      const accountsByEmail = new Map();
+      for (const account of discovered) {
+        accountsByEmail.set(account.email, {
+          ...(stateByEmail.get(account.email) || {}),
+          user_id: account.user_id,
+          profile_id: account.profile_id,
+          email: account.email,
+          provider: account.provider.name,
+          is_enabled: true,
+          connected: true,
+          credential_ready: true
+        });
+      }
+      // A verified test should be visible immediately, even if a legacy credential lookup later fails.
+      for (const state of states) {
+        const email = lower(state.email);
+        if (!email || accountsByEmail.has(email)) continue;
+        accountsByEmail.set(email, {
+          ...state,
+          email,
+          provider: state.provider || providerForEmail(email)?.name || 'imap',
+          connected: true,
+          credential_ready: false
+        });
+      }
+      const accounts = [...accountsByEmail.values()];
       res.json({ accounts, connected_count: accounts.length });
     } catch (error) {
       res.status(500).json({ error: error.message });
