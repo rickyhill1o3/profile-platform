@@ -261,12 +261,44 @@ module.exports = function registerSuccessNetwork({ app, supabase, auth, admin, g
     const superAdmin = isSuper(user, SUPER_ADMIN_EMAIL);
     let sourceQuery = supabase.from('discord_success_channels').select('*').order('created_at', { ascending: false });
     if (!superAdmin) sourceQuery = sourceQuery.eq('admin_user_id', user.id);
-    const [{ data: sources = [] }, { data: master }, { count }, connection] = await Promise.all([
+    const [{ data: sources = [] }, { data: master }, { count }, storedConnection] = await Promise.all([
       sourceQuery,
       supabase.from('discord_success_master_settings').select('*').eq('id', 'master').maybeSingle(),
       supabase.from('discord_success_posts').select('*', { count: 'exact', head: true }),
       getConnection(user.id)
     ]);
+
+    // Older/direct bot installations may already be fully working even when an OAuth
+    // connection row was never stored. Derive a safe display connection from the
+    // admin's active source channel (or, for the Super Admin, from the bot guild cache)
+    // so the UI reflects the real working state instead of incorrectly saying
+    // "Discord not connected."
+    let connection = storedConnection;
+    if (!connection && sources.length) {
+      const guildMap = new Map();
+      for (const source of sources) {
+        if (source?.guild_id) guildMap.set(String(source.guild_id), {
+          id: String(source.guild_id),
+          name: cleanText(source.guild_name || 'Connected Discord server', 200),
+          icon: null
+        });
+      }
+      connection = {
+        admin_user_id: user.id,
+        discord_username: 'Discord server connected',
+        manageable_guilds: [...guildMap.values()],
+        derived_from_success_channel: true
+      };
+    }
+    if (!connection && superAdmin && client && ready && client.guilds?.cache?.size) {
+      connection = {
+        admin_user_id: user.id,
+        discord_username: 'Discord bot connected',
+        manageable_guilds: [...client.guilds.cache.values()].map(g => ({ id: String(g.id), name: cleanText(g.name, 200), icon: g.icon || null })),
+        derived_from_bot_installation: true
+      };
+    }
+
     res.json({ bot_ready: ready, configured: !!token, oauth_configured: !!clientId, client_id: clientId, is_super_admin: superAdmin, connection, sources, master, total_posts: count || 0 });
   });
 
