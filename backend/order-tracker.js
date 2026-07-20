@@ -511,6 +511,103 @@ async function persistVerifiedMailbox(supabase, userId, profileId, email, passwo
   return { saved: true, profile_id: cleanProfileId };
 }
 
+
+function aycdConfig() {
+  const baseUrl = clean(process.env.AYCD_INBOX_API_BASE_URL || process.env.AYCD_INBOX_API_URL).replace(/\/$/, '');
+  const apiKey = clean(process.env.AYCD_INBOX_API_KEY);
+  const searchPath = clean(process.env.AYCD_INBOX_SEARCH_PATH || '/mail/search');
+  return {
+    enabled: lower(process.env.AYCD_INBOX_ENABLED || 'false') === 'true' && !!baseUrl && !!apiKey,
+    baseUrl,
+    apiKey,
+    searchPath: searchPath.startsWith('/') ? searchPath : `/${searchPath}`,
+    timeoutMs: Math.max(5000, Number(process.env.AYCD_INBOX_TIMEOUT_MS || 30000)),
+    maxResults: Math.max(25, Math.min(2000, Number(process.env.AYCD_INBOX_MAX_RESULTS || 500)))
+  };
+}
+
+function aycdHeaders(apiKey) {
+  return {
+    'Content-Type': 'application/json',
+    'Accept': 'application/json',
+    'Authorization': `Bearer ${apiKey}`,
+    'X-API-Key': apiKey,
+    'api-key': apiKey
+  };
+}
+
+function normalizeAycdMessages(payload) {
+  const source = Array.isArray(payload) ? payload
+    : Array.isArray(payload?.messages) ? payload.messages
+    : Array.isArray(payload?.emails) ? payload.emails
+    : Array.isArray(payload?.data) ? payload.data
+    : Array.isArray(payload?.results) ? payload.results
+    : [];
+  return source.map((m, index) => ({
+    uid: clean(m.uid || m.id || m.message_id || m.messageId || `aycd-${index}`),
+    subject: clean(m.subject || m.title),
+    from: clean(m.from?.text || m.from || m.sender || m.sender_email || m.senderEmail),
+    text: clean(m.text || m.body_text || m.bodyText || m.body || m.snippet),
+    html: m.html || m.body_html || m.bodyHtml || null,
+    messageId: clean(m.message_id || m.messageId || m.id),
+    date: m.date || m.received_at || m.receivedAt || m.created_at || m.createdAt || new Date().toISOString(),
+    mailboxEmail: lower(m.account_email || m.accountEmail || m.mailbox || m.email_account || '')
+  })).filter(m => m.subject || m.text || m.html);
+}
+
+async function fetchAycdMessages(query = '') {
+  const cfg = aycdConfig();
+  if (!cfg.enabled) return { configured: false, messages: [] };
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), cfg.timeoutMs);
+  try {
+    const response = await fetch(`${cfg.baseUrl}${cfg.searchPath}`, {
+      method: 'POST',
+      headers: aycdHeaders(cfg.apiKey),
+      body: JSON.stringify({ query, search: query, limit: cfg.maxResults, max_results: cfg.maxResults }),
+      signal: controller.signal
+    });
+    const text = await response.text();
+    let payload = {};
+    try { payload = text ? JSON.parse(text) : {}; } catch (_) { payload = { raw: text }; }
+    if (!response.ok) throw new Error(payload?.error || payload?.message || `AYCD Inbox API returned ${response.status}`);
+    return { configured: true, messages: normalizeAycdMessages(payload), raw_count: Number(payload?.count || 0) };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function scanAycdForUser(supabase, userId, adjustCredits = null) {
+  const cfg = aycdConfig();
+  if (!cfg.enabled) return { configured: false, checked: 0, matched: 0, ignored: 0 };
+  const serviceOrders = await loadServiceOrders(supabase, userId);
+  const refs = [...new Set(serviceOrders.flatMap(collectOrderRefs))].filter(Boolean);
+  if (!refs.length) return { configured: true, checked: 0, matched: 0, ignored: 0 };
+  // Keep the request broad enough for AYCD implementations that accept plain text search.
+  const query = refs.slice(0, 250).join(' OR ');
+  const result = await fetchAycdMessages(query);
+  let matched = 0, ignored = 0;
+  for (const m of result.messages) {
+    const account = {
+      user_id: userId,
+      profile_id: null,
+      email: m.mailboxEmail || 'aycd-inbox@connected.local',
+      provider: { name: 'aycd', host: '', port: 0, secure: true }
+    };
+    const parsed = {
+      subject: m.subject,
+      from: { text: m.from },
+      text: m.text,
+      html: m.html,
+      messageId: m.messageId,
+      date: new Date(m.date)
+    };
+    const saved = await saveParsedMessage(supabase, account, parsed, m.uid, adjustCredits);
+    if (saved?.ignored) ignored += 1; else matched += 1;
+  }
+  return { configured: true, checked: result.messages.length, matched, ignored };
+}
+
 function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits }) {
   app.post('/orders/imap-test', auth, async (req, res) => {
     const email = lower(req.body?.email);
@@ -579,6 +676,69 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits })
       }
       return res.status(400).json({ error: message, provider: provider.name });
     }
+  });
+
+
+  app.get('/orders/bootstrap', auth, async (req, res) => {
+    try {
+      const discovered = await loadScanAccounts(supabase, req.user_id);
+      await syncServiceOrders(supabase, req.user_id, discovered);
+      for (const account of discovered) {
+        try { await upsertScanState(supabase, account, { is_enabled: true }); } catch (_) {}
+      }
+      let states = [];
+      try {
+        const stateResult = await supabase.from('imap_scan_accounts').select('*').eq('user_id', req.user_id).order('email');
+        if (!stateResult.error) states = stateResult.data || [];
+      } catch (_) {}
+      const stateByEmail = new Map(states.map(row => [lower(row.email), row]));
+      const accounts = discovered.map(account => ({
+        ...(stateByEmail.get(account.email) || {}),
+        user_id: account.user_id,
+        profile_id: account.profile_id,
+        email: account.email,
+        provider: account.provider.name,
+        connected: true,
+        credential_ready: true
+      }));
+      for (const state of states) {
+        const email = lower(state.email);
+        if (!email || accounts.some(a => lower(a.email) === email)) continue;
+        accounts.push({ ...state, email, provider: state.provider || 'imap', connected: true, credential_ready: false });
+      }
+      let q = supabase.from('tracked_orders').select('*, tracked_order_events(*)').eq('user_id', req.user_id).order('order_date', { ascending: false }).limit(1000);
+      const { data, error } = await q;
+      if (error) throw error;
+      const orders = data || [];
+      const summary = orders.reduce((a,o) => { a.total += Number(o.total || 0); a[o.status] = (a[o.status]||0)+1; return a; }, { total:0 });
+      summary.success_rate = orders.length ? Math.round(((summary.delivered || 0) + (summary.shipped || 0)) / orders.length * 1000) / 10 : 0;
+      res.json({
+        accounts,
+        connected_count: accounts.length,
+        orders,
+        summary,
+        aycd: { configured: aycdConfig().enabled }
+      });
+    } catch (error) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.get('/orders/aycd-status', auth, async (req, res) => {
+    const cfg = aycdConfig();
+    res.json({ configured: cfg.enabled, base_url_set: !!cfg.baseUrl, api_key_set: !!cfg.apiKey, search_path: cfg.searchPath });
+  });
+
+  app.post('/orders/aycd-test', auth, admin, async (req, res) => {
+    try {
+      const result = await fetchAycdMessages(clean(req.body?.query || 'target order'));
+      res.json({ success: true, configured: result.configured, messages_found: result.messages.length, sample: result.messages.slice(0, 3).map(m => ({ subject: m.subject, from: m.from, mailbox: m.mailboxEmail })) });
+    } catch (error) { res.status(400).json({ error: error.message }); }
+  });
+
+  app.post('/orders/aycd-scan', auth, admin, async (req, res) => {
+    try { res.json({ success: true, ...(await scanAycdForUser(supabase, req.user_id, adjustUserCredits)) }); }
+    catch (error) { res.status(500).json({ error: error.message }); }
   });
 
   app.post('/orders/scan', auth, async (req, res) => {
