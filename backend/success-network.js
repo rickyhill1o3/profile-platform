@@ -459,13 +459,43 @@ module.exports = function registerSuccessNetwork({ app, supabase, auth, admin, g
   });
 
   app.get('/public/checkout-success-feed', async (req, res) => {
+    // Pull enough history to preserve product variety after a high-volume drop.
+    // The old 100-row window could be filled by one release (including decline/error
+    // events), pushing yesterday's successful products completely out of the feed.
     const { data, error } = await supabase.from('webhook_events')
-      .select('id,site,product,product_name,sku,parsed_items,payload,created_at,status,type,webhook_type')
-      .order('created_at', { ascending: false }).limit(100);
+      .select('id,site,product,product_name,sku,parsed_items,payload,created_at,status,type,webhook_type,error,error_message')
+      .order('created_at', { ascending: false }).limit(2000);
     if (error) return res.json([]);
 
+    const publicSuccessOnly = (row = {}) => {
+      const payload = row.payload && typeof row.payload === 'object' ? row.payload : {};
+      const embeds = Array.isArray(payload.embeds) ? payload.embeds : [];
+      const embed = embeds[0] || payload.embed || {};
+      const fields = Array.isArray(embed.fields) ? embed.fields : [];
+      const fieldText = fields.map(field => `${field?.name || ''} ${field?.value || ''}`).join(' ');
+      const haystack = [
+        row.type, row.webhook_type, row.status, row.error, row.error_message,
+        embed.title, embed.description, embed?.author?.name, fieldText,
+        payload.title, payload.status, payload.message, payload.error
+      ].map(value => String(value || '')).join(' ').toLowerCase();
+
+      const isCheckout = String(row.type || row.webhook_type || '').toLowerCase().includes('checkout');
+      if (!isCheckout) return false;
+
+      // Error terminology wins even when an older webhook row was incorrectly stored
+      // with a generic "checkout" type or a non-error status.
+      const errorPattern = /payment declined|declined|decision manager|failed|failure|error|out of stock|oos|cancelled|canceled|rejected|insufficient|login required|relogin|required action|captcha|account locked|account disabled|verification required|minimum bypass failed/;
+      if (errorPattern.test(haystack)) return false;
+
+      // Only publish an event that positively identifies itself as a completed success.
+      // This prevents payment attempts and ambiguous checkout events from inflating the
+      // homepage count or product grouping.
+      return /successful checkout|checkout success|successfully checked out|order confirmed|confirmed order|status success|status confirmed/.test(haystack)
+        || ['success', 'successful', 'confirmed', 'completed'].includes(String(row.status || '').trim().toLowerCase());
+    };
+
     const normalizedRows = (data || [])
-      .filter(r => String(r.type || r.webhook_type || '').toLowerCase().includes('checkout') && !String(r.status || '').toLowerCase().includes('error'))
+      .filter(publicSuccessOnly)
       .map(r => {
         const item = Array.isArray(r.parsed_items) ? (r.parsed_items[0] || {}) : {};
         const payload = r.payload && typeof r.payload === 'object' ? r.payload : {};
