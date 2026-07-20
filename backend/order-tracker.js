@@ -293,6 +293,60 @@ async function tcgToken() {
 }
 
 function registerOrderTracker({ app, supabase, auth, admin }) {
+  app.post('/orders/imap-test', auth, async (req, res) => {
+    const email = lower(req.body?.email);
+    const provider = providerForEmail(email);
+    const password = normalizeMailboxPassword(req.body?.password, provider?.name);
+    if (!email || !provider) {
+      return res.status(400).json({ error: 'Enter a supported Gmail, Outlook, Yahoo, or iCloud email address.' });
+    }
+    if (!password) {
+      return res.status(400).json({ error: 'Enter the mailbox app password before testing.' });
+    }
+
+    const client = new ImapFlow({
+      host: provider.host,
+      port: provider.port,
+      secure: provider.secure,
+      auth: { user: email, pass: password },
+      logger: false,
+      connectionTimeout: 15000,
+      greetingTimeout: 15000,
+      socketTimeout: 20000
+    });
+
+    try {
+      await client.connect();
+      const lock = await client.getMailboxLock('INBOX');
+      let mailbox = null;
+      try {
+        mailbox = { name: client.mailbox?.path || 'INBOX', messages: Number(client.mailbox?.exists || 0) };
+      } finally {
+        lock.release();
+      }
+      await client.logout();
+      return res.json({
+        success: true,
+        provider: provider.name,
+        email,
+        mailbox,
+        message: `IMAP connected successfully to ${email}.`
+      });
+    } catch (err) {
+      try { client.close(); } catch (_) {}
+      const raw = String(err?.responseText || err?.message || 'IMAP connection failed');
+      let message = raw;
+      if (/authentication|auth|credentials|invalid|login failed/i.test(raw)) {
+        message = provider.name === 'gmail'
+          ? 'Gmail rejected the login. Confirm 2-Step Verification is enabled and use a 16-character Google App Password, not the normal Gmail password.'
+          : `${provider.name} rejected the mailbox login. Confirm the email and app password are correct.`;
+      } else if (/timeout|timed out/i.test(raw)) {
+        message = 'The mailbox connection timed out. Try again in a moment.';
+      }
+      return res.status(400).json({ error: message, provider: provider.name });
+    }
+  });
+
   app.post('/orders/scan', auth, async (req, res) => {
     try { res.json({ success: true, ...(await scanAll(supabase, req.user_id)) }); }
     catch (e) { res.status(500).json({ error: e.message }); }

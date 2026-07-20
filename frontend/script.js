@@ -418,7 +418,11 @@ function storeCredentialBlock(store, values = {}) {
                     ${cfg.label} Gmail App Password / IMAP
                     <button class="help-link-button" type="button" data-toggle-help="${imapHelpId}">What is this?</button>
                 </label>
-                <input class="input" id="${prefix}_gmail_app_password" type="password" value="${gmailAppPassword}" placeholder="Gmail App Password" />
+                <input class="input" id="${prefix}_gmail_app_password" type="password" value="${gmailAppPassword}" placeholder="Gmail App Password" autocomplete="new-password" />
+                <div class="setup-step-actions" style="margin-top:8px;align-items:center;">
+                    <button class="btn" type="button" data-test-imap="${store}">Test IMAP Connection</button>
+                    <span id="${prefix}_imap_test_status" class="form-help" aria-live="polite"></span>
+                </div>
                 <div class="inline-help-card" id="${imapHelpId}" hidden>
                     A Gmail app password is different from your normal Gmail password. Create the store account first, then turn on 2-Step Verification in your Gmail account. After 2-Step Verification is on, search Gmail/Google Account settings for <strong>App passwords</strong>, create a new app password, and paste the 16-character code here. It usually looks like <strong>xxxx xxxx xxxx xxxx</strong>.
                 </div>
@@ -5324,6 +5328,54 @@ function initHelpCenter() {
     document.getElementById('restartSetupWizardButton')?.addEventListener('click', () => openSetupWizard(0));
     document.getElementById('openHelpCenterButton')?.addEventListener('click', () => navigateUserDashboardPane('help'));
 }
+
+async function testProfileImapConnection(store, button) {
+    const prefix = `store_${store}`;
+    const emailInput = document.getElementById(`${prefix}_login_email`);
+    const passwordInput = document.getElementById(`${prefix}_gmail_app_password`);
+    const status = document.getElementById(`${prefix}_imap_test_status`);
+    const email = String(emailInput?.value || '').trim();
+    const password = String(passwordInput?.value || '').replace(/\s+/g, '');
+
+    if (!email || !password) {
+        if (status) { status.textContent = 'Enter the email and Gmail app password first.'; status.style.color = '#b42318'; }
+        return;
+    }
+
+    const originalText = button?.textContent || 'Test IMAP Connection';
+    if (button) { button.disabled = true; button.textContent = 'Testing…'; }
+    if (status) { status.textContent = 'Connecting securely to the mailbox…'; status.style.color = ''; }
+
+    try {
+        const response = await fetch(API + '/orders/imap-test', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                Authorization: 'Bearer ' + token()
+            },
+            body: JSON.stringify({ email, password })
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(data.error || 'IMAP connection failed.');
+        const count = Number(data.mailbox?.messages || 0);
+        if (status) {
+            status.textContent = `✓ Connected to ${data.email}. Inbox contains ${count.toLocaleString()} message${count === 1 ? '' : 's'}. Save the profile to use this mailbox in Order Tracker.`;
+            status.style.color = '#067647';
+        }
+        if (passwordInput) passwordInput.value = password;
+    } catch (error) {
+        if (status) { status.textContent = `✕ ${error.message}`; status.style.color = '#b42318'; }
+    } finally {
+        if (button) { button.disabled = false; button.textContent = originalText; }
+    }
+}
+
+document.addEventListener('click', (event) => {
+    const button = event.target.closest('[data-test-imap]');
+    if (!button) return;
+    event.preventDefault();
+    testProfileImapConnection(button.dataset.testImap, button);
+});
 
 async function initGuidedSetup() {
     if (!document.getElementById('setupHealthCard')) return;
