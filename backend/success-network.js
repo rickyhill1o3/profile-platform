@@ -547,8 +547,16 @@ module.exports = function registerSuccessNetwork({ app, supabase, auth, admin, g
     // Product name is the primary identity so the same item merges across dates,
     // stores, bot versions, and changing/missing SKUs. SKU is only a fallback.
     const canonicalName = value => normalize(value)
-      .replace(/\b(pokemon|pokémon)\s+(trading card game|tcg)\b/g, 'pokemon')
-      .replace(/\b(target|walmart|pokemon center|pokémon center|amazon|sams club)\b/g, '')
+      // `normalize()` removes accented characters, so Pokémon can become `pok mon`.
+      // Standardize common retailer/bot naming variants before grouping.
+      .replace(/\bpok\s+mon\b/g, 'pokemon')
+      .replace(/\bpokemon\s+(trading\s+card\s+games?|tcg)\b/g, 'pokemon')
+      .replace(/\btrading\s+card\s+games?\b/g, '')
+      .replace(/\bevolutions\b/g, 'evolution')
+      .replace(/\belite\s+trainer\s+boxes\b/g, 'elite trainer box')
+      .replace(/\bbooster\s+bundles\b/g, 'booster bundle')
+      .replace(/\bcollections\b/g, 'collection')
+      .replace(/\b(target|walmart|pokemon center|amazon|sams club)\b/g, '')
       .replace(/\s+/g, ' ').trim();
     const grouped = new Map();
     for (const row of normalizedRows) {
