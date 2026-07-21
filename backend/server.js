@@ -5453,6 +5453,53 @@ app.get('/admin/webhooks/logs', auth, admin, async (req, res) => {
 
 
 
+
+function homepageCheckoutProductKey(product) {
+    const normalized = String(product || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()
+        .replace(/\b(pokemon|pokémon)\s+(trading card game|tcg)\b/g, 'pokemon')
+        .replace(/\b(target|walmart|pokemon center|pokémon center|amazon|sams club)\b/g, '')
+        .replace(/\s+/g, ' ').trim();
+    return normalized ? `product:${normalized}` : '';
+}
+
+app.get('/admin/homepage-checkout-products/hidden', auth, admin, async (req, res) => {
+    try {
+        const currentUser = await getCurrentUser(req);
+        if (currentUser.role !== 'super_admin') return res.status(403).json({ error: 'Only super admin can manage homepage checkout products.' });
+        const items = await getAppSetting('homepage_hidden_checkout_products', []);
+        res.json({ items: Array.isArray(items) ? items : [] });
+    } catch (err) { res.status(500).json({ error: err.message || String(err) }); }
+});
+
+app.post('/admin/homepage-checkout-products/hide', auth, admin, async (req, res) => {
+    try {
+        const currentUser = await getCurrentUser(req);
+        if (currentUser.role !== 'super_admin') return res.status(403).json({ error: 'Only super admin can manage homepage checkout products.' });
+        const product = String(req.body?.product || '').trim();
+        const key = String(req.body?.key || homepageCheckoutProductKey(product)).trim();
+        if (!key) return res.status(400).json({ error: 'Product name is required.' });
+        const current = await getAppSetting('homepage_hidden_checkout_products', []);
+        const items = Array.isArray(current) ? current : [];
+        const without = items.filter(item => String(item?.key || item) !== key);
+        without.unshift({ key, product: product || key.replace(/^product:/, ''), hidden_at: new Date().toISOString() });
+        await setAppSetting('homepage_hidden_checkout_products', without.slice(0, 500));
+        res.json({ ok: true, item: without[0] });
+    } catch (err) { res.status(500).json({ error: err.message || String(err) }); }
+});
+
+app.delete('/admin/homepage-checkout-products/hidden', auth, admin, async (req, res) => {
+    try {
+        const currentUser = await getCurrentUser(req);
+        if (currentUser.role !== 'super_admin') return res.status(403).json({ error: 'Only super admin can manage homepage checkout products.' });
+        const key = String(req.query.key || '').trim();
+        if (!key) return res.status(400).json({ error: 'Product key is required.' });
+        const current = await getAppSetting('homepage_hidden_checkout_products', []);
+        const items = (Array.isArray(current) ? current : []).filter(item => String(item?.key || item) !== key);
+        await setAppSetting('homepage_hidden_checkout_products', items);
+        res.json({ ok: true });
+    } catch (err) { res.status(500).json({ error: err.message || String(err) }); }
+});
+
 app.post('/admin/webhooks/logs/:id/resend', auth, admin, async (req, res) => {
     try {
         const currentUser = await getCurrentUser(req);

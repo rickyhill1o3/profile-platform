@@ -459,13 +459,39 @@ module.exports = function registerSuccessNetwork({ app, supabase, auth, admin, g
   });
 
   app.get('/public/checkout-success-feed', async (req, res) => {
-    // Pull enough history to preserve product variety after a high-volume drop.
-    // The old 100-row window could be filled by one release (including decline/error
-    // events), pushing yesterday's successful products completely out of the feed.
+    // Read a wide history window. Busy releases can generate hundreds of checkout and
+    // decline events, so a small newest-row limit can accidentally hide valid products.
     const { data, error } = await supabase.from('webhook_events')
       .select('id,site,product,product_name,sku,parsed_items,payload,created_at,status,type,webhook_type,error,error_message')
-      .order('created_at', { ascending: false }).limit(2000);
+      .order('created_at', { ascending: false }).limit(10000);
     if (error) return res.json([]);
+
+    const normalize = value => String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+    const getField = (fields, names) => {
+      const wanted = names.map(normalize);
+      const match = (fields || []).find(field => wanted.includes(normalize(field?.name)));
+      return cleanText(match?.value || '', 2000).replace(/^\|\||\|\|$/g, '').trim();
+    };
+    const productFromRow = (row, item, payload, embed, fields) => {
+      const fieldProduct = getField(fields, ['Product', 'Product (1)', 'Item', 'Item (1)', 'Product Name', 'Title']);
+      const candidates = [
+        row.product, row.product_name, item.title, item.product_name,
+        payload.product_name, payload?.product?.name, fieldProduct,
+        embed.description
+      ];
+      for (const candidate of candidates) {
+        const text = cleanText(candidate, 500).trim();
+        if (!text) continue;
+        if (/^https?:\/\//i.test(text)) continue;
+        if (/successful checkout|checkout success/i.test(text) && text.length < 80) continue;
+        return text;
+      }
+      return 'Successful checkout';
+    };
+    const skuFromRow = (row, item, payload, fields) => cleanText(
+      row.sku || item.sku || item.tcin || item.asin || payload.sku || payload.product_sku
+      || getField(fields, ['SKU', 'TCIN', 'ASIN', 'Product ID', 'Offer ID']), 160
+    ).replace(/^\|\||\|\|$/g, '').trim();
 
     const publicSuccessOnly = (row = {}) => {
       const payload = row.payload && typeof row.payload === 'object' ? row.payload : {};
@@ -479,62 +505,76 @@ module.exports = function registerSuccessNetwork({ app, supabase, auth, admin, g
         payload.title, payload.status, payload.message, payload.error
       ].map(value => String(value || '')).join(' ').toLowerCase();
 
-      const isCheckout = String(row.type || row.webhook_type || '').toLowerCase().includes('checkout');
-      if (!isCheckout) return false;
-
-      // Error terminology wins even when an older webhook row was incorrectly stored
-      // with a generic "checkout" type or a non-error status.
-      const errorPattern = /payment declined|declined|decision manager|failed|failure|error|out of stock|oos|cancelled|canceled|rejected|insufficient|login required|relogin|required action|captcha|account locked|account disabled|verification required|minimum bypass failed/;
+      const typeText = `${row.type || ''} ${row.webhook_type || ''}`.toLowerCase();
+      if (!typeText.includes('checkout')) return false;
+      const errorPattern = /payment declined|declined|decision manager|failed|failure|error|out of stock|\boos\b|cancelled|canceled|rejected|insufficient|login required|relogin|required action|captcha|account locked|account disabled|verification required|minimum bypass failed/;
       if (errorPattern.test(haystack)) return false;
 
-      // Only publish an event that positively identifies itself as a completed success.
-      // This prevents payment attempts and ambiguous checkout events from inflating the
-      // homepage count or product grouping.
+      // Stellar and similar bots commonly use "Successful Checkout!" in the embed title.
       return /successful checkout|checkout success|successfully checked out|order confirmed|confirmed order|status success|status confirmed/.test(haystack)
-        || ['success', 'successful', 'confirmed', 'completed'].includes(String(row.status || '').trim().toLowerCase());
+        || ['success', 'successful', 'confirmed', 'completed', 'processed'].includes(String(row.status || '').trim().toLowerCase());
     };
 
-    const normalizedRows = (data || [])
-      .filter(publicSuccessOnly)
-      .map(r => {
-        const item = Array.isArray(r.parsed_items) ? (r.parsed_items[0] || {}) : {};
-        const payload = r.payload && typeof r.payload === 'object' ? r.payload : {};
-        const firstEmbed = Array.isArray(payload.embeds) ? (payload.embeds[0] || {}) : (payload.embed || {});
-        const payloadProduct = payload.product && typeof payload.product === 'object' ? payload.product : {};
-        const image = item.image || item.image_url || item.thumbnail || item.thumbnail_url
-          || payload.image_url || payload.image || payload.thumbnail_url
-          || payloadProduct.image_url || payloadProduct.image
-          || firstEmbed?.thumbnail?.url || firstEmbed?.image?.url || '';
-        return {
-          id: r.id,
-          site: cleanText(r.site || item.site || payload.site || payload.source || 'store', 80),
-          product: cleanText(r.product || r.product_name || item.title || item.product_name || payload.product_name || payloadProduct.name || firstEmbed?.title || 'Successful checkout', 500),
-          sku: cleanText(r.sku || item.sku || item.tcin || item.asin || payload.sku || payload.product_sku || '', 160),
-          created_at: r.created_at,
-          image: cleanText(image, 2000)
-        };
-      });
+    const normalizedRows = (data || []).filter(publicSuccessOnly).map(r => {
+      const item = Array.isArray(r.parsed_items) ? (r.parsed_items[0] || {}) : {};
+      const payload = r.payload && typeof r.payload === 'object' ? r.payload : {};
+      const firstEmbed = Array.isArray(payload.embeds) ? (payload.embeds[0] || {}) : (payload.embed || {});
+      const fields = Array.isArray(firstEmbed.fields) ? firstEmbed.fields : [];
+      const payloadProduct = payload.product && typeof payload.product === 'object' ? payload.product : {};
+      const image = item.image || item.image_url || item.thumbnail || item.thumbnail_url
+        || payload.image_url || payload.image || payload.thumbnail_url
+        || payloadProduct.image_url || payloadProduct.image
+        || firstEmbed?.thumbnail?.url || firstEmbed?.image?.url || '';
+      return {
+        id: r.id,
+        site: cleanText(r.site || item.site || payload.site || payload.source || getField(fields, ['Site', 'Store']) || 'store', 80),
+        product: productFromRow(r, item, payload, firstEmbed, fields),
+        sku: skuFromRow(r, item, payload, fields),
+        created_at: r.created_at,
+        image: cleanText(image, 2000)
+      };
+    });
 
-    // Group repeated successes so one high-volume release cannot crowd every other
-    // product off the homepage. SKU is the strongest identity; legacy rows without
-    // a SKU fall back to normalized site + product name.
-    const normalizeIdentity = value => String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+    // Hidden homepage products are maintained by super admin without deleting the
+    // underlying webhook event or order history.
+    let hiddenKeys = [];
+    try {
+      const { data: hiddenSetting } = await supabase.from('app_settings').select('value_json').eq('key', 'homepage_hidden_checkout_products').maybeSingle();
+      hiddenKeys = Array.isArray(hiddenSetting?.value_json) ? hiddenSetting.value_json : [];
+    } catch (_) {}
+    const hiddenSet = new Set(hiddenKeys.map(entry => String(entry?.key || entry || '')));
+
+    // Product name is the primary identity so the same item merges across dates,
+    // stores, bot versions, and changing/missing SKUs. SKU is only a fallback.
+    const canonicalName = value => normalize(value)
+      .replace(/\b(pokemon|pokémon)\s+(trading card game|tcg)\b/g, 'pokemon')
+      .replace(/\b(target|walmart|pokemon center|pokémon center|amazon|sams club)\b/g, '')
+      .replace(/\s+/g, ' ').trim();
     const grouped = new Map();
     for (const row of normalizedRows) {
-      const siteKey = normalizeIdentity(row.site);
-      const skuKey = normalizeIdentity(row.sku);
-      const productKey = normalizeIdentity(row.product);
-      const groupKey = skuKey ? `${siteKey}:sku:${skuKey}` : `${siteKey}:product:${productKey}`;
+      const nameKey = canonicalName(row.product);
+      const skuKey = normalize(row.sku);
+      const groupKey = nameKey && nameKey !== 'successful checkout' ? `product:${nameKey}` : `sku:${skuKey}`;
+      if (!groupKey || groupKey === 'sku:') continue;
+      if (hiddenSet.has(groupKey)) continue;
       const existing = grouped.get(groupKey);
       if (!existing) {
-        grouped.set(groupKey, { ...row, checkout_count: 1, first_checkout_at: row.created_at, latest_checkout_at: row.created_at });
+        grouped.set(groupKey, { ...row, homepage_group_key: groupKey, checkout_count: 1, first_checkout_at: row.created_at, latest_checkout_at: row.created_at });
         continue;
       }
       existing.checkout_count += 1;
       existing.first_checkout_at = new Date(row.created_at) < new Date(existing.first_checkout_at) ? row.created_at : existing.first_checkout_at;
-      existing.latest_checkout_at = new Date(row.created_at) > new Date(existing.latest_checkout_at) ? row.created_at : existing.latest_checkout_at;
-      if (!existing.image && row.image) existing.image = row.image;
-      if (!existing.sku && row.sku) existing.sku = row.sku;
+      if (new Date(row.created_at) > new Date(existing.latest_checkout_at)) {
+        existing.latest_checkout_at = row.created_at;
+        existing.id = row.id;
+        existing.site = row.site || existing.site;
+        existing.product = row.product || existing.product;
+        existing.image = row.image || existing.image;
+        existing.sku = row.sku || existing.sku;
+      } else {
+        if (!existing.image && row.image) existing.image = row.image;
+        if (!existing.sku && row.sku) existing.sku = row.sku;
+      }
     }
 
     const rows = [...grouped.values()]
@@ -542,9 +582,6 @@ module.exports = function registerSuccessNetwork({ app, supabase, auth, admin, g
       .slice(0, 24)
       .map(row => ({ ...row, created_at: row.latest_checkout_at || row.created_at }));
 
-    // Older webhook rows often did not save the image in parsed_items. Fill those
-    // images from the original webhook payload first, then the catalog/storefront.
-    // SKU matching is preferred, with a normalized product-name fallback for legacy rows.
     const missing = rows.filter(r => !r.image);
     if (missing.length) {
       const skus = [...new Set(missing.map(r => String(r.sku).trim()).filter(Boolean))].slice(0, 100);
@@ -554,54 +591,15 @@ module.exports = function registerSuccessNetwork({ app, supabase, auth, admin, g
       const key = (site, sku) => `${String(site || '').toLowerCase().replace(/[^a-z0-9]/g, '')}:${String(sku || '').toLowerCase().trim()}`;
       const nameKey = (site, name) => `${String(site || '').toLowerCase().replace(/[^a-z0-9]/g, '')}:${String(name || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()}`;
       const remember = (site, sku, name, image) => {
-        const url = String(image || '').trim();
-        if (!url) return;
-        if (sku) {
-          imageMap.set(key(site, sku), url);
-          imageMap.set(key('', sku), url);
-        }
-        if (name) {
-          nameMap.set(nameKey(site, name), url);
-          nameMap.set(nameKey('', name), url);
-        }
+        const url = String(image || '').trim(); if (!url) return;
+        if (sku) { imageMap.set(key(site, sku), url); imageMap.set(key('', sku), url); }
+        if (name) { nameMap.set(nameKey(site, name), url); nameMap.set(nameKey('', name), url); }
       };
-      if (skus.length) {
-        try {
-          const { data: catalogRows } = await supabase.from('catalog_products')
-            .select('site,sku,product_name,image_url,product_url').in('sku', skus);
-          for (const product of catalogRows || []) remember(product.site, product.sku, product.product_name, product.image_url);
-        } catch (_) {}
-      }
-      // A second name-based query helps old Shikari/Target records whose SKU was absent
-      // from webhook_events even though Discord received a thumbnail.
-      if (names.length) {
-        try {
-          const { data: catalogByName } = await supabase.from('catalog_products')
-            .select('site,sku,product_name,image_url').in('product_name', names);
-          for (const product of catalogByName || []) remember(product.site, product.sku, product.product_name, product.image_url);
-        } catch (_) {}
-      }
-      if (skus.length) {
-        try {
-          const { data: storeRows } = await supabase.from('storefront_products')
-            .select('primary_site,primary_sku,title,image_url').in('primary_sku', skus);
-          for (const product of storeRows || []) remember(product.primary_site, product.primary_sku, product.title, product.image_url);
-        } catch (_) {}
-      }
-      if (names.length) {
-        try {
-          const { data: storeByName } = await supabase.from('storefront_products')
-            .select('primary_site,primary_sku,title,image_url').in('title', names);
-          for (const product of storeByName || []) remember(product.primary_site, product.primary_sku, product.title, product.image_url);
-        } catch (_) {}
-      }
-      for (const row of missing) {
-        row.image = imageMap.get(key(row.site, row.sku))
-          || imageMap.get(key('', row.sku))
-          || nameMap.get(nameKey(row.site, row.product))
-          || nameMap.get(nameKey('', row.product))
-          || '';
-      }
+      if (skus.length) try { const { data: catalogRows } = await supabase.from('catalog_products').select('site,sku,product_name,image_url').in('sku', skus); for (const product of catalogRows || []) remember(product.site, product.sku, product.product_name, product.image_url); } catch (_) {}
+      if (names.length) try { const { data: catalogByName } = await supabase.from('catalog_products').select('site,sku,product_name,image_url').in('product_name', names); for (const product of catalogByName || []) remember(product.site, product.sku, product.product_name, product.image_url); } catch (_) {}
+      if (skus.length) try { const { data: storeRows } = await supabase.from('storefront_products').select('primary_site,primary_sku,title,image_url').in('primary_sku', skus); for (const product of storeRows || []) remember(product.primary_site, product.primary_sku, product.title, product.image_url); } catch (_) {}
+      if (names.length) try { const { data: storeByName } = await supabase.from('storefront_products').select('primary_site,primary_sku,title,image_url').in('title', names); for (const product of storeByName || []) remember(product.primary_site, product.primary_sku, product.title, product.image_url); } catch (_) {}
+      for (const row of missing) row.image = imageMap.get(key(row.site, row.sku)) || imageMap.get(key('', row.sku)) || nameMap.get(nameKey(row.site, row.product)) || nameMap.get(nameKey('', row.product)) || '';
     }
 
     res.set('Cache-Control', 'public, max-age=30');

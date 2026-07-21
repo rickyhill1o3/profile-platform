@@ -2871,6 +2871,7 @@ async function recheckOrderCredits(id, button) {
 }
 
 async function loadWebhookLogs() {
+    loadHomepageHiddenCheckoutProducts().catch(() => {});
     const container = document.getElementById('webhookLogs');
     if (!container) return;
     try {
@@ -2911,7 +2912,10 @@ async function loadWebhookLogs() {
             const userLabel = item.user_display || item.user_email || '-';
             const assignedTarget = targets.map((target) => String(target?.destination_name || target?.assigned_to || target?.brand_label || '').trim()).find(Boolean) || '-';
             const creditsLabel = (item.type === 'checkout') ? String(item.credits_charged ?? 0) : '-';
-            const productValue = String(item.product || '-');
+            const parsedProduct = parsed.map(x => x?.title || x?.product_name || x?.product).find(Boolean);
+            const embedFields = Array.isArray(item.payload?.embeds?.[0]?.fields) ? item.payload.embeds[0].fields : [];
+            const fieldProduct = embedFields.find(f => /^product(?:\s*\(\d+\))?$/i.test(String(f?.name || '').trim()))?.value;
+            const productValue = String(item.product_name || item.product || parsedProduct || fieldProduct || '-').replace(/^\|\||\|\|$/g, '').trim();
             const isProductUrl = /^https?:\/\//i.test(productValue);
             const productCell = isProductUrl
               ? `<a class="webhook-log-link" href="${escapeHtml(productValue)}" target="_blank" rel="noopener noreferrer" title="${escapeHtml(productValue)}">Open checkout link</a>`
@@ -2930,7 +2934,7 @@ async function loadWebhookLogs() {
               <td class="webhook-log-product">${productCell}</td>
               <td class="webhook-log-sku"><span class="webhook-log-truncate" title="${escapeHtml(item.sku || '-')}">${escapeHtml(item.sku || '-')}</span></td>
               <td class="webhook-log-debug"><div class="webhook-log-error">${escapeHtml(item.error || '')}</div>${details}${targetDetails}${payloadDetails}</td>
-              <td class="webhook-log-actions"><div class="webhook-log-action-buttons"><button class="secondary" type="button" onclick="resendWebhookLog('${escapeHtml(item.id || '')}', this)">Resend</button><button class="secondary" type="button" onclick="recheckWebhookCredits('${escapeHtml(item.id || '')}', this)">Recheck credits</button></div></td>
+              <td class="webhook-log-actions"><div class="webhook-log-action-buttons"><button class="secondary" type="button" onclick="resendWebhookLog('${escapeHtml(item.id || '')}', this)">Resend</button><button class="secondary" type="button" onclick="recheckWebhookCredits('${escapeHtml(item.id || '')}', this)">Recheck credits</button>${String(item.type || '').toLowerCase()==='checkout' && productValue !== '-' && !isProductUrl ? `<button class="secondary" type="button" onclick='hideHomepageCheckoutProduct(${JSON.stringify(productValue)}, this)'>Hide from homepage</button>` : ''}</div></td>
             </tr>`;
         }).join('');
         container.innerHTML = `
@@ -2942,6 +2946,49 @@ async function loadWebhookLogs() {
             </div>`;
     } catch (err) {
         container.textContent = err.message || 'Failed to load webhook logs.';
+    }
+}
+
+
+async function loadHomepageHiddenCheckoutProducts() {
+    const container = document.getElementById('homepageHiddenCheckoutProducts');
+    if (!container) return;
+    try {
+        const data = await authJSON(API + '/admin/homepage-checkout-products/hidden');
+        const items = Array.isArray(data.items) ? data.items : [];
+        container.innerHTML = items.length ? items.map(item => {
+            const key = String(item?.key || item || '');
+            const product = String(item?.product || key.replace(/^product:/, '') || 'Hidden product');
+            return `<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;border:1px solid #dbe3ef;border-radius:10px;padding:10px;margin-top:8px;"><span><strong>${escapeHtml(product)}</strong><br><span class="subtle-text">Hidden from public homepage</span></span><button class="secondary" type="button" onclick='restoreHomepageCheckoutProduct(${JSON.stringify(key)}, this)'>Restore</button></div>`;
+        }).join('') : '<span>No checkout products are hidden from the homepage.</span>';
+    } catch (err) {
+        container.textContent = err.message || 'Failed to load hidden homepage products.';
+    }
+}
+
+async function hideHomepageCheckoutProduct(product, button) {
+    if (!product || !confirm(`Hide ${product} from the public homepage? The checkout and order history will remain saved.`)) return;
+    const original = button?.textContent;
+    if (button) { button.disabled = true; button.textContent = 'Hiding...'; }
+    try {
+        await authJSON(API + '/admin/homepage-checkout-products/hide', { method: 'POST', body: JSON.stringify({ product }) });
+        await loadHomepageHiddenCheckoutProducts();
+        if (button) button.textContent = 'Hidden';
+    } catch (err) {
+        alert(err.message || 'Failed to hide product.');
+        if (button) { button.disabled = false; button.textContent = original || 'Hide from homepage'; }
+    }
+}
+
+async function restoreHomepageCheckoutProduct(key, button) {
+    const original = button?.textContent;
+    if (button) { button.disabled = true; button.textContent = 'Restoring...'; }
+    try {
+        await authJSON(API + '/admin/homepage-checkout-products/hidden?key=' + encodeURIComponent(key), { method: 'DELETE' });
+        await loadHomepageHiddenCheckoutProducts();
+    } catch (err) {
+        alert(err.message || 'Failed to restore product.');
+        if (button) { button.disabled = false; button.textContent = original || 'Restore'; }
     }
 }
 
