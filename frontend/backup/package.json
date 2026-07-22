@@ -1,0 +1,36 @@
+{
+  "name": "backend",
+  "version": "1.0.0",
+  "description": "",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "preinstall": "node scripts/clean-render-cache.js",
+    "postinstall": "node scripts/verify-install.js && node scripts/install-playwright-chromium.js",
+    "render-build": "npm install"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "@supabase/supabase-js": "^2.98.0",
+    "bcryptjs": "^3.0.3",
+    "body-parser": "^2.2.2",
+    "cheerio": "^1.2.0",
+    "cors": "^2.8.6",
+    "crypto": "^1.0.1",
+    "dotenv": "^17.3.1",
+    "express": "^5.2.1",
+    "jsonwebtoken": "^9.0.3",
+    "node-fetch": "^3.3.2",
+    "nodemailer": "^6.10.0",
+    "pg": "^8.20.0",
+    "playwright": "^1.58.2",
+    "stripe": "^18.1.1",
+    "uuid": "^13.0.0",
+    "imapflow": "^1.0.191",
+    "ws": "^8.18.0"
+  }
+}

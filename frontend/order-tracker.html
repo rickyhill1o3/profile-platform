@@ -1,7 +1,83 @@
-<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Order Tracker</title><link rel="stylesheet" href="styles.css"></head><body><div class="page-shell"><section class="panel"><div class="order-head"><div><p class="eyebrow">THE SHORE SHACK TCG</p><h1>Order Tracker</h1><p class="subtle-text">Automatically follow confirmations, cancellations, shipping, delivery, receipts, and order success rates from connected email accounts.</p></div><div class="order-actions"><a class="btn" href="dashboard.html">Dashboard</a><a class="btn" href="investment.html">Investment Value</a><button class="btn btn-danger" onclick="logout()">Logout</button></div></div></section>
-<section class="tracker-stats"><div class="tracker-card"><span class="stat-label">Tracked orders</span><strong class="stat-value" id="countAll">…</strong></div><div class="tracker-card"><span class="stat-label">Confirmed / active</span><strong class="stat-value" id="countActive">…</strong></div><div class="tracker-card"><span class="stat-label">Shipped / delivered</span><strong class="stat-value" id="countSuccess">…</strong></div><div class="tracker-card"><span class="stat-label">Canceled / refunded</span><strong class="stat-value" id="countCanceled">…</strong></div><div class="tracker-card"><span class="stat-label">Success rate</span><strong class="stat-value" id="successRate">…</strong></div></section>
-<section class="panel"><div class="order-head"><div><h2>Email scanner</h2><p class="subtle-text">Scans the IMAP/app passwords already saved in your profiles. Automatic scans run in the background.</p></div><button class="btn btn-primary" id="scanNow">Scan Email Now</button></div><div id="scanMessage" class="subtle-text">Loading connected mailboxes and saved orders…</div><div id="scanAccounts"><p class="subtle-text">Loading connected accounts…</p></div></section>
-<section class="panel" id="aycdPanel" hidden><div class="order-head"><div><h2>AYCD Unified Inbox</h2><p class="subtle-text">Super-admin only. This connects through the local helper on the same Windows laptop as AYCD Inbox. Your normal user IMAP accounts remain unchanged.</p></div><span class="status-pill" id="aycdBridgeStatus">Helper not checked</span></div>
-<div class="form-grid"><label>Host<input id="aycdHost" value="127.0.0.1"></label><label>Port<input id="aycdPort" type="number" value="43283"></label><label>Username<input id="aycdUsername" value="inbox@aycd.me"></label><label>AYCD IMAP password<input id="aycdPassword" type="password" autocomplete="new-password" placeholder="Paste the password shown in AYCD"></label><label><input id="aycdSecure" type="checkbox"> TLS/SSL</label><label>Lookback days<input id="aycdLookback" type="number" min="1" max="90" value="30"></label></div>
-<div class="order-actions"><button class="btn" id="saveAycd">Save to Local Helper</button><button class="btn" id="testAycd">Test Connection</button><button class="btn btn-primary" id="scanAycd">Scan AYCD Unified Inbox</button></div><div id="aycdMessage" class="subtle-text">Install and run the bundled local helper on the AYCD laptop first.</div></section>
-<section class="panel"><div class="tracker-toolbar"><select id="statusFilter"><option value="">All statuses</option><option>confirmed</option><option>processing</option><option>shipped</option><option>delivered</option><option>canceled</option><option>refunded</option></select><select id="yearFilter"></select><input id="searchOrders" placeholder="Search store, order number, or product"><button class="btn" id="printYear">Print annual receipts</button><button class="btn" id="refreshOrders">Refresh</button></div></section><section id="ordersList"><section class="panel"><p>Loading saved platform orders…</p></section></section></div><script src="order-tracker.js"></script></body></html>
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Order Tracker</title>
+  <link rel="stylesheet" href="styles.css">
+  <style>
+    body.order-tracker-page{background:#f3f6fb;color:#111827}
+    .tracker-shell{width:min(1180px,calc(100% - 32px));margin:28px auto 56px}
+    .tracker-header{display:flex;justify-content:space-between;gap:24px;align-items:center;padding:24px 26px;border:1px solid #dce4f0;background:#fff;border-radius:20px;box-shadow:0 10px 30px rgba(15,23,42,.06)}
+    .tracker-header h1{margin:4px 0 5px;font-size:30px}.tracker-header p{margin:0}.tracker-actions{display:flex;gap:9px;flex-wrap:wrap}
+    .tracker-stats{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:12px;margin:14px 0}
+    .tracker-stat{padding:18px;border:1px solid #dce4f0;background:#fff;border-radius:16px}.tracker-stat span{display:block;font-size:11px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;color:#64748b}.tracker-stat strong{display:block;margin-top:7px;font-size:28px}
+    .tracker-grid{display:grid;grid-template-columns:minmax(0,1fr) 340px;gap:14px;align-items:start}.tracker-panel{background:#fff;border:1px solid #dce4f0;border-radius:18px;padding:20px;box-shadow:0 8px 24px rgba(15,23,42,.04)}
+    .tracker-panel h2{margin:0 0 4px;font-size:19px}.tracker-panel .subtle-text{color:#64748b}.mail-account{padding:11px 0;border-top:1px solid #edf1f7;font-size:13px}.mail-account:first-of-type{margin-top:12px}.mail-ok{color:#047857;font-weight:800}.mail-error{color:#b91c1c;margin-top:4px}
+    .tracker-toolbar{display:grid;grid-template-columns:160px 140px minmax(220px,1fr) auto auto;gap:9px;align-items:center;margin:14px 0}.tracker-toolbar>*{min-height:42px}
+    .order-list{display:grid;gap:12px}.order-card{background:#fff;border:1px solid #dce4f0;border-radius:17px;padding:18px;box-shadow:0 7px 20px rgba(15,23,42,.035)}.order-head{display:flex;justify-content:space-between;gap:18px;align-items:flex-start}.order-head h3{margin:7px 0 3px;font-size:17px}.order-head p{margin:0;color:#475569}.order-meta{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-top:15px}.order-meta>div{background:#f7f9fc;border-radius:11px;padding:10px}.order-meta small{color:#64748b}.order-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:13px}
+    .aycd-form{display:grid;grid-template-columns:1fr 110px;gap:9px}.aycd-form label{display:grid;gap:5px;font-size:12px;font-weight:700}.aycd-form .wide{grid-column:1/-1}.aycd-buttons{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
+    .scan-overlay{position:fixed;inset:0;z-index:9999;background:linear-gradient(135deg,#0f172a,#172554 58%,#312e81);display:grid;place-items:center;padding:24px}.scan-overlay[hidden]{display:none}.scan-box{width:min(620px,100%);background:#fff;border-radius:24px;padding:30px;box-shadow:0 30px 80px rgba(0,0,0,.34)}.scan-box h1{margin:5px 0 8px}.scan-progress{height:15px;background:#e5eaf2;border-radius:999px;overflow:hidden;margin:22px 0 10px}.scan-progress>div{height:100%;width:0;background:linear-gradient(90deg,#2563eb,#7c3aed);transition:width .35s ease}.scan-percent{font-size:34px;font-weight:900}.scan-stage{color:#475569;min-height:44px}.scan-detail{font-size:13px;color:#64748b}.scan-warning{margin-top:15px;padding:11px;border-radius:10px;background:#fff7ed;color:#9a3412;font-size:13px}
+    #trackerApp[hidden]{display:none}
+    @media(max-width:900px){.tracker-grid{grid-template-columns:1fr}.tracker-stats{grid-template-columns:repeat(2,1fr)}.tracker-toolbar{grid-template-columns:1fr 1fr}.tracker-toolbar input{grid-column:1/-1}.order-meta{grid-template-columns:1fr 1fr}}
+    @media(max-width:600px){.tracker-shell{width:min(100% - 18px,1180px);margin-top:10px}.tracker-header{display:block}.tracker-actions{margin-top:14px}.tracker-stats{grid-template-columns:1fr 1fr}.tracker-stat:last-child{grid-column:1/-1}.order-meta{grid-template-columns:1fr}.tracker-toolbar{grid-template-columns:1fr}.tracker-toolbar input{grid-column:auto}}
+  </style>
+</head>
+<body class="order-tracker-page">
+  <div id="scanOverlay" class="scan-overlay">
+    <div class="scan-box">
+      <p class="eyebrow">THE SHORE SHACK TCG</p>
+      <h1>Updating your orders</h1>
+      <p class="scan-stage" id="scanStage">Loading saved orders and locating connected mailboxes…</p>
+      <div class="scan-progress"><div id="scanProgressBar"></div></div>
+      <div class="scan-percent" id="scanPercent">0%</div>
+      <p class="scan-detail" id="scanDetail">The first historical scan can take several minutes. Future visits only check messages that have not already been scanned.</p>
+      <div id="scanWarning" class="scan-warning" hidden></div>
+    </div>
+  </div>
+
+  <main id="trackerApp" class="tracker-shell" hidden>
+    <header class="tracker-header">
+      <div><p class="eyebrow">THE SHORE SHACK TCG</p><h1>Order Tracker</h1><p class="subtle-text">Order confirmations and status updates from your connected mailboxes.</p></div>
+      <div class="tracker-actions"><a class="btn" href="dashboard.html">Dashboard</a><a class="btn" href="investment.html">Investment Value</a><button class="btn btn-danger" onclick="logout()">Logout</button></div>
+    </header>
+
+    <section class="tracker-stats">
+      <div class="tracker-stat"><span>Tracked orders</span><strong id="countAll">0</strong></div>
+      <div class="tracker-stat"><span>Confirmed / active</span><strong id="countActive">0</strong></div>
+      <div class="tracker-stat"><span>Shipped / delivered</span><strong id="countSuccess">0</strong></div>
+      <div class="tracker-stat"><span>Canceled / refunded</span><strong id="countCanceled">0</strong></div>
+      <div class="tracker-stat"><span>Success rate</span><strong id="successRate">0%</strong></div>
+    </section>
+
+    <section class="tracker-grid">
+      <div class="tracker-panel">
+        <h2>Connected email accounts</h2>
+        <p id="scanMessage" class="subtle-text">Loading mailbox status…</p>
+        <div id="scanAccounts"></div>
+      </div>
+      <aside class="tracker-panel" id="aycdPanel" hidden>
+        <div class="order-head"><div><h2>AYCD Unified Inbox</h2><p class="subtle-text">Super-admin local connection</p></div><span class="status-pill" id="aycdBridgeStatus">Checking</span></div>
+        <div class="aycd-form">
+          <label>Host<input id="aycdHost" value="127.0.0.1"></label><label>Port<input id="aycdPort" type="number" value="43283"></label>
+          <label class="wide">Username<input id="aycdUsername" value="inbox@aycd.me"></label>
+          <label class="wide">AYCD IMAP password<input id="aycdPassword" type="password" autocomplete="new-password" placeholder="Password from AYCD IMAP Server"></label>
+          <label>Lookback days<input id="aycdLookback" type="number" min="1" max="365" value="30"></label><label><span>TLS/SSL</span><input id="aycdSecure" type="checkbox"></label>
+        </div>
+        <div class="aycd-buttons"><button class="btn" id="saveAycd">Save</button><button class="btn" id="testAycd">Test</button><button class="btn btn-primary" id="scanAycd">Scan AYCD</button></div>
+        <p id="aycdMessage" class="subtle-text">The local helper must be running on the AYCD laptop.</p>
+      </aside>
+    </section>
+
+    <section class="tracker-toolbar">
+      <select id="statusFilter"><option value="">All statuses</option><option>confirmed</option><option>processing</option><option>shipped</option><option>delivered</option><option>canceled</option><option>refunded</option></select>
+      <select id="yearFilter"></select>
+      <input id="searchOrders" placeholder="Search store, order number, or product">
+      <button class="btn" id="printYear">Print annual receipts</button>
+      <button class="btn" id="refreshOrders">Refresh view</button>
+    </section>
+    <section id="ordersList" class="order-list"></section>
+  </main>
+<script src="order-tracker.js"></script>
+</body>
+</html>

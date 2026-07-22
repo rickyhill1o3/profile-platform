@@ -2,10 +2,12 @@ const { ImapFlow } = require('imapflow');
 const { simpleParser } = require('mailparser');
 
 const SCAN_INTERVAL_MS = Math.max(5 * 60 * 1000, Number(process.env.IMAP_SCAN_INTERVAL_MS || 15 * 60 * 1000));
-const INITIAL_LOOKBACK_DAYS = Math.max(7, Number(process.env.IMAP_INITIAL_LOOKBACK_DAYS || 90));
+const INITIAL_LOOKBACK_DAYS = Math.max(7, Number(process.env.IMAP_INITIAL_LOOKBACK_DAYS || 365));
+const INITIAL_SCAN_START = process.env.IMAP_INITIAL_SCAN_START || '2026-01-01T00:00:00.000Z';
 const MAX_MESSAGES_PER_SCAN = Math.max(25, Number(process.env.IMAP_MAX_MESSAGES_PER_SCAN || 250));
 const MAX_ACCOUNTS_PER_CYCLE = Math.max(1, Number(process.env.IMAP_MAX_ACCOUNTS_PER_CYCLE || 25));
 let backgroundAccountCursor = 0;
+const userScanJobs = new Map();
 
 function clean(v) { return String(v || '').trim(); }
 function lower(v) { return clean(v).toLowerCase(); }
@@ -375,7 +377,7 @@ async function saveParsedMessage(supabase, account, parsed, uid, adjustCredits =
   return { saved: true, order_id: order.id, status };
 }
 
-async function scanAccount(supabase, account, adjustCredits = null) {
+async function scanAccount(supabase, account, adjustCredits = null, onProgress = null) {
   const stateResp = await supabase.from('imap_scan_accounts').select('*').eq('user_id', account.user_id).eq('email', account.email).maybeSingle();
   const state = stateResp.data || {};
   const client = new ImapFlow({
@@ -383,7 +385,8 @@ async function scanAccount(supabase, account, adjustCredits = null) {
     auth: { user: account.email, pass: account.password }, logger: false,
     connectionTimeout: 30000, greetingTimeout: 30000, socketTimeout: 120000
   });
-  let saved = 0, checked = 0, highestUid = Number(state.last_seen_uid || 0);
+  let saved = 0, checked = 0, highestUid = Number(state.last_seen_uid || 0), total = 0;
+  const scanStartedAt = new Date().toISOString();
   try {
     await client.connect();
     let mailboxName = 'INBOX';
@@ -395,35 +398,48 @@ async function scanAccount(supabase, account, adjustCredits = null) {
     }
     const lock = await client.getMailboxLock(mailboxName);
     try {
-      let range;
-      if (highestUid > 0) range = `${highestUid + 1}:*`;
-      else {
-        const since = new Date(Date.now() - INITIAL_LOOKBACK_DAYS * 86400000);
-        const uids = await client.search({ since });
-        range = uids.slice(-MAX_MESSAGES_PER_SCAN);
+      let uids = [];
+      if (highestUid > 0) {
+        uids = await client.search({ uid: `${highestUid + 1}:*` });
+      } else {
+        const configuredStart = new Date(INITIAL_SCAN_START);
+        const fallbackStart = new Date(Date.now() - INITIAL_LOOKBACK_DAYS * 86400000);
+        const since = Number.isNaN(configuredStart.getTime()) ? fallbackStart : configuredStart;
+        uids = await client.search({ since });
       }
-      if ((Array.isArray(range) && !range.length)) return { checked: 0, saved: 0 };
-      const fetchRange = Array.isArray(range) ? range : range;
-      for await (const msg of client.fetch(fetchRange, { uid: true, source: true, envelope: true })) {
-        checked += 1; highestUid = Math.max(highestUid, Number(msg.uid || 0));
+      uids = (uids || []).map(Number).filter(Boolean).sort((a,b)=>a-b);
+      total = uids.length;
+      if (!uids.length) {
+        const now = new Date().toISOString();
+        await upsertScanState(supabase, account, { last_scan_at: now, last_success_at: now, last_error: null, is_enabled: true, scan_started_at: scanStartedAt, scanned_through_at: now, initial_scan_start_at: state.initial_scan_start_at || INITIAL_SCAN_START });
+        if (onProgress) onProgress({ checked: 0, total: 0, saved: 0 });
+        return { checked: 0, total: 0, saved: 0 };
+      }
+      const batch = uids.slice(0, MAX_MESSAGES_PER_SCAN);
+      total = batch.length;
+      if (onProgress) onProgress({ checked: 0, total, saved: 0 });
+      for await (const msg of client.fetch(batch, { uid: true, source: true, envelope: true })) {
+        checked += 1;
+        highestUid = Math.max(highestUid, Number(msg.uid || 0));
         try {
           const parsed = await simpleParser(msg.source);
           const result = await saveParsedMessage(supabase, account, parsed, msg.uid, adjustCredits);
           if (result.saved) saved += 1;
         } catch (e) { console.error('IMAP message parse failed', account.email, msg.uid, e.message); }
-        if (checked >= MAX_MESSAGES_PER_SCAN) break;
+        if (onProgress) onProgress({ checked, total, saved });
       }
     } finally { lock.release(); }
-    await upsertScanState(supabase, account, { last_scan_at: new Date().toISOString(), last_success_at: new Date().toISOString(), last_error: null, last_seen_uid: highestUid, is_enabled: true });
-    return { checked, saved };
+    const now = new Date().toISOString();
+    await upsertScanState(supabase, account, { last_scan_at: now, last_success_at: now, last_error: null, last_seen_uid: highestUid, is_enabled: true, scan_started_at: scanStartedAt, scanned_through_at: now, initial_scan_start_at: state.initial_scan_start_at || INITIAL_SCAN_START });
+    return { checked, total, saved };
   } catch (err) {
-    await upsertScanState(supabase, account, { last_scan_at: new Date().toISOString(), last_error: String(err.message || err).slice(0, 1000), last_seen_uid: highestUid });
+    await upsertScanState(supabase, account, { last_scan_at: new Date().toISOString(), last_error: String(err.message || err).slice(0, 1000), last_seen_uid: highestUid, scan_started_at: scanStartedAt });
     throw err;
   } finally { try { await client.logout(); } catch (_) {} }
 }
 
 let scanRunning = false;
-async function scanAll(supabase, userId = null, adjustCredits = null) {
+async function scanAll(supabase, userId = null, adjustCredits = null, onProgress = null) {
   if (scanRunning && !userId) return { skipped: true };
   if (!userId) scanRunning = true;
   try {
@@ -435,12 +451,59 @@ async function scanAll(supabase, userId = null, adjustCredits = null) {
       backgroundAccountCursor = (start + accounts.length) % Math.max(1, (await loadScanAccounts(supabase, null)).length);
     }
     const results = [];
-    for (const account of accounts) {
-      try { results.push({ email: account.email, ...(await scanAccount(supabase, account, adjustCredits)) }); }
-      catch (err) { results.push({ email: account.email, error: err.message }); }
+    if (onProgress) onProgress({ phase: 'scanning', accountIndex: 0, accountTotal: accounts.length, checked: 0, total: 0 });
+    for (let index = 0; index < accounts.length; index++) {
+      const account = accounts[index];
+      try {
+        const result = await scanAccount(supabase, account, adjustCredits, detail => {
+          if (onProgress) onProgress({ phase: 'scanning', accountIndex: index, accountTotal: accounts.length, email: account.email, ...detail });
+        });
+        results.push({ email: account.email, ...result });
+      } catch (err) {
+        results.push({ email: account.email, error: err.message });
+      }
+      if (onProgress) onProgress({ phase: 'scanning', accountIndex: index + 1, accountTotal: accounts.length, email: account.email, accountComplete: true });
     }
     return { accounts: accounts.length, results };
   } finally { if (!userId) scanRunning = false; }
+}
+
+function scanJobView(job) {
+  if (!job) return null;
+  return {
+    id: job.id, status: job.status, phase: job.phase, percent: job.percent,
+    message: job.message, accountIndex: job.accountIndex, accountTotal: job.accountTotal,
+    email: job.email || null, checked: job.checked || 0, total: job.total || 0,
+    startedAt: job.startedAt, completedAt: job.completedAt || null,
+    error: job.error || null, result: job.result || null
+  };
+}
+
+function startUserScanJob(supabase, userId, adjustCredits) {
+  const current = userScanJobs.get(String(userId));
+  if (current?.status === 'running') return current;
+  const job = { id: `${userId}:${Date.now()}`, status: 'running', phase: 'starting', percent: 1, message: 'Preparing connected mailboxes…', accountIndex: 0, accountTotal: 0, checked: 0, total: 0, startedAt: new Date().toISOString() };
+  userScanJobs.set(String(userId), job);
+  Promise.resolve().then(async () => {
+    try {
+      const result = await scanAll(supabase, userId, adjustCredits, progress => {
+        job.phase = progress.phase || 'scanning';
+        job.accountIndex = Number(progress.accountIndex || 0);
+        job.accountTotal = Number(progress.accountTotal || 0);
+        job.email = progress.email || job.email;
+        job.checked = Number(progress.checked || 0);
+        job.total = Number(progress.total || 0);
+        const accountFraction = job.accountTotal ? job.accountIndex / job.accountTotal : 0;
+        const messageFraction = job.total ? Math.min(1, job.checked / job.total) : 0;
+        job.percent = Math.max(2, Math.min(98, Math.round((accountFraction + (messageFraction / Math.max(1, job.accountTotal))) * 96)));
+        job.message = job.email ? `Scanning ${job.email} (${Math.min(job.checked, job.total || job.checked)} of ${job.total || 'new'} messages)…` : 'Scanning connected mailboxes…';
+      });
+      job.status = 'complete'; job.phase = 'complete'; job.percent = 100; job.message = 'Email scan complete.'; job.completedAt = new Date().toISOString(); job.result = result;
+    } catch (error) {
+      job.status = 'failed'; job.phase = 'failed'; job.percent = 100; job.message = 'Email scan finished with an error.'; job.error = error.message; job.completedAt = new Date().toISOString();
+    }
+  });
+  return job;
 }
 
 async function tcgToken() {
@@ -777,6 +840,18 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits })
     } catch (error) {
       res.status(500).json({ error: error.message });
     }
+  });
+
+  app.post('/orders/scan/start', auth, async (req, res) => {
+    try {
+      const job = startUserScanJob(supabase, req.user_id, adjustUserCredits);
+      res.status(job.status === 'running' ? 202 : 200).json({ success: true, job: scanJobView(job) });
+    } catch (error) { res.status(500).json({ error: error.message }); }
+  });
+
+  app.get('/orders/scan-progress', auth, async (req, res) => {
+    const job = userScanJobs.get(String(req.user_id));
+    res.json({ job: scanJobView(job) });
   });
 
   app.post('/orders/scan', auth, async (req, res) => {

@@ -11,8 +11,10 @@ const PORT = 43821;
 const CONFIG_DIR = path.join(os.homedir(), '.shore-shack-aycd');
 const CONFIG_FILE = path.join(CONFIG_DIR, 'config.json');
 const STATE_FILE = path.join(CONFIG_DIR, 'state.json');
-app.use((req,res,next)=>{res.setHeader('Access-Control-Allow-Private-Network','true');next()});
-app.use(cors({origin:['https://theshoreshacktcg.com','http://localhost:3000','http://127.0.0.1:3000'],methods:['GET','POST','OPTIONS'],allowedHeaders:['Content-Type']}));
+app.use((req,res,next)=>{res.setHeader('Access-Control-Allow-Private-Network','true');res.setHeader('Cache-Control','no-store');next()});
+const corsOptions={origin:['https://theshoreshacktcg.com','https://www.theshoreshacktcg.com','http://localhost:3000','http://127.0.0.1:3000'],methods:['GET','POST','OPTIONS'],allowedHeaders:['Content-Type'],optionsSuccessStatus:204};
+app.use(cors(corsOptions));
+app.options(/.*/,cors(corsOptions));
 app.use(express.json({limit:'25mb'}));
 function clean(v){return String(v||'').trim()}
 function readJson(file,fallback={}){try{return JSON.parse(fs.readFileSync(file,'utf8'))}catch{return fallback}}
