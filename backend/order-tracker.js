@@ -6,6 +6,7 @@ const INITIAL_LOOKBACK_DAYS = Math.max(7, Number(process.env.IMAP_INITIAL_LOOKBA
 const INITIAL_SCAN_START = process.env.IMAP_INITIAL_SCAN_START || '2026-01-01T00:00:00.000Z';
 const MAX_MESSAGES_PER_SCAN = Math.max(25, Number(process.env.IMAP_MAX_MESSAGES_PER_SCAN || 250));
 const MAX_ACCOUNTS_PER_CYCLE = Math.max(1, Number(process.env.IMAP_MAX_ACCOUNTS_PER_CYCLE || 25));
+const MIN_RESCAN_INTERVAL_MS = Math.max(0, Number(process.env.IMAP_MIN_RESCAN_INTERVAL_MS || 2 * 60 * 1000));
 let backgroundAccountCursor = 0;
 const userScanJobs = new Map();
 
@@ -380,6 +381,11 @@ async function saveParsedMessage(supabase, account, parsed, uid, adjustCredits =
 async function scanAccount(supabase, account, adjustCredits = null, onProgress = null) {
   const stateResp = await supabase.from('imap_scan_accounts').select('*').eq('user_id', account.user_id).eq('email', account.email).maybeSingle();
   const state = stateResp.data || {};
+  const lastSuccessMs = state.last_success_at ? new Date(state.last_success_at).getTime() : 0;
+  if (MIN_RESCAN_INTERVAL_MS > 0 && lastSuccessMs && Date.now() - lastSuccessMs < MIN_RESCAN_INTERVAL_MS) {
+    if (onProgress) onProgress({ checked: 0, total: 0, saved: 0, skippedRecent: true });
+    return { checked: 0, total: 0, saved: 0, skipped_recent: true };
+  }
   const client = new ImapFlow({
     host: account.provider.host, port: account.provider.port, secure: account.provider.secure,
     auth: { user: account.email, pass: account.password }, logger: false,

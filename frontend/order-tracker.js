@@ -1,6 +1,7 @@
 const API=location.hostname==='localhost'||location.hostname==='127.0.0.1'?'http://localhost:3000':'https://profile-platform.onrender.com';
 const token=localStorage.getItem('token');
-const AYCD_HELPER='http://127.0.0.1:43821';
+const AYCD_HELPERS=['http://localhost:43821','http://127.0.0.1:43821'];
+let activeAycdHelper=AYCD_HELPERS[0];
 if(!token) location.href='login.html';
 const headers={'Authorization':`Bearer ${token}`,'Content-Type':'application/json'};
 let allOrders=[];
@@ -26,9 +27,22 @@ async function runAutomaticScan(){setProgress(8,'Preparing your order tracker…
   while(job&&job.status==='running'&&Date.now()<deadline){const message=job.email?`Scanning ${job.email}`:'Scanning connected mailboxes';setProgress(Math.max(12,job.percent||12),message,job.message||'Checking unscanned email messages…');await new Promise(r=>setTimeout(r,1200));job=(await api('/orders/scan-progress')).job}
   if(job?.status==='failed')showWarning(job.error||'The email scan finished with an error. Saved orders will still load.');
   if(Date.now()>=deadline)showWarning('The scan is still running in the background. The page loaded saved orders while it continues.');
-  setProgress(97,'Refreshing order statuses…','Loading confirmations, cancellations, shipping, and delivery updates.');await bootstrap();setProgress(100,'Order tracker ready','All saved results are loaded. Future visits will continue from the last scanned message.');
+  setProgress(97,'Refreshing order statuses…','Loading confirmations, cancellations, shipping, and delivery updates.');await bootstrap();setProgress(100,'Order tracker ready','All saved results are loaded. Future visits only check newer messages, so they should be much faster than the first historical scan.');
 }
-async function helperApi(path,opt={}){let r;try{r=await fetch(AYCD_HELPER+path,{...opt,headers:{'Content-Type':'application/json',...(opt.headers||{})}})}catch(e){throw new Error('Local AYCD helper could not be reached. Start local-aycd-bridge\\start-aycd-bridge.bat on this laptop. Changing AYCD to “All Interfaces” does not make Render able to reach it.')}const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.error||`Local helper request failed (${r.status})`);return j}
+async function helperApi(path,opt={}){
+  const candidates=[activeAycdHelper,...AYCD_HELPERS.filter(x=>x!==activeAycdHelper)];
+  let lastError=null;
+  for(const base of candidates){
+    try{
+      const r=await fetch(base+path,{...opt,mode:'cors',cache:'no-store',headers:{'Content-Type':'application/json',...(opt.headers||{})}});
+      const j=await r.json().catch(()=>({}));
+      if(!r.ok)throw new Error(j.error||`Local helper request failed (${r.status})`);
+      activeAycdHelper=base;
+      return j;
+    }catch(e){lastError=e}
+  }
+  throw new Error(`Local AYCD helper could not be reached. Double-click local-aycd-bridge\start-aycd-bridge.bat and leave its black window open, then open http://127.0.0.1:43821 in Chrome to confirm it says Running. ${lastError?.message||''}`.trim());
+}
 function aycdSettings(){return {host:$('aycdHost').value.trim()||'127.0.0.1',port:Number($('aycdPort').value||43283),username:$('aycdUsername').value.trim()||'inbox@aycd.me',password:$('aycdPassword').value,secure:$('aycdSecure').checked,lookbackDays:Number($('aycdLookback').value||30)}}
 async function checkAycdHelper(){try{const j=await helperApi('/health');$('aycdBridgeStatus').textContent='Helper running';$('aycdBridgeStatus').className='status-pill status-confirmed';if(j.configured){$('aycdHost').value=j.host||'127.0.0.1';$('aycdPort').value=j.port||43283;$('aycdUsername').value=j.username||'inbox@aycd.me';$('aycdSecure').checked=!!j.secure;$('aycdLookback').value=j.lookbackDays||30;$('aycdMessage').textContent='Local helper is ready. AYCD Inbox must remain open.'}else $('aycdMessage').textContent='Enter the AYCD IMAP password and save the connection.'}catch(e){$('aycdBridgeStatus').textContent='Helper offline';$('aycdBridgeStatus').className='status-pill status-canceled';$('aycdMessage').textContent=e.message}}
 $('saveAycd').onclick=async()=>{try{await helperApi('/configure',{method:'POST',body:JSON.stringify(aycdSettings())});$('aycdPassword').value='';$('aycdMessage').textContent='AYCD settings saved locally.';await checkAycdHelper()}catch(e){$('aycdMessage').textContent=e.message}};
