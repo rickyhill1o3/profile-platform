@@ -719,7 +719,8 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits })
         connected_count: accounts.length,
         orders,
         summary,
-        aycd: { configured: aycdConfig().enabled }
+        aycd: { configured: req.role === 'super_admin', mode: 'local_unified_imap_bridge' },
+        is_super_admin: req.role === 'super_admin'
       });
     } catch (error) {
       res.status(500).json({ error: error.message });
@@ -727,20 +728,55 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits })
   });
 
   app.get('/orders/aycd-status', auth, async (req, res) => {
-    const cfg = aycdConfig();
-    res.json({ configured: cfg.enabled, base_url_set: !!cfg.baseUrl, api_key_set: !!cfg.apiKey, search_path: cfg.searchPath });
+    if (req.role !== 'super_admin') return res.status(403).json({ error: 'Only the super admin can use AYCD Unified Inbox.' });
+    res.json({ configured: true, mode: 'local_unified_imap_bridge', requires_local_helper: true });
   });
 
-  app.post('/orders/aycd-test', auth, admin, async (req, res) => {
+  // The AYCD IMAP server shown in Inbox binds to 127.0.0.1. Render cannot reach that loopback
+  // address, so the bundled local helper scans AYCD on the laptop and submits parsed messages here.
+  app.post('/orders/aycd-bridge-ingest', auth, async (req, res) => {
+    if (req.role !== 'super_admin') return res.status(403).json({ error: 'Only the super admin can use AYCD Unified Inbox.' });
     try {
-      const result = await fetchAycdMessages(clean(req.body?.query || 'target order'));
-      res.json({ success: true, configured: result.configured, messages_found: result.messages.length, sample: result.messages.slice(0, 3).map(m => ({ subject: m.subject, from: m.from, mailbox: m.mailboxEmail })) });
-    } catch (error) { res.status(400).json({ error: error.message }); }
-  });
-
-  app.post('/orders/aycd-scan', auth, admin, async (req, res) => {
-    try { res.json({ success: true, ...(await scanAycdForUser(supabase, req.user_id, adjustUserCredits)) }); }
-    catch (error) { res.status(500).json({ error: error.message }); }
+      const messages = Array.isArray(req.body?.messages) ? req.body.messages.slice(0, 1000) : [];
+      const account = {
+        user_id: req.user_id,
+        profile_id: null,
+        email: 'inbox@aycd.me',
+        provider: { name: 'aycd-unified-imap', host: '127.0.0.1', port: 0, secure: false }
+      };
+      await syncServiceOrders(supabase, req.user_id, [account]);
+      let checked = 0, matched = 0, ignored = 0;
+      const results = [];
+      for (const item of messages) {
+        checked += 1;
+        try {
+          const parsed = {
+            subject: clean(item.subject),
+            from: { text: clean(item.from) },
+            text: clean(item.text),
+            html: clean(item.html),
+            date: item.date ? new Date(item.date) : new Date(),
+            messageId: clean(item.messageId) || `aycd:${clean(item.uid) || checked}`
+          };
+          const result = await saveParsedMessage(supabase, account, parsed, item.uid || checked, adjustUserCredits);
+          if (result?.saved) matched += 1; else ignored += 1;
+          results.push(result || { ignored: true });
+        } catch (error) {
+          results.push({ error: error.message });
+        }
+      }
+      try {
+        await upsertScanState(supabase, account, {
+          is_enabled: true,
+          last_scan_at: new Date().toISOString(),
+          last_success_at: new Date().toISOString(),
+          last_error: null
+        });
+      } catch (_) {}
+      res.json({ success: true, checked, matched, ignored, results });
+    } catch (error) {
+      res.status(500).json({ error: error.message });
+    }
   });
 
   app.post('/orders/scan', auth, async (req, res) => {
