@@ -33,25 +33,59 @@ async function testImap(config){
   try{ await client.connect(); const lock=await client.getMailboxLock('INBOX'); let data; try{ data={mailbox:client.mailbox?.path||'INBOX',messages:Number(client.mailbox?.exists||0)}; } finally { lock.release(); } await client.logout(); return data; }
   catch(e){ try{client.close()}catch{} throw e; }
 }
-async function scanImap(config){
-  const state=readJson(STATE_FILE,{lastUid:0});
-  const client=clientFor(config); let checked=0; const messages=[]; let highest=Number(state.lastUid||0);
+async function discoverScanPlan(config){
+  const rawState=readJson(STATE_FILE,{});
+  const state = rawState.version === 2 ? rawState : {version:2,lastUid:0,historicalComplete:false};
+  const client=clientFor(config);
+  try{
+    await client.connect();
+    const lock=await client.getMailboxLock('INBOX');
+    try{
+      let uids=[];
+      if(Number(state.lastUid||0)>0){
+        uids=await client.search({uid:`${Number(state.lastUid)+1}:*`});
+      } else {
+        uids=await client.search({since:new Date(Date.now()-config.lookbackDays*86400000)});
+      }
+      uids=(uids||[]).map(Number).filter(Boolean).sort((a,b)=>a-b);
+      return {uids,state,mailboxCount:Number(client.mailbox?.exists||0)};
+    } finally { lock.release(); }
+  } finally { try{await client.logout();}catch(_){try{client.close()}catch(__){}} }
+}
+function recipientList(parsed){
+  const values=[];
+  const add=v=>{ if(!v) return; if(Array.isArray(v)) v.forEach(add); else values.push(String(v)); };
+  add(parsed.to?.text); add(parsed.cc?.text); add(parsed.bcc?.text);
+  try{ add(parsed.headers?.get('delivered-to')); }catch(_){}
+  try{ add(parsed.headers?.get('x-original-to')); }catch(_){}
+  try{ add(parsed.headers?.get('envelope-to')); }catch(_){}
+  const out=new Set();
+  for(const value of values){
+    for(const match of value.matchAll(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/ig)) out.add(match[0].toLowerCase());
+  }
+  return [...out];
+}
+async function fetchMessageBatch(config,uids){
+  const client=clientFor(config); const messages=[]; let highest=0;
   try{
     await client.connect(); const lock=await client.getMailboxLock('INBOX');
     try{
-      let fetchRange;
-      if(highest>0) fetchRange=`${highest+1}:*`;
-      else { const uids=await client.search({since:new Date(Date.now()-config.lookbackDays*86400000)}); fetchRange=(uids||[]).slice(-1000); }
-      if(Array.isArray(fetchRange)&&!fetchRange.length) fetchRange=[];
-      for await(const msg of client.fetch(fetchRange,{uid:true,source:true})){
-        checked++; highest=Math.max(highest,Number(msg.uid||0));
-        try{ const p=await simpleParser(msg.source); messages.push({uid:msg.uid,messageId:p.messageId||`aycd:${msg.uid}`,subject:p.subject||'',from:p.from?.text||'',text:String(p.text||'').slice(0,250000),html:p.html?String(p.html).slice(0,250000):'',date:p.date||new Date()}); } catch(e){ console.error('Parse failed',msg.uid,e.message); }
+      for await(const msg of client.fetch(uids,{uid:true,source:true})){
+        highest=Math.max(highest,Number(msg.uid||0));
+        try{
+          const p=await simpleParser(msg.source);
+          messages.push({
+            uid:msg.uid,messageId:p.messageId||`aycd:${msg.uid}`,subject:p.subject||'',from:p.from?.text||'',
+            to:p.to?.text||'',cc:p.cc?.text||'',recipients:recipientList(p),
+            text:String(p.text||'').slice(0,250000),html:p.html?String(p.html).slice(0,250000):'',date:p.date||new Date()
+          });
+        }catch(e){ console.error('Parse failed',msg.uid,e.message); }
       }
     } finally { lock.release(); }
-    await client.logout();
-    return {checked,messages,highest};
-  } catch(e){ try{client.close()}catch{} throw Object.assign(e,{checked}); }
+    return {messages,highest};
+  } finally { try{await client.logout();}catch(_){try{client.close()}catch(__){}} }
 }
+
 function page(message=''){
   const c=readJson(CONFIG_FILE,{}), b=readJson(BRIDGE_FILE,{});
   return `<!doctype html><meta charset="utf-8"><title>Shore Shack AYCD Bridge</title><style>body{font-family:Arial,sans-serif;background:#0f172a;color:#111827;margin:0;padding:30px}.card{max-width:760px;margin:auto;background:white;border-radius:18px;padding:26px;box-shadow:0 20px 60px #0008}label{display:grid;gap:5px;margin:12px 0;font-weight:700}input{padding:11px;border:1px solid #cbd5e1;border-radius:8px}button{padding:11px 15px;border:0;border-radius:8px;background:#2563eb;color:#fff;font-weight:700;margin-right:8px}.ok{color:#15803d}.bad{color:#b91c1c}.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.wide{grid-column:1/-1}.status{padding:12px;border-radius:10px;background:#f1f5f9}</style><div class="card"><h1>The Shore Shack AYCD Bridge</h1><p class="${message.startsWith('Error')?'bad':'ok'}">${esc(message||'Bridge is running on this laptop.')}</p><div class="status"><b>Local helper:</b> Online at http://${HOST}:${PORT}<br><b>Website:</b> ${esc(API_BASE)}<br><b>Pairing:</b> ${b.secret?'Paired':'Not paired yet'}</div><form method="post" action="/save"><div class="grid"><label>Pairing code<input name="pairCode" placeholder="6-digit code from Order Tracker"></label><label>AYCD port<input name="port" value="${esc(c.port||43283)}"></label><label class="wide">AYCD username<input name="username" value="${esc(c.username||'inbox@aycd.me')}"></label><label class="wide">AYCD IMAP password<input type="password" name="password" placeholder="Leave blank to keep saved password"></label><label>Lookback days<input name="lookbackDays" value="${esc(c.lookbackDays||240)}"></label><label>TLS/SSL<input type="checkbox" name="secure" ${c.secure?'checked':''}></label></div><button type="submit">Save and Pair</button></form><form method="post" action="/test" style="margin-top:12px"><button type="submit">Test AYCD IMAP</button></form><p>Keep AYCD Inbox and this command window open. The bridge checks the website for scan requests every few seconds.</p></div>`;
@@ -84,27 +118,30 @@ async function poll(){
     if(cmd.command==='scan'){
       const current=readJson(CONFIG_FILE,{}); const cfg=sanitize({...current,lookbackDays:cmd.payload?.lookbackDays||current.lookbackDays});
       try{
-        const result=await scanImap(cfg);
-        const maxBytes=2*1024*1024;
-        const chunks=[]; let current=[]; let size=0;
-        for(const message of result.messages){
-          const bytes=Buffer.byteLength(JSON.stringify(message),'utf8');
-          if(current.length && size+bytes>maxBytes){ chunks.push(current); current=[]; size=0; }
-          current.push(message); size+=bytes;
+        const plan=await discoverScanPlan(cfg);
+        const uidBatchSize=Math.max(50,Math.min(500,Number(process.env.AYCD_UID_BATCH_SIZE||250)));
+        const uidChunks=[];
+        for(let i=0;i<plan.uids.length;i+=uidBatchSize) uidChunks.push(plan.uids.slice(i,i+uidBatchSize));
+        if(!uidChunks.length){
+          await postJson('/orders/aycd/bridge/result',{success:true,command_id:cmd.command_id,checked:0,messages:[],chunk_index:0,chunk_count:1,final:true},b.secret);
+          saveJson(STATE_FILE,{version:2,lastUid:Number(plan.state.lastUid||0),historicalComplete:true,lastScanAt:new Date().toISOString()});
+          console.log('AYCD scan complete: no new messages.');
+        } else {
+          let sent=0, highest=Number(plan.state.lastUid||0);
+          for(let i=0;i<uidChunks.length;i++){
+            const batch=await fetchMessageBatch(cfg,uidChunks[i]);
+            highest=Math.max(highest,Number(batch.highest||0));
+            await postJson('/orders/aycd/bridge/result',{
+              success:true,command_id:cmd.command_id,checked:batch.messages.length,messages:batch.messages,
+              chunk_index:i,chunk_count:uidChunks.length,final:i===uidChunks.length-1,
+              scan_progress:{processed:sent+batch.messages.length,total:plan.uids.length,mailbox_count:plan.mailboxCount}
+            },b.secret);
+            sent+=batch.messages.length;
+            saveJson(STATE_FILE,{version:2,lastUid:highest,historicalComplete:i===uidChunks.length-1,lastScanAt:new Date().toISOString()});
+            console.log(`Uploaded AYCD batch ${i+1}/${uidChunks.length} (${sent}/${plan.uids.length} messages).`);
+          }
+          console.log(`AYCD scan complete: ${sent} messages checked.`);
         }
-        if(current.length || !chunks.length) chunks.push(current);
-        let sent=0;
-        for(let i=0;i<chunks.length;i++){
-          await postJson('/orders/aycd/bridge/result',{
-            success:true, command_id:cmd.command_id, checked:result.checked,
-            messages:chunks[i], chunk_index:i, chunk_count:chunks.length,
-            final:i===chunks.length-1
-          },b.secret);
-          sent+=chunks[i].length;
-          console.log(`Uploaded AYCD batch ${i+1}/${chunks.length} (${sent}/${result.messages.length} messages).`);
-        }
-        saveJson(STATE_FILE,{lastUid:result.highest,lastScanAt:new Date().toISOString()});
-        console.log(`AYCD scan complete: ${result.checked} messages checked.`);
       }catch(e){
         try{await postJson('/orders/aycd/bridge/result',{success:false,command_id:cmd.command_id,checked:e.checked||0,error:e.message,final:true},b.secret);}catch(_){}
         console.error('AYCD scan failed:',e.message);

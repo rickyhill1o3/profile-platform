@@ -807,31 +807,72 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits })
     if (error) throw error;
     return data;
   }
+  async function loadAycdRecipientMap(userId) {
+    const map = new Map();
+    const { data: profiles, error: pe } = await supabase.from('profiles').select('id,user_id').eq('user_id', userId);
+    if (pe) throw pe;
+    const profileIds = (profiles || []).map(p => p.id);
+    const profileById = new Map((profiles || []).map(p => [String(p.id), p]));
+    const add = row => {
+      const email = lower(row?.login_email || row?.email);
+      const profile = profileById.get(String(row?.profile_id));
+      if (email && profile && !map.has(email)) map.set(email, { profile_id: profile.id, email });
+    };
+    if (profileIds.length) {
+      try {
+        const r = await supabase.from('profile_store_credentials').select('profile_id,login_email').in('profile_id', profileIds);
+        if (!r.error) for (const row of r.data || []) add(row);
+      } catch (_) {}
+      try {
+        const r = await supabase.from('accounts').select('profile_id,login_email').in('profile_id', profileIds);
+        if (!r.error) for (const row of r.data || []) add(row);
+      } catch (_) {}
+    }
+    return map;
+  }
+
+  function aycdMessageRecipients(item = {}) {
+    const out = new Set();
+    const add = value => {
+      if (!value) return;
+      if (Array.isArray(value)) return value.forEach(add);
+      for (const match of String(value).matchAll(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/ig)) out.add(lower(match[0]));
+    };
+    add(item.recipients); add(item.to); add(item.cc); add(item.deliveredTo); add(item.mailboxEmail);
+    return [...out];
+  }
+
   async function ingestAycdMessages(userId, messages) {
-    const account = {
+    const recipientMap = await loadAycdRecipientMap(userId);
+    const fallbackAccount = {
       user_id: userId,
       profile_id: null,
       email: 'inbox@aycd.me',
       provider: { name: 'aycd-unified-imap', host: '127.0.0.1', port: 0, secure: false }
     };
-    await syncServiceOrders(supabase, userId, [account]);
-    let checked = 0, matched = 0, ignored = 0;
+    await syncServiceOrders(supabase, userId, [fallbackAccount]);
+    let checked = 0, matched = 0, ignored = 0, linkedProfiles = 0;
     const results = [];
-    for (const item of (Array.isArray(messages) ? messages.slice(0, 1000) : [])) {
+    for (const item of (Array.isArray(messages) ? messages : [])) {
       checked += 1;
       try {
+        const linked = aycdMessageRecipients(item).map(email => recipientMap.get(email)).find(Boolean);
+        const account = linked ? { ...fallbackAccount, profile_id: linked.profile_id, email: linked.email } : fallbackAccount;
+        if (linked) linkedProfiles += 1;
         const parsed = {
-          subject: clean(item.subject), from: { text: clean(item.from) }, text: clean(item.text), html: clean(item.html),
+          subject: clean(item.subject), from: { text: clean(item.from) },
+          to: { text: clean(item.to) }, cc: { text: clean(item.cc) },
+          text: clean(item.text), html: clean(item.html),
           date: item.date ? new Date(item.date) : new Date(),
           messageId: clean(item.messageId) || `aycd:${clean(item.uid) || checked}`
         };
         const result = await saveParsedMessage(supabase, account, parsed, item.uid || checked, adjustUserCredits);
         if (result?.saved) matched += 1; else ignored += 1;
-        results.push(result || { ignored: true });
+        results.push({ ...(result || { ignored: true }), source_email: account.email, profile_id: account.profile_id });
       } catch (error) { results.push({ error: error.message }); }
     }
-    try { await upsertScanState(supabase, account, { is_enabled: true, last_scan_at: new Date().toISOString(), last_success_at: new Date().toISOString(), last_error: null }); } catch (_) {}
-    return { checked, matched, ignored, results };
+    try { await upsertScanState(supabase, fallbackAccount, { is_enabled: true, last_scan_at: new Date().toISOString(), last_success_at: new Date().toISOString(), last_error: null }); } catch (_) {}
+    return { checked, matched, ignored, linked_profiles: linkedProfiles, results };
   }
 
   app.post('/orders/aycd/pair/start', auth, async (req, res) => {
@@ -889,11 +930,13 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits })
       }
 
       const previous = (Number(req.body?.chunk_index || 0) > 0 && row.last_result && !row.last_result.error)
-        ? row.last_result : { checked: 0, matched: 0, ignored: 0, chunks_received: 0 };
+        ? row.last_result : { checked: 0, matched: 0, ignored: 0, linked_profiles: 0, chunks_received: 0 };
       const aggregate = {
         checked: Number(previous.checked || 0) + Number(chunkSummary.checked || 0),
         matched: Number(previous.matched || 0) + Number(chunkSummary.matched || 0),
         ignored: Number(previous.ignored || 0) + Number(chunkSummary.ignored || 0),
+        linked_profiles: Number(previous.linked_profiles || 0) + Number(chunkSummary.linked_profiles || 0),
+        progress: req.body?.scan_progress || previous.progress || null,
         chunks_received: Number(previous.chunks_received || 0) + 1,
         chunks_total: Number(req.body?.chunk_count || 1)
       };
