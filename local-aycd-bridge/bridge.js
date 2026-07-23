@@ -77,13 +77,39 @@ async function fetchMessageBatch(config,uids){
           messages.push({
             uid:msg.uid,messageId:p.messageId||`aycd:${msg.uid}`,subject:p.subject||'',from:p.from?.text||'',
             to:p.to?.text||'',cc:p.cc?.text||'',recipients:recipientList(p),
-            text:String(p.text||'').slice(0,250000),html:p.html?String(p.html).slice(0,250000):'',date:p.date||new Date()
+            text:String(p.text||'').slice(0,60000),html:p.html?String(p.html).slice(0,60000):'',date:p.date||new Date()
           });
         }catch(e){ console.error('Parse failed',msg.uid,e.message); }
       }
     } finally { lock.release(); }
     return {messages,highest};
   } finally { try{await client.logout();}catch(_){try{client.close()}catch(__){}} }
+}
+
+
+function splitMessagesByPayloadSize(messages, maxBytes=600*1024){
+  const chunks=[];
+  let current=[];
+  let currentBytes=2;
+  for(const message of messages||[]){
+    let item=message;
+    let encoded=JSON.stringify(item);
+    // Keep one unusually large email from exceeding the upload ceiling by itself.
+    if(Buffer.byteLength(encoded,'utf8') > maxBytes-4096){
+      item={...item,text:String(item.text||'').slice(0,24000),html:String(item.html||'').slice(0,24000)};
+      encoded=JSON.stringify(item);
+    }
+    const itemBytes=Buffer.byteLength(encoded,'utf8')+1;
+    if(current.length && currentBytes+itemBytes > maxBytes){
+      chunks.push(current);
+      current=[];
+      currentBytes=2;
+    }
+    current.push(item);
+    currentBytes+=itemBytes;
+  }
+  if(current.length) chunks.push(current);
+  return chunks;
 }
 
 function page(message=''){
@@ -127,18 +153,27 @@ async function poll(){
           saveJson(STATE_FILE,{version:2,lastUid:Number(plan.state.lastUid||0),historicalComplete:true,lastScanAt:new Date().toISOString()});
           console.log('AYCD scan complete: no new messages.');
         } else {
-          let sent=0, highest=Number(plan.state.lastUid||0);
+          let sent=0, highest=Number(plan.state.lastUid||0), uploadIndex=0;
+          const maxPayloadBytes=Math.max(128*1024,Math.min(2*1024*1024,Number(process.env.AYCD_UPLOAD_MAX_BYTES||600*1024)));
           for(let i=0;i<uidChunks.length;i++){
             const batch=await fetchMessageBatch(cfg,uidChunks[i]);
             highest=Math.max(highest,Number(batch.highest||0));
-            await postJson('/orders/aycd/bridge/result',{
-              success:true,command_id:cmd.command_id,checked:batch.messages.length,messages:batch.messages,
-              chunk_index:i,chunk_count:uidChunks.length,final:i===uidChunks.length-1,
-              scan_progress:{processed:sent+batch.messages.length,total:plan.uids.length,mailbox_count:plan.mailboxCount}
-            },b.secret);
-            sent+=batch.messages.length;
+            const uploadChunks=splitMessagesByPayloadSize(batch.messages,maxPayloadBytes);
+            if(!uploadChunks.length) uploadChunks.push([]);
+            for(let part=0;part<uploadChunks.length;part++){
+              const messages=uploadChunks[part];
+              const isFinal=i===uidChunks.length-1 && part===uploadChunks.length-1;
+              await postJson('/orders/aycd/bridge/result',{
+                success:true,command_id:cmd.command_id,checked:messages.length,messages,
+                chunk_index:uploadIndex,chunk_count:0,final:isFinal,
+                scan_progress:{processed:sent+messages.length,total:plan.uids.length,mailbox_count:plan.mailboxCount}
+              },b.secret);
+              sent+=messages.length;
+              uploadIndex+=1;
+              console.log(`Uploaded AYCD payload ${uploadIndex} (${sent}/${plan.uids.length} messages, ${Math.round(Buffer.byteLength(JSON.stringify(messages),'utf8')/1024)} KB).`);
+            }
+            // Advance the UID checkpoint only after every payload for this UID batch was accepted.
             saveJson(STATE_FILE,{version:2,lastUid:highest,historicalComplete:i===uidChunks.length-1,lastScanAt:new Date().toISOString()});
-            console.log(`Uploaded AYCD batch ${i+1}/${uidChunks.length} (${sent}/${plan.uids.length} messages).`);
           }
           console.log(`AYCD scan complete: ${sent} messages checked.`);
         }
