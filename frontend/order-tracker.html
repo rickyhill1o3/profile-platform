@@ -16,7 +16,7 @@
     .tracker-panel h2{margin:0 0 4px;font-size:19px}.tracker-panel .subtle-text{color:#64748b}.mail-account{padding:11px 0;border-top:1px solid #edf1f7;font-size:13px}.mail-account:first-of-type{margin-top:12px}.mail-ok{color:#047857;font-weight:800}.mail-error{color:#b91c1c;margin-top:4px}
     .tracker-toolbar{display:grid;grid-template-columns:160px 140px minmax(220px,1fr) auto auto;gap:9px;align-items:center;margin:14px 0}.tracker-toolbar>*{min-height:42px}
     .order-list{display:grid;gap:12px}.order-card{background:#fff;border:1px solid #dce4f0;border-radius:17px;padding:18px;box-shadow:0 7px 20px rgba(15,23,42,.035)}.order-head{display:flex;justify-content:space-between;gap:18px;align-items:flex-start}.order-head h3{margin:7px 0 3px;font-size:17px}.order-head p{margin:0;color:#475569}.order-meta{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-top:15px}.order-meta>div{background:#f7f9fc;border-radius:11px;padding:10px}.order-meta small{color:#64748b}.order-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:13px}
-    .aycd-form{display:grid;grid-template-columns:1fr 110px;gap:9px}.aycd-form label{display:grid;gap:5px;font-size:12px;font-weight:700}.aycd-form .wide{grid-column:1/-1}.aycd-buttons{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
+    .aycd-form{display:grid;grid-template-columns:1fr 110px;gap:9px}.aycd-form label{display:grid;gap:5px;font-size:12px;font-weight:700}.aycd-form .wide{grid-column:1/-1}.aycd-buttons{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}.pair-code-box{margin:14px 0;padding:14px;border:1px dashed #94a3b8;border-radius:12px;background:#f8fafc}.pair-code-box span,.pair-code-box small{display:block;color:#64748b}.pair-code-box strong{display:block;font-size:34px;letter-spacing:.18em;margin:5px 0}.aycd-lookback{display:grid;gap:5px;font-size:12px;font-weight:700}.aycd-lookback input{max-width:150px}
     .scan-overlay{position:fixed;inset:0;z-index:9999;background:linear-gradient(135deg,#0f172a,#172554 58%,#312e81);display:grid;place-items:center;padding:24px}.scan-overlay[hidden]{display:none}.scan-box{width:min(620px,100%);background:#fff;border-radius:24px;padding:30px;box-shadow:0 30px 80px rgba(0,0,0,.34)}.scan-box h1{margin:5px 0 8px}.scan-progress{height:15px;background:#e5eaf2;border-radius:999px;overflow:hidden;margin:22px 0 10px}.scan-progress>div{height:100%;width:0;background:linear-gradient(90deg,#2563eb,#7c3aed);transition:width .35s ease}.scan-percent{font-size:34px;font-weight:900}.scan-stage{color:#475569;min-height:44px}.scan-detail{font-size:13px;color:#64748b}.scan-warning{margin-top:15px;padding:11px;border-radius:10px;background:#fff7ed;color:#9a3412;font-size:13px}
     #trackerApp[hidden]{display:none}
     @media(max-width:900px){.tracker-grid{grid-template-columns:1fr}.tracker-stats{grid-template-columns:repeat(2,1fr)}.tracker-toolbar{grid-template-columns:1fr 1fr}.tracker-toolbar input{grid-column:1/-1}.order-meta{grid-template-columns:1fr 1fr}}
@@ -58,14 +58,11 @@
       </div>
       <aside class="tracker-panel" id="aycdPanel" hidden>
         <div class="order-head"><div><h2>AYCD Unified Inbox</h2><p class="subtle-text">Super-admin local connection</p></div><span class="status-pill" id="aycdBridgeStatus">Checking</span></div>
-        <div class="aycd-form">
-          <label>Host<input id="aycdHost" value="127.0.0.1"></label><label>Port<input id="aycdPort" type="number" value="43283"></label>
-          <label class="wide">Username<input id="aycdUsername" value="inbox@aycd.me"></label>
-          <label class="wide">AYCD IMAP password<input id="aycdPassword" type="password" autocomplete="new-password" placeholder="Password from AYCD IMAP Server"></label>
-          <label>Lookback days<input id="aycdLookback" type="number" min="1" max="365" value="30"></label><label><span>TLS/SSL</span><input id="aycdSecure" type="checkbox"></label>
-        </div>
-        <div class="aycd-buttons"><button class="btn" id="saveAycd">Save</button><button class="btn" id="testAycd">Test</button><button class="btn btn-primary" id="scanAycd">Scan AYCD</button></div>
-        <p id="aycdMessage" class="subtle-text">The local helper must be running on the AYCD laptop.</p>
+        <p class="subtle-text">The website communicates with your AYCD laptop through a secure paired bridge. The browser no longer needs direct access to localhost.</p>
+        <div id="aycdPairBox" class="pair-code-box" hidden><span>Pairing code</span><strong id="aycdPairCode">------</strong><small>Enter this at http://127.0.0.1:43821 on the AYCD laptop.</small></div>
+        <label class="aycd-lookback">AYCD historical lookback days<input id="aycdLookback" type="number" min="1" max="365" value="240"></label>
+        <div class="aycd-buttons"><button class="btn" id="pairAycd">Generate pairing code</button><button class="btn" id="refreshAycd">Refresh status</button><button class="btn btn-primary" id="scanAycd">Scan AYCD now</button></div>
+        <p id="aycdMessage" class="subtle-text">Checking paired laptop status…</p>
       </aside>
     </section>
 

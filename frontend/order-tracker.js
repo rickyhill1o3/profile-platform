@@ -1,7 +1,5 @@
 const API=location.hostname==='localhost'||location.hostname==='127.0.0.1'?'http://localhost:3000':'https://profile-platform.onrender.com';
 const token=localStorage.getItem('token');
-const AYCD_HELPERS=['http://localhost:43821','http://127.0.0.1:43821'];
-let activeAycdHelper=AYCD_HELPERS[0];
 if(!token) location.href='login.html';
 const headers={'Authorization':`Bearer ${token}`,'Content-Type':'application/json'};
 let allOrders=[];
@@ -15,7 +13,7 @@ function setProgress(percent,stage,detail=''){const p=Math.max(0,Math.min(100,Nu
 function showWarning(text){$('scanWarning').hidden=!text;$('scanWarning').textContent=text||''}
 function renderAccounts(accounts=[]){const el=$('scanAccounts');el.innerHTML=accounts.length?accounts.map(a=>`<div class="mail-account"><div class="mail-ok">✓ ${esc(a.email)}</div><div>${esc(a.provider||'IMAP')} · ${a.last_success_at?'Last scan '+new Date(a.last_success_at).toLocaleString():'Ready for first scan'}</div>${a.scanned_through_at?`<div class="subtle-text">Scanned through ${new Date(a.scanned_through_at).toLocaleString()}</div>`:''}${a.last_error?`<div class="mail-error">${esc(a.last_error)}</div>`:''}</div>`).join(''):'<p class="subtle-text">No supported IMAP/app password was found in saved profiles.</p>'}
 function applyOrders(orders=[],summary={}){allOrders=orders;render();$('countAll').textContent=allOrders.length;$('countActive').textContent=(summary.confirmed||0)+(summary.processing||0);$('countSuccess').textContent=(summary.shipped||0)+(summary.delivered||0);$('countCanceled').textContent=(summary.canceled||0)+(summary.refunded||0);$('successRate').textContent=`${Number(summary.success_rate||0).toFixed(1)}%`}
-async function bootstrap(){const j=await api('/orders/bootstrap');renderAccounts(j.accounts||[]);applyOrders(j.orders||[],j.summary||{});$('scanMessage').textContent=`${j.connected_count||0} connected mailbox${Number(j.connected_count||0)===1?'':'es'}. Scans continue from the last saved IMAP UID, so previously checked messages are not searched again.`;if(j.is_super_admin){$('aycdPanel').hidden=false;checkAycdHelper()}return j}
+async function bootstrap(){const j=await api('/orders/bootstrap');renderAccounts(j.accounts||[]);applyOrders(j.orders||[],j.summary||{});$('scanMessage').textContent=`${j.connected_count||0} connected mailbox${Number(j.connected_count||0)===1?'':'es'}. Scans continue from the last saved IMAP UID, so previously checked messages are not searched again.`;if(j.is_super_admin){$('aycdPanel').hidden=false;refreshAycdStatus()}return j}
 async function loadOrders(){const qs=new URLSearchParams();if($('statusFilter').value)qs.set('status',$('statusFilter').value);if($('yearFilter').value)qs.set('year',$('yearFilter').value);const j=await api('/orders/tracked?'+qs);applyOrders(j.orders||[],j.summary||{})}
 function render(){const q=$('searchOrders').value.toLowerCase();const rows=allOrders.filter(o=>`${o.store} ${o.order_number} ${o.product_summary}`.toLowerCase().includes(q));$('ordersList').innerHTML=rows.length?rows.map(o=>`<article class="order-card"><div class="order-head"><div><span class="status-pill status-${esc(o.status)}">${esc(o.status)}</span><h3>${esc(o.store).toUpperCase()} · ${esc(o.order_number)}</h3><p>${esc(o.product_summary||'Product details will improve as receipt emails are parsed.')}</p></div><strong>${money(o.total)}</strong></div><div class="order-meta"><div><small>Order date</small><br><b>${o.order_date?new Date(o.order_date).toLocaleDateString():'—'}</b></div><div><small>Tracking</small><br><b>${esc(o.tracking_number||'—')}</b></div><div><small>Credits spent</small><br><b>${money(o.credits_spent)}</b></div><div><small>Last update</small><br><b>${o.last_status_at?new Date(o.last_status_at).toLocaleString():'—'}</b></div></div><div class="order-actions"><button class="btn" onclick="openReceipt('${o.id}')">View / Print Receipt</button><button class="btn" onclick="editOrder('${o.id}')">Edit</button><button class="btn btn-danger" onclick="deleteOrder('${o.id}')">Delete</button></div></article>`).join(''):'<section class="tracker-panel"><p>No tracked orders match this view yet.</p></section>'}
 async function openReceipt(id){const r=await fetch(`${API}/orders/receipt/${id}`,{headers:{Authorization:`Bearer ${token}`}});if(!r.ok){alert('Receipt could not be opened');return}const html=await r.text();const w=window.open('','_blank');w.document.open();w.document.write(html);w.document.close()}
@@ -29,25 +27,22 @@ async function runAutomaticScan(){setProgress(8,'Preparing your order tracker…
   if(Date.now()>=deadline)showWarning('The scan is still running in the background. The page loaded saved orders while it continues.');
   setProgress(97,'Refreshing order statuses…','Loading confirmations, cancellations, shipping, and delivery updates.');await bootstrap();setProgress(100,'Order tracker ready','All saved results are loaded. Future visits only check newer messages, so they should be much faster than the first historical scan.');
 }
-async function helperApi(path,opt={}){
-  const candidates=[activeAycdHelper,...AYCD_HELPERS.filter(x=>x!==activeAycdHelper)];
-  let lastError=null;
-  for(const base of candidates){
-    try{
-      const r=await fetch(base+path,{...opt,mode:'cors',cache:'no-store',headers:{'Content-Type':'application/json',...(opt.headers||{})}});
-      const j=await r.json().catch(()=>({}));
-      if(!r.ok)throw new Error(j.error||`Local helper request failed (${r.status})`);
-      activeAycdHelper=base;
-      return j;
-    }catch(e){lastError=e}
-  }
-  throw new Error(`Local AYCD helper could not be reached. Double-click local-aycd-bridge\start-aycd-bridge.bat and leave its black window open, then open http://127.0.0.1:43821 in Chrome to confirm it says Running. ${lastError?.message||''}`.trim());
+async function refreshAycdStatus(){
+  try{
+    const j=await api('/orders/aycd/device-status');
+    const status=$('aycdBridgeStatus');
+    if(!j.paired){status.textContent='Not paired';status.className='status-pill status-canceled';$('aycdMessage').textContent='Generate a pairing code, then enter it in the local bridge page on the AYCD laptop.';return}
+    if(j.online){status.textContent='Online';status.className='status-pill status-confirmed'}else{status.textContent='Offline';status.className='status-pill status-canceled'}
+    const d=j.device||{};
+    $('aycdMessage').textContent=`${d.name||'AYCD laptop'} · ${j.online?'connected now':'last seen '+(d.last_seen_at?new Date(d.last_seen_at).toLocaleString():'never')}${d.last_scan_at?' · last scan '+new Date(d.last_scan_at).toLocaleString():''}${d.last_error?' · '+d.last_error:''}`;
+    $('scanAycd').disabled=!j.online || !!d.pending_command;
+    if(d.pending_command) $('scanAycd').textContent='Scan requested…'; else $('scanAycd').textContent='Scan AYCD now';
+  }catch(e){$('aycdMessage').textContent=e.message}
 }
-function aycdSettings(){return {host:$('aycdHost').value.trim()||'127.0.0.1',port:Number($('aycdPort').value||43283),username:$('aycdUsername').value.trim()||'inbox@aycd.me',password:$('aycdPassword').value,secure:$('aycdSecure').checked,lookbackDays:Number($('aycdLookback').value||30)}}
-async function checkAycdHelper(){try{const j=await helperApi('/health');$('aycdBridgeStatus').textContent='Helper running';$('aycdBridgeStatus').className='status-pill status-confirmed';if(j.configured){$('aycdHost').value=j.host||'127.0.0.1';$('aycdPort').value=j.port||43283;$('aycdUsername').value=j.username||'inbox@aycd.me';$('aycdSecure').checked=!!j.secure;$('aycdLookback').value=j.lookbackDays||30;$('aycdMessage').textContent='Local helper is ready. AYCD Inbox must remain open.'}else $('aycdMessage').textContent='Enter the AYCD IMAP password and save the connection.'}catch(e){$('aycdBridgeStatus').textContent='Helper offline';$('aycdBridgeStatus').className='status-pill status-canceled';$('aycdMessage').textContent=e.message}}
-$('saveAycd').onclick=async()=>{try{await helperApi('/configure',{method:'POST',body:JSON.stringify(aycdSettings())});$('aycdPassword').value='';$('aycdMessage').textContent='AYCD settings saved locally.';await checkAycdHelper()}catch(e){$('aycdMessage').textContent=e.message}};
-$('testAycd').onclick=async()=>{try{const j=await helperApi('/test',{method:'POST',body:JSON.stringify(aycdSettings())});$('aycdMessage').textContent=`Connected. ${Number(j.messages||0).toLocaleString()} messages are exposed in ${j.mailbox||'INBOX'}.`}catch(e){$('aycdMessage').textContent=e.message}};
-$('scanAycd').onclick=async()=>{try{$('aycdMessage').textContent='Scanning AYCD Unified Inbox…';const j=await helperApi('/scan',{method:'POST',body:JSON.stringify({settings:aycdSettings(),apiBase:API,token})});$('aycdMessage').textContent=`Complete: ${j.checked||0} messages checked, ${j.matched||0} platform updates found, ${j.ignored||0} unrelated messages ignored.`;await bootstrap()}catch(e){$('aycdMessage').textContent=e.message}};
+$('pairAycd').onclick=async()=>{try{const j=await api('/orders/aycd/pair/start',{method:'POST',body:'{}'});$('aycdPairCode').textContent=j.code;$('aycdPairBox').hidden=false;$('aycdMessage').textContent='Open http://127.0.0.1:43821 on the AYCD laptop and enter this code. It expires in 10 minutes.';}catch(e){$('aycdMessage').textContent=e.message}};
+$('scanAycd').onclick=async()=>{try{await api('/orders/aycd/scan-request',{method:'POST',body:JSON.stringify({lookbackDays:Number($('aycdLookback').value||240)})});$('aycdMessage').textContent='AYCD scan requested. The laptop helper will begin within a few seconds.';await refreshAycdStatus()}catch(e){$('aycdMessage').textContent=e.message}};
+$('refreshAycd').onclick=refreshAycdStatus;
+setInterval(()=>{if(!$('aycdPanel').hidden)refreshAycdStatus()},10000);
 $('printYear').onclick=async()=>{const y=$('yearFilter').value||new Date().getFullYear();const r=await fetch(`${API}/orders/tax-export?year=${y}`,{headers:{Authorization:`Bearer ${token}`}});if(!r.ok){alert('Annual receipt archive could not be opened');return}const html=await r.text();const w=window.open('','_blank');w.document.open();w.document.write(html);w.document.close()};
 $('refreshOrders').onclick=loadOrders;$('statusFilter').onchange=loadOrders;$('yearFilter').onchange=loadOrders;$('searchOrders').oninput=render;
 initYears();

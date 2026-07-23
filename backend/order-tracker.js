@@ -1,5 +1,6 @@
 const { ImapFlow } = require('imapflow');
 const { simpleParser } = require('mailparser');
+const crypto = require('crypto');
 
 const SCAN_INTERVAL_MS = Math.max(5 * 60 * 1000, Number(process.env.IMAP_SCAN_INTERVAL_MS || 15 * 60 * 1000));
 const INITIAL_LOOKBACK_DAYS = Math.max(7, Number(process.env.IMAP_INITIAL_LOOKBACK_DAYS || 365));
@@ -796,6 +797,118 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits })
     }
   });
 
+
+  function bridgeHash(value) {
+    return crypto.createHash('sha256').update(String(value || '')).digest('hex');
+  }
+  async function getBridgeBySecret(secret) {
+    const hash = bridgeHash(secret);
+    const { data, error } = await supabase.from('aycd_bridge_devices').select('*').eq('device_secret_hash', hash).maybeSingle();
+    if (error) throw error;
+    return data;
+  }
+  async function ingestAycdMessages(userId, messages) {
+    const account = {
+      user_id: userId,
+      profile_id: null,
+      email: 'inbox@aycd.me',
+      provider: { name: 'aycd-unified-imap', host: '127.0.0.1', port: 0, secure: false }
+    };
+    await syncServiceOrders(supabase, userId, [account]);
+    let checked = 0, matched = 0, ignored = 0;
+    const results = [];
+    for (const item of (Array.isArray(messages) ? messages.slice(0, 1000) : [])) {
+      checked += 1;
+      try {
+        const parsed = {
+          subject: clean(item.subject), from: { text: clean(item.from) }, text: clean(item.text), html: clean(item.html),
+          date: item.date ? new Date(item.date) : new Date(),
+          messageId: clean(item.messageId) || `aycd:${clean(item.uid) || checked}`
+        };
+        const result = await saveParsedMessage(supabase, account, parsed, item.uid || checked, adjustUserCredits);
+        if (result?.saved) matched += 1; else ignored += 1;
+        results.push(result || { ignored: true });
+      } catch (error) { results.push({ error: error.message }); }
+    }
+    try { await upsertScanState(supabase, account, { is_enabled: true, last_scan_at: new Date().toISOString(), last_success_at: new Date().toISOString(), last_error: null }); } catch (_) {}
+    return { checked, matched, ignored, results };
+  }
+
+  app.post('/orders/aycd/pair/start', auth, async (req, res) => {
+    if (req.role !== 'super_admin') return res.status(403).json({ error: 'Only the super admin can pair AYCD.' });
+    try {
+      const code = String(Math.floor(100000 + Math.random() * 900000));
+      const expires = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+      await supabase.from('aycd_bridge_devices').delete().eq('user_id', req.user_id).eq('is_paired', false);
+      const { error } = await supabase.from('aycd_bridge_devices').insert({ user_id: req.user_id, pair_code_hash: bridgeHash(code), pair_expires_at: expires, is_paired: false, status: 'waiting' });
+      if (error) throw error;
+      res.json({ code, expires_at: expires });
+    } catch (error) { res.status(500).json({ error: error.message }); }
+  });
+
+  app.post('/orders/aycd/bridge/claim', async (req, res) => {
+    try {
+      const codeHash = bridgeHash(req.body?.code);
+      const { data: row, error } = await supabase.from('aycd_bridge_devices').select('*').eq('pair_code_hash', codeHash).eq('is_paired', false).maybeSingle();
+      if (error) throw error;
+      if (!row || !row.pair_expires_at || new Date(row.pair_expires_at) < new Date()) return res.status(400).json({ error: 'Pairing code is invalid or expired.' });
+      const secret = crypto.randomBytes(32).toString('hex');
+      const { data: updated, error: ue } = await supabase.from('aycd_bridge_devices').update({
+        device_secret_hash: bridgeHash(secret), device_name: clean(req.body?.device_name || 'AYCD laptop').slice(0,120), is_paired: true,
+        status: 'online', last_seen_at: new Date().toISOString(), pair_code_hash: null, pair_expires_at: null
+      }).eq('id', row.id).select().single();
+      if (ue) throw ue;
+      res.json({ success: true, device_id: updated.id, secret });
+    } catch (error) { res.status(500).json({ error: error.message }); }
+  });
+
+  app.post('/orders/aycd/bridge/poll', async (req, res) => {
+    try {
+      const secret = String(req.headers['x-aycd-bridge-secret'] || '');
+      const row = await getBridgeBySecret(secret);
+      if (!row) return res.status(401).json({ error: 'Bridge is not paired.' });
+      const now = new Date().toISOString();
+      await supabase.from('aycd_bridge_devices').update({ status: 'online', last_seen_at: now }).eq('id', row.id);
+      res.json({ command: row.pending_command || null, command_id: row.command_id || null, payload: row.command_payload || null });
+    } catch (error) { res.status(500).json({ error: error.message }); }
+  });
+
+  app.post('/orders/aycd/bridge/result', async (req, res) => {
+    try {
+      const secret = String(req.headers['x-aycd-bridge-secret'] || '');
+      const row = await getBridgeBySecret(secret);
+      if (!row) return res.status(401).json({ error: 'Bridge is not paired.' });
+      let summary = null;
+      if (req.body?.success && Array.isArray(req.body?.messages)) summary = await ingestAycdMessages(row.user_id, req.body.messages);
+      await supabase.from('aycd_bridge_devices').update({
+        pending_command: null, command_payload: null, command_id: null, status: req.body?.success ? 'online' : 'error',
+        last_seen_at: new Date().toISOString(), last_scan_at: req.body?.success ? new Date().toISOString() : row.last_scan_at,
+        last_error: req.body?.success ? null : clean(req.body?.error || 'AYCD scan failed').slice(0,1000),
+        last_result: summary || { error: req.body?.error || null, checked: Number(req.body?.checked || 0) }
+      }).eq('id', row.id);
+      res.json({ success: true, summary });
+    } catch (error) { res.status(500).json({ error: error.message }); }
+  });
+
+  app.get('/orders/aycd/device-status', auth, async (req, res) => {
+    if (req.role !== 'super_admin') return res.status(403).json({ error: 'Only the super admin can use AYCD.' });
+    const { data, error } = await supabase.from('aycd_bridge_devices').select('*').eq('user_id', req.user_id).eq('is_paired', true).order('created_at',{ascending:false}).limit(1).maybeSingle();
+    if (error) return res.status(500).json({ error: error.message });
+    const online = !!(data?.last_seen_at && Date.now() - new Date(data.last_seen_at).getTime() < 30000);
+    res.json({ paired: !!data, online, device: data ? { id:data.id, name:data.device_name, status:data.status, last_seen_at:data.last_seen_at, last_scan_at:data.last_scan_at, last_error:data.last_error, pending_command:data.pending_command, last_result:data.last_result } : null });
+  });
+
+  app.post('/orders/aycd/scan-request', auth, async (req, res) => {
+    if (req.role !== 'super_admin') return res.status(403).json({ error: 'Only the super admin can use AYCD.' });
+    const { data, error } = await supabase.from('aycd_bridge_devices').select('*').eq('user_id', req.user_id).eq('is_paired', true).order('created_at',{ascending:false}).limit(1).maybeSingle();
+    if (error) return res.status(500).json({ error: error.message });
+    if (!data) return res.status(400).json({ error: 'Pair the AYCD laptop first.' });
+    const commandId = crypto.randomUUID();
+    const { error: ue } = await supabase.from('aycd_bridge_devices').update({ pending_command:'scan', command_id:commandId, command_payload:{ lookbackDays:Number(req.body?.lookbackDays || 240) }, status:'scan_requested' }).eq('id', data.id);
+    if (ue) return res.status(500).json({ error: ue.message });
+    res.json({ success:true, command_id:commandId });
+  });
+
   app.get('/orders/aycd-status', auth, async (req, res) => {
     if (req.role !== 'super_admin') return res.status(403).json({ error: 'Only the super admin can use AYCD Unified Inbox.' });
     res.json({ configured: true, mode: 'local_unified_imap_bridge', requires_local_helper: true });
@@ -805,47 +918,8 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits })
   // address, so the bundled local helper scans AYCD on the laptop and submits parsed messages here.
   app.post('/orders/aycd-bridge-ingest', auth, async (req, res) => {
     if (req.role !== 'super_admin') return res.status(403).json({ error: 'Only the super admin can use AYCD Unified Inbox.' });
-    try {
-      const messages = Array.isArray(req.body?.messages) ? req.body.messages.slice(0, 1000) : [];
-      const account = {
-        user_id: req.user_id,
-        profile_id: null,
-        email: 'inbox@aycd.me',
-        provider: { name: 'aycd-unified-imap', host: '127.0.0.1', port: 0, secure: false }
-      };
-      await syncServiceOrders(supabase, req.user_id, [account]);
-      let checked = 0, matched = 0, ignored = 0;
-      const results = [];
-      for (const item of messages) {
-        checked += 1;
-        try {
-          const parsed = {
-            subject: clean(item.subject),
-            from: { text: clean(item.from) },
-            text: clean(item.text),
-            html: clean(item.html),
-            date: item.date ? new Date(item.date) : new Date(),
-            messageId: clean(item.messageId) || `aycd:${clean(item.uid) || checked}`
-          };
-          const result = await saveParsedMessage(supabase, account, parsed, item.uid || checked, adjustUserCredits);
-          if (result?.saved) matched += 1; else ignored += 1;
-          results.push(result || { ignored: true });
-        } catch (error) {
-          results.push({ error: error.message });
-        }
-      }
-      try {
-        await upsertScanState(supabase, account, {
-          is_enabled: true,
-          last_scan_at: new Date().toISOString(),
-          last_success_at: new Date().toISOString(),
-          last_error: null
-        });
-      } catch (_) {}
-      res.json({ success: true, checked, matched, ignored, results });
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
+    try { res.json({ success: true, ...(await ingestAycdMessages(req.user_id, req.body?.messages || [])) }); }
+    catch (error) { res.status(500).json({ error: error.message }); }
   });
 
   app.post('/orders/scan/start', auth, async (req, res) => {
