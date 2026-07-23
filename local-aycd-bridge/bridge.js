@@ -48,8 +48,8 @@ async function scanImap(config){
         try{ const p=await simpleParser(msg.source); messages.push({uid:msg.uid,messageId:p.messageId||`aycd:${msg.uid}`,subject:p.subject||'',from:p.from?.text||'',text:String(p.text||'').slice(0,250000),html:p.html?String(p.html).slice(0,250000):'',date:p.date||new Date()}); } catch(e){ console.error('Parse failed',msg.uid,e.message); }
       }
     } finally { lock.release(); }
-    await client.logout(); saveJson(STATE_FILE,{lastUid:highest,lastScanAt:new Date().toISOString()});
-    return {checked,messages};
+    await client.logout();
+    return {checked,messages,highest};
   } catch(e){ try{client.close()}catch{} throw Object.assign(e,{checked}); }
 }
 function page(message=''){
@@ -83,7 +83,32 @@ async function poll(){
     const cmd=await postJson('/orders/aycd/bridge/poll',{},b.secret);
     if(cmd.command==='scan'){
       const current=readJson(CONFIG_FILE,{}); const cfg=sanitize({...current,lookbackDays:cmd.payload?.lookbackDays||current.lookbackDays});
-      try{const result=await scanImap(cfg);await postJson('/orders/aycd/bridge/result',{success:true,command_id:cmd.command_id,checked:result.checked,messages:result.messages},b.secret);console.log(`AYCD scan complete: ${result.checked} messages checked.`);}catch(e){await postJson('/orders/aycd/bridge/result',{success:false,command_id:cmd.command_id,checked:e.checked||0,error:e.message},b.secret);console.error('AYCD scan failed:',e.message);}
+      try{
+        const result=await scanImap(cfg);
+        const maxBytes=2*1024*1024;
+        const chunks=[]; let current=[]; let size=0;
+        for(const message of result.messages){
+          const bytes=Buffer.byteLength(JSON.stringify(message),'utf8');
+          if(current.length && size+bytes>maxBytes){ chunks.push(current); current=[]; size=0; }
+          current.push(message); size+=bytes;
+        }
+        if(current.length || !chunks.length) chunks.push(current);
+        let sent=0;
+        for(let i=0;i<chunks.length;i++){
+          await postJson('/orders/aycd/bridge/result',{
+            success:true, command_id:cmd.command_id, checked:result.checked,
+            messages:chunks[i], chunk_index:i, chunk_count:chunks.length,
+            final:i===chunks.length-1
+          },b.secret);
+          sent+=chunks[i].length;
+          console.log(`Uploaded AYCD batch ${i+1}/${chunks.length} (${sent}/${result.messages.length} messages).`);
+        }
+        saveJson(STATE_FILE,{lastUid:result.highest,lastScanAt:new Date().toISOString()});
+        console.log(`AYCD scan complete: ${result.checked} messages checked.`);
+      }catch(e){
+        try{await postJson('/orders/aycd/bridge/result',{success:false,command_id:cmd.command_id,checked:e.checked||0,error:e.message,final:true},b.secret);}catch(_){}
+        console.error('AYCD scan failed:',e.message);
+      }
     }
   }catch(e){console.error('Bridge poll:',e.message);}finally{busy=false;}
 }

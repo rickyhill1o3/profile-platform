@@ -1,0 +1,9 @@
+npm warn deprecated mailsplit@5.4.2: This package has been renamed to @zone-eu/mailsplit. Please update your dependencies.
+npm warn deprecated mailsplit@5.4.5: This package has been renamed to @zone-eu/mailsplit. Please update your dependencies.
+
+added 49 packages in 5s
+npm notice
+npm notice New minor version of npm available! 11.9.0 -> 11.18.0
+npm notice Changelog: https://github.com/npm/cli/releases/tag/v11.18.0
+npm notice To update run: npm install -g npm@11.18.0
+npm notice

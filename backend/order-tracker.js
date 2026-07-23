@@ -878,15 +878,40 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits })
       const secret = String(req.headers['x-aycd-bridge-secret'] || '');
       const row = await getBridgeBySecret(secret);
       if (!row) return res.status(401).json({ error: 'Bridge is not paired.' });
-      let summary = null;
-      if (req.body?.success && Array.isArray(req.body?.messages)) summary = await ingestAycdMessages(row.user_id, req.body.messages);
-      await supabase.from('aycd_bridge_devices').update({
-        pending_command: null, command_payload: null, command_id: null, status: req.body?.success ? 'online' : 'error',
-        last_seen_at: new Date().toISOString(), last_scan_at: req.body?.success ? new Date().toISOString() : row.last_scan_at,
+      if (req.body?.command_id && row.command_id && req.body.command_id !== row.command_id) {
+        return res.status(409).json({ error: 'This AYCD scan command is no longer active.' });
+      }
+
+      const final = req.body?.final !== false;
+      let chunkSummary = { checked: 0, matched: 0, ignored: 0 };
+      if (req.body?.success && Array.isArray(req.body?.messages)) {
+        chunkSummary = await ingestAycdMessages(row.user_id, req.body.messages);
+      }
+
+      const previous = (Number(req.body?.chunk_index || 0) > 0 && row.last_result && !row.last_result.error)
+        ? row.last_result : { checked: 0, matched: 0, ignored: 0, chunks_received: 0 };
+      const aggregate = {
+        checked: Number(previous.checked || 0) + Number(chunkSummary.checked || 0),
+        matched: Number(previous.matched || 0) + Number(chunkSummary.matched || 0),
+        ignored: Number(previous.ignored || 0) + Number(chunkSummary.ignored || 0),
+        chunks_received: Number(previous.chunks_received || 0) + 1,
+        chunks_total: Number(req.body?.chunk_count || 1)
+      };
+
+      const update = {
+        status: req.body?.success ? (final ? 'online' : 'uploading') : 'error',
+        last_seen_at: new Date().toISOString(),
         last_error: req.body?.success ? null : clean(req.body?.error || 'AYCD scan failed').slice(0,1000),
-        last_result: summary || { error: req.body?.error || null, checked: Number(req.body?.checked || 0) }
-      }).eq('id', row.id);
-      res.json({ success: true, summary });
+        last_result: req.body?.success ? aggregate : { error: req.body?.error || null, checked: Number(req.body?.checked || 0) }
+      };
+      if (final || !req.body?.success) {
+        update.pending_command = null;
+        update.command_payload = null;
+        update.command_id = null;
+        if (req.body?.success) update.last_scan_at = new Date().toISOString();
+      }
+      await supabase.from('aycd_bridge_devices').update(update).eq('id', row.id);
+      res.json({ success: true, summary: aggregate, final });
     } catch (error) { res.status(500).json({ error: error.message }); }
   });
 
