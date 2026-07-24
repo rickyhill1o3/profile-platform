@@ -1145,3 +1145,6 @@ h1,h2,h3,h4,p{margin:0}
 .checkbox-row input { margin-top:3px; width:17px; height:17px; flex:0 0 auto; }
 .checkbox-row span { display:grid; gap:3px; }
 .checkbox-row small { color:#64748b; font-weight:400; line-height:1.35; }
+
+/* Bulk profile editor */
+.bulk-edit-modal{display:none;position:fixed;inset:0;z-index:10000;align-items:center;justify-content:center;padding:20px}.bulk-edit-modal.is-open{display:flex}.bulk-edit-backdrop{position:absolute;inset:0;background:rgba(12,22,48,.62);backdrop-filter:blur(3px)}.bulk-edit-dialog{position:relative;width:min(620px,100%);max-height:90vh;overflow:auto;background:#fff;border:1px solid #dbe3f1;border-radius:18px;box-shadow:0 24px 70px rgba(7,20,50,.28)}.bulk-edit-header,.bulk-edit-footer{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:20px 22px}.bulk-edit-header{border-bottom:1px solid #e7ecf4}.bulk-edit-header h3{margin:4px 0 5px}.bulk-edit-body{display:grid;gap:18px;padding:22px}.bulk-edit-body .field{display:grid;gap:7px}.bulk-edit-body small{color:#66748c;line-height:1.35}.bulk-edit-footer{align-items:center;justify-content:flex-end;border-top:1px solid #e7ecf4}.form-help.success{color:#087443}.form-help.error{color:#b42318}@media(max-width:640px){.bulk-edit-header{flex-direction:column}.bulk-edit-footer{flex-wrap:wrap}.bulk-edit-footer .btn{flex:1}}

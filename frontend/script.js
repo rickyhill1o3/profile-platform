@@ -726,6 +726,7 @@ async function loadProfiles() {
                     <div class="toolbar-row profile-group-toolbar">
                         <input class="input" type="search" placeholder="Search ${labels[groupKey].toLowerCase()}" value="${escapeHTML(profileGroupFilters[groupKey] || '')}" data-profile-search="${groupKey}" />
                         <button class="btn" type="button" data-profile-select-visible="${groupKey}">Select Visible</button>
+                        <button class="btn" type="button" data-profile-edit-group="${groupKey}" ${selectedCount ? '' : 'disabled'}>Edit Selected (${selectedCount})</button>
                         <button class="btn btn-danger" type="button" data-profile-delete-group="${groupKey}" ${selectedCount ? '' : 'disabled'}>Delete Selected (${selectedCount})</button>
                     </div>
             `;
@@ -801,6 +802,110 @@ async function loadProfiles() {
 }
 
 
+
+function ensureBulkProfileEditModal() {
+    let modal = document.getElementById('bulkProfileEditModal');
+    if (modal) return modal;
+    modal = document.createElement('div');
+    modal.id = 'bulkProfileEditModal';
+    modal.className = 'bulk-edit-modal';
+    modal.innerHTML = `
+        <div class="bulk-edit-backdrop" data-bulk-edit-close></div>
+        <section class="bulk-edit-dialog" role="dialog" aria-modal="true" aria-labelledby="bulkProfileEditTitle">
+            <div class="bulk-edit-header">
+                <div>
+                    <div class="eyebrow">BULK PROFILE EDIT</div>
+                    <h3 id="bulkProfileEditTitle">Edit selected profiles</h3>
+                    <p id="bulkProfileEditSummary" class="subtle-text"></p>
+                </div>
+                <button class="btn" type="button" data-bulk-edit-close>Close</button>
+            </div>
+            <div class="bulk-edit-body">
+                <label class="field">
+                    <span>Account password</span>
+                    <input id="bulkProfileLoginPassword" class="input" type="password" autocomplete="new-password" placeholder="Leave blank to keep existing passwords" />
+                    <small>Applies the same retailer account password to every selected profile.</small>
+                </label>
+                <label class="field">
+                    <span>Gmail app password / direct IMAP</span>
+                    <input id="bulkProfileGmailAppPassword" class="input" type="password" autocomplete="new-password" placeholder="Leave blank to keep existing app passwords" />
+                    <small>Only change this when the selected mailboxes all use the same direct IMAP app password.</small>
+                </label>
+                <label class="field">
+                    <span>Order-email source</span>
+                    <select id="bulkProfileAycdAction" class="input">
+                        <option value="keep">No change</option>
+                        <option value="enable">Use AYCD Unified Inbox</option>
+                        <option value="disable">Use direct IMAP instead</option>
+                    </select>
+                    <small>AYCD profiles count as email-connected without requiring an individual Gmail app password.</small>
+                </label>
+                <div id="bulkProfileEditMessage" class="form-help"></div>
+            </div>
+            <div class="bulk-edit-footer">
+                <button class="btn" type="button" data-bulk-edit-close>Cancel</button>
+                <button class="btn btn-primary" type="button" id="bulkProfileEditSave">Save selected profiles</button>
+            </div>
+        </section>`;
+    document.body.appendChild(modal);
+    modal.querySelectorAll('[data-bulk-edit-close]').forEach((el) => el.addEventListener('click', () => modal.classList.remove('is-open')));
+    return modal;
+}
+
+function openBulkProfileEdit(group, ids) {
+    const modal = ensureBulkProfileEditModal();
+    modal.dataset.group = group;
+    modal.dataset.ids = JSON.stringify(ids);
+    modal.querySelector('#bulkProfileEditTitle').textContent = `Edit ${ids.length} selected ${group} profile${ids.length === 1 ? '' : 's'}`;
+    modal.querySelector('#bulkProfileEditSummary').textContent = 'Only fields entered below will be changed. Existing emails, shipping details, cards, and profile names stay untouched.';
+    modal.querySelector('#bulkProfileLoginPassword').value = '';
+    modal.querySelector('#bulkProfileGmailAppPassword').value = '';
+    modal.querySelector('#bulkProfileAycdAction').value = 'keep';
+    const message = modal.querySelector('#bulkProfileEditMessage');
+    message.textContent = '';
+    message.className = 'form-help';
+    modal.classList.add('is-open');
+
+    const saveButton = modal.querySelector('#bulkProfileEditSave');
+    saveButton.onclick = async () => {
+        const loginPassword = modal.querySelector('#bulkProfileLoginPassword').value;
+        const gmailAppPassword = modal.querySelector('#bulkProfileGmailAppPassword').value.replace(/\s+/g, '');
+        const aycdAction = modal.querySelector('#bulkProfileAycdAction').value;
+        if (!loginPassword && !gmailAppPassword && aycdAction === 'keep') {
+            message.textContent = 'Choose at least one change.';
+            return;
+        }
+        saveButton.disabled = true;
+        saveButton.textContent = 'Saving...';
+        try {
+            const response = await fetch(API + '/profiles/bulk', {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token() },
+                body: JSON.stringify({
+                    ids,
+                    store: group,
+                    login_password: loginPassword || undefined,
+                    gmail_app_password: gmailAppPassword || undefined,
+                    use_aycd_inbox: aycdAction === 'keep' ? undefined : aycdAction === 'enable'
+                })
+            });
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok || data.error) throw new Error(data.error || 'Could not update selected profiles.');
+            message.textContent = `Updated ${data.updated_count || ids.length} profile${(data.updated_count || ids.length) === 1 ? '' : 's'}.`;
+            message.className = 'form-help success';
+            ids.forEach((id) => selectedProfileIds.delete(String(id)));
+            await loadProfiles();
+            setTimeout(() => modal.classList.remove('is-open'), 500);
+        } catch (error) {
+            message.textContent = error.message || 'Could not update selected profiles.';
+            message.className = 'form-help error';
+        } finally {
+            saveButton.disabled = false;
+            saveButton.textContent = 'Save selected profiles';
+        }
+    };
+}
+
 function bindProfileDashboardControls() {
     document.querySelectorAll('[data-profile-search]').forEach((input) => {
         input.addEventListener('input', () => {
@@ -826,6 +931,14 @@ function bindProfileDashboardControls() {
                 if (!filterValue || haystack.includes(filterValue)) selectedProfileIds.add(String(p.id));
             });
             loadProfiles();
+        });
+    });
+    document.querySelectorAll('[data-profile-edit-group]').forEach((button) => {
+        button.addEventListener('click', () => {
+            const group = button.dataset.profileEditGroup;
+            const ids = allDashboardProfiles.filter((p) => profileInGroup(p, group) && selectedProfileIds.has(String(p.id))).map((p) => String(p.id));
+            if (!ids.length) return;
+            openBulkProfileEdit(group, ids);
         });
     });
     document.querySelectorAll('[data-profile-delete-group]').forEach((button) => {

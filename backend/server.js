@@ -7637,6 +7637,79 @@ app.post("/profiles/raffle-builder", auth, async (req, res) => {
 });
 
 
+app.patch("/profiles/bulk", auth, async (req, res) => {
+    try {
+        await ensureUserNotRevoked(req.user_id);
+        const ids = Array.isArray(req.body?.ids) ? [...new Set(req.body.ids.map((id) => String(id || '').trim()).filter(Boolean))] : [];
+        const store = normalizeProfileAccountType(req.body?.store || '');
+        const allowedStores = new Set(['target', 'walmart', 'samsclub', 'amazon', 'crunchyroll', 'pokemoncenter', 'general']);
+        if (!ids.length) return res.status(400).json({ error: 'No profile ids were provided' });
+        if (!allowedStores.has(store) || store === 'all') return res.status(400).json({ error: 'Choose a specific store group before bulk editing.' });
+
+        const hasLoginPassword = Object.prototype.hasOwnProperty.call(req.body || {}, 'login_password') && String(req.body.login_password || '').length > 0;
+        const hasGmailPassword = Object.prototype.hasOwnProperty.call(req.body || {}, 'gmail_app_password') && String(req.body.gmail_app_password || '').replace(/\s+/g, '').length > 0;
+        const hasAycd = typeof req.body?.use_aycd_inbox === 'boolean';
+        if (!hasLoginPassword && !hasGmailPassword && !hasAycd) return res.status(400).json({ error: 'No profile changes were provided' });
+
+        const allProfiles = await getUserProfilesWithRelations(req.user_id);
+        const owned = (allProfiles || []).filter((profile) => ids.includes(String(profile.id)) && profileAssignedStores(profile).includes(store));
+        if (!owned.length) return res.status(404).json({ error: 'No matching profiles found in this store group' });
+        const ownedIds = owned.map((profile) => String(profile.id));
+
+        let existingRows = [];
+        try {
+            const { data, error } = await supabase.from('profile_store_credentials').select('*').in('profile_id', ownedIds).eq('store', store);
+            if (error) throw error;
+            existingRows = data || [];
+        } catch (error) {
+            return res.status(500).json({ error: `Could not load store credentials: ${error.message}` });
+        }
+        const byProfile = new Map(existingRows.map((row) => [String(row.profile_id), row]));
+        const rows = owned.map((profile) => {
+            const current = byProfile.get(String(profile.id)) || {};
+            const fallbackAccount = (profile.accounts || []).find((account) => normalizeProfileAccountType(account.provider || account.account_type || '') === store) || profile.accounts?.[0] || {};
+            return {
+                ...(current.id ? { id: current.id } : {}),
+                profile_id: profile.id,
+                store,
+                login_email: current.login_email || fallbackAccount.username || fallbackAccount.email || profile.addresses?.[0]?.email || null,
+                login_password: hasLoginPassword ? String(req.body.login_password) : (current.login_password || fallbackAccount.password || null),
+                gmail_app_password: hasGmailPassword ? normalizeStoredGmailAppPassword(req.body.gmail_app_password) : (current.gmail_app_password || null),
+                amazon_2fa_secret: current.amazon_2fa_secret || fallbackAccount.two_fa_secret || null,
+                use_aycd_inbox: hasAycd ? !!req.body.use_aycd_inbox : !!current.use_aycd_inbox
+            };
+        });
+
+        for (let i = 0; i < rows.length; i += 100) {
+            const chunk = rows.slice(i, i + 100);
+            for (const row of chunk) {
+                if (row.id) {
+                    const { id, ...changes } = row;
+                    const { error } = await supabase.from('profile_store_credentials').update(changes).eq('id', id);
+                    if (error) throw error;
+                } else {
+                    const { error } = await supabase.from('profile_store_credentials').insert(row);
+                    if (error) throw error;
+                }
+            }
+        }
+
+        if (hasLoginPassword) {
+            const { data: accountRows } = await supabase.from('accounts').select('id,profile_id,provider').in('profile_id', ownedIds);
+            for (const account of accountRows || []) {
+                if (normalizeProfileAccountType(account.provider || '') !== store) continue;
+                await supabase.from('accounts').update({ password: String(req.body.login_password) }).eq('id', account.id);
+            }
+        }
+
+        await markProfileSyncChanged(req.user_id, [store], 'profiles_bulk_updated');
+        res.json({ success: true, updated_count: ownedIds.length, store });
+    } catch (err) {
+        const status = err.message === 'This account has been revoked' ? 403 : 500;
+        res.status(status).json({ error: err.message || 'Bulk profile update failed' });
+    }
+});
+
 app.delete("/profiles/bulk", auth, async (req, res) => {
     try {
         await ensureUserNotRevoked(req.user_id);
