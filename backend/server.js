@@ -6820,12 +6820,20 @@ async function loadProfileStoreCredentials(profileIds = []) {
     const map = new Map();
     if (!ids.length) return map;
 
-    try {
+    // A super-admin can have hundreds of profiles. Sending every UUID in one
+    // PostgREST `in(...)` filter can exceed the request URL limit and silently
+    // make AYCD flags appear unsaved. Read the rows in bounded chunks instead.
+    for (let i = 0; i < ids.length; i += 75) {
         const { data, error } = await supabase
             .from('profile_store_credentials')
             .select('*')
-            .in('profile_id', ids);
-        if (error) throw error;
+            .in('profile_id', ids.slice(i, i + 75));
+        if (error) {
+            // Keep legacy installations usable when the credential migration has
+            // not been installed, but do not discard rows already loaded.
+            if (/does not exist|schema cache|relation/i.test(String(error.message || ''))) return map;
+            throw error;
+        }
 
         (data || []).forEach((row) => {
             const profileId = String(row.profile_id || '');
@@ -6834,33 +6842,48 @@ async function loadProfileStoreCredentials(profileIds = []) {
             if (!map.has(profileId)) map.set(profileId, {});
             map.get(profileId)[store] = row;
         });
-    } catch (_) {
-        // Migration may not be installed yet; accounts table fallback still works.
     }
     return map;
 }
 
 async function replaceProfileStoreCredentials(profileId, payload = {}) {
     const credentials = normalizeStoreCredentialsPayload(payload);
-    try {
-        await supabase.from('profile_store_credentials').delete().eq('profile_id', profileId);
-        const rows = Object.entries(credentials)
-            .filter(([, c]) => c.login_email || c.login_password || c.gmail_app_password || c.amazon_2fa_secret || c.use_aycd_inbox)
-            .map(([store, c]) => ({
-                profile_id: profileId,
-                store,
-                login_email: c.login_email || null,
-                login_password: c.login_password || null,
-                gmail_app_password: c.gmail_app_password || null,
-                amazon_2fa_secret: c.amazon_2fa_secret || null,
-                use_aycd_inbox: !!c.use_aycd_inbox
-            }));
-        if (rows.length) {
-            const { error } = await supabase.from('profile_store_credentials').insert(rows);
-            if (error) throw error;
-        }
-    } catch (_) {
-        // If migration is not installed yet, the primary accounts row still saves below.
+    const desiredStores = new Set(Object.keys(credentials));
+
+    // Update rows in place instead of deleting everything first. This prevents a
+    // transient database/schema error from erasing working credentials and makes
+    // the AYCD checkbox durable on normal profile saves.
+    const { data: existingRows, error: loadError } = await supabase
+        .from('profile_store_credentials')
+        .select('*')
+        .eq('profile_id', profileId);
+    if (loadError) throw new Error(`Could not load profile store credentials: ${loadError.message}`);
+
+    const existingByStore = new Map((existingRows || []).map((row) => [normalizeProfileAccountType(row.store), row]));
+    for (const [store, c] of Object.entries(credentials)) {
+        const row = {
+            profile_id: profileId,
+            store,
+            login_email: c.login_email || null,
+            login_password: c.login_password || null,
+            gmail_app_password: c.gmail_app_password || null,
+            amazon_2fa_secret: c.amazon_2fa_secret || null,
+            use_aycd_inbox: !!c.use_aycd_inbox
+        };
+        const existing = existingByStore.get(store);
+        const result = existing?.id
+            ? await supabase.from('profile_store_credentials').update(row).eq('id', existing.id)
+            : await supabase.from('profile_store_credentials').insert(row);
+        if (result.error) throw new Error(`Could not save ${store} email settings: ${result.error.message}`);
+    }
+
+    const obsoleteIds = (existingRows || [])
+        .filter((row) => !desiredStores.has(normalizeProfileAccountType(row.store)))
+        .map((row) => row.id)
+        .filter(Boolean);
+    if (obsoleteIds.length) {
+        const { error } = await supabase.from('profile_store_credentials').delete().in('id', obsoleteIds);
+        if (error) throw new Error(`Could not remove old store credentials: ${error.message}`);
     }
 }
 
