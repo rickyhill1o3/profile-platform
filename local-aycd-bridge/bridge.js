@@ -21,11 +21,29 @@ function saveJson(file,data){ fs.mkdirSync(CONFIG_DIR,{recursive:true}); fs.writ
 function esc(v){ return String(v||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function sanitize(cfg={}){ return { host:'127.0.0.1', port:Number(cfg.port||43283), username:clean(cfg.username)||'inbox@aycd.me', password:clean(cfg.password), secure:!!cfg.secure, lookbackDays:Math.max(1,Math.min(365,Number(cfg.lookbackDays||240))) }; }
 function clientFor(c){ return new ImapFlow({ host:c.host, port:c.port, secure:c.secure, auth:{user:c.username,pass:c.password}, logger:false, connectionTimeout:15000, greetingTimeout:15000, socketTimeout:180000, tls:{rejectUnauthorized:false} }); }
-async function postJson(pathname, body, secret=''){
-  const r = await fetch(API_BASE + pathname, { method:'POST', headers:{'Content-Type':'application/json', ...(secret?{'x-aycd-bridge-secret':secret}:{})}, body:JSON.stringify(body||{}) });
-  const j = await r.json().catch(()=>({}));
-  if(!r.ok) throw new Error(j.error || `Website returned ${r.status}`);
-  return j;
+function sleep(ms){ return new Promise(resolve=>setTimeout(resolve,ms)); }
+async function postJson(pathname, body, secret='', options={}){
+  const attempts=Math.max(1,Number(options.attempts||1));
+  const timeoutMs=Math.max(5000,Number(options.timeoutMs||180000));
+  let lastError;
+  for(let attempt=1;attempt<=attempts;attempt++){
+    const controller=new AbortController();
+    const timer=setTimeout(()=>controller.abort(),timeoutMs);
+    try{
+      const r=await fetch(API_BASE+pathname,{method:'POST',headers:{'Content-Type':'application/json',...(secret?{'x-aycd-bridge-secret':secret}:{})},body:JSON.stringify(body||{}),signal:controller.signal});
+      const j=await r.json().catch(()=>({}));
+      if(!r.ok){ const e=new Error(j.error||`Website returned ${r.status}`); e.status=r.status; throw e; }
+      return j;
+    }catch(e){
+      lastError=e;
+      const retryable=!e.status || e.status===408 || e.status===429 || e.status>=500;
+      if(attempt>=attempts || !retryable) throw e;
+      const wait=Math.min(30000,1500*Math.pow(2,attempt-1));
+      console.log(`Upload attempt ${attempt}/${attempts} failed (${e.message}). Retrying in ${Math.round(wait/1000)}s...`);
+      await sleep(wait);
+    }finally{ clearTimeout(timer); }
+  }
+  throw lastError||new Error('Request failed');
 }
 async function testImap(config){
   if(!config.password) throw new Error('AYCD IMAP password has not been saved.');
@@ -35,22 +53,33 @@ async function testImap(config){
 }
 async function discoverScanPlan(config){
   const rawState=readJson(STATE_FILE,{});
-  const state = rawState.version === 2 ? rawState : {version:2,lastUid:0,historicalComplete:false};
+  // Preserve checkpoints created by every earlier bridge version.
+  const state={
+    version:4,
+    lastUid:Number(rawState.lastUid||0),
+    historicalComplete:!!rawState.historicalComplete,
+    skippedUids:[...new Set((rawState.skippedUids||[]).map(Number).filter(Boolean))].sort((a,b)=>a-b)
+  };
   const client=clientFor(config);
   try{
     await client.connect();
     const lock=await client.getMailboxLock('INBOX');
     try{
       let uids=[];
-      if(Number(state.lastUid||0)>0){
-        uids=await client.search({uid:`${Number(state.lastUid)+1}:*`});
-      } else {
+      if(state.lastUid>0){
+        // This is the same UID SEARCH path used by the last version that reliably
+        // processed messages. It requests identifiers only, never message bodies.
+        uids=await client.search({uid:`${state.lastUid+1}:*`});
+      }else{
         uids=await client.search({since:new Date(Date.now()-config.lookbackDays*86400000)});
       }
-      uids=(uids||[]).map(Number).filter(Boolean).sort((a,b)=>a-b);
-      return {uids,state,mailboxCount:Number(client.mailbox?.exists||0)};
-    } finally { lock.release(); }
-  } finally { try{await client.logout();}catch(_){try{client.close()}catch(__){}} }
+      // Only continue forward from the durable high-water UID. Temporarily
+      // unavailable older UIDs are kept in a separate retry queue and must not
+      // be mixed into the main list, otherwise progress appears to restart.
+      uids=[...new Set((uids||[]).map(Number).filter(uid=>uid>state.lastUid))].sort((a,b)=>a-b);
+      return {uids,state,retryUids:[...(state.skippedUids||[])],mailboxCount:Number(client.mailbox?.exists||0)};
+    }finally{ lock.release(); }
+  }finally{ try{await client.logout();}catch(_){try{client.close()}catch(__){}} }
 }
 function recipientList(parsed){
   const values=[];
@@ -66,51 +95,95 @@ function recipientList(parsed){
   return [...out];
 }
 async function fetchMessageBatch(config,uids){
-  const client=clientFor(config); const messages=[]; let highest=0;
-  try{
-    await client.connect(); const lock=await client.getMailboxLock('INBOX');
+  const messages=[];
+  const skipped=[];
+  let highest=0;
+
+  async function parseMessage(msg){
+    const uid=Number(msg.uid||0);
+    highest=Math.max(highest,uid);
     try{
-      for await(const msg of client.fetch(uids,{uid:true,source:true})){
-        highest=Math.max(highest,Number(msg.uid||0));
-        try{
-          const p=await simpleParser(msg.source);
-          messages.push({
-            uid:msg.uid,messageId:p.messageId||`aycd:${msg.uid}`,subject:p.subject||'',from:p.from?.text||'',
-            to:p.to?.text||'',cc:p.cc?.text||'',recipients:recipientList(p),
-            text:String(p.text||'').slice(0,60000),html:p.html?String(p.html).slice(0,60000):'',date:p.date||new Date()
-          });
-        }catch(e){ console.error('Parse failed',msg.uid,e.message); }
+      const p=await simpleParser(msg.source);
+      messages.push({
+        uid,messageId:p.messageId||`aycd:${uid}`,subject:p.subject||'',from:p.from?.text||'',
+        to:p.to?.text||'',cc:p.cc?.text||'',recipients:recipientList(p),
+        text:String(p.text||'').slice(0,60000),html:p.html?String(p.html).slice(0,60000):'',date:p.date||new Date()
+      });
+      return true;
+    }catch(e){
+      console.error(`Parse failed for AYCD UID ${uid}: ${e.message}`);
+      skipped.push(uid);
+      return false;
+    }
+  }
+
+  const client=clientFor(config);
+  try{
+    await client.connect();
+    const lock=await client.getMailboxLock('INBOX');
+    try{
+      // First use the known-working multi-message fetch. If AYCD rejects the group
+      // because one body is temporarily unavailable, retry each UID independently so
+      // one bad email cannot stop the remaining 49.
+      try{
+        for await(const msg of client.fetch(uids,{uid:true,source:true},{uid:true})) await parseMessage(msg);
+      }catch(groupError){
+        console.warn(`AYCD group fetch failed (${groupError.responseText||groupError.message}). Retrying ${uids.length} messages individually...`);
+        for(const rawUid of uids){
+          const uid=Number(rawUid||0);
+          if(!uid) continue;
+          let completed=false;
+          for(let attempt=1;attempt<=3;attempt++){
+            try{
+              let seen=false;
+              for await(const msg of client.fetch([uid],{uid:true,source:true},{uid:true})){
+                seen=true;
+                await parseMessage(msg);
+              }
+              if(!seen) throw new Error('AYCD returned no body for this UID.');
+              completed=true;
+              break;
+            }catch(e){
+              if(attempt<3){
+                console.log(`AYCD UID ${uid} unavailable. Retry ${attempt}/2 in ${attempt*2}s...`);
+                await sleep(attempt*2000);
+              }else{
+                highest=Math.max(highest,uid);
+                skipped.push(uid);
+                console.warn(`Skipping AYCD UID ${uid} for this scan: ${e.responseText||e.message}`);
+              }
+            }
+          }
+          if(!completed && !skipped.includes(uid)) skipped.push(uid);
+        }
       }
-    } finally { lock.release(); }
-    return {messages,highest};
-  } finally { try{await client.logout();}catch(_){try{client.close()}catch(__){}} }
+    }finally{ lock.release(); }
+    return {messages,highest,skippedUids:[...new Set(skipped.filter(Boolean))].sort((a,b)=>a-b)};
+  }finally{ try{await client.logout();}catch(_){try{client.close()}catch(__){}} }
 }
 
 
-function splitMessagesByPayloadSize(messages, maxBytes=600*1024){
+function splitMessagesByPayloadSize(messages, maxBytes=500*1024, maxMessages=50){
   const chunks=[];
   let current=[];
   let currentBytes=2;
-  for(const message of messages||[]){
-    let item=message;
+  for(const original of messages||[]){
+    let item=original;
     let encoded=JSON.stringify(item);
-    // Keep one unusually large email from exceeding the upload ceiling by itself.
-    if(Buffer.byteLength(encoded,'utf8') > maxBytes-4096){
-      item={...item,text:String(item.text||'').slice(0,24000),html:String(item.html||'').slice(0,24000)};
+    if(Buffer.byteLength(encoded,'utf8')>maxBytes-4096){
+      item={...item,text:String(item.text||'').slice(0,18000),html:String(item.html||'').slice(0,18000)};
       encoded=JSON.stringify(item);
     }
     const itemBytes=Buffer.byteLength(encoded,'utf8')+1;
-    if(current.length && currentBytes+itemBytes > maxBytes){
-      chunks.push(current);
-      current=[];
-      currentBytes=2;
+    if(current.length && (current.length>=maxMessages || currentBytes+itemBytes>maxBytes)){
+      chunks.push(current); current=[]; currentBytes=2;
     }
-    current.push(item);
-    currentBytes+=itemBytes;
+    current.push(item); currentBytes+=itemBytes;
   }
   if(current.length) chunks.push(current);
   return chunks;
 }
+
 
 function page(message=''){
   const c=readJson(CONFIG_FILE,{}), b=readJson(BRIDGE_FILE,{});
@@ -145,41 +218,97 @@ async function poll(){
       const current=readJson(CONFIG_FILE,{}); const cfg=sanitize({...current,lookbackDays:cmd.payload?.lookbackDays||current.lookbackDays});
       try{
         const plan=await discoverScanPlan(cfg);
-        const uidBatchSize=Math.max(50,Math.min(500,Number(process.env.AYCD_UID_BATCH_SIZE||250)));
+        // Small 50-UID groups reduce AYCD pressure and make recovery granular.
+        const uidBatchSize=Math.max(1,Math.min(25,Number(process.env.AYCD_UID_BATCH_SIZE||10)));
         const uidChunks=[];
         for(let i=0;i<plan.uids.length;i+=uidBatchSize) uidChunks.push(plan.uids.slice(i,i+uidBatchSize));
         if(!uidChunks.length){
-          await postJson('/orders/aycd/bridge/result',{success:true,command_id:cmd.command_id,checked:0,messages:[],chunk_index:0,chunk_count:1,final:true},b.secret);
-          saveJson(STATE_FILE,{version:2,lastUid:Number(plan.state.lastUid||0),historicalComplete:true,lastScanAt:new Date().toISOString()});
+          await postJson('/orders/aycd/bridge/result',{success:true,command_id:cmd.command_id,checked:0,messages:[],chunk_index:0,chunk_count:1,final:true},b.secret,{attempts:6});
+          saveJson(STATE_FILE,{version:4,lastUid:Number(plan.state.lastUid||0),skippedUids:plan.state.skippedUids||[],historicalComplete:true,lastScanAt:new Date().toISOString()});
           console.log('AYCD scan complete: no new messages.');
-        } else {
-          let sent=0, highest=Number(plan.state.lastUid||0), uploadIndex=0;
-          const maxPayloadBytes=Math.max(128*1024,Math.min(2*1024*1024,Number(process.env.AYCD_UPLOAD_MAX_BYTES||600*1024)));
+        }else{
+          let sent=0, uploadIndex=0;
+          const maxPayloadBytes=Math.max(96*1024,Math.min(400*1024,Number(process.env.AYCD_UPLOAD_MAX_BYTES||250*1024)));
           for(let i=0;i<uidChunks.length;i++){
-            const batch=await fetchMessageBatch(cfg,uidChunks[i]);
-            highest=Math.max(highest,Number(batch.highest||0));
-            const uploadChunks=splitMessagesByPayloadSize(batch.messages,maxPayloadBytes);
-            if(!uploadChunks.length) uploadChunks.push([]);
+            const sourceUids=uidChunks[i];
+            const batch=await fetchMessageBatch(cfg,sourceUids);
+            const uploadChunks=splitMessagesByPayloadSize(batch.messages,maxPayloadBytes,10);
+
             for(let part=0;part<uploadChunks.length;part++){
               const messages=uploadChunks[part];
-              const isFinal=i===uidChunks.length-1 && part===uploadChunks.length-1;
+              const isFinal=false;
               await postJson('/orders/aycd/bridge/result',{
                 success:true,command_id:cmd.command_id,checked:messages.length,messages,
                 chunk_index:uploadIndex,chunk_count:0,final:isFinal,
                 scan_progress:{processed:sent+messages.length,total:plan.uids.length,mailbox_count:plan.mailboxCount}
-              },b.secret);
+              },b.secret,{attempts:6,timeoutMs:180000});
+
+              // The website accepted these exact messages. Persist their highest UID immediately.
+              const acceptedHighest=messages.reduce((m,x)=>Math.max(m,Number(x.uid||0)),0);
+              const current=readJson(STATE_FILE,{});
+              const skippedSet=new Set([...(current.skippedUids||[]),...(batch.skippedUids||[])].map(Number).filter(Boolean));
+              for(const message of messages) skippedSet.delete(Number(message.uid||0));
+              saveJson(STATE_FILE,{
+                version:4,
+                lastUid:Math.max(Number(current.lastUid||0),acceptedHighest),
+                skippedUids:[...skippedSet].sort((a,b)=>a-b),
+                historicalComplete:isFinal,
+                lastScanAt:new Date().toISOString(),
+                uploadedMessages:Number(current.uploadedMessages||0)+messages.length
+              });
               sent+=messages.length;
               uploadIndex+=1;
-              console.log(`Uploaded AYCD payload ${uploadIndex} (${sent}/${plan.uids.length} messages, ${Math.round(Buffer.byteLength(JSON.stringify(messages),'utf8')/1024)} KB).`);
+              const persisted=readJson(STATE_FILE,{});
+              console.log(`Uploaded AYCD payload ${uploadIndex} (${sent}/${plan.uids.length} messages, ${Math.round(Buffer.byteLength(JSON.stringify(messages),'utf8')/1024)} KB). Durable checkpoint UID ${Number(persisted.lastUid||0)}.`);
             }
-            // Advance the UID checkpoint only after every payload for this UID batch was accepted.
-            saveJson(STATE_FILE,{version:2,lastUid:highest,historicalComplete:i===uidChunks.length-1,lastScanAt:new Date().toISOString()});
+
+            // If every UID in this group was unavailable, record them for retry but move
+            // the contiguous cursor forward so later mail can still be processed.
+            if(!uploadChunks.length){
+              const current=readJson(STATE_FILE,{});
+              const skippedSet=new Set([...(current.skippedUids||[]),...(batch.skippedUids||[])].map(Number).filter(Boolean));
+              const groupHighest=Math.max(...sourceUids.map(Number));
+              saveJson(STATE_FILE,{version:4,lastUid:Math.max(Number(current.lastUid||0),groupHighest),skippedUids:[...skippedSet].sort((a,b)=>a-b),historicalComplete:false,lastScanAt:new Date().toISOString(),uploadedMessages:Number(current.uploadedMessages||0)});
+              console.log(`No available bodies in this AYCD group. Saved ${skippedSet.size} UID(s) for retry and continued after UID ${groupHighest}.`);
+            }
           }
-          console.log(`AYCD scan complete: ${sent} messages checked.`);
+
+          // Retry a limited number of older unavailable UIDs after forward progress
+          // is safely checkpointed. These retries never lower or reset lastUid.
+          const retryQueue=[...new Set((readJson(STATE_FILE,{}).skippedUids||[]).map(Number).filter(Boolean))].sort((a,b)=>a-b).slice(0,25);
+          for(const retryUid of retryQueue){
+            try{
+              const retryBatch=await fetchMessageBatch(cfg,[retryUid]);
+              if(retryBatch.messages.length){
+                const retryParts=splitMessagesByPayloadSize(retryBatch.messages,maxPayloadBytes,1);
+                for(const messages of retryParts){
+                  await postJson('/orders/aycd/bridge/result',{
+                    success:true,command_id:cmd.command_id,checked:messages.length,messages,
+                    chunk_index:uploadIndex,chunk_count:0,final:false,
+                    scan_progress:{processed:plan.uids.length,total:plan.uids.length,mailbox_count:plan.mailboxCount}
+                  },b.secret,{attempts:6,timeoutMs:180000});
+                  uploadIndex+=1;
+                }
+                const current=readJson(STATE_FILE,{});
+                const remaining=(current.skippedUids||[]).map(Number).filter(uid=>uid!==retryUid);
+                saveJson(STATE_FILE,{...current,version:4,lastUid:Number(current.lastUid||0),skippedUids:remaining,lastScanAt:new Date().toISOString()});
+                console.log(`Recovered previously unavailable AYCD UID ${retryUid}. Durable checkpoint remains ${Number(current.lastUid||0)}.`);
+              }
+            }catch(e){
+              console.log(`AYCD UID ${retryUid} is still unavailable; it remains queued for a later scan.`);
+            }
+          }
+
+          // Always send a tiny final marker after all groups. This closes the command even
+          // when the final group contained only skipped messages.
+          await postJson('/orders/aycd/bridge/result',{success:true,command_id:cmd.command_id,checked:0,messages:[],chunk_index:uploadIndex,chunk_count:0,final:true,scan_progress:{processed:plan.uids.length,total:plan.uids.length,mailbox_count:plan.mailboxCount}},b.secret,{attempts:6,timeoutMs:180000});
+          const current=readJson(STATE_FILE,{});
+          saveJson(STATE_FILE,{...current,version:4,historicalComplete:true,lastScanAt:new Date().toISOString()});
+          console.log(`AYCD scan complete: ${sent} messages uploaded. ${Number(current.skippedUids?.length||0)} temporarily unavailable UID(s) remain queued for a later scan.`);
         }
       }catch(e){
         try{await postJson('/orders/aycd/bridge/result',{success:false,command_id:cmd.command_id,checked:e.checked||0,error:e.message,final:true},b.secret);}catch(_){}
-        console.error('AYCD scan failed:',e.message);
+        console.error('AYCD scan failed:',e.message); if(e.responseText) console.error('IMAP response:',e.responseText); if(e.code) console.error('Error code:',e.code);
       }
     }
   }catch(e){console.error('Bridge poll:',e.message);}finally{busy=false;}

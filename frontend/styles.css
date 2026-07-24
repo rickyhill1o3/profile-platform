@@ -1138,3 +1138,10 @@ h1,h2,h3,h4,p{margin:0}
   .setup-wizard-backdrop { padding:10px; align-items:end; }
   .setup-wizard { border-radius:18px 18px 0 0; max-height:94vh; }
 }
+
+/* AYCD profile email-source option */
+.aycd-profile-option { margin-top: 4px; }
+.checkbox-row { display:flex; align-items:flex-start; gap:10px; padding:12px; border:1px solid #cbd5e1; border-radius:10px; background:#f8fafc; cursor:pointer; }
+.checkbox-row input { margin-top:3px; width:17px; height:17px; flex:0 0 auto; }
+.checkbox-row span { display:grid; gap:3px; }
+.checkbox-row small { color:#64748b; font-weight:400; line-height:1.35; }

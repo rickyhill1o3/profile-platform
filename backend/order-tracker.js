@@ -111,7 +111,7 @@ function extractProductSummary(subject, text, store) {
 }
 
 function statusRank(s) {
-  return ({unknown:0,confirmed:1,processing:2,shipped:3,delivered:4,canceled:5,refunded:6})[s] || 0;
+  return ({unknown:0,waiting_confirmation:0.5,confirmed:1,processing:2,shipped:3,delivered:4,canceled:5,refunded:6})[s] || 0;
 }
 
 function normalizeOrderRef(value) {
@@ -138,12 +138,16 @@ function collectOrderRefs(order = {}) {
 }
 
 function serviceOrderNumber(order = {}) {
-  const preferred = [
-    order.metadata?.order_number, order.metadata?.order_id, order.metadata?.purchase_id,
-    order.raw_payload?.order_number, order.raw_payload?.order_id, order.raw_payload?.purchase_id,
-    order.raw_payload?.purchaseId, order.external_order_id
+  const direct = [
+    order.metadata?.purchase_id, order.metadata?.purchaseId,
+    order.metadata?.order_number, order.metadata?.order_id,
+    order.raw_payload?.purchase_id, order.raw_payload?.purchaseId, order.raw_payload?.purchaseID,
+    order.raw_payload?.order_number, order.raw_payload?.order_id,
+    order.external_order_id
   ].map(clean).find(v => normalizeOrderRef(v).length >= 6);
-  return preferred || clean(order.external_order_id || order.id);
+  if (direct) return direct;
+  const refs = collectOrderRefs(order);
+  return refs[0] || clean(order.external_order_id || order.id);
 }
 
 async function loadServiceOrders(supabase, userId) {
@@ -178,7 +182,8 @@ async function syncServiceOrders(supabase, userId, accounts = []) {
     const payload = {
       user_id: userId, source_order_id: source.id, service_order_external_id: source.external_order_id || null,
       profile_id: prior?.profile_id || accounts[0]?.profile_id || null, source_email: prior?.source_email || defaultEmail,
-      store, order_number: prior?.order_number || orderNumber, status: prior?.status || 'confirmed',
+      store, order_number: prior?.order_number || orderNumber,
+      status: prior?.status || (['confirmed','processing','shipped','delivered','canceled','refunded'].includes(lower(source.status)) ? lower(source.status) : 'waiting_confirmation'),
       order_date: prior?.order_date || source.created_at || new Date().toISOString(),
       last_status_at: prior?.last_status_at || source.created_at || new Date().toISOString(),
       credits_spent: Number(source.credits_charged || 0), product_summary: clean(source.product_name || source.sku || 'Checkout').slice(0,500),
@@ -199,7 +204,12 @@ async function syncServiceOrders(supabase, userId, accounts = []) {
         }
       }
     }
-    if (tracked) await ensureInvestmentRow(supabase, tracked, source, !['canceled','refunded'].includes(tracked.status));
+    if (tracked && ['confirmed','processing','shipped','delivered'].includes(lower(tracked.status))) {
+      await ensureInvestmentRow(supabase, tracked, source, true);
+    } else if (tracked && ['canceled','refunded'].includes(lower(tracked.status))) {
+      const { data: investment } = await supabase.from('investment_products').select('id').eq('user_id', tracked.user_id).eq('source_order_id', source.id).maybeSingle();
+      if (investment?.id) await ensureInvestmentRow(supabase, tracked, source, false);
+    }
   }
   return serviceOrders;
 }
@@ -368,13 +378,25 @@ async function saveParsedMessage(supabase, account, parsed, uid, adjustCredits =
     message_id: messageId, source_email: account.email, body_excerpt: text.slice(0, 1000)
   }, { onConflict: 'user_id,message_id', ignoreDuplicates: true });
 
+  const sourceMetadata = {
+    ...(serviceOrder.metadata || {}),
+    purchase_id: serviceOrder.metadata?.purchase_id || orderNumber,
+    order_number: orderNumber,
+    confirmation_status: status,
+    imap_status: status,
+    imap_last_message_at: eventAt,
+    imap_last_message_id: messageId
+  };
+  if (status === 'confirmed') sourceMetadata.confirmed_by_email_at = eventAt;
+  await supabase.from('orders').update({ status, external_order_id: orderNumber, metadata: sourceMetadata }).eq('id', serviceOrder.id);
+
   const inactive = ['canceled','refunded'].includes(status);
   await ensureInvestmentRow(supabase, order, serviceOrder, !inactive);
   if (inactive && !existing.credits_refunded && Number(serviceOrder.credits_charged || 0) > 0 && typeof adjustCredits === 'function') {
     const refund = Number(serviceOrder.credits_charged || 0);
     await adjustCredits({ userId: account.user_id, delta: refund, reason: 'imap_order_canceled_refund', note: `Credits refunded after ${store} order ${orderNumber} was ${status}`, metadata: { tracked_order_id: order.id, source_order_id: serviceOrder.id, imap_status: status }, orderId: serviceOrder.id });
     await supabase.from('tracked_orders').update({ credits_refunded: true, credits_refunded_at: new Date().toISOString() }).eq('id', order.id);
-    await supabase.from('orders').update({ status: 'canceled', metadata: { ...(serviceOrder.metadata || {}), imap_status: status, imap_canceled_at: new Date().toISOString(), credits_refunded_by_imap: refund } }).eq('id', serviceOrder.id);
+    await supabase.from('orders').update({ status: 'canceled', metadata: { ...sourceMetadata, imap_canceled_at: new Date().toISOString(), credits_refunded_by_imap: refund } }).eq('id', serviceOrder.id);
   }
   return { saved: true, order_id: order.id, status };
 }
@@ -820,13 +842,11 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits })
     };
     if (profileIds.length) {
       try {
-        const r = await supabase.from('profile_store_credentials').select('profile_id,login_email').in('profile_id', profileIds);
+        const r = await supabase.from('profile_store_credentials').select('profile_id,login_email,use_aycd_inbox').in('profile_id', profileIds).eq('use_aycd_inbox', true);
         if (!r.error) for (const row of r.data || []) add(row);
       } catch (_) {}
-      try {
-        const r = await supabase.from('accounts').select('profile_id,login_email').in('profile_id', profileIds);
-        if (!r.error) for (const row of r.data || []) add(row);
-      } catch (_) {}
+      // AYCD linkage is explicit. Legacy account rows are not included unless
+      // the corresponding store credential has use_aycd_inbox enabled.
     }
     return map;
   }

@@ -1281,13 +1281,51 @@ function extractTargetSkuFromText(value = '') {
     return '';
 }
 
+function extractCheckoutReferenceDeep(payload = {}, preferredKeys = []) {
+    const wanted = new Set((preferredKeys || []).map((key) => String(key || '').toLowerCase().replace(/[^a-z0-9]/g, '')));
+    const candidates = [];
+    const visit = (value, key = '', depth = 0) => {
+        if (depth > 8 || value == null) return;
+        if (Array.isArray(value)) {
+            for (const item of value) visit(item, key, depth + 1);
+            return;
+        }
+        if (typeof value === 'object') {
+            for (const [childKey, childValue] of Object.entries(value)) visit(childValue, childKey, depth + 1);
+            return;
+        }
+        const normalizedKey = String(key || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+        if (!wanted.has(normalizedKey)) return;
+        const cleaned = cleanFieldValue(value).replace(/^#/, '').trim();
+        if (cleaned && !/^n\/?a$/i.test(cleaned)) candidates.push(cleaned);
+    };
+    visit(payload);
+    return candidates.find(Boolean) || '';
+}
+
+function extractAmazonPurchaseId(payload = {}, fields = {}) {
+    const direct = cleanFieldValue(
+        payload.purchase_id || payload.purchaseId || payload.purchaseID ||
+        payload.metadata?.purchase_id || payload.metadata?.purchaseId ||
+        fields['purchase id'] || fields['purchase_id'] || fields['purchase'] || ''
+    ).replace(/^#/, '').trim();
+    if (direct) return direct;
+    return extractCheckoutReferenceDeep(payload, [
+        'purchase_id', 'purchaseId', 'purchaseID', 'purchase id',
+        'amazon_purchase_id', 'amazonPurchaseId', 'purchase'
+    ]);
+}
+
 function stableExternalOrderId(payload = {}, normalized = {}) {
     const direct = String(
         payload.external_order_id ||
+        payload.purchase_id ||
+        payload.purchaseId ||
         payload.order_id ||
-        payload.id ||
+        normalized.purchase_id ||
         normalized.order_id ||
         normalized.order_number ||
+        payload.id ||
         ''
     ).trim();
     if (direct) return direct;
@@ -1390,13 +1428,18 @@ function normalizeIncomingOrderPayload(payload = {}) {
     const descOrderId = extractOrderIdFromText(embed.description || payload.description || '');
     const productLinkSource = payload.product_url || payload.url || fields['product'] || indexedProductValue || fields['share link'] || fields['input'] || embed.description || embed.url || '';
     const productLink = extractMarkdownLink(productLinkSource);
-    const orderLink = extractMarkdownLink(fields['order id'] || fields['order number'] || payload.order_number || '');
+    const amazonPurchaseId = site === 'amazon' ? extractAmazonPurchaseId(payload, fields) : '';
+    const genericPurchaseId = cleanFieldValue(payload.purchase_id || payload.purchaseId || fields['purchase id'] || '');
+    const orderLink = extractMarkdownLink(amazonPurchaseId || fields['order id'] || fields['order number'] || genericPurchaseId || payload.order_number || '');
     let productName = cleanFieldValue(productLink?.text || productFieldRaw || '');
     if (!productName || /^n\/?a$/i.test(productName)) {
         const asin = extractAmazonAsin(payload.url || embed.url || fields['sku'] || '');
         if (asin) productName = `Amazon item ${asin}`;
     }
-    const orderNumber = cleanFieldValue(orderLink?.text || payload.order_number || fields['order id'] || fields['order number'] || descOrderId || '').replace(/^#/, '');
+    const orderNumber = cleanFieldValue(
+        amazonPurchaseId || orderLink?.text || payload.order_number || payload.order_id ||
+        fields['purchase id'] || fields['order id'] || fields['order number'] || genericPurchaseId || descOrderId || ''
+    ).replace(/^#/, '');
     const accountEmail = extractEmail(payload.user_email || payload.email || fields['account'] || fields['email'] || '');
     const profileName = cleanFieldValue(payload.profile_name || fields['profile'] || '');
     const sku = cleanFieldValue(payload.sku || payload.product_sku || fields['sku'] || '')
@@ -1446,6 +1489,7 @@ function normalizeIncomingOrderPayload(payload = {}) {
         profile_name: profileName,
         order_id: orderNumber,
         order_number: orderNumber,
+        purchase_id: amazonPurchaseId || genericPurchaseId || '',
         countdown_id: payload.countdown_id || null,
         raw_payload: payload
     };
@@ -3657,13 +3701,18 @@ async function sendDiscordWebhookToTarget({
         description = rawDesc || normalized.product_name || order.product_name || 'Checkout error received';
         footerText = decodeHtmlEntities(String(embed?.footer?.text || '')).trim() || 'Checkout error captured by The Shore Shack';
     } else {
+        const awaitingConfirmation = String(order.status || '') === 'waiting_confirmation';
         title = isInsufficient
             ? `Checkout Logged • Credits Needed`
-            : `Successful Checkout • ${siteLabel}`;
+            : awaitingConfirmation
+                ? `Checkout Submitted • Awaiting Email Confirmation • ${siteLabel}`
+                : `Successful Checkout • ${siteLabel}`;
         description = normalized.product_name || order.product_name || 'Checkout received';
         footerText = isInsufficient
             ? 'Order saved without charging credits'
-            : 'Youve Been Served by The Shore Shack';
+            : awaitingConfirmation
+                ? 'The Shore Shack is waiting for the retailer confirmation email'
+                : 'Youve Been Served by The Shore Shack';
     }
 
     const checkoutItems = extractCheckoutLineItems(payload);
@@ -3716,6 +3765,9 @@ async function sendDiscordWebhookToTarget({
 
     if (checkoutType === 'success') {
         embed.fields.push({ name: 'Credits', value: String(order.credits_charged || 0), inline: true });
+        if (String(order.status || '') === 'waiting_confirmation') {
+            embed.fields.push({ name: 'Confirmation', value: 'Waiting for retailer email', inline: true });
+        }
     }
 
     if (normalized.sku) {
@@ -4004,11 +4056,15 @@ async function recordSuccessfulCheckout(payload) {
         ...normalized,
         user_id: user.id,
         external_order_id: externalOrderId,
-        status: "success",
+        status: "waiting_confirmation",
         credits_charged: creditsToCharge,
         metadata: {
             ...(payload.metadata || {}),
             matched_user_email: user.email,
+            purchase_id: normalized.purchase_id || normalized.order_number || null,
+            order_number: normalized.order_number || null,
+            confirmation_status: 'waiting_confirmation',
+            waiting_for_confirmation_since: new Date().toISOString(),
             requested_credits: creditsToCharge,
             previous_balance: currentBalance,
             projected_balance_after_charge: currentBalance - creditsToCharge,
@@ -6751,7 +6807,8 @@ function normalizeStoreCredentialsPayload(payload = {}) {
             login_email: String(item.login_email || '').trim() || String(payload.account_login_email || payload.email || '').trim(),
             login_password: String(item.login_password || '').trim() || String(payload.account_login_password || '').trim(),
             gmail_app_password: normalizeStoredGmailAppPassword(item.gmail_app_password) || (isImapStore ? sharedGmailAppPassword : normalizeStoredGmailAppPassword(payload.gmail_app_password)),
-            amazon_2fa_secret: String(item.amazon_2fa_secret || item.two_fa_secret || '').trim() || String(payload.amazon_2fa_secret || '').trim()
+            amazon_2fa_secret: String(item.amazon_2fa_secret || item.two_fa_secret || '').trim() || String(payload.amazon_2fa_secret || '').trim(),
+            use_aycd_inbox: item.use_aycd_inbox === true || String(item.use_aycd_inbox || '').toLowerCase() === 'true'
         };
     });
 
@@ -6788,14 +6845,15 @@ async function replaceProfileStoreCredentials(profileId, payload = {}) {
     try {
         await supabase.from('profile_store_credentials').delete().eq('profile_id', profileId);
         const rows = Object.entries(credentials)
-            .filter(([, c]) => c.login_email || c.login_password || c.gmail_app_password || c.amazon_2fa_secret)
+            .filter(([, c]) => c.login_email || c.login_password || c.gmail_app_password || c.amazon_2fa_secret || c.use_aycd_inbox)
             .map(([store, c]) => ({
                 profile_id: profileId,
                 store,
                 login_email: c.login_email || null,
                 login_password: c.login_password || null,
                 gmail_app_password: c.gmail_app_password || null,
-                amazon_2fa_secret: c.amazon_2fa_secret || null
+                amazon_2fa_secret: c.amazon_2fa_secret || null,
+                use_aycd_inbox: !!c.use_aycd_inbox
             }));
         if (rows.length) {
             const { error } = await supabase.from('profile_store_credentials').insert(rows);

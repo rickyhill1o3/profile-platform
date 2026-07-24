@@ -406,6 +406,7 @@ function storeCredentialBlock(store, values = {}) {
     const loginEmail = escapeHTML(values.login_email || '');
     const loginPassword = escapeHTML(values.login_password || '');
     const gmailAppPassword = escapeHTML(values.gmail_app_password || '');
+    const useAycdInbox = !!values.use_aycd_inbox;
     const amazonSecret = escapeHTML(values.amazon_2fa_secret || values.two_fa_secret || '');
     const sharedEmail = escapeHTML(document.getElementById('email')?.value || '');
 
@@ -432,6 +433,19 @@ function storeCredentialBlock(store, values = {}) {
             <div class="field field--full">
                 <label for="${prefix}_amazon_2fa_secret">Amazon Authenticator / 2FA Secret</label>
                 <input class="input" id="${prefix}_amazon_2fa_secret" value="${amazonSecret}" placeholder="Amazon Authenticator Secret" />
+            </div>`;
+    }
+
+    if (['imap', 'amazon2fa'].includes(cfg.method)) {
+        extra += `
+            <div class="field field--full aycd-profile-option">
+                <label class="checkbox-row" for="${prefix}_use_aycd_inbox">
+                    <input id="${prefix}_use_aycd_inbox" type="checkbox" ${useAycdInbox ? 'checked' : ''} />
+                    <span>
+                        <strong>Use AYCD Unified Inbox for order emails</strong>
+                        <small>Choose this when this login email is already inside the super-admin AYCD Inbox. A separate Gmail app password is not required for order tracking.</small>
+                    </span>
+                </label>
             </div>`;
     }
 
@@ -496,7 +510,8 @@ function collectStoreCredentials(assignedStores = []) {
             login_email: document.getElementById(`${prefix}_login_email`)?.value.trim() || '',
             login_password: document.getElementById(`${prefix}_login_password`)?.value.trim() || '',
             gmail_app_password: (document.getElementById(`${prefix}_gmail_app_password`)?.value || '').replace(/\s+/g, ''),
-            amazon_2fa_secret: document.getElementById(`${prefix}_amazon_2fa_secret`)?.value.trim() || ''
+            amazon_2fa_secret: document.getElementById(`${prefix}_amazon_2fa_secret`)?.value.trim() || '',
+            use_aycd_inbox: !!document.getElementById(`${prefix}_use_aycd_inbox`)?.checked
         };
     });
     return out;
@@ -509,8 +524,9 @@ function credentialStatusForStore(profile = {}, store = '') {
     const hasEmail = !!String(creds.login_email || '').trim();
     const hasPassword = !!String(creds.login_password || '').trim();
     const hasImap = !!String(creds.gmail_app_password || '').trim();
+    const usesAycd = !!creds.use_aycd_inbox;
     const has2fa = !!String(creds.amazon_2fa_secret || creds.two_fa_secret || '').trim();
-    if (cfg.method === 'imap') return hasEmail && hasPassword && hasImap ? 'Login complete' : 'Missing login info';
+    if (cfg.method === 'imap') return hasEmail && hasPassword && (hasImap || usesAycd) ? 'Login complete' : 'Missing login info';
     if (cfg.method === 'amazon2fa') return hasEmail && hasPassword && has2fa ? 'Login complete' : 'Missing login info';
     return hasEmail && hasPassword ? 'Login complete' : 'Missing login info';
 }
