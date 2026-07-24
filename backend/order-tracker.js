@@ -786,49 +786,76 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits })
 
 
   app.get('/orders/bootstrap', auth, async (req, res) => {
+    // Bootstrap must always return saved orders even when one optional mailbox table,
+    // legacy schema, or service-order synchronization step is temporarily unavailable.
+    const warnings = [];
+    let discovered = [];
     try {
-      const discovered = await loadScanAccounts(supabase, req.user_id);
-      await syncServiceOrders(supabase, req.user_id, discovered);
-      for (const account of discovered) {
-        try { await upsertScanState(supabase, account, { is_enabled: true }); } catch (_) {}
-      }
-      let states = [];
-      try {
-        const stateResult = await supabase.from('imap_scan_accounts').select('*').eq('user_id', req.user_id).order('email');
-        if (!stateResult.error) states = stateResult.data || [];
-      } catch (_) {}
-      const stateByEmail = new Map(states.map(row => [lower(row.email), row]));
-      const accounts = discovered.map(account => ({
-        ...(stateByEmail.get(account.email) || {}),
-        user_id: account.user_id,
-        profile_id: account.profile_id,
-        email: account.email,
-        provider: account.provider.name,
-        connected: true,
-        credential_ready: true
-      }));
-      for (const state of states) {
-        const email = lower(state.email);
-        if (!email || accounts.some(a => lower(a.email) === email)) continue;
-        accounts.push({ ...state, email, provider: state.provider || 'imap', connected: true, credential_ready: false });
-      }
-      let q = supabase.from('tracked_orders').select('*, tracked_order_events(*)').eq('user_id', req.user_id).order('order_date', { ascending: false }).limit(1000);
-      const { data, error } = await q;
-      if (error) throw error;
-      const orders = data || [];
-      const summary = orders.reduce((a,o) => { a.total += Number(o.total || 0); a[o.status] = (a[o.status]||0)+1; return a; }, { total:0 });
-      summary.success_rate = orders.length ? Math.round(((summary.delivered || 0) + (summary.shipped || 0)) / orders.length * 1000) / 10 : 0;
-      res.json({
-        accounts,
-        connected_count: accounts.length,
-        orders,
-        summary,
-        aycd: { configured: req.role === 'super_admin', mode: 'local_unified_imap_bridge' },
-        is_super_admin: req.role === 'super_admin'
-      });
+      discovered = await loadScanAccounts(supabase, req.user_id);
     } catch (error) {
-      res.status(500).json({ error: error.message });
+      warnings.push(`Mailbox discovery: ${error.message}`);
     }
+
+    try {
+      await syncServiceOrders(supabase, req.user_id, discovered);
+    } catch (error) {
+      warnings.push(`Order synchronization: ${error.message}`);
+    }
+
+    for (const account of discovered) {
+      try { await upsertScanState(supabase, account, { is_enabled: true }); } catch (_) {}
+    }
+
+    let states = [];
+    try {
+      const stateResult = await supabase.from('imap_scan_accounts').select('*').eq('user_id', req.user_id).order('email');
+      if (stateResult.error) warnings.push(`Mailbox status: ${stateResult.error.message}`);
+      else states = stateResult.data || [];
+    } catch (error) {
+      warnings.push(`Mailbox status: ${error.message}`);
+    }
+
+    const stateByEmail = new Map(states.map(row => [lower(row.email), row]));
+    const accounts = discovered.map(account => ({
+      ...(stateByEmail.get(account.email) || {}),
+      user_id: account.user_id,
+      profile_id: account.profile_id,
+      email: account.email,
+      provider: account.provider.name,
+      connected: true,
+      credential_ready: true
+    }));
+    for (const state of states) {
+      const email = lower(state.email);
+      if (!email || accounts.some(a => lower(a.email) === email)) continue;
+      accounts.push({ ...state, email, provider: state.provider || 'imap', connected: true, credential_ready: false });
+    }
+
+    let orders = [];
+    try {
+      let result = await supabase.from('tracked_orders').select('*, tracked_order_events(*)').eq('user_id', req.user_id).order('order_date', { ascending: false }).limit(1000);
+      if (result.error) {
+        // Some deployments do not expose the relationship in the PostgREST schema cache.
+        result = await supabase.from('tracked_orders').select('*').eq('user_id', req.user_id).order('order_date', { ascending: false }).limit(1000);
+      }
+      if (result.error) throw result.error;
+      orders = result.data || [];
+    } catch (error) {
+      warnings.push(`Tracked orders: ${error.message}`);
+    }
+
+    const summary = orders.reduce((a,o) => { a.total += Number(o.total || 0); a[o.status] = (a[o.status]||0)+1; return a; }, { total:0 });
+    summary.success_rate = orders.length ? Math.round(((summary.delivered || 0) + (summary.shipped || 0)) / orders.length * 1000) / 10 : 0;
+    return res.json({
+      accounts,
+      connected_count: accounts.length,
+      orders,
+      summary,
+      warnings,
+      partial: warnings.length > 0,
+      aycd: { configured: req.role === 'super_admin', mode: 'local_unified_imap_bridge' },
+      is_super_admin: req.role === 'super_admin'
+    });
   });
 
 

@@ -7718,7 +7718,7 @@ app.patch("/profiles/bulk", auth, async (req, res) => {
             const matchingAccounts = accountRows.filter((account) => normalizeProfileAccountType(account.provider || '') === store);
             for (let i = 0; i < matchingAccounts.length; i += 25) {
                 const results = await Promise.all(matchingAccounts.slice(i, i + 25).map((account) =>
-                    supabase.from('accounts').update({ password: String(req.body.login_password) }).eq('id', account.id)
+                    supabase.from('accounts').update({ login_password: String(req.body.login_password) }).eq('id', account.id)
                 ));
                 const failed = results.find((result) => result?.error);
                 if (failed?.error) throw failed.error;
