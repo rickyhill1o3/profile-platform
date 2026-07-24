@@ -335,16 +335,48 @@ async function upsertScanState(supabase, account, patch) {
   }, { onConflict: 'user_id,email' });
 }
 
+
+async function archiveEmailMetadata(supabase, account, parsed, uid, classification = {}) {
+  const subject = clean(parsed.subject);
+  const fromText = clean(parsed.from?.text || parsed.from || '');
+  const toText = clean(parsed.to?.text || parsed.to || '');
+  const ccText = clean(parsed.cc?.text || parsed.cc || '');
+  const bodyText = clean(parsed.text || parsed.html || '').replace(/\u0000/g, '');
+  const store = classification.store || detectStore(fromText, subject, bodyText) || 'unknown';
+  const emailType = classification.status || detectStatus(subject, bodyText) || 'unknown';
+  const orderNumber = classification.orderNumber || (store !== 'unknown' ? extractOrderNumber(store, subject, bodyText) : '') || null;
+  const messageId = clean(parsed.messageId) || `${account.email}:${uid}`;
+  const receivedAt = (parsed.date || new Date()).toISOString();
+  const keepForever = ['confirmed','processing','shipped','delivered','canceled','refunded'].includes(emailType);
+  const row = {
+    user_id: account.user_id, message_id: messageId, imap_uid: Number(uid || 0) || null,
+    mailbox_email: lower(account.email), from_text: fromText.slice(0,1000), to_text: toText.slice(0,2000), cc_text: ccText.slice(0,2000),
+    subject: subject.slice(0,1000), received_at: receivedAt, store, email_type: emailType, order_number: orderNumber,
+    snippet: bodyText.replace(/\s+/g,' ').slice(0,600), keep_forever: keepForever, is_order_related: keepForever,
+    has_attachments: Array.isArray(parsed.attachments) && parsed.attachments.length > 0, attachment_count: Array.isArray(parsed.attachments) ? parsed.attachments.length : 0,
+    updated_at: new Date().toISOString()
+  };
+  const { data, error } = await supabase.from('email_messages').upsert(row, { onConflict:'user_id,message_id' }).select().single();
+  if (error) {
+    // Keep order scanning operational before the optional Email Center migration is installed.
+    if (!/email_messages|relation .* does not exist|schema cache/i.test(String(error.message||''))) throw error;
+    return null;
+  }
+  return data;
+}
 async function saveParsedMessage(supabase, account, parsed, uid, adjustCredits = null) {
   const subject = clean(parsed.subject);
   const from = parsed.from?.text || '';
   const text = clean(parsed.text || parsed.html || '').replace(/\u0000/g, '');
   const store = detectStore(from, subject, text);
-  if (!store) return { ignored: true };
   const status = detectStatus(subject, text);
-  if (status === 'unknown') return { ignored: true };
+  if (!store || status === 'unknown') {
+    const archivedEmail = await archiveEmailMetadata(supabase, account, parsed, uid, { store: store || 'unknown', status });
+    return { ignored: true, email_id: archivedEmail?.id || null };
+  }
   const orderNumber = extractOrderNumber(store, subject, text);
-  if (!orderNumber) return { ignored: true };
+  const archivedEmail = await archiveEmailMetadata(supabase, account, parsed, uid, { store, status, orderNumber });
+  if (!orderNumber) return { ignored: true, email_id: archivedEmail?.id || null };
   const messageId = clean(parsed.messageId) || `${account.email}:${uid}`;
   const eventAt = (parsed.date || new Date()).toISOString();
   const amounts = extractAmounts(text);
@@ -385,6 +417,7 @@ async function saveParsedMessage(supabase, account, parsed, uid, adjustCredits =
   };
   const { data: order, error } = await supabase.from('tracked_orders').update(patch).eq('id', existing.id).select().single();
   if (error) throw error;
+  if (archivedEmail?.id) await supabase.from('email_messages').update({ linked_order_id: order.id, is_order_related: true, keep_forever: true, updated_at: new Date().toISOString() }).eq('id', archivedEmail.id);
   await supabase.from('tracked_order_events').upsert({
     order_id: order.id, user_id: account.user_id, status, event_at: eventAt, subject,
     message_id: messageId, source_email: account.email, body_excerpt: text.slice(0, 1000)
@@ -1163,6 +1196,70 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits })
     const rows = data || [];
     const total = rows.reduce((s,o)=>s+Number(o.total||0)+Number(o.credits_spent||0),0);
     res.type('html').send(`<!doctype html><html><head><meta charset="utf-8"><title>${year} Order Receipts</title><style>body{font-family:Arial,sans-serif;margin:28px}table{width:100%;border-collapse:collapse}th,td{padding:8px;border-bottom:1px solid #ddd;text-align:left}.receipt{page-break-before:always}.no-print{margin-bottom:16px}@media print{.no-print{display:none}}</style></head><body><div class="no-print"><button onclick="print()">Print / Save as PDF</button></div><h1>${year} Successful Order Receipt Archive</h1><p>${rows.length} orders • Combined purchase + credits: $${total.toFixed(2)}</p><table><thead><tr><th>Date</th><th>Store</th><th>Order</th><th>Status</th><th>Purchase</th><th>Credits</th></tr></thead><tbody>${rows.map(o=>`<tr><td>${htmlEscape((o.order_date||'').slice(0,10))}</td><td>${htmlEscape(o.store)}</td><td>${htmlEscape(o.order_number)}</td><td>${htmlEscape(o.status)}</td><td>$${Number(o.total||0).toFixed(2)}</td><td>$${Number(o.credits_spent||0).toFixed(2)}</td></tr>`).join('')}</tbody></table>${rows.map(o=>`<section class="receipt"><h2>${htmlEscape(o.store)} — ${htmlEscape(o.order_number)}</h2>${o.receipt_html || `<pre>${htmlEscape(o.receipt_text || '')}</pre>`}</section>`).join('')}</body></html>`);
+  });
+
+  // Super-admin Email Center: lightweight AYCD/direct-IMAP metadata, manual linking, and retention cleanup.
+  app.get('/admin/email-center', auth, async (req, res) => {
+    if (req.role !== 'super_admin') return res.status(403).json({ error:'Super admin only.' });
+    const page = Math.max(1, Number(req.query.page || 1));
+    const limit = Math.max(10, Math.min(200, Number(req.query.limit || 75)));
+    const from = (page - 1) * limit, to = from + limit - 1;
+    let q = supabase.from('email_messages').select('*', { count:'exact' }).eq('user_id', req.user_id);
+    if (req.query.type && req.query.type !== 'all') q = q.eq('email_type', clean(req.query.type));
+    if (req.query.store && req.query.store !== 'all') q = q.eq('store', clean(req.query.store));
+    if (req.query.mailbox) q = q.ilike('mailbox_email', `%${clean(req.query.mailbox)}%`);
+    if (req.query.linked === 'yes') q = q.not('linked_order_id','is',null);
+    if (req.query.linked === 'no') q = q.is('linked_order_id',null);
+    const term = clean(req.query.q);
+    if (term) q = q.or(`subject.ilike.%${term.replace(/[,%]/g,'')}%,from_text.ilike.%${term.replace(/[,%]/g,'')}%,mailbox_email.ilike.%${term.replace(/[,%]/g,'')}%,order_number.ilike.%${term.replace(/[,%]/g,'')}%,snippet.ilike.%${term.replace(/[,%]/g,'')}%`);
+    const { data, error, count } = await q.order('received_at',{ascending:false}).range(from,to);
+    if (error) return res.status(500).json({error:error.message});
+    const { data: stats } = await supabase.from('email_messages').select('email_type,store,linked_order_id,keep_forever').eq('user_id',req.user_id);
+    const summary=(stats||[]).reduce((a,e)=>{a.total++;a[e.email_type]=(a[e.email_type]||0)+1;if(e.linked_order_id)a.linked++;if(e.keep_forever)a.kept++;return a;},{total:0,linked:0,kept:0});
+    res.json({emails:data||[],count:count||0,page,limit,summary});
+  });
+
+  app.get('/admin/email-center/orders', auth, async (req,res)=>{
+    if(req.role!=='super_admin') return res.status(403).json({error:'Super admin only.'});
+    const term=clean(req.query.q); let q=supabase.from('tracked_orders').select('id,store,order_number,status,product_summary,source_email,order_date').eq('user_id',req.user_id);
+    if(term) q=q.or(`order_number.ilike.%${term.replace(/[,%]/g,'')}%,product_summary.ilike.%${term.replace(/[,%]/g,'')}%,source_email.ilike.%${term.replace(/[,%]/g,'')}%`);
+    const {data,error}=await q.order('order_date',{ascending:false}).limit(100); if(error)return res.status(500).json({error:error.message}); res.json({orders:data||[]});
+  });
+
+  app.post('/admin/email-center/:id/link', auth, async (req,res)=>{
+    if(req.role!=='super_admin') return res.status(403).json({error:'Super admin only.'});
+    const {data:email,error:ee}=await supabase.from('email_messages').select('*').eq('id',req.params.id).eq('user_id',req.user_id).maybeSingle();
+    if(ee||!email)return res.status(404).json({error:ee?.message||'Email not found'});
+    const {data:order,error:oe}=await supabase.from('tracked_orders').select('*').eq('id',req.body?.order_id).eq('user_id',req.user_id).maybeSingle();
+    if(oe||!order)return res.status(404).json({error:oe?.message||'Order not found'});
+    const status=['confirmed','processing','shipped','delivered','canceled','refunded'].includes(email.email_type)?email.email_type:order.status;
+    const patch={linked_order_id:order.id,is_order_related:true,keep_forever:true,order_number:email.order_number||order.order_number,updated_at:new Date().toISOString()};
+    await supabase.from('email_messages').update(patch).eq('id',email.id);
+    if(status!==order.status) await supabase.from('tracked_orders').update({status,last_status_at:email.received_at||new Date().toISOString(),updated_at:new Date().toISOString()}).eq('id',order.id);
+    res.json({success:true,status});
+  });
+
+  app.post('/admin/email-center/:id/unlink', auth, async (req,res)=>{
+    if(req.role!=='super_admin') return res.status(403).json({error:'Super admin only.'});
+    const {error}=await supabase.from('email_messages').update({linked_order_id:null,updated_at:new Date().toISOString()}).eq('id',req.params.id).eq('user_id',req.user_id);
+    if(error)return res.status(500).json({error:error.message});res.json({success:true});
+  });
+
+  app.post('/admin/email-center/cleanup', auth, async (req,res)=>{
+    if(req.role!=='super_admin') return res.status(403).json({error:'Super admin only.'});
+    const days=Math.max(0,Math.min(3650,Number(req.body?.older_than_days||30)));
+    const cutoff=new Date(Date.now()-days*86400000).toISOString();
+    let q=supabase.from('email_messages').delete({count:'exact'}).eq('user_id',req.user_id).eq('keep_forever',false).is('linked_order_id',null);
+    if(days>0) q=q.lt('received_at',cutoff);
+    const {error,count}=await q; if(error)return res.status(500).json({error:error.message});res.json({success:true,deleted:count||0});
+  });
+
+  app.post('/admin/email-center/backfill-order-events', auth, async (req,res)=>{
+    if(req.role!=='super_admin') return res.status(403).json({error:'Super admin only.'});
+    const {data:events,error}=await supabase.from('tracked_order_events').select('*,tracked_orders(store,order_number)').eq('user_id',req.user_id).order('event_at',{ascending:true});
+    if(error)return res.status(500).json({error:error.message}); let saved=0;
+    for(const e of events||[]){const row={user_id:req.user_id,message_id:e.message_id||`event:${e.id}`,mailbox_email:lower(e.source_email),from_text:'',to_text:lower(e.source_email),subject:clean(e.subject),received_at:e.event_at,email_type:e.status||'unknown',store:e.tracked_orders?.store||'unknown',order_number:e.tracked_orders?.order_number||null,snippet:clean(e.body_excerpt).slice(0,600),linked_order_id:e.order_id,is_order_related:true,keep_forever:true,updated_at:new Date().toISOString()};const r=await supabase.from('email_messages').upsert(row,{onConflict:'user_id,message_id'});if(!r.error)saved++;}
+    res.json({success:true,saved});
   });
 
   app.get('/investment', auth, async (req, res) => {
