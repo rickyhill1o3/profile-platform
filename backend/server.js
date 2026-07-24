@@ -7658,9 +7658,19 @@ app.patch("/profiles/bulk", auth, async (req, res) => {
 
         let existingRows = [];
         try {
-            const { data, error } = await supabase.from('profile_store_credentials').select('*').in('profile_id', ownedIds).eq('store', store);
-            if (error) throw error;
-            existingRows = data || [];
+            // Supabase/PostgREST can reject very large `in(...)` filters because the generated
+            // request URL becomes too long. Load credentials in bounded chunks so hundreds of
+            // selected profiles can be edited together safely.
+            for (let i = 0; i < ownedIds.length; i += 75) {
+                const idChunk = ownedIds.slice(i, i + 75);
+                const { data, error } = await supabase
+                    .from('profile_store_credentials')
+                    .select('*')
+                    .in('profile_id', idChunk)
+                    .eq('store', store);
+                if (error) throw error;
+                existingRows.push(...(data || []));
+            }
         } catch (error) {
             return res.status(500).json({ error: `Could not load store credentials: ${error.message}` });
         }
@@ -7680,25 +7690,38 @@ app.patch("/profiles/bulk", auth, async (req, res) => {
             };
         });
 
-        for (let i = 0; i < rows.length; i += 100) {
-            const chunk = rows.slice(i, i + 100);
-            for (const row of chunk) {
+        // Process bounded concurrent writes. Sequentially updating 500-700 profiles can exceed
+        // Render's request timeout even though every individual update is valid.
+        for (let i = 0; i < rows.length; i += 20) {
+            const chunk = rows.slice(i, i + 20);
+            const results = await Promise.all(chunk.map(async (row) => {
                 if (row.id) {
                     const { id, ...changes } = row;
-                    const { error } = await supabase.from('profile_store_credentials').update(changes).eq('id', id);
-                    if (error) throw error;
-                } else {
-                    const { error } = await supabase.from('profile_store_credentials').insert(row);
-                    if (error) throw error;
+                    return supabase.from('profile_store_credentials').update(changes).eq('id', id);
                 }
-            }
+                return supabase.from('profile_store_credentials').insert(row);
+            }));
+            const failed = results.find((result) => result?.error);
+            if (failed?.error) throw failed.error;
         }
 
         if (hasLoginPassword) {
-            const { data: accountRows } = await supabase.from('accounts').select('id,profile_id,provider').in('profile_id', ownedIds);
-            for (const account of accountRows || []) {
-                if (normalizeProfileAccountType(account.provider || '') !== store) continue;
-                await supabase.from('accounts').update({ password: String(req.body.login_password) }).eq('id', account.id);
+            const accountRows = [];
+            for (let i = 0; i < ownedIds.length; i += 75) {
+                const { data, error } = await supabase
+                    .from('accounts')
+                    .select('id,profile_id,provider')
+                    .in('profile_id', ownedIds.slice(i, i + 75));
+                if (error) throw error;
+                accountRows.push(...(data || []));
+            }
+            const matchingAccounts = accountRows.filter((account) => normalizeProfileAccountType(account.provider || '') === store);
+            for (let i = 0; i < matchingAccounts.length; i += 25) {
+                const results = await Promise.all(matchingAccounts.slice(i, i + 25).map((account) =>
+                    supabase.from('accounts').update({ password: String(req.body.login_password) }).eq('id', account.id)
+                ));
+                const failed = results.find((result) => result?.error);
+                if (failed?.error) throw failed.error;
             }
         }
 

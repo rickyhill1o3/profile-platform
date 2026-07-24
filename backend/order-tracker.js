@@ -256,9 +256,16 @@ async function loadScanAccounts(supabase, onlyUserId = null) {
 
   // Current multi-store credential table. Older deployments may not have this migration installed yet.
   try {
-    const { data: creds, error: ce } = await supabase.from('profile_store_credentials').select('*').in('profile_id', ids);
-    if (ce) throw ce;
-    for (const c of creds || []) addCredential(c);
+    // Large users can own hundreds of profiles. Chunk `in` filters to avoid PostgREST
+    // returning 400 Bad Request when the generated query URL is too large.
+    for (let i = 0; i < ids.length; i += 75) {
+      const { data: creds, error: ce } = await supabase
+        .from('profile_store_credentials')
+        .select('*')
+        .in('profile_id', ids.slice(i, i + 75));
+      if (ce) throw ce;
+      for (const c of creds || []) addCredential(c);
+    }
   } catch (err) {
     console.warn('IMAP credential table unavailable; checking legacy accounts table:', err.message);
   }
@@ -266,9 +273,14 @@ async function loadScanAccounts(supabase, onlyUserId = null) {
   // Legacy/fallback account row used by the profile editor. This also covers profiles saved before
   // profile_store_credentials was installed or when that migration silently failed.
   try {
-    const { data: accounts, error: ae } = await supabase.from('accounts').select('profile_id,login_email,gmail_app_password').in('profile_id', ids);
-    if (ae) throw ae;
-    for (const account of accounts || []) addCredential(account);
+    for (let i = 0; i < ids.length; i += 75) {
+      const { data: accounts, error: ae } = await supabase
+        .from('accounts')
+        .select('profile_id,login_email,gmail_app_password')
+        .in('profile_id', ids.slice(i, i + 75));
+      if (ae) throw ae;
+      for (const account of accounts || []) addCredential(account);
+    }
   } catch (err) {
     console.warn('Legacy IMAP accounts lookup failed:', err.message);
   }
@@ -842,8 +854,15 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits })
     };
     if (profileIds.length) {
       try {
-        const r = await supabase.from('profile_store_credentials').select('profile_id,login_email,use_aycd_inbox').in('profile_id', profileIds).eq('use_aycd_inbox', true);
-        if (!r.error) for (const row of r.data || []) add(row);
+        for (let i = 0; i < profileIds.length; i += 75) {
+          const r = await supabase
+            .from('profile_store_credentials')
+            .select('profile_id,login_email,use_aycd_inbox')
+            .in('profile_id', profileIds.slice(i, i + 75))
+            .eq('use_aycd_inbox', true);
+          if (r.error) throw r.error;
+          for (const row of r.data || []) add(row);
+        }
       } catch (_) {}
       // AYCD linkage is explicit. Legacy account rows are not included unless
       // the corresponding store credential has use_aycd_inbox enabled.
