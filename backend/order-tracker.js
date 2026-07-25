@@ -1205,6 +1205,15 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits })
     const limit = Math.max(10, Math.min(200, Number(req.query.limit || 75)));
     const from = (page - 1) * limit, to = from + limit - 1;
     let q = supabase.from('email_messages').select('*', { count:'exact' }).eq('user_id', req.user_id);
+    // Hidden mailboxes remain indexed and continue updating orders, but are excluded from the Email Center view.
+    try {
+      const { data: hiddenRows } = await supabase.from('email_center_hidden_mailboxes').select('mailbox_email').eq('user_id', req.user_id).eq('is_hidden', true);
+      const hidden = (hiddenRows || []).map(r => lower(r.mailbox_email)).filter(Boolean);
+      if (hidden.length) {
+        const encoded = `(${hidden.map(v => `"${String(v).replace(/"/g,'')}"`).join(',')})`;
+        q = q.not('mailbox_email', 'in', encoded);
+      }
+    } catch (_) {}
     if (req.query.type && req.query.type !== 'all') q = q.eq('email_type', clean(req.query.type));
     if (req.query.store && req.query.store !== 'all') q = q.eq('store', clean(req.query.store));
     if (req.query.mailbox) q = q.ilike('mailbox_email', `%${clean(req.query.mailbox)}%`);
@@ -1252,6 +1261,67 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits })
     let q=supabase.from('email_messages').delete({count:'exact'}).eq('user_id',req.user_id).eq('keep_forever',false).is('linked_order_id',null);
     if(days>0) q=q.lt('received_at',cutoff);
     const {error,count}=await q; if(error)return res.status(500).json({error:error.message});res.json({success:true,deleted:count||0});
+  });
+
+
+  app.get('/admin/email-center/maintenance', auth, async (req,res)=>{
+    if(req.role!=='super_admin') return res.status(403).json({error:'Super admin only.'});
+    try{
+      const {data:messages,error}=await supabase.from('email_messages').select('mailbox_email,is_order_related,keep_forever,linked_order_id').eq('user_id',req.user_id);
+      if(error) throw error;
+      let hiddenRows=[];
+      try{const r=await supabase.from('email_center_hidden_mailboxes').select('mailbox_email,is_hidden').eq('user_id',req.user_id);hiddenRows=r.data||[];}catch(_){ }
+      const hiddenSet=new Set(hiddenRows.filter(r=>r.is_hidden).map(r=>lower(r.mailbox_email)));
+      const byMailbox=new Map();
+      let total=0,orderRelated=0,temporary=0,linked=0;
+      for(const m of messages||[]){
+        total++;
+        if(m.is_order_related||m.keep_forever) orderRelated++; else temporary++;
+        if(m.linked_order_id) linked++;
+        const key=lower(m.mailbox_email)||'aycd unified inbox';
+        const row=byMailbox.get(key)||{mailbox_email:key,count:0,order_related:0,temporary:0,hidden:hiddenSet.has(key)};
+        row.count++; if(m.is_order_related||m.keep_forever) row.order_related++; else row.temporary++;
+        byMailbox.set(key,row);
+      }
+      let bridge=null;
+      try{const r=await supabase.from('aycd_bridge_devices').select('id,device_name,status,last_seen_at,last_scan_at,last_error,pending_command').eq('user_id',req.user_id).eq('is_paired',true).order('created_at',{ascending:false}).limit(1).maybeSingle();bridge=r.data||null;}catch(_){ }
+      res.json({summary:{total,order_related:orderRelated,temporary,linked},mailboxes:[...byMailbox.values()].sort((a,b)=>b.count-a.count),bridge});
+    }catch(error){res.status(500).json({error:error.message});}
+  });
+
+  app.post('/admin/email-center/clear-all', auth, async (req,res)=>{
+    if(req.role!=='super_admin') return res.status(403).json({error:'Super admin only.'});
+    const {error,count}=await supabase.from('email_messages').delete({count:'exact'}).eq('user_id',req.user_id);
+    if(error)return res.status(500).json({error:error.message});
+    res.json({success:true,deleted:count||0});
+  });
+
+  app.post('/admin/email-center/clear-non-order', auth, async (req,res)=>{
+    if(req.role!=='super_admin') return res.status(403).json({error:'Super admin only.'});
+    const {error,count}=await supabase.from('email_messages').delete({count:'exact'}).eq('user_id',req.user_id).eq('is_order_related',false).eq('keep_forever',false).is('linked_order_id',null);
+    if(error)return res.status(500).json({error:error.message});
+    res.json({success:true,deleted:count||0});
+  });
+
+  app.post('/admin/email-center/mailbox-visibility', auth, async (req,res)=>{
+    if(req.role!=='super_admin') return res.status(403).json({error:'Super admin only.'});
+    const mailbox=lower(req.body?.mailbox_email);
+    if(!mailbox)return res.status(400).json({error:'Mailbox email is required.'});
+    const row={user_id:req.user_id,mailbox_email:mailbox,is_hidden:!!req.body?.hidden,updated_at:new Date().toISOString()};
+    const {error}=await supabase.from('email_center_hidden_mailboxes').upsert(row,{onConflict:'user_id,mailbox_email'});
+    if(error)return res.status(500).json({error:error.message});
+    res.json({success:true,mailbox_email:mailbox,hidden:row.is_hidden});
+  });
+
+  app.post('/admin/email-center/reset-aycd', auth, async (req,res)=>{
+    if(req.role!=='super_admin') return res.status(403).json({error:'Super admin only.'});
+    const {data,error}=await supabase.from('aycd_bridge_devices').select('*').eq('user_id',req.user_id).eq('is_paired',true).order('created_at',{ascending:false}).limit(1).maybeSingle();
+    if(error)return res.status(500).json({error:error.message});
+    if(!data)return res.status(400).json({error:'No paired AYCD bridge was found.'});
+    const commandId=crypto.randomUUID();
+    const {error:ue}=await supabase.from('aycd_bridge_devices').update({pending_command:'reset_checkpoint',command_id:commandId,command_payload:{requested_at:new Date().toISOString()},status:'reset_requested',last_error:null}).eq('id',data.id);
+    if(ue)return res.status(500).json({error:ue.message});
+    res.json({success:true,command_id:commandId,message:'Reset requested. Keep the local AYCD bridge open until it confirms the checkpoint was cleared.'});
   });
 
   app.post('/admin/email-center/backfill-order-events', auth, async (req,res)=>{

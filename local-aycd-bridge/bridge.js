@@ -214,7 +214,16 @@ async function poll(){
   busy=true;
   try{
     const cmd=await postJson('/orders/aycd/bridge/poll',{},b.secret);
-    if(cmd.command==='scan'){
+    if(cmd.command==='reset_checkpoint'){
+      try{
+        if(fs.existsSync(STATE_FILE)) fs.unlinkSync(STATE_FILE);
+        await postJson('/orders/aycd/bridge/result',{success:true,command_id:cmd.command_id,checked:0,messages:[],final:true,reset_checkpoint:true},b.secret,{attempts:6});
+        console.log('AYCD checkpoint reset. The next scan will start from the beginning of the configured lookback window.');
+      }catch(e){
+        try{await postJson('/orders/aycd/bridge/result',{success:false,command_id:cmd.command_id,checked:0,error:e.message,final:true},b.secret);}catch(_){}
+        console.error('AYCD checkpoint reset failed:',e.message);
+      }
+    }else if(cmd.command==='scan'){
       const current=readJson(CONFIG_FILE,{}); const cfg=sanitize({...current,lookbackDays:cmd.payload?.lookbackDays||current.lookbackDays});
       try{
         const plan=await discoverScanPlan(cfg);
