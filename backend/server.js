@@ -6981,15 +6981,10 @@ async function filterProfilesByActiveRunStatus(profiles, group = "", activeOnly 
 }
 
 function getProfileLimitForRole(role = "user", accountType = "general") {
-    const type = normalizeProfileAccountType(accountType);
-    if (role === "super_admin") return Infinity;
-    if (type === "raffle") return Infinity;
-
-    const adminLimits = { target: 8, samsclub: 6, amazon: 2, general: 5, walmart: 100, crunchyroll: 10, pokemoncenter: 10 };
-    const userLimits = { target: 4, samsclub: 4, amazon: 2, general: 3, walmart: 100, crunchyroll: 4, pokemoncenter: 5 };
-
-    const source = role === "admin" ? adminLimits : userLimits;
-    return source[type] ?? 0;
+    // Profiles are intentionally unlimited for every role and store. Retailer-specific
+    // address/card/email guidance is presented in the profile editor as a recommendation,
+    // not enforced as an account-wide platform limit.
+    return Infinity;
 }
 
 async function enforceProfileLimit({ userId, role, accountType, excludeProfileId = null, addCount = 1 }) {

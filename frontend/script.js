@@ -335,6 +335,14 @@ function selectedStoreAssignments() {
         .filter(Boolean);
 }
 
+function updateStoreProfileGuidance() {
+    const selected = new Set(selectedStoreAssignments());
+    document.querySelectorAll('[data-store-guidance]').forEach((notice) => {
+        const store = String(notice.dataset.storeGuidance || '').toLowerCase();
+        notice.style.display = selected.has(store) ? 'block' : 'none';
+    });
+}
+
 function setStoreAssignments(stores = []) {
     const clean = Array.isArray(stores) ? stores.map((store) => String(store || '').toLowerCase()) : [];
     document.querySelectorAll('input[name="assigned_stores"]').forEach((input) => {
@@ -344,6 +352,7 @@ function setStoreAssignments(stores = []) {
     if (accountType) {
         accountType.value = clean[0] || "general";
     }
+    updateStoreProfileGuidance();
 }
 
 function profileAssignedStores(profile = {}) {
@@ -1232,7 +1241,10 @@ async function loadProfileEditor() {
 
     const accountTypeSelect = document.getElementById("account_type");
     document.querySelectorAll('input[name="assigned_stores"]').forEach((input) => {
-        input.addEventListener('change', toggleAccountCredentialFields);
+        input.addEventListener('change', () => {
+            toggleAccountCredentialFields();
+            updateStoreProfileGuidance();
+        });
     });
 
     const editId = localStorage.getItem("edit");
