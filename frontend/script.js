@@ -5122,9 +5122,16 @@ async function initAdminStoreRunStatus() {
         }
         acknowledgeButton.disabled = true;
         try {
+            const selectedUser = (lastData?.users || []).find((user) => String(user.id) === String(userFilter.value));
+            const selectedStore = (selectedUser?.stores || []).find((store) => store.site === storeFilter.value);
             await authJSON(API + '/admin/profile-sync-status/acknowledge', {
                 method: 'POST',
-                body: JSON.stringify({ site: storeFilter.value, user_id: userFilter.value })
+                body: JSON.stringify({
+                    site: storeFilter.value,
+                    user_id: userFilter.value,
+                    profile_count: Number(selectedStore?.profile_count || 0),
+                    is_enabled: !!selectedStore?.is_enabled
+                })
             });
             await load();
         } catch (err) {

@@ -7166,7 +7166,7 @@ async function loadProfileSyncStatus(userIds = []) {
     try {
         const { data, error } = await supabase
             .from("profile_sync_status")
-            .select("user_id,site,changed_at,acknowledged_at,change_reason")
+            .select("user_id,site,changed_at,acknowledged_at,change_reason,acknowledged_profile_count,acknowledged_run_enabled")
             .in("user_id", userIds);
         if (error) throw error;
         (data || []).forEach((row) => {
@@ -7175,6 +7175,8 @@ async function loadProfileSyncStatus(userIds = []) {
                 changed_at: row.changed_at || null,
                 acknowledged_at: row.acknowledged_at || null,
                 change_reason: row.change_reason || null,
+                acknowledged_profile_count: row.acknowledged_profile_count ?? null,
+                acknowledged_run_enabled: row.acknowledged_run_enabled ?? null,
                 changed_since_acknowledged: !!row.changed_at && (!row.acknowledged_at || new Date(row.changed_at) > new Date(row.acknowledged_at))
             });
         });
@@ -7209,11 +7211,25 @@ app.post("/admin/profile-sync-status/acknowledge", auth, admin, async (req, res)
             if (ownedError || !owned) return res.status(403).json({ error: "You cannot update this user." });
         }
         const acknowledgedAt = new Date().toISOString();
-        const { error } = await supabase.from("profile_sync_status").upsert({
+        const acknowledgedProfileCount = Number.isFinite(Number(req.body?.profile_count)) ? Number(req.body.profile_count) : null;
+        const acknowledgedRunEnabled = typeof req.body?.is_enabled === "boolean" ? req.body.is_enabled : null;
+        const payload = {
             user_id: userId,
             site,
             acknowledged_at: acknowledgedAt
-        }, { onConflict: "user_id,site" });
+        };
+        if (acknowledgedProfileCount !== null) payload.acknowledged_profile_count = acknowledgedProfileCount;
+        if (acknowledgedRunEnabled !== null) payload.acknowledged_run_enabled = acknowledgedRunEnabled;
+
+        let { error } = await supabase.from("profile_sync_status").upsert(payload, { onConflict: "user_id,site" });
+        if (error && /acknowledged_profile_count|acknowledged_run_enabled/i.test(String(error.message || ""))) {
+            // Backward-compatible fallback until the new migration is installed.
+            ({ error } = await supabase.from("profile_sync_status").upsert({
+                user_id: userId,
+                site,
+                acknowledged_at: acknowledgedAt
+            }, { onConflict: "user_id,site" }));
+        }
         if (error) return res.status(500).json({ error: `${error.message}. Run backend/sql/PROFILE_CHANGE_SYNC_STATUS.sql in Supabase.` });
         res.json({ success: true, user_id: userId, site, acknowledged_at: acknowledgedAt });
     } catch (err) {
@@ -7246,10 +7262,25 @@ app.put("/store-run-status", auth, async (req, res) => {
         if (!site) return res.status(400).json({ error: "Invalid store" });
         const isEnabled = !!req.body?.is_enabled;
         const now = new Date().toISOString();
+
+        const { data: previousStatus } = await supabase
+            .from("user_store_run_status")
+            .select("is_enabled")
+            .eq("user_id", req.user_id)
+            .eq("site", site)
+            .maybeSingle();
+
         const { error } = await supabase
             .from("user_store_run_status")
             .upsert({ user_id: req.user_id, site, is_enabled: isEnabled, updated_at: now }, { onConflict: "user_id,site" });
         if (error) return res.status(500).json({ error: error.message });
+
+        // Turning a store on means the admin must verify/export the currently assigned profiles,
+        // even when no profile record itself changed.
+        if (isEnabled && !previousStatus?.is_enabled) {
+            await markProfileSyncChanged(req.user_id, [site], "store_enabled");
+        }
+
         res.json({ success: true, site, label: STORE_RUN_STATUS_LABELS[site] || site, is_enabled: isEnabled, updated_at: now });
     } catch (err) {
         res.status(500).json({ error: err.message || "Could not update store run status" });
@@ -7387,15 +7418,42 @@ app.get("/admin/store-run-status", auth, admin, async (req, res) => {
                 owner_admin_id: user.owner_admin_id,
                 stores: STORE_RUN_STATUS_SITES
                     .filter((site) => !siteFilter || site === siteFilter)
-                    .map((site) => ({
-                        site,
-                        label: STORE_RUN_STATUS_LABELS[site] || site,
-                        is_enabled: !!status[site],
-                        updated_at: status[`${site}_updated_at`] || null,
-                        profile_count: counts[site] || 0,
-                        profile_updated_at: updated[site] || null,
-                        ...(profileSyncMap.get(`${user.id}:${site}`) || { changed_at: null, acknowledged_at: null, change_reason: null, changed_since_acknowledged: false })
-                    }))
+                    .map((site) => {
+                        const sync = profileSyncMap.get(`${user.id}:${site}`) || {
+                            changed_at: null,
+                            acknowledged_at: null,
+                            change_reason: null,
+                            acknowledged_profile_count: null,
+                            acknowledged_run_enabled: null,
+                            changed_since_acknowledged: false
+                        };
+                        const currentCount = counts[site] || 0;
+                        const currentEnabled = !!status[site];
+                        const runChangedAt = status[`${site}_updated_at`] || null;
+                        const newestProfileAt = updated[site] || null;
+                        const newerThanAcknowledged = (value) => !!value && (!sync.acknowledged_at || new Date(value) > new Date(sync.acknowledged_at));
+                        const countChanged = sync.acknowledged_profile_count !== null && Number(sync.acknowledged_profile_count) !== Number(currentCount);
+                        const enabledChanged = sync.acknowledged_run_enabled !== null && Boolean(sync.acknowledged_run_enabled) !== currentEnabled;
+                        const enabledNeedsInitialSync = currentEnabled && !sync.acknowledged_at;
+                        const changedSinceAcknowledged = Boolean(
+                            sync.changed_since_acknowledged ||
+                            newerThanAcknowledged(newestProfileAt) ||
+                            (currentEnabled && newerThanAcknowledged(runChangedAt)) ||
+                            countChanged ||
+                            enabledChanged ||
+                            enabledNeedsInitialSync
+                        );
+                        return {
+                            site,
+                            label: STORE_RUN_STATUS_LABELS[site] || site,
+                            is_enabled: currentEnabled,
+                            updated_at: runChangedAt,
+                            profile_count: currentCount,
+                            profile_updated_at: newestProfileAt,
+                            ...sync,
+                            changed_since_acknowledged: changedSinceAcknowledged
+                        };
+                    })
             };
         });
 
