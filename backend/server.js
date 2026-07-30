@@ -799,6 +799,36 @@ async function sendCreditDepletedNotifications({ user, previousBalance, newBalan
     }
 }
 
+function summarizeCreditTransactions(rows = []) {
+    const summary = {
+        purchased: 0,
+        free_or_bonus: 0,
+        refunded: 0,
+        checkout_charged: 0,
+        manual_removed: 0,
+        total_ever_received: 0
+    };
+
+    for (const row of rows || []) {
+        const delta = Math.trunc(Number(row?.amount_delta || 0));
+        const reason = String(row?.reason || '').toLowerCase();
+        if (delta > 0) {
+            if (reason === 'stripe_purchase') summary.purchased += delta;
+            else if (reason.includes('refund')) summary.refunded += delta;
+            else summary.free_or_bonus += delta;
+        } else if (delta < 0) {
+            if (reason === 'successful_checkout' || reason === 'successful_checkout_credit_recheck') {
+                summary.checkout_charged += Math.abs(delta);
+            } else {
+                summary.manual_removed += Math.abs(delta);
+            }
+        }
+    }
+
+    summary.total_ever_received = summary.purchased + summary.free_or_bonus;
+    return summary;
+}
+
 async function adjustUserCredits({ userId, delta, reason, note = "", metadata = {}, createdBy = null, orderId = null }) {
     const amount = Math.trunc(Number(delta || 0));
     if (!Number.isFinite(amount) || amount === 0) {
@@ -808,10 +838,12 @@ async function adjustUserCredits({ userId, delta, reason, note = "", metadata = 
     const current = await ensureUserCreditBalance(userId);
     const nextBalance = asSignedCredits(current.balance, 0) + amount;
 
+    const normalizedReason = String(reason || '').toLowerCase();
+    const isRefund = amount > 0 && normalizedReason.includes('refund');
     const updates = {
         balance: nextBalance,
-        lifetime_credits_granted: asWholeCredits(current.lifetime_credits_granted, 0) + Math.max(amount, 0),
-        lifetime_credits_spent: asWholeCredits(current.lifetime_credits_spent, 0) + Math.max(-amount, 0),
+        lifetime_credits_granted: asWholeCredits(current.lifetime_credits_granted, 0) + (amount > 0 && !isRefund ? amount : 0),
+        lifetime_credits_spent: Math.max(0, asWholeCredits(current.lifetime_credits_spent, 0) + Math.max(-amount, 0) - (isRefund ? amount : 0)),
         updated_at: new Date().toISOString()
     };
 
@@ -4786,6 +4818,20 @@ app.get("/admin/credits/users", auth, admin, async (req, res) => {
             (balances || []).forEach((row) => balancesByUser.set(row.user_id, row));
         }
 
+        const creditSummaryByUser = new Map();
+        if (userIds.length) {
+            const { data: transactions, error: transactionError } = await maybeMany("credit_transactions", (qb) =>
+                qb.select("user_id, amount_delta, reason").in("user_id", userIds)
+            );
+            if (transactionError) return res.status(500).json({ error: transactionError.message });
+            const grouped = new Map();
+            for (const row of transactions || []) {
+                if (!grouped.has(row.user_id)) grouped.set(row.user_id, []);
+                grouped.get(row.user_id).push(row);
+            }
+            for (const userId of userIds) creditSummaryByUser.set(userId, summarizeCreditTransactions(grouped.get(userId) || []));
+        }
+
         const insufficientCounts = new Map();
         if (userIds.length) {
             const { data: flaggedOrders, error: flaggedError } = await supabase
@@ -4809,6 +4855,7 @@ app.get("/admin/credits/users", auth, admin, async (req, res) => {
                 credits_balance: creditsBalance,
                 lifetime_credits_granted: asWholeCredits(balance.lifetime_credits_granted, 0),
                 lifetime_credits_spent: asWholeCredits(balance.lifetime_credits_spent, 0),
+                credit_summary: creditSummaryByUser.get(user.id) || summarizeCreditTransactions([]),
                 insufficient_orders: insufficientCounts.get(user.id) || 0,
                 needs_removal: creditsBalance <= 0
             });
@@ -4879,6 +4926,7 @@ app.get("/admin/users/:id/credits/history", auth, admin, async (req, res) => {
             balance: asSignedCredits(balanceRow.balance, 0),
             lifetime_credits_granted: asWholeCredits(balanceRow.lifetime_credits_granted, 0),
             lifetime_credits_spent: asWholeCredits(balanceRow.lifetime_credits_spent, 0),
+            credit_summary: summarizeCreditTransactions(txRows),
             needs_removal: asSignedCredits(balanceRow.balance, 0) < 0,
             transactions: txRows,
             orders: orderRows
@@ -4943,26 +4991,43 @@ app.post("/admin/orders/:id/refund-credits", auth, admin, async (req, res) => {
             return res.status(403).json({ error: "You do not have access to this user." });
         }
 
-        const amount = asWholeCredits(req.body?.amount, order.credits_charged || 0);
+        const remainingCharge = asWholeCredits(order.credits_charged, 0);
+        if (remainingCharge <= 0) return res.status(400).json({ error: "This order has already been fully refunded." });
+
+        const amount = asWholeCredits(req.body?.amount, remainingCharge);
         if (amount <= 0) return res.status(400).json({ error: "Refund amount must be greater than 0" });
+        if (amount > remainingCharge) return res.status(400).json({ error: `Refund cannot exceed the ${remainingCharge} credits still charged to this order.` });
+
+        const externalOrderId = String(order.external_order_id || order.id);
+        const adminNote = String(req.body?.note || "").trim();
+        const transactionNote = `Order refunded • Order ${externalOrderId}${adminNote ? ` • ${adminNote}` : ''}`;
+        const newCharge = Math.max(0, remainingCharge - amount);
+        const previouslyRefunded = asWholeCredits(order.metadata?.refund_credits, 0);
 
         const balance = await adjustUserCredits({
             userId: order.user_id,
             delta: amount,
-            reason: "order_refund_credit",
-            note: String(req.body?.note || "Manual credit refund").trim(),
-            metadata: { order_id: order.id, external_order_id: order.external_order_id, refunded_by: currentUser.email },
+            reason: "order_refunded",
+            note: transactionNote,
+            metadata: { order_id: order.id, external_order_id: externalOrderId, refunded_by: currentUser.email, refund_amount: amount },
             createdBy: currentUser.id,
             orderId: order.id
         });
 
         const { error: updateError } = await supabase.from("orders").update({
-            metadata: { ...(order.metadata || {}), refund_credits: amount, refund_note: String(req.body?.note || "").trim() },
-            status: order.status === "refunded" ? "refunded" : `${order.status || "success"}_credited`
+            credits_charged: newCharge,
+            metadata: {
+                ...(order.metadata || {}),
+                original_credits_charged: asWholeCredits(order.metadata?.original_credits_charged, remainingCharge + previouslyRefunded),
+                refund_credits: previouslyRefunded + amount,
+                refund_note: adminNote,
+                last_refunded_at: new Date().toISOString()
+            },
+            status: newCharge === 0 ? "refunded" : `${String(order.status || "success").replace(/_credited$/, '')}_partially_refunded`
         }).eq("id", order.id);
         if (updateError) return res.status(500).json({ error: updateError.message });
 
-        res.json({ success: true, balance });
+        res.json({ success: true, balance, refunded: amount, credits_charged: newCharge, order_id: externalOrderId });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }

@@ -4330,11 +4330,14 @@ async function loadUserActivity() {
     }
 }
 
+let selectedCreditReceiptUserId = '';
+
 async function loadUserCreditReceipt(userId) {
     const summary = document.getElementById('creditReceiptSummary');
     const txBody = document.getElementById('creditTransactionsTableBody');
     const ordersBody = document.getElementById('userOrdersTableBody');
     if (!summary || !txBody || !ordersBody) return;
+    selectedCreditReceiptUserId = String(userId || '');
 
     summary.textContent = 'Loading user receipt...';
     txBody.innerHTML = '<tr><td colspan="5">Loading transactions...</td></tr>';
@@ -4344,9 +4347,10 @@ async function loadUserCreditReceipt(userId) {
         const data = await authJSON(API + '/admin/users/' + encodeURIComponent(userId) + '/credits/history');
         const user = data.user || {};
         const balance = Number(data.balance || 0);
+        const creditSummary = data.credit_summary || {};
         summary.innerHTML = `
             <strong>${escapeHTML(userDisplayName(user))}</strong>
-            <span class="subtle-text"> • Balance: ${escapeHTML(String(balance))} credits • Granted: ${escapeHTML(String(data.lifetime_credits_granted || 0))} • Spent: ${escapeHTML(String(data.lifetime_credits_spent || 0))} • ${data.needs_removal ? 'Needs removal until positive balance' : 'Eligible / positive balance'}</span>
+            <span class="subtle-text"> • Balance: ${escapeHTML(String(balance))} credits • Purchased: ${escapeHTML(String(creditSummary.purchased || 0))} • Free / Bonus: ${escapeHTML(String(creditSummary.free_or_bonus || 0))} • Refunded: ${escapeHTML(String(creditSummary.refunded || 0))} • Checkout Charges: ${escapeHTML(String(creditSummary.checkout_charged || 0))} • ${data.needs_removal ? 'Needs removal until positive balance' : 'Eligible / positive balance'}</span>
         `;
 
         const transactions = Array.isArray(data.transactions) ? data.transactions : [];
@@ -4356,23 +4360,56 @@ async function loadUserCreditReceipt(userId) {
               <td>${Number(item.amount_delta || 0) >= 0 ? '+' : ''}${escapeHTML(String(item.amount_delta || 0))}</td>
               <td>${escapeHTML(String(item.balance_after ?? '-'))}</td>
               <td>${escapeHTML(item.reason || '-')}</td>
-              <td>${escapeHTML(item.note || '-')}</td>
+              <td>${escapeHTML((String(item.reason || '').toLowerCase().includes('refund') && item.metadata?.external_order_id && !String(item.note || '').includes(String(item.metadata.external_order_id))) ? `Order refunded • Order ${item.metadata.external_order_id}${item.note ? ` • ${item.note}` : ''}` : (item.note || '-'))}</td>
             </tr>`).join('') : '<tr><td colspan="5">No credit transactions found.</td></tr>';
 
         const orders = Array.isArray(data.orders) ? data.orders : [];
-        ordersBody.innerHTML = orders.length ? orders.map((item) => `
+        ordersBody.innerHTML = orders.length ? orders.map((item) => {
+            const credits = Number(item.credits_charged || 0);
+            const isInsufficient = String(item.status || '') === 'insufficient_credits';
+            const isRefunded = credits <= 0 && (String(item.status || '').includes('refund') || Number(item.metadata?.refund_credits || 0) > 0);
+            const statusHtml = isInsufficient
+                ? '<span class="status-tag status-tag--danger">Insufficient Credits</span>'
+                : isRefunded
+                    ? '<span class="status-tag">Refunded</span>'
+                    : '<span class="status-tag status-tag--success">Charged</span>';
+            return `
             <tr>
               <td>${escapeHTML(formatEasternTime(item.created_at || ''))} ET</td>
               <td>${escapeHTML(item.site || '-')}</td>
               <td>${escapeHTML(item.product_name || item.sku || '-')}</td>
-              <td>${String(item.status || '') === 'insufficient_credits' ? '<span class="status-tag status-tag--danger">Insufficient Credits</span>' : '<span class="status-tag status-tag--success">Charged</span>'}</td>
-              <td>${escapeHTML(String(item.credits_charged || 0))}</td>
+              <td>${statusHtml}</td>
+              <td>${escapeHTML(String(credits))}</td>
               <td>${escapeHTML(item.external_order_id || '-')}</td>
-            </tr>`).join('') : '<tr><td colspan="6">No linked orders found.</td></tr>';
+              <td>${credits > 0 ? `<button class="btn" type="button" data-linked-refund-order="${escapeHTML(item.id)}" data-linked-refund-amount="${escapeHTML(String(credits))}">Refund Order</button>` : '<span class="subtle-text">Refunded</span>'}</td>
+            </tr>`;
+        }).join('') : '<tr><td colspan="7">No linked orders found.</td></tr>';
+
+        ordersBody.querySelectorAll('[data-linked-refund-order]').forEach((button) => {
+            button.addEventListener('click', async () => {
+                const amount = Math.round(Number(button.dataset.linkedRefundAmount || 0));
+                if (!amount || !window.confirm(`Refund all ${amount} credits for this order?`)) return;
+                const note = window.prompt('Optional refund note', 'Order canceled') || '';
+                button.disabled = true;
+                button.textContent = 'Refunding...';
+                try {
+                    await authJSON(API + '/admin/orders/' + encodeURIComponent(button.dataset.linkedRefundOrder) + '/refund-credits', {
+                        method: 'POST',
+                        body: JSON.stringify({ amount, note })
+                    });
+                    await loadCreditsAdminPane();
+                    await loadUserCreditReceipt(userId);
+                } catch (err) {
+                    alert(err.message || 'Failed to refund order credits.');
+                    button.disabled = false;
+                    button.textContent = 'Refund Order';
+                }
+            });
+        });
     } catch (err) {
         summary.textContent = err.message;
         txBody.innerHTML = `<tr><td colspan="5">${escapeHTML(err.message)}</td></tr>`;
-        ordersBody.innerHTML = `<tr><td colspan="6">${escapeHTML(err.message)}</td></tr>`;
+        ordersBody.innerHTML = `<tr><td colspan="7">${escapeHTML(err.message)}</td></tr>`;
     }
 }
 
@@ -4393,15 +4430,17 @@ async function loadCreditsAdminPane() {
               <td>${escapeHTML(userDisplayName(item))}</td>
               <td>${escapeHTML(item.role || '-')}</td>
               <td>${escapeHTML(String(item.credits_balance || 0))}</td>
-              <td>${escapeHTML(String(item.lifetime_credits_granted || 0))}</td>
-              <td>${escapeHTML(String(item.lifetime_credits_spent || 0))}</td>
+              <td>${escapeHTML(String(item.credit_summary?.purchased || 0))}</td>
+              <td>${escapeHTML(String(item.credit_summary?.free_or_bonus || 0))}</td>
+              <td>${escapeHTML(String(item.credit_summary?.refunded || 0))}</td>
+              <td>${escapeHTML(String(item.credit_summary?.checkout_charged || 0))}</td>
               <td>${item.needs_removal ? `<span class="status-tag status-tag--danger">Flagged until positive</span>` : '<span class="subtle-text">No</span>'}</td>
               <td class="table-actions">
                 <button class="btn" type="button" data-credit-user="${escapeHTML(item.id)}" data-credit-action="details">Details</button>
                 <button class="btn" type="button" data-credit-user="${escapeHTML(item.id)}" data-credit-action="add">Add</button>
                 <button class="btn btn-danger" type="button" data-credit-user="${escapeHTML(item.id)}" data-credit-action="remove">Remove</button>
               </td>
-            </tr>`).join('') : '<tr><td colspan="7">No users found.</td></tr>';
+            </tr>`).join('') : '<tr><td colspan="9">No users found.</td></tr>';
 
         usersBody.querySelectorAll('[data-credit-user]').forEach((button) => {
             button.addEventListener('click', async () => {
@@ -4459,6 +4498,7 @@ async function loadCreditsAdminPane() {
                     await authJSON(API + '/admin/orders/' + button.dataset.refundOrder + '/refund-credits', { method: 'POST', body: JSON.stringify({ amount, note }) });
                     if (message) message.textContent = 'Credits refunded.';
                     await loadCreditsAdminPane();
+                    if (selectedCreditReceiptUserId) await loadUserCreditReceipt(selectedCreditReceiptUserId);
                 } catch (err) {
                     if (message) message.textContent = err.message;
                 }
