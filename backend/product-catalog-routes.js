@@ -22,6 +22,24 @@ function countEffectiveSkus(product) {
     return 1;
 }
 
+
+async function fetchAllSupabaseRows(buildQuery, pageSize = 1000) {
+    const rows = [];
+    let from = 0;
+
+    while (true) {
+        const { data, error } = await buildQuery().range(from, from + pageSize - 1);
+        if (error) return { data: null, error };
+
+        const page = Array.isArray(data) ? data : [];
+        rows.push(...page);
+        if (page.length < pageSize) break;
+        from += pageSize;
+    }
+
+    return { data: rows, error: null };
+}
+
 const cheerio = require("cheerio");
 const crypto = require("crypto");
 
@@ -1693,15 +1711,19 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
                 ? null
                 : [...new Set([...(rawScopedUserIds || []), currentUser?.id].filter(Boolean))];
 
-            let query = supabase
-                .from('user_product_preferences')
-                .select(`user_id, selected, max_price, quantity, is_primary, updated_at, catalog_products!inner ( id, site, sku, product_name, default_max_price )`)
-                .eq('selected', true)
-                .eq('catalog_products.site', site);
+            const buildSelectionQuery = () => {
+                let query = supabase
+                    .from('user_product_preferences')
+                    .select(`id, user_id, selected, max_price, quantity, is_primary, updated_at, catalog_products!inner ( id, site, sku, product_name, default_max_price )`)
+                    .eq('selected', true)
+                    .eq('catalog_products.site', site)
+                    .order('id', { ascending: true });
 
-            if (scopedUserIds && scopedUserIds.length) query = query.in('user_id', scopedUserIds);
+                if (scopedUserIds && scopedUserIds.length) query = query.in('user_id', scopedUserIds);
+                return query;
+            };
 
-            const { data, error } = await query;
+            const { data, error } = await fetchAllSupabaseRows(buildSelectionQuery);
             if (error) return res.status(500).json({ error: error.message });
 
             // Resolve old single-SKU selections to the current grouped multi-SKU product,
@@ -1906,16 +1928,20 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
                 return res.status(403).json({ error: 'You do not have access to this user.' });
             }
 
-            let query = supabase
-                .from('user_product_preferences')
-                .select(`user_id, selected, max_price, quantity, is_primary, updated_at, catalog_products!inner ( id, site, sku, product_name, default_max_price )`)
-                .eq('selected', true)
-                .eq('catalog_products.site', site);
+            const buildExportQuery = () => {
+                let query = supabase
+                    .from('user_product_preferences')
+                    .select(`id, user_id, selected, max_price, quantity, is_primary, updated_at, catalog_products!inner ( id, site, sku, product_name, default_max_price )`)
+                    .eq('selected', true)
+                    .eq('catalog_products.site', site)
+                    .order('id', { ascending: true });
 
-            if (requestedUserId) query = query.eq('user_id', requestedUserId);
-            else if (scopedUserIds && scopedUserIds.length) query = query.in('user_id', scopedUserIds);
+                if (requestedUserId) query = query.eq('user_id', requestedUserId);
+                else if (scopedUserIds && scopedUserIds.length) query = query.in('user_id', scopedUserIds);
+                return query;
+            };
 
-            const { data, error } = await query;
+            const { data, error } = await fetchAllSupabaseRows(buildExportQuery);
             if (error) return res.status(500).json({ error: error.message });
 
             // Resolve old single-SKU selections to newest grouped products
@@ -2038,16 +2064,20 @@ app.get('/admin/product-preferences', auth, admin, async (req, res) => {
             const search = sanitizeLike(req.query.search);
             const scopedUserIds = await getScopedUserIds(supabase, currentUser);
 
-            let productQuery = supabase
-                .from('user_product_preferences')
-                .select(`user_id, selected, catalog_products!inner ( site, sku, product_name )`)
-                .eq('selected', true);
+            const buildProductQuery = () => {
+                let productQuery = supabase
+                    .from('user_product_preferences')
+                    .select(`id, user_id, selected, catalog_products!inner ( site, sku, product_name )`)
+                    .eq('selected', true)
+                    .order('id', { ascending: true });
 
-            if (site) productQuery = productQuery.eq('catalog_products.site', site);
-            if (scopedUserIds && scopedUserIds.length) productQuery = productQuery.in('user_id', scopedUserIds);
-            if (search) productQuery = productQuery.or(`catalog_products.sku.ilike.%${search}%,catalog_products.product_name.ilike.%${search}%`);
+                if (site) productQuery = productQuery.eq('catalog_products.site', site);
+                if (scopedUserIds && scopedUserIds.length) productQuery = productQuery.in('user_id', scopedUserIds);
+                if (search) productQuery = productQuery.or(`catalog_products.sku.ilike.%${search}%,catalog_products.product_name.ilike.%${search}%`);
+                return productQuery;
+            };
 
-            const { data: productData, error: productError } = await productQuery;
+            const { data: productData, error: productError } = await fetchAllSupabaseRows(buildProductQuery);
             if (productError) return res.status(500).json({ error: productError.message });
 
             let countdownRows = [];
@@ -2099,7 +2129,7 @@ app.get('/admin/product-preferences', auth, admin, async (req, res) => {
             if (!(await canAdminAccessUser(supabase, currentUser, targetUserId))) {
                 return res.status(403).json({ error: 'You do not have access to this user.' });
             }
-            const { data, error } = await supabase
+            const { data, error } = await fetchAllSupabaseRows(() => supabase
                 .from('user_product_preferences')
                 .select(`
           id, selected, run_mode, max_price, quantity, is_primary, updated_at,
@@ -2107,8 +2137,10 @@ app.get('/admin/product-preferences', auth, admin, async (req, res) => {
         `)
                 .eq('user_id', targetUserId)
                 .eq('selected', true)
-                .order('updated_at', { ascending: false });
+                .order('id', { ascending: true }));
             if (error) return res.status(500).json({ error: error.message });
+
+            (data || []).sort((a, b) => new Date(b.updated_at || 0) - new Date(a.updated_at || 0));
 
             let countdownSelections = [];
             try {
