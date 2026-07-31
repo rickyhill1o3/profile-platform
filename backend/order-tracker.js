@@ -51,6 +51,7 @@ function detectStore(from, subject, text) {
   if (/amazon\.com|amazon order|amazon\.com/.test(hay)) return 'amazon';
   if (/pokemoncenter\.com|pok[eé]mon center/.test(hay)) return 'pokemoncenter';
   if (/crunchyroll/.test(hay)) return 'crunchyroll';
+  if (/books\s*-?\s*a\s*-?\s*million|booksamillion(?:\.com)?|\bbam!?(?:\s|$)/i.test(hay)) return 'booksamillion';
   return '';
 }
 
@@ -73,13 +74,22 @@ function extractOrderNumber(store, subject, text) {
     walmart: [/\b(?:order(?: number| #)?\s*[:#]?\s*)([A-Z0-9-]{8,30})\b/i, /\b(\d{7,8}-\d{6,8})\b/],
     samsclub: [/\b(?:order(?: number| #)?\s*[:#]?\s*)([A-Z0-9-]{8,30})\b/i],
     pokemoncenter: [/\b(?:order(?: number| #)?\s*[:#]?\s*)([A-Z0-9-]{6,30})\b/i],
-    crunchyroll: [/\b(?:order(?: number| #)?\s*[:#]?\s*)([A-Z0-9-]{6,30})\b/i]
+    crunchyroll: [/\b(?:order(?: number| #)?\s*[:#]?\s*)([A-Z0-9-]{6,30})\b/i],
+    booksamillion: [
+      /\b(?:order\s*(?:number|no\.?|#)?\s*[:#-]?\s*)(\d{8,20})\b/i,
+      /\b(?:delivery\s+orders?\s*)?(?:order\s*)?#\s*[:#-]?\s*(\d{8,20})\b/i,
+      /\b(\d{12,16})\b/
+    ]
   };
   for (const re of patterns[store] || patterns.target) {
     const m = hay.match(re);
     if (m?.[1]) return m[1].replace(/[.,]$/, '');
   }
-  return '';
+  // Some retailers omit the order number from the subject and only place it in the
+  // rendered receipt body. Keep this label-based fallback strict so SKU, tracking,
+  // phone, and payment numbers are not mistaken for order references.
+  const generic = hay.match(/\b(?:order|confirmation|purchase)\s*(?:number|no\.?|id|#)?\s*[:#-]\s*([A-Z0-9][A-Z0-9-]{5,29})\b/i);
+  return generic?.[1]?.replace(/[.,]$/, '') || '';
 }
 
 function extractAmounts(text) {
