@@ -1736,6 +1736,19 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
                 if (!item.latest_change_at || new Date(row.updated_at) > new Date(item.latest_change_at)) item.latest_change_at = row.updated_at;
             });
 
+            // Always include the signed-in admin's own account in the selector.
+            // Previously the selector was built only from rows returned by
+            // user_product_preferences, so the super-admin could disappear from
+            // the dropdown when their current site had no remaining selected rows
+            // (for example immediately after removing products).
+            if (currentUser?.id && !grouped.has(currentUser.id)) {
+                grouped.set(currentUser.id, {
+                    user_id: currentUser.id,
+                    selection_count: 0,
+                    latest_change_at: null
+                });
+            }
+
             const userIds = [...grouped.keys()];
             let userMap = new Map();
             if (userIds.length) {
