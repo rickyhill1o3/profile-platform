@@ -1686,7 +1686,11 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
         try {
             const currentUser = await getCurrentUser(req);
             const site = req.query.site ? normalizeSite(req.query.site) : 'target';
-            const scopedUserIds = await getScopedUserIds(supabase, currentUser);
+            const rawScopedUserIds = await getScopedUserIds(supabase, currentUser);
+            // Admin scope helpers can return only managed child accounts. Always
+            // include the signed-in admin/super-admin so their own saved product
+            // preferences are counted and exported without requiring a fresh edit.
+            const scopedUserIds = [...new Set([...(rawScopedUserIds || []), currentUser?.id].filter(Boolean))];
 
             let query = supabase
                 .from('user_product_preferences')
@@ -1892,7 +1896,8 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
             const currentUser = await getCurrentUser(req);
             const site = req.query.site ? normalizeSite(req.query.site) : 'target';
             const requestedUserId = String(req.query.user_id || '').trim();
-            const scopedUserIds = await getScopedUserIds(supabase, currentUser);
+            const rawScopedUserIds = await getScopedUserIds(supabase, currentUser);
+            const scopedUserIds = [...new Set([...(rawScopedUserIds || []), currentUser?.id].filter(Boolean))];
 
             if (requestedUserId && !(await canAdminAccessUser(supabase, currentUser, requestedUserId))) {
                 return res.status(403).json({ error: 'You do not have access to this user.' });
