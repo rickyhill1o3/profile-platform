@@ -6742,7 +6742,7 @@ function normalizeImportedProfilePayload(entry = {}, accountType = "walmart") {
 }
 
 
-const PROFILE_ACCOUNT_TYPES = new Set(["general", "walmart", "target", "samsclub", "amazon", "crunchyroll", "pokemoncenter", "raffle"]);
+const PROFILE_ACCOUNT_TYPES = new Set(["general", "walmart", "target", "samsclub", "amazon", "bandai", "crunchyroll", "pokemoncenter", "raffle"]);
 
 function normalizeProfileAccountType(value = "general") {
     const raw = String(value || "general").trim().toLowerCase();
@@ -6757,17 +6757,21 @@ function normalizeProfileAccountType(value = "general") {
     if (["crunchyroll", "crunchy", "cr"].includes(type)) {
         return "crunchyroll";
     }
+    if (["bandai", "premiumbandai", "pbandai"].includes(type)) {
+        return "bandai";
+    }
 
     return PROFILE_ACCOUNT_TYPES.has(type) ? type : "general";
 }
 
 
-const STORE_RUN_STATUS_SITES = ["target", "walmart", "samsclub", "amazon", "general", "crunchyroll", "pokemoncenter"];
+const STORE_RUN_STATUS_SITES = ["target", "walmart", "samsclub", "amazon", "bandai", "general", "crunchyroll", "pokemoncenter"];
 const STORE_RUN_STATUS_LABELS = {
     target: "Target",
     walmart: "Walmart",
     samsclub: "Sam's Club",
     amazon: "Amazon",
+    bandai: "Premium Bandai",
     general: "General",
     crunchyroll: "Crunchyroll",
     pokemoncenter: "Pokémon Center"
@@ -6816,6 +6820,13 @@ function normalizeAssignedStores(value, fallback = "general") {
     }
 
     return [...new Set(stores)];
+}
+
+function restrictAssignedStoresForRole(stores = [], role = 'user') {
+    const clean = normalizeAssignedStores(stores);
+    if (String(role || '').toLowerCase() === 'super_admin') return clean;
+    const filtered = clean.filter((store) => store !== 'walmart');
+    return filtered.length ? filtered : ['general'];
 }
 
 function profileAssignedStores(profile = {}) {
@@ -6873,7 +6884,7 @@ function normalizeStoreCredentialsPayload(payload = {}) {
     const raw = payload.store_credentials && typeof payload.store_credentials === 'object' ? payload.store_credentials : {};
     const stores = normalizeAssignedStores(payload.assigned_stores, payload.account_type);
     const out = {};
-    const imapStores = new Set(['target', 'walmart', 'samsclub', 'amazon']);
+    const imapStores = new Set(['target', 'walmart', 'samsclub', 'amazon', 'bandai']);
     const sharedGmailAppPassword = normalizeStoredGmailAppPassword(payload.gmail_app_password)
         || Object.values(raw).map((item) => normalizeStoredGmailAppPassword(item?.gmail_app_password)).find(Boolean)
         || '';
@@ -7553,7 +7564,7 @@ app.get("/admin/store-run-status", auth, admin, async (req, res) => {
 
 app.get("/profiles", auth, async (req, res) => {
     try {
-        await ensureUserNotRevoked(req.user_id);
+        const profileUser = await ensureUserNotRevoked(req.user_id);
 
         const { data, error } = await supabase
             .from("profiles")
@@ -7576,6 +7587,11 @@ app.get("/profiles", auth, async (req, res) => {
         (data || []).forEach((profile) => {
             profile.store_assignments = assignments?.get(String(profile.id)) || [normalizeProfileAccountType(profile.account_type || "general")];
             profile.store_credentials = credentials.get(String(profile.id)) || {};
+            if (String(profileUser.role || '').toLowerCase() !== 'super_admin') {
+                profile.store_assignments = profile.store_assignments.filter((store) => normalizeProfileAccountType(store) !== 'walmart');
+                if (!profile.store_assignments.length) profile.store_assignments = ['general'];
+                if (profile.store_credentials && typeof profile.store_credentials === 'object') delete profile.store_credentials.walmart;
+            }
             if (profile.payments?.length) {
                 const payment = profile.payments[0];
                 try {
@@ -7597,9 +7613,10 @@ app.get("/profiles", auth, async (req, res) => {
 
 app.post("/profiles/import", auth, async (req, res) => {
     try {
-        await ensureUserNotRevoked(req.user_id);
-        const accountType = normalizeProfileAccountType(req.body?.account_type || 'walmart');
-        const assignedStores = normalizeAssignedStores(req.body?.assigned_stores || [accountType], accountType);
+        const importUser = await ensureUserNotRevoked(req.user_id);
+        const requestedType = normalizeProfileAccountType(req.body?.account_type || 'general');
+        const assignedStores = restrictAssignedStoresForRole(normalizeAssignedStores(req.body?.assigned_stores || [requestedType], requestedType), importUser.role);
+        const accountType = assignedStores[0] || 'general';
         const rawProfiles = Array.isArray(req.body?.profiles) ? req.body.profiles : [];
         if (!rawProfiles.length) {
             return res.status(400).json({ error: "No profiles were provided" });
@@ -7797,7 +7814,9 @@ app.patch("/profiles/bulk", auth, async (req, res) => {
         await ensureUserNotRevoked(req.user_id);
         const ids = Array.isArray(req.body?.ids) ? [...new Set(req.body.ids.map((id) => String(id || '').trim()).filter(Boolean))] : [];
         const store = normalizeProfileAccountType(req.body?.store || '');
-        const allowedStores = new Set(['target', 'walmart', 'samsclub', 'amazon', 'crunchyroll', 'pokemoncenter', 'general']);
+        const allowedStores = new Set(['target', 'walmart', 'samsclub', 'amazon', 'bandai', 'crunchyroll', 'pokemoncenter', 'general']);
+        const bulkUser = await ensureUserNotRevoked(req.user_id);
+        if (store === 'walmart' && String(bulkUser.role || '').toLowerCase() !== 'super_admin') return res.status(403).json({ error: 'Walmart profiles are available only to the super admin.' });
         if (!ids.length) return res.status(400).json({ error: 'No profile ids were provided' });
         if (!allowedStores.has(store) || store === 'all') return res.status(400).json({ error: 'Choose a specific store group before bulk editing.' });
 
@@ -7930,11 +7949,11 @@ app.delete("/profiles/bulk", auth, async (req, res) => {
 
 app.post("/profiles", auth, async (req, res) => {
     try {
-        const assignedStores = normalizeAssignedStores(req.body?.assigned_stores, req.body?.account_type);
+        const currentUser = await ensureUserNotRevoked(req.user_id);
+        const assignedStores = restrictAssignedStoresForRole(normalizeAssignedStores(req.body?.assigned_stores, req.body?.account_type), currentUser.role);
         const data = { ...req.body, account_type: assignedStores[0] || normalizeProfileAccountType(req.body?.account_type), assigned_stores: assignedStores };
         const cardLast4 = (data.card || "").slice(-4);
 
-        const currentUser = await ensureUserNotRevoked(req.user_id);
         await enforceProfileAssignmentLimits({ userId: req.user_id, role: currentUser.role, stores: assignedStores });
 
         if (!phoneRegex.test(data.phone || "")) {
@@ -7983,11 +8002,11 @@ app.post("/profiles", auth, async (req, res) => {
 app.put("/profiles/:id", auth, async (req, res) => {
     try {
         const id = req.params.id;
-        const assignedStores = normalizeAssignedStores(req.body?.assigned_stores, req.body?.account_type);
+        const currentUser = await ensureUserNotRevoked(req.user_id);
+        const assignedStores = restrictAssignedStoresForRole(normalizeAssignedStores(req.body?.assigned_stores, req.body?.account_type), currentUser.role);
         const data = { ...req.body, account_type: assignedStores[0] || normalizeProfileAccountType(req.body?.account_type), assigned_stores: assignedStores };
         const cardLast4 = (data.card || "").slice(-4);
 
-        const currentUser = await ensureUserNotRevoked(req.user_id);
         await enforceProfileAssignmentLimits({ userId: req.user_id, role: currentUser.role, stores: assignedStores, excludeProfileId: id });
 
         if (!phoneRegex.test(data.phone || "")) {

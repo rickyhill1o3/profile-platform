@@ -158,7 +158,7 @@ const PAGE_SIZE = 10;
 let profileImportBound = false;
 let raffleBuilderBound = false;
 let allDashboardProfiles = [];
-let profileGroupFilters = { all: '', general: '', walmart: '', target: '', samsclub: '', amazon: '', crunchyroll: '', pokemoncenter: '', raffle: '' };
+let profileGroupFilters = { all: '', general: '', walmart: '', target: '', samsclub: '', amazon: '', bandai: '', crunchyroll: '', pokemoncenter: '', raffle: '' };
 let selectedProfileIds = new Set();
 
 consumeOAuthRedirectParams();
@@ -376,6 +376,7 @@ const STORE_CREDENTIAL_CONFIG = {
     walmart: { label: 'Walmart', method: 'imap', help: 'Walmart uses email, account password, and Gmail app password / IMAP.' },
     samsclub: { label: "Sam's Club", method: 'imap', help: "Sam's Club uses email, account password, and Gmail app password / IMAP." },
     amazon: { label: 'Amazon', method: 'amazon2fa_imap', help: 'Amazon uses email, password, authenticator / 2FA secret, and IMAP or AYCD for email-confirmed checkout billing.' },
+    bandai: { label: 'Premium Bandai', method: 'imap', help: 'Premium Bandai uses login email, account password, and Gmail app password / IMAP.' },
     crunchyroll: { label: 'Crunchyroll', method: 'password', help: 'Crunchyroll uses email and password only.' }
 };
 
@@ -662,7 +663,7 @@ async function loadProfiles() {
         }
 
         allDashboardProfiles = profiles;
-        const groups = { all: [], general: [], walmart: [], target: [], samsclub: [], amazon: [], crunchyroll: [], pokemoncenter: [], raffle: [] };
+        const groups = { all: [], general: [], walmart: [], target: [], samsclub: [], amazon: [], bandai: [], crunchyroll: [], pokemoncenter: [], raffle: [] };
         profiles.forEach((p) => {
             groups.all.push(p);
             const assignedStores = profileAssignedStores(p);
@@ -1240,6 +1241,13 @@ async function loadProfileEditor() {
         adminButton.style.display = "inline-block";
     }
 
+    const isSuperAdmin = String(user?.role || '').toLowerCase() === 'super_admin';
+    document.querySelectorAll('[data-super-admin-store="walmart"]').forEach((el) => {
+        el.style.display = isSuperAdmin ? '' : 'none';
+        const input = el.querySelector('input[name="assigned_stores"][value="walmart"]');
+        if (input && !isSuperAdmin) input.checked = false;
+    });
+
     const accountTypeSelect = document.getElementById("account_type");
     document.querySelectorAll('input[name="assigned_stores"]').forEach((input) => {
         input.addEventListener('change', () => {
@@ -1276,7 +1284,7 @@ async function loadProfileEditor() {
 
     profile_name.value = profile.profile_name || "";
     account_type.value = profile.account_type || "general";
-    setStoreAssignments(profileAssignedStores(profile));
+    setStoreAssignments(profileAssignedStores(profile).filter((store) => store !== 'walmart' || String(user?.role || '').toLowerCase() === 'super_admin'));
     first_name.value = addr.first_name || "";
     last_name.value = addr.last_name || "";
     email.value = addr.email || "";
@@ -1300,7 +1308,10 @@ if (profileForm) {
 
         const message = document.getElementById("profileMessage");
         const editId = localStorage.getItem("edit");
-        const assignedStores = selectedStoreAssignments().length ? selectedStoreAssignments() : ['general'];
+        let assignedStores = selectedStoreAssignments().length ? selectedStoreAssignments() : ['general'];
+        const editorUser = currentUser();
+        if (String(editorUser?.role || '').toLowerCase() !== 'super_admin') assignedStores = assignedStores.filter((store) => store !== 'walmart');
+        if (!assignedStores.length) assignedStores = ['general'];
         if (account_type) account_type.value = assignedStores[0] || 'general';
 
         const storeCredentials = collectStoreCredentials(assignedStores);
