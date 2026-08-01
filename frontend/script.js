@@ -375,7 +375,7 @@ const STORE_CREDENTIAL_CONFIG = {
     target: { label: 'Target', method: 'imap', help: 'Target uses email, account password, and Gmail app password / IMAP.' },
     walmart: { label: 'Walmart', method: 'imap', help: 'Walmart uses email, account password, and Gmail app password / IMAP.' },
     samsclub: { label: "Sam's Club", method: 'imap', help: "Sam's Club uses email, account password, and Gmail app password / IMAP." },
-    amazon: { label: 'Amazon', method: 'amazon2fa', help: 'Amazon uses email, password, and authenticator / 2FA secret.' },
+    amazon: { label: 'Amazon', method: 'amazon2fa_imap', help: 'Amazon uses email, password, authenticator / 2FA secret, and IMAP or AYCD for email-confirmed checkout billing.' },
     crunchyroll: { label: 'Crunchyroll', method: 'password', help: 'Crunchyroll uses email and password only.' }
 };
 
@@ -389,7 +389,7 @@ function profileStoreCredentials(profile = {}, store = '') {
 
 function firstSavedImapAppPassword(profile = {}, existingValues = {}) {
     const imapStores = Object.entries(STORE_CREDENTIAL_CONFIG)
-        .filter(([, cfg]) => cfg.method === 'imap')
+        .filter(([, cfg]) => ['imap', 'amazon2fa_imap'].includes(cfg.method))
         .map(([store]) => store);
 
     for (const store of imapStores) {
@@ -420,7 +420,7 @@ function storeCredentialBlock(store, values = {}) {
     const sharedEmail = escapeHTML(document.getElementById('email')?.value || '');
 
     let extra = '';
-    if (cfg.method === 'imap') {
+    if (['imap', 'amazon2fa_imap'].includes(cfg.method)) {
         const imapHelpId = `${prefix}_gmail_app_password_help`;
         extra = `
             <div class="field field--full">
@@ -437,15 +437,16 @@ function storeCredentialBlock(store, values = {}) {
                     A Gmail app password is different from your normal Gmail password. Create the store account first, then turn on 2-Step Verification in your Gmail account. After 2-Step Verification is on, search Gmail/Google Account settings for <strong>App passwords</strong>, create a new app password, and paste the 16-character code here. It usually looks like <strong>xxxx xxxx xxxx xxxx</strong>.
                 </div>
             </div>`;
-    } else if (cfg.method === 'amazon2fa') {
-        extra = `
+    }
+    if (cfg.method === 'amazon2fa_imap') {
+        extra += `
             <div class="field field--full">
                 <label for="${prefix}_amazon_2fa_secret">Amazon Authenticator / 2FA Secret</label>
                 <input class="input" id="${prefix}_amazon_2fa_secret" value="${amazonSecret}" placeholder="Amazon Authenticator Secret" />
             </div>`;
     }
 
-    if (['imap', 'amazon2fa'].includes(cfg.method)) {
+    if (['imap', 'amazon2fa_imap'].includes(cfg.method)) {
         extra += `
             <div class="field field--full aycd-profile-option">
                 <label class="checkbox-row" for="${prefix}_use_aycd_inbox">
@@ -501,7 +502,7 @@ function toggleAccountCredentialFields(profile = null) {
         const saved = profileStoreCredentials(profile || {}, store);
         const current = existingValues[store] || {};
         const values = Object.assign({}, saved, Object.fromEntries(Object.entries(current).filter(([, value]) => value)));
-        if (STORE_CREDENTIAL_CONFIG[store]?.method === 'imap' && !String(values.gmail_app_password || '').trim() && sharedGmailAppPassword) {
+        if (['imap', 'amazon2fa_imap'].includes(STORE_CREDENTIAL_CONFIG[store]?.method) && !String(values.gmail_app_password || '').trim() && sharedGmailAppPassword) {
             values.gmail_app_password = sharedGmailAppPassword;
         }
         return storeCredentialBlock(store, values);
@@ -536,7 +537,7 @@ function credentialStatusForStore(profile = {}, store = '') {
     const usesAycd = !!creds.use_aycd_inbox;
     const has2fa = !!String(creds.amazon_2fa_secret || creds.two_fa_secret || '').trim();
     if (cfg.method === 'imap') return hasEmail && hasPassword && (hasImap || usesAycd) ? 'Login complete' : 'Missing login info';
-    if (cfg.method === 'amazon2fa') return hasEmail && hasPassword && has2fa ? 'Login complete' : 'Missing login info';
+    if (cfg.method === 'amazon2fa_imap') return hasEmail && hasPassword && has2fa && (hasImap || usesAycd) ? 'Login complete' : 'Missing login info';
     return hasEmail && hasPassword ? 'Login complete' : 'Missing login info';
 }
 
@@ -5494,7 +5495,7 @@ function renderSetupWizardStep() {
         <div class="setup-wizard-status ${step.complete ? 'is-complete' : 'is-incomplete'}">${step.complete ? '✓ Complete' : 'Needs attention'}</div>
         <p>${escapeHTML(step.description)}</p>
         <p class="subtle-text">${escapeHTML(step.detail)}</p>
-        ${step.key === 'credentials' ? `<ul class="setup-step-list"><li>Target, Walmart, and Sam’s Club: retailer login plus mailbox app password/IMAP.</li><li>Amazon: retailer login plus the permanent authenticator setup key.</li><li>Never paste a temporary six-digit code into the 2FA Secret field.</li></ul>` : ''}
+        ${step.key === 'credentials' ? `<ul class="setup-step-list"><li>Target, Walmart, and Sam’s Club: retailer login plus mailbox app password/IMAP.</li><li>Amazon: retailer login, permanent authenticator setup key, plus Gmail app password/IMAP or AYCD for checkout confirmation.</li><li>Never paste a temporary six-digit code into the 2FA Secret field.</li></ul>` : ''}
         <div class="setup-step-actions">
           <button class="btn btn-primary" type="button" data-setup-go="${escapeHTML(step.nav)}">${escapeHTML(step.action)}</button>
           ${step.help ? '<button class="btn" type="button" data-setup-help>Read IMAP & 2FA Help</button>' : ''}

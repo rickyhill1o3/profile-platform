@@ -4082,22 +4082,29 @@ async function recordSuccessfulCheckout(payload) {
     const currentBalance = await getUserCreditBalance(user.id);
     const willBeZeroOrNegative = creditsToCharge > 0 && (currentBalance - creditsToCharge) <= 0;
 
-    // Create order. Successful checkouts are always charged, even if the balance goes negative.
+    const isAmazonPendingVerification = String(normalized.site || '').toLowerCase().includes('amazon');
+
+    // Amazon Fast can emit ghost success webhooks. Save those as pending and do not
+    // charge credits until a distinct confirmation email is matched one-to-one.
     const order = await createOrderRecord({
         ...payload,
         ...normalized,
         user_id: user.id,
         external_order_id: externalOrderId,
-        status: "waiting_confirmation",
-        credits_charged: creditsToCharge,
+        status: isAmazonPendingVerification ? "pending_email_verification" : "waiting_confirmation",
+        credits_charged: isAmazonPendingVerification ? 0 : creditsToCharge,
         metadata: {
             ...(payload.metadata || {}),
             matched_user_email: user.email,
             purchase_id: normalized.purchase_id || normalized.order_number || null,
             order_number: normalized.order_number || null,
-            confirmation_status: 'waiting_confirmation',
+            confirmation_status: isAmazonPendingVerification ? 'pending_email_verification' : 'waiting_confirmation',
             waiting_for_confirmation_since: new Date().toISOString(),
             requested_credits: creditsToCharge,
+            pending_credits_to_charge: isAmazonPendingVerification ? creditsToCharge : 0,
+            quantity: Number(normalized.quantity || 1) || 1,
+            purchase_price: Number(normalized.price || 0) || 0,
+            email_verification_required: isAmazonPendingVerification,
             previous_balance: currentBalance,
             projected_balance_after_charge: currentBalance - creditsToCharge,
             balance_went_zero_or_negative: willBeZeroOrNegative,
@@ -4109,7 +4116,7 @@ async function recordSuccessfulCheckout(payload) {
     let balanceAfter = currentBalance;
 
     // Charge credits. This intentionally allows negative balances.
-    if (creditsToCharge > 0) {
+    if (!isAmazonPendingVerification && creditsToCharge > 0) {
         balanceAfter = await adjustUserCredits({
             userId: user.id,
             delta: -creditsToCharge,
@@ -4137,7 +4144,9 @@ async function recordSuccessfulCheckout(payload) {
     return {
         order,
         duplicate: false,
-        credits_charged: creditsToCharge,
+        credits_charged: isAmazonPendingVerification ? 0 : creditsToCharge,
+        pending_credits: isAmazonPendingVerification ? creditsToCharge : 0,
+        pending_email_verification: isAmazonPendingVerification,
         balance_after: balanceAfter
     };
 }
@@ -4746,7 +4755,8 @@ app.post(["/webhooks/orders", "/webhooks/orders/:token"], async (req, res) => {
                     }
                 }
 
-                finalDiscordResults = await sendCheckoutDiscordNotificationsForPayload(payload, resolvedUser, {
+                const pendingAmazonVerification = recordedOrder?.status === 'pending_email_verification' || recordedOrder?.metadata?.email_verification_required === true;
+                if (!pendingAmazonVerification) finalDiscordResults = await sendCheckoutDiscordNotificationsForPayload(payload, resolvedUser, {
                     status: 'processed',
                     ...(recordedOrder ? { order: recordedOrder } : {}),
                     ...(recordedCreditsCharged !== null ? { credits_charged: recordedCreditsCharged } : {})
@@ -4754,7 +4764,11 @@ app.post(["/webhooks/orders", "/webhooks/orders/:token"], async (req, res) => {
                     console.error('Checkout discord relay failed:', err);
                     return [{ success: false, error: err.message || String(err) }];
                 });
-                checkoutDiscordSent = true;
+                checkoutDiscordSent = !pendingAmazonVerification;
+                if (pendingAmazonVerification) {
+                    finalStatus = 'pending_email_verification';
+                    finalError = 'Amazon checkout is waiting for a one-to-one confirmation email before credits are charged or success is sent to Discord.';
+                }
 
                 await updateWebhookLogEntry(logId, {
                     status: finalStatus,
@@ -6859,7 +6873,7 @@ function normalizeStoreCredentialsPayload(payload = {}) {
     const raw = payload.store_credentials && typeof payload.store_credentials === 'object' ? payload.store_credentials : {};
     const stores = normalizeAssignedStores(payload.assigned_stores, payload.account_type);
     const out = {};
-    const imapStores = new Set(['target', 'walmart', 'samsclub']);
+    const imapStores = new Set(['target', 'walmart', 'samsclub', 'amazon']);
     const sharedGmailAppPassword = normalizeStoredGmailAppPassword(payload.gmail_app_password)
         || Object.values(raw).map((item) => normalizeStoredGmailAppPassword(item?.gmail_app_password)).find(Boolean)
         || '';
@@ -9439,7 +9453,67 @@ registerSuccessNetwork({
     SUPER_ADMIN_EMAIL
 });
 
-registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits });
+registerOrderTracker({
+    app, supabase, auth, admin, adjustUserCredits,
+    confirmPendingAmazonCheckout: async ({ serviceOrder, amazonOrderNumber, messageId, eventAt, emailTotal, emailQuantity }) => {
+        let metadata = { ...(serviceOrder.metadata || {}) };
+        if (metadata.email_verified_at || Number(serviceOrder.credits_charged || 0) > 0) return { already_verified: true, order: serviceOrder };
+
+        // Enforce one email -> one webhook even if two IMAP/AYCD scans overlap.
+        const existingOrders = await supabase.from('orders').select('id,metadata').eq('user_id', serviceOrder.user_id).limit(1000);
+        if (existingOrders.error) throw existingOrders.error;
+        const reused = (existingOrders.data || []).find(row => row.id !== serviceOrder.id && String(row.metadata?.matched_email_message_id || '') === String(messageId || ''));
+        if (reused) return { already_verified: true, email_already_used: true, order: serviceOrder };
+
+        const reservationMetadata = {
+            ...metadata,
+            confirmation_status: 'confirming_email',
+            matched_email_message_id: messageId,
+            amazon_order_number: amazonOrderNumber,
+            email_total: emailTotal,
+            email_quantity: emailQuantity,
+            email_confirmation_reserved_at: new Date().toISOString()
+        };
+        const reservation = await supabase.from('orders')
+            .update({ status: 'confirming_email', metadata: reservationMetadata })
+            .eq('id', serviceOrder.id)
+            .eq('status', 'pending_email_verification')
+            .select().maybeSingle();
+        if (reservation.error) throw reservation.error;
+        if (!reservation.data) return { already_verified: true, reservation_failed: true, order: serviceOrder };
+
+        metadata = reservationMetadata;
+        const credits = asWholeCredits(metadata.pending_credits_to_charge ?? metadata.requested_credits, 0);
+        let balanceAfter = await getUserCreditBalance(serviceOrder.user_id);
+        try {
+            if (credits > 0) {
+                balanceAfter = await adjustUserCredits({
+                    userId: serviceOrder.user_id, delta: -credits, reason: 'amazon_email_verified_checkout',
+                    note: `Credits charged after Amazon email verification ${amazonOrderNumber}`,
+                    metadata: { source_order_id: serviceOrder.id, amazon_order_number: amazonOrderNumber, matched_email_message_id: messageId },
+                    orderId: serviceOrder.id
+                });
+            }
+            const updatedMetadata = { ...metadata, confirmation_status: 'confirmed', email_verification_required: false,
+                email_verified_at: eventAt, matched_email_message_id: messageId, amazon_order_number: amazonOrderNumber,
+                email_total: emailTotal, email_quantity: emailQuantity, pending_credits_to_charge: 0 };
+            const updatedResult = await supabase.from('orders').update({ status: 'confirmed', external_order_id: amazonOrderNumber, credits_charged: credits, metadata: updatedMetadata }).eq('id', serviceOrder.id).eq('status', 'confirming_email').select().single();
+            if (updatedResult.error) throw updatedResult.error;
+            const updatedOrder = updatedResult.data;
+            const userResult = await supabase.from('users').select('*').eq('id', serviceOrder.user_id).maybeSingle();
+            const discordResults = await sendCheckoutDiscordNotificationsForPayload(serviceOrder.raw_payload || {}, userResult.data || null, {
+                status: 'processed', order: updatedOrder, credits_charged: credits
+            }).catch(err => [{ success: false, error: err.message || String(err) }]);
+            return { order: updatedOrder, credits_charged: credits, balance_after: balanceAfter, discord_results: discordResults };
+        } catch (err) {
+            // Release the reservation so a later scan can retry. If credit debit
+            // succeeded but finalization failed, the ledger/order-idempotency
+            // protections prevent a second debit for the same order.
+            await supabase.from('orders').update({ status: 'pending_email_verification', metadata: { ...metadata, confirmation_status: 'pending_email_verification', matched_email_message_id: null, email_confirmation_error: err.message || String(err) } }).eq('id', serviceOrder.id).eq('status', 'confirming_email');
+            throw err;
+        }
+    }
+});
 registerMarketValueEngine({ app, supabase, auth, admin });
 registerMasterProductCatalog({ app, supabase, auth, admin });
 

@@ -92,6 +92,102 @@ function extractOrderNumber(store, subject, text) {
   return generic?.[1]?.replace(/[.,]$/, '') || '';
 }
 
+function extractAmazonItemQuantity(subject, text) {
+  const hay = `${subject}\n${text}`;
+  const patterns = [
+    /\b(?:ordered:\s*)?(\d+)\s+(?:toy\s+)?items?\b/i,
+    /\bquantity\s*[:#]?\s*(\d+)\b/i,
+    /\bqty\s*[:#]?\s*(\d+)\b/i
+  ];
+  for (const re of patterns) {
+    const m = hay.match(re);
+    if (m?.[1]) return Math.max(1, Number(m[1]) || 1);
+  }
+  return 1;
+}
+
+function findEmailValues(value, out = new Set(), depth = 0) {
+  if (depth > 7 || value == null) return out;
+  if (Array.isArray(value)) { value.forEach(v => findEmailValues(v, out, depth + 1)); return out; }
+  if (typeof value === 'object') { Object.values(value).forEach(v => findEmailValues(v, out, depth + 1)); return out; }
+  const matches = String(value).match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi) || [];
+  matches.forEach(email => out.add(lower(email)));
+  return out;
+}
+
+function findNamedPayloadValue(value, names, depth = 0) {
+  if (depth > 8 || value == null) return null;
+  if (Array.isArray(value)) {
+    for (const item of value) { const found = findNamedPayloadValue(item, names, depth + 1); if (found != null) return found; }
+    return null;
+  }
+  if (typeof value !== 'object') return null;
+  for (const [key, child] of Object.entries(value)) {
+    const normalizedKey = lower(key).replace(/[^a-z0-9]/g, '');
+    if (names.includes(normalizedKey) && child != null && typeof child !== 'object') return child;
+    if (normalizedKey === 'name' && names.includes(lower(value.name).replace(/[^a-z0-9]/g, '')) && value.value != null) return value.value;
+  }
+  for (const child of Object.values(value)) { const found = findNamedPayloadValue(child, names, depth + 1); if (found != null) return found; }
+  return null;
+}
+
+async function matchPendingAmazonOrder(supabase, account, parsed, orderNumber, amounts, messageId) {
+  const eventMs = new Date(parsed.date || Date.now()).getTime();
+  const emailQuantity = extractAmazonItemQuantity(clean(parsed.subject), clean(parsed.text || parsed.html || ''));
+
+  // Amazon Fast can report the task/configured quantity rather than the final
+  // quantity Amazon accepted. Therefore quantity is evidence for display only;
+  // it must never reject or multiply-confirm a checkout.
+  //
+  // One Amazon confirmation email consumes exactly one pending webhook. When a
+  // burst contains many indistinguishable ghost successes, the closest unused
+  // webhook for the same mailbox is selected and all others remain pending.
+  const { data, error } = await supabase
+    .from('orders')
+    .select('*')
+    .eq('user_id', account.user_id)
+    .order('created_at', { ascending: false })
+    .limit(1000);
+  if (error) throw error;
+
+  const allOrders = data || [];
+  const messageAlreadyUsed = allOrders.some(order => {
+    const meta = order.metadata || {};
+    return clean(meta.matched_email_message_id) === clean(messageId);
+  });
+  if (messageAlreadyUsed) return null;
+
+  const candidates = allOrders.filter(order => {
+    const meta = order.metadata || {};
+    if (!String(order.site || meta.site || '').toLowerCase().includes('amazon')) return false;
+    if (!(order.status === 'pending_email_verification' || meta.email_verification_required === true)) return false;
+    if (meta.matched_email_message_id || meta.email_verified_at || Number(order.credits_charged || 0) > 0) return false;
+
+    const emails = findEmailValues(order.raw_payload || {});
+    if (emails.size && !emails.has(lower(account.email))) return false;
+
+    const createdMs = new Date(order.created_at || meta.waiting_for_confirmation_since || 0).getTime();
+    // Permit delayed Amazon/AYCD delivery while keeping the match inside the
+    // same checkout burst. The nearest unused webhook wins.
+    return Number.isFinite(createdMs) && Math.abs(eventMs - createdMs) <= 30 * 60 * 1000;
+  }).map(order => {
+    const createdMs = new Date(order.created_at || order.metadata?.waiting_for_confirmation_since || 0).getTime();
+    const unitPrice = money(order.metadata?.purchase_price || findNamedPayloadValue(order.raw_payload || {}, ['price','unitprice'])) || 0;
+
+    // Total is only a tie-breaker. Amazon emails include tax and the webhook
+    // quantity may be wrong, so do not require an exact quantity or total.
+    let totalTieBreak = Number.MAX_SAFE_INTEGER;
+    if (amounts.total != null && unitPrice > 0) {
+      const inferredUnits = Math.max(1, Math.round(amounts.total / unitPrice));
+      const merchandiseEstimate = unitPrice * inferredUnits;
+      totalTieBreak = Math.abs(amounts.total - merchandiseEstimate);
+    }
+    return { order, timeDiff: Math.abs(eventMs - createdMs), totalTieBreak };
+  }).sort((a, b) => (a.timeDiff - b.timeDiff) || (a.totalTieBreak - b.totalTieBreak) || String(a.order.id).localeCompare(String(b.order.id)));
+
+  return candidates[0] ? { serviceOrder: candidates[0].order, emailQuantity } : null;
+}
+
 function extractAmounts(text) {
   const find = (labels) => {
     for (const label of labels) {
@@ -374,7 +470,7 @@ async function archiveEmailMetadata(supabase, account, parsed, uid, classificati
   }
   return data;
 }
-async function saveParsedMessage(supabase, account, parsed, uid, adjustCredits = null) {
+async function saveParsedMessage(supabase, account, parsed, uid, adjustCredits = null, confirmPendingAmazonCheckout = null) {
   const subject = clean(parsed.subject);
   const from = parsed.from?.text || '';
   const text = clean(parsed.text || parsed.html || '').replace(/\u0000/g, '');
@@ -395,7 +491,12 @@ async function saveParsedMessage(supabase, account, parsed, uid, adjustCredits =
 
   const serviceOrders = await loadServiceOrders(supabase, account.user_id);
   const incomingRef = normalizeOrderRef(orderNumber);
-  const serviceOrder = serviceOrders.find(o => collectOrderRefs(o).includes(incomingRef));
+  let serviceOrder = serviceOrders.find(o => collectOrderRefs(o).includes(incomingRef));
+  let amazonPendingMatch = null;
+  if (!serviceOrder && store === 'amazon' && status === 'confirmed') {
+    amazonPendingMatch = await matchPendingAmazonOrder(supabase, account, parsed, orderNumber, amounts, messageId);
+    serviceOrder = amazonPendingMatch?.serviceOrder || null;
+  }
   // Only track retailer emails that correspond to a checkout recorded by this platform.
   if (!serviceOrder) return { ignored: true, reason: 'not_a_platform_order' };
 
@@ -443,7 +544,24 @@ async function saveParsedMessage(supabase, account, parsed, uid, adjustCredits =
     imap_last_message_id: messageId
   };
   if (status === 'confirmed') sourceMetadata.confirmed_by_email_at = eventAt;
-  await supabase.from('orders').update({ status, external_order_id: orderNumber, metadata: sourceMetadata }).eq('id', serviceOrder.id);
+  const deferAmazonConfirmation = store === 'amazon' && status === 'confirmed' && amazonPendingMatch && typeof confirmPendingAmazonCheckout === 'function';
+  // Keep Amazon in pending state until the one-to-one email reservation and
+  // credit charge complete. This prevents concurrent scans from consuming the
+  // same email or confirming the same webhook twice.
+  if (!deferAmazonConfirmation) {
+    await supabase.from('orders').update({ status, external_order_id: orderNumber, metadata: sourceMetadata }).eq('id', serviceOrder.id);
+  }
+
+  if (deferAmazonConfirmation) {
+    const confirmed = await confirmPendingAmazonCheckout({
+      serviceOrder, amazonOrderNumber: orderNumber, messageId, eventAt,
+      emailTotal: amounts.total, emailQuantity: amazonPendingMatch.emailQuantity
+    });
+    if (confirmed?.order) {
+      serviceOrder = confirmed.order;
+      await supabase.from('tracked_orders').update({ credits_spent: Number(confirmed.order.credits_charged || 0), updated_at: new Date().toISOString() }).eq('id', order.id);
+    }
+  }
 
   const inactive = ['canceled','refunded'].includes(status);
   await ensureInvestmentRow(supabase, order, serviceOrder, !inactive);
@@ -456,7 +574,7 @@ async function saveParsedMessage(supabase, account, parsed, uid, adjustCredits =
   return { saved: true, order_id: order.id, status };
 }
 
-async function scanAccount(supabase, account, adjustCredits = null, onProgress = null) {
+async function scanAccount(supabase, account, adjustCredits = null, onProgress = null, confirmPendingAmazonCheckout = null) {
   const stateResp = await supabase.from('imap_scan_accounts').select('*').eq('user_id', account.user_id).eq('email', account.email).maybeSingle();
   const state = stateResp.data || {};
   const lastSuccessMs = state.last_success_at ? new Date(state.last_success_at).getTime() : 0;
@@ -507,7 +625,7 @@ async function scanAccount(supabase, account, adjustCredits = null, onProgress =
         highestUid = Math.max(highestUid, Number(msg.uid || 0));
         try {
           const parsed = await simpleParser(msg.source);
-          const result = await saveParsedMessage(supabase, account, parsed, msg.uid, adjustCredits);
+          const result = await saveParsedMessage(supabase, account, parsed, msg.uid, adjustCredits, confirmPendingAmazonCheckout);
           if (result.saved) saved += 1;
         } catch (e) { console.error('IMAP message parse failed', account.email, msg.uid, e.message); }
         if (onProgress) onProgress({ checked, total, saved });
@@ -523,7 +641,7 @@ async function scanAccount(supabase, account, adjustCredits = null, onProgress =
 }
 
 let scanRunning = false;
-async function scanAll(supabase, userId = null, adjustCredits = null, onProgress = null) {
+async function scanAll(supabase, userId = null, adjustCredits = null, onProgress = null, confirmPendingAmazonCheckout = null) {
   if (scanRunning && !userId) return { skipped: true };
   if (!userId) scanRunning = true;
   try {
@@ -541,7 +659,7 @@ async function scanAll(supabase, userId = null, adjustCredits = null, onProgress
       try {
         const result = await scanAccount(supabase, account, adjustCredits, detail => {
           if (onProgress) onProgress({ phase: 'scanning', accountIndex: index, accountTotal: accounts.length, email: account.email, ...detail });
-        });
+        }, confirmPendingAmazonCheckout);
         results.push({ email: account.email, ...result });
       } catch (err) {
         results.push({ email: account.email, error: err.message });
@@ -563,7 +681,7 @@ function scanJobView(job) {
   };
 }
 
-function startUserScanJob(supabase, userId, adjustCredits) {
+function startUserScanJob(supabase, userId, adjustCredits, confirmPendingAmazonCheckout) {
   const current = userScanJobs.get(String(userId));
   if (current?.status === 'running') return current;
   const job = { id: `${userId}:${Date.now()}`, status: 'running', phase: 'starting', percent: 1, message: 'Preparing connected mailboxes…', accountIndex: 0, accountTotal: 0, checked: 0, total: 0, startedAt: new Date().toISOString() };
@@ -581,7 +699,7 @@ function startUserScanJob(supabase, userId, adjustCredits) {
         const messageFraction = job.total ? Math.min(1, job.checked / job.total) : 0;
         job.percent = Math.max(2, Math.min(98, Math.round((accountFraction + (messageFraction / Math.max(1, job.accountTotal))) * 96)));
         job.message = job.email ? `Scanning ${job.email} (${Math.min(job.checked, job.total || job.checked)} of ${job.total || 'new'} messages)…` : 'Scanning connected mailboxes…';
-      });
+      }, confirmPendingAmazonCheckout);
       job.status = 'complete'; job.phase = 'complete'; job.percent = 100; job.message = 'Email scan complete.'; job.completedAt = new Date().toISOString(); job.result = result;
     } catch (error) {
       job.status = 'failed'; job.phase = 'failed'; job.percent = 100; job.message = 'Email scan finished with an error.'; job.error = error.message; job.completedAt = new Date().toISOString();
@@ -726,7 +844,7 @@ async function fetchAycdMessages(query = '') {
   }
 }
 
-async function scanAycdForUser(supabase, userId, adjustCredits = null) {
+async function scanAycdForUser(supabase, userId, adjustCredits = null, confirmPendingAmazonCheckout = null) {
   const cfg = aycdConfig();
   if (!cfg.enabled) return { configured: false, checked: 0, matched: 0, ignored: 0 };
   const serviceOrders = await loadServiceOrders(supabase, userId);
@@ -751,13 +869,13 @@ async function scanAycdForUser(supabase, userId, adjustCredits = null) {
       messageId: m.messageId,
       date: new Date(m.date)
     };
-    const saved = await saveParsedMessage(supabase, account, parsed, m.uid, adjustCredits);
+    const saved = await saveParsedMessage(supabase, account, parsed, m.uid, adjustCredits, confirmPendingAmazonCheckout);
     if (saved?.ignored) ignored += 1; else matched += 1;
   }
   return { configured: true, checked: result.messages.length, matched, ignored };
 }
 
-function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits }) {
+function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, confirmPendingAmazonCheckout }) {
   app.post('/orders/imap-test', auth, async (req, res) => {
     const email = lower(req.body?.email);
     const provider = providerForEmail(email);
@@ -975,7 +1093,7 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits })
           date: item.date ? new Date(item.date) : new Date(),
           messageId: clean(item.messageId) || `aycd:${clean(item.uid) || checked}`
         };
-        const result = await saveParsedMessage(supabase, account, parsed, item.uid || checked, adjustUserCredits);
+        const result = await saveParsedMessage(supabase, account, parsed, item.uid || checked, adjustUserCredits, confirmPendingAmazonCheckout);
         if (result?.saved) matched += 1; else ignored += 1;
         results.push({ ...(result || { ignored: true }), source_email: account.email, profile_id: account.profile_id });
       } catch (error) { results.push({ error: error.message }); }
@@ -1101,7 +1219,7 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits })
 
   app.post('/orders/scan/start', auth, async (req, res) => {
     try {
-      const job = startUserScanJob(supabase, req.user_id, adjustUserCredits);
+      const job = startUserScanJob(supabase, req.user_id, adjustUserCredits, confirmPendingAmazonCheckout);
       res.status(job.status === 'running' ? 202 : 200).json({ success: true, job: scanJobView(job) });
     } catch (error) { res.status(500).json({ error: error.message }); }
   });
@@ -1112,7 +1230,7 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits })
   });
 
   app.post('/orders/scan', auth, async (req, res) => {
-    try { res.json({ success: true, ...(await scanAll(supabase, req.user_id, adjustUserCredits)) }); }
+    try { res.json({ success: true, ...(await scanAll(supabase, req.user_id, adjustUserCredits, null, confirmPendingAmazonCheckout)) }); }
     catch (e) { res.status(500).json({ error: e.message }); }
   });
 
@@ -1380,8 +1498,8 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits })
   });
 
   if (process.env.IMAP_ORDER_TRACKER_ENABLED !== 'false') {
-    setTimeout(() => scanAll(supabase).catch(e => console.error('Initial IMAP order scan failed:', e.message)), 30000);
-    setInterval(() => scanAll(supabase).catch(e => console.error('Scheduled IMAP order scan failed:', e.message)), SCAN_INTERVAL_MS);
+    setTimeout(() => scanAll(supabase, null, adjustUserCredits, null, confirmPendingAmazonCheckout).catch(e => console.error('Initial IMAP order scan failed:', e.message)), 30000);
+    setInterval(() => scanAll(supabase, null, adjustUserCredits, null, confirmPendingAmazonCheckout).catch(e => console.error('Scheduled IMAP order scan failed:', e.message)), SCAN_INTERVAL_MS);
   }
 }
 
