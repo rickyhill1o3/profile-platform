@@ -46,6 +46,7 @@
     <section class="stats-grid">
       <div class="stat-card"><span class="stat-label">All Profiles</span><strong class="stat-value" id="profileCountStat">0</strong><span class="stat-help">Saved checkout profiles</span></div>
       <div class="stat-card"><span class="stat-label">Amazon</span><strong class="stat-value" id="amazonProfileCountStat">0</strong><span class="stat-help">Amazon-ready profiles</span></div>
+      <div class="stat-card"><span class="stat-label">Premium Bandai</span><strong class="stat-value" id="bandaiProfileCountStat">0</strong><span class="stat-help">Bandai-ready profiles</span></div>
       <div class="stat-card"><span class="stat-label">Retail</span><strong class="stat-value" id="retailProfileCountStat">0</strong><span class="stat-help">Target + Walmart profiles</span></div>
       <div class="stat-card"><span class="stat-label">Sam's Club</span><strong class="stat-value" id="samsclubProfileCountStat">0</strong><span class="stat-help">Sam's Club profiles</span></div>
       <div class="stat-card"><span class="stat-label">General</span><strong class="stat-value" id="generalProfileCountStat">0</strong><span class="stat-help">Supreme or custom releases</span></div>
@@ -59,9 +60,10 @@
         <button class="admin-nav-button is-active" type="button" data-user-nav="profiles">Profiles</button>
         <button class="admin-nav-button" type="button" data-user-nav="run-status">Store Run Status</button>
         <button class="admin-nav-button" type="button" data-user-nav="target">Target</button>
-        <button class="admin-nav-button" type="button" data-user-nav="walmart">Walmart</button>
+        <button class="admin-nav-button" type="button" data-user-nav="walmart" data-super-admin-dashboard-store="walmart">Walmart</button>
         <button class="admin-nav-button" type="button" data-user-nav="samsclub">Sam's Club</button>
         <button class="admin-nav-button" type="button" data-user-nav="amazon">Amazon</button>
+        <button class="admin-nav-button" type="button" data-user-nav="bandai">Premium Bandai</button>
         <button class="admin-nav-button" type="button" data-user-nav="general">General</button>
         <button class="admin-nav-button" type="button" data-user-nav="crunchyroll">Crunchyroll</button>
         <button class="admin-nav-button" type="button" data-user-nav="pokemoncenter">Pokémon Center</button>
@@ -90,7 +92,7 @@
         <section class="admin-pane is-active" data-user-pane="profiles">
           <section class="panel banner banner-soft">
             <strong>Profile Manager</strong>
-            <p class="subtle-text">Create one profile with shared shipping and payment, then assign it to Target, Walmart, Sam's Club, Amazon, Crunchyroll, Pokémon Center, or General.</p>
+            <p class="subtle-text">Create one profile with shared shipping and payment, then assign it to Target, Walmart, Sam's Club, Amazon, Premium Bandai, Crunchyroll, Pokémon Center, or General.</p>
             <div class="panel-actions">
               <button class="btn btn-primary" onclick="createProfile()">Create Profile</button>
               <button class="btn" type="button" id="showProfileImportButton">Import Profiles</button>
@@ -99,9 +101,10 @@
               <div class="toolbar-row">
                 <select class="input" id="profileImportType">
                   <option value="target">Target</option>
-                  <option value="walmart">Walmart</option>
+                  <option value="walmart" data-super-admin-dashboard-store="walmart">Walmart</option>
                   <option value="samsclub">Sam's Club</option>
                   <option value="amazon">Amazon</option>
+                  <option value="bandai">Premium Bandai</option>
                   <option value="general">General</option>
                   <option value="crunchyroll">Crunchyroll</option>
                   <option value="pokemoncenter">Pokémon Center</option>
@@ -152,7 +155,7 @@
           </section>
         </section>
 
-        <section class="admin-pane" data-user-pane="walmart">
+        <section class="admin-pane" data-user-pane="walmart" data-super-admin-dashboard-store="walmart">
           <section class="panel banner banner-soft">
             <strong>Walmart hub</strong>
             <p class="subtle-text">Walmart profiles and current Walmart release information.</p>
@@ -210,6 +213,17 @@
             </div>
             <div id="amazonProductsPanel" class="store-products-panel"></div>
           </section>
+        </section>
+
+        <section class="admin-pane" data-user-pane="bandai">
+          <section class="panel banner banner-soft">
+            <strong>Premium Bandai hub</strong>
+            <p class="subtle-text">Premium Bandai profiles include the Bandai login and the IMAP or AYCD mailbox connection used for order-email tracking.</p>
+            <div class="panel-actions">
+              <button class="btn btn-primary" onclick="location='profile.html'">Add Premium Bandai Profile</button>
+            </div>
+          </section>
+          <section class="panel" id="bandaiProfilesPanel"></section>
         </section>
 
         <section class="admin-pane" data-user-pane="general">

@@ -624,6 +624,7 @@ async function loadProfiles() {
         target: document.getElementById("targetProfilesPanel"),
         samsclub: document.getElementById("samsclubProfilesPanel"),
         amazon: document.getElementById("amazonProfilesPanel"),
+        bandai: document.getElementById("bandaiProfilesPanel"),
         crunchyroll: document.getElementById("crunchyrollProfilesPanel"),
         pokemoncenter: document.getElementById("pokemoncenterProfilesPanel"),
         raffle: document.getElementById("raffleProfilesPanel")
@@ -646,6 +647,11 @@ async function loadProfiles() {
     if (storeAdminButton) {
         storeAdminButton.style.display = user?.role === 'super_admin' ? 'inline-flex' : 'none';
     }
+
+    const isSuperAdminDashboard = String(user?.role || '').toLowerCase() === 'super_admin';
+    document.querySelectorAll('[data-super-admin-dashboard-store="walmart"]').forEach((el) => {
+        el.style.display = isSuperAdminDashboard ? '' : 'none';
+    });
 
     try {
         const res = await fetch(API + "/profiles", {
@@ -685,6 +691,7 @@ async function loadProfiles() {
 
         setStat("profileCountStat", profiles.length);
         setStat("amazonProfileCountStat", groups.amazon.length);
+        setStat("bandaiProfileCountStat", groups.bandai.length);
         setStat("retailProfileCountStat", groups.target.length + groups.walmart.length);
         setStat("samsclubProfileCountStat", groups.samsclub.length);
         setStat("raffleProfileCountStat", groups.raffle.length);
@@ -696,6 +703,7 @@ async function loadProfiles() {
             target: "Target Profiles",
             samsclub: "Sam's Club Profiles",
             amazon: "Amazon Profiles",
+            bandai: "Premium Bandai Profiles",
             crunchyroll: "Crunchyroll Profiles",
             pokemoncenter: "Pokémon Center Profiles",
             all: "All Profiles",
@@ -709,6 +717,7 @@ async function loadProfiles() {
             target: "Profiles configured for Target accounts.",
             samsclub: "Profiles configured for Sam's Club accounts.",
             amazon: "Profiles configured for Amazon accounts.",
+            bandai: "Profiles configured for Premium Bandai accounts and order-email tracking.",
             raffle: "Bulk-built raffle entries. Payment fields use invalid placeholder card-style numbers unless edited manually."
         };
 
