@@ -17,6 +17,209 @@ module.exports = function registerSuccessNetwork({ app, supabase, auth, admin, g
   const jwtSecret = String(process.env.JWT_SECRET || '').trim();
   let client = null;
   let ready = false;
+  const communityBucket = String(process.env.COMMUNITY_SUCCESS_BUCKET || 'community-success').trim();
+  const publicPostLimit = Math.max(1, Math.min(50, Number(process.env.COMMUNITY_SUCCESS_PUBLIC_LIMIT || 12)));
+  const retainedImageLimit = Math.max(publicPostLimit, Math.min(200, Number(process.env.COMMUNITY_SUCCESS_RETAINED_IMAGE_LIMIT || 24)));
+  const imageMigrationSettingKey = 'community_success_storage_migration_v2';
+  let imageReconcilePromise = null;
+
+  function isImageAttachment(a = {}) {
+    return String(a.content_type || a.contentType || '').toLowerCase().startsWith('image/');
+  }
+  function safeStoragePart(value, fallback = 'file') {
+    const cleaned = String(value || '').replace(/[^a-zA-Z0-9._-]+/g, '-').replace(/^-+|-+$/g, '');
+    return (cleaned || fallback).slice(0, 120);
+  }
+  function extensionForAttachment(attachment = {}) {
+    const name = String(attachment.name || '').split('?')[0];
+    const match = name.match(/\.([a-zA-Z0-9]{2,8})$/);
+    if (match) return match[1].toLowerCase();
+    const mime = String(attachment.content_type || attachment.contentType || '').toLowerCase();
+    return ({ 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp', 'image/gif': 'gif', 'image/avif': 'avif' })[mime] || 'jpg';
+  }
+  function storagePathFor(post, attachment) {
+    return [safeStoragePart(post.guild_id, 'guild'), safeStoragePart(post.discord_message_id || post.id, 'message'), `${safeStoragePart(attachment.id, 'attachment')}.${extensionForAttachment(attachment)}`].join('/');
+  }
+  function attachmentSourceUrl(attachment = {}) {
+    return String(attachment.original_url || attachment.discord_url || attachment.url || attachment.proxy_url || '').trim();
+  }
+  async function uploadAttachment(post, attachment) {
+    if (!isImageAttachment(attachment)) return attachment;
+    if (attachment.storage_path && attachment.storage_url) return attachment;
+    const sourceUrl = attachmentSourceUrl(attachment);
+    if (!sourceUrl) return attachment;
+    const response = await fetch(sourceUrl, { headers: { 'User-Agent': 'The Shore Shack Success Network/1.0' } });
+    if (!response.ok) throw new Error(`Image download failed (${response.status})`);
+    const bytes = Buffer.from(await response.arrayBuffer());
+    if (!bytes.length) throw new Error('Image download returned an empty file');
+    const storagePath = storagePathFor(post, attachment);
+    const contentType = String(attachment.content_type || response.headers.get('content-type') || 'image/jpeg').split(';')[0];
+    const { error } = await supabase.storage.from(communityBucket).upload(storagePath, bytes, { contentType, cacheControl: '31536000', upsert: true });
+    if (error) throw error;
+    const { data } = supabase.storage.from(communityBucket).getPublicUrl(storagePath);
+    const publicUrl = data?.publicUrl || '';
+    if (!publicUrl) throw new Error('Supabase did not return a public image URL');
+    return {
+      ...attachment,
+      original_url: attachment.original_url || attachment.url || null,
+      discord_url: attachment.discord_url || attachment.url || null,
+      storage_path: storagePath,
+      storage_url: publicUrl,
+      url: publicUrl
+    };
+  }
+  async function fetchFreshDiscordAttachments(post) {
+    try {
+      await ensureClient();
+      if (!client || !ready || !post.guild_id || !post.source_channel_id || !post.discord_message_id) return null;
+      const guild = await client.guilds.fetch(String(post.guild_id));
+      const channel = await guild.channels.fetch(String(post.source_channel_id));
+      if (!channel?.isTextBased()) return null;
+      const message = await channel.messages.fetch(String(post.discord_message_id));
+      return [...message.attachments.values()].map(a => ({
+        id: a.id, name: a.name, url: a.url, proxy_url: a.proxyURL, content_type: a.contentType, size: a.size,
+        width: a.width || null, height: a.height || null
+      }));
+    } catch (err) {
+      console.warn('[success-network] could not refresh Discord attachments', post?.id, err.message);
+      return null;
+    }
+  }
+  async function ensurePostImagesStored(post, maxImages = Number.POSITIVE_INFINITY) {
+    let attachments = Array.isArray(post?.attachments) ? post.attachments : [];
+    if (!attachments.some(isImageAttachment)) {
+      const fresh = await fetchFreshDiscordAttachments(post);
+      if (fresh?.length) attachments = fresh;
+    }
+
+    async function uploadList(list) {
+      const uploaded = [];
+      let changed = false;
+      let failedImage = false;
+      let storedImages = 0;
+      for (const attachment of list) {
+        if (!isImageAttachment(attachment)) { uploaded.push(attachment); continue; }
+        if (storedImages >= maxImages) { uploaded.push(attachment); continue; }
+        try {
+          const stored = await uploadAttachment(post, attachment);
+          uploaded.push(stored);
+          if (stored.storage_path) storedImages += 1;
+          if (stored.storage_path && stored.url !== attachment.url) changed = true;
+          if (!stored.storage_path) failedImage = true;
+        } catch (err) {
+          console.warn('[success-network] image upload failed', post?.id, attachment?.id, err.message);
+          uploaded.push(attachment);
+          failedImage = true;
+        }
+      }
+      return { uploaded, changed, failedImage, storedImages };
+    }
+
+    let result = await uploadList(attachments);
+    if (result.failedImage && result.storedImages < maxImages) {
+      const fresh = await fetchFreshDiscordAttachments(post);
+      if (fresh?.length) result = await uploadList(fresh);
+    }
+    if (result.changed) {
+      const { error } = await supabase.from('discord_success_posts').update({ attachments: result.uploaded }).eq('id', post.id);
+      if (error) throw error;
+    }
+    return { post: { ...post, attachments: result.uploaded }, storedImages: result.storedImages };
+  }
+
+  async function deleteStoredAttachments(attachments = []) {
+    const paths = [...new Set(attachments.map(a => a?.storage_path).filter(Boolean))];
+    if (!paths.length) return;
+    for (let i = 0; i < paths.length; i += 100) {
+      const { error } = await supabase.storage.from(communityBucket).remove(paths.slice(i, i + 100));
+      if (error) console.warn('[success-network] storage cleanup failed', error.message);
+    }
+  }
+  function eligiblePublicPosts(rows = []) {
+    return rows.filter(post => post.public_approved === true && ['forwarded', 'already_in_master'].includes(String(post.forwarding_status || '')));
+  }
+  async function loadCommunityPostHistory() {
+    const { data: rows, error } = await supabase.from('discord_success_posts')
+      .select('id,discord_message_id,guild_id,source_channel_id,attachments,posted_at,public_approved,forwarding_status')
+      .order('posted_at', { ascending: false })
+      .limit(5000);
+    if (error) throw error;
+    return rows || [];
+  }
+  async function reconcileCommunityImages() {
+    if (imageReconcilePromise) return imageReconcilePromise;
+    imageReconcilePromise = (async () => {
+      const rows = await loadCommunityPostHistory();
+      const eligible = eligiblePublicPosts(rows);
+      const retainedIds = new Set();
+      let retainedImages = 0;
+
+      // Migrate and retain the newest images first. The website still renders only
+      // publicPostLimit posts, but Storage keeps up to retainedImageLimit images so
+      // recent posts can be reordered or restored without relying on Discord URLs.
+      for (const post of eligible) {
+        if (retainedImages >= retainedImageLimit) break;
+        const remaining = retainedImageLimit - retainedImages;
+        const result = await ensurePostImagesStored(post, remaining);
+        let retainedAttachments = Array.isArray(result.post.attachments) ? result.post.attachments : [];
+        const storedImages = retainedAttachments.filter(a => a?.storage_path && isImageAttachment(a));
+        if (storedImages.length > remaining) {
+          const keepPaths = new Set(storedImages.slice(0, remaining).map(a => a.storage_path));
+          const overflow = storedImages.slice(remaining);
+          await deleteStoredAttachments(overflow);
+          retainedAttachments = retainedAttachments.map(a => {
+            if (!a?.storage_path || keepPaths.has(a.storage_path)) return a;
+            const { storage_path, storage_url, ...rest } = a;
+            return { ...rest, url: rest.original_url || rest.discord_url || rest.url || null };
+          });
+          const { error } = await supabase.from('discord_success_posts').update({ attachments: retainedAttachments }).eq('id', post.id);
+          if (error) throw error;
+        }
+        const storedCount = retainedAttachments.filter(a => a?.storage_path && isImageAttachment(a)).length;
+        if (storedCount > 0) {
+          retainedIds.add(String(post.id));
+          retainedImages += storedCount;
+        }
+      }
+
+      // Delete Storage objects for every post that is outside the retained image set.
+      // Database and Discord history remain intact.
+      for (const post of rows) {
+        if (retainedIds.has(String(post.id))) continue;
+        const attachments = Array.isArray(post.attachments) ? post.attachments : [];
+        if (!attachments.some(a => a?.storage_path)) continue;
+        await deleteStoredAttachments(attachments);
+        const cleaned = attachments.map(a => {
+          const { storage_path, storage_url, ...rest } = a || {};
+          return { ...rest, url: rest.original_url || rest.discord_url || rest.url || null };
+        });
+        const { error } = await supabase.from('discord_success_posts').update({ attachments: cleaned }).eq('id', post.id);
+        if (error) throw error;
+      }
+      return { retained_images: retainedImages, retained_posts: retainedIds.size, public_posts: Math.min(publicPostLimit, eligible.length) };
+    })().catch(err => {
+      console.error('[success-network] image reconciliation failed', err);
+      throw err;
+    }).finally(() => { imageReconcilePromise = null; });
+    return imageReconcilePromise;
+  }
+  async function runOneTimeCommunityImageMigration({ force = false } = {}) {
+    if (!force) {
+      try {
+        const { data } = await supabase.from('app_settings').select('value_json').eq('key', imageMigrationSettingKey).maybeSingle();
+        if (data?.value_json?.completed === true) return { skipped: true, ...data.value_json };
+      } catch (_) {}
+    }
+    const result = await reconcileCommunityImages();
+    const summary = { completed: true, completed_at: new Date().toISOString(), retained_image_limit: retainedImageLimit, public_post_limit: publicPostLimit, ...result };
+    try {
+      await supabase.from('app_settings').upsert({ key: imageMigrationSettingKey, value_json: summary, updated_at: new Date().toISOString() }, { onConflict: 'key' });
+    } catch (err) {
+      console.warn('[success-network] migration marker could not be saved', err.message);
+    }
+    return summary;
+  }
+
 
   function frontendBase(req) {
     return String(process.env.FRONTEND_BASE_URL || process.env.PUBLIC_BASE_URL || `${req.protocol}://${req.get('host')}`).replace(/\/$/, '');
@@ -161,6 +364,7 @@ module.exports = function registerSuccessNetwork({ app, supabase, auth, admin, g
           forwarding_status: 'already_in_master', forwarded_message_id: message.id,
           forwarded_at: new Date().toISOString(), forwarding_error: null
         }).eq('id', inserted.id);
+        setImmediate(() => reconcileCommunityImages());
         return;
       }
 
@@ -170,26 +374,28 @@ module.exports = function registerSuccessNetwork({ app, supabase, auth, admin, g
       const masterPermissionProblem = botChannelPermissionProblem(channel, guild);
       if (masterPermissionProblem) throw new Error(masterPermissionProblem);
 
+      const publicAttachments = attachments;
       const embed = new EmbedBuilder()
         .setColor(0x2ecc71)
         .setAuthor({ name: row.author_name || 'Discord member', iconURL: row.author_avatar_url || undefined })
         .setTitle(`Success from ${row.guild_name}`)
-        .setDescription(row.message_text || (attachments.length ? 'Shared a success attachment.' : 'Shared a success.'))
+        .setDescription(row.message_text || (publicAttachments.length ? 'Shared a success attachment.' : 'Shared a success.'))
         .addFields(
           { name: 'Source', value: `${row.guild_name} • #${row.source_channel_name}`, inline: true },
           { name: 'Posted by', value: row.author_name || 'Unknown', inline: true },
           { name: 'Original', value: `[Open message](${jumpUrl})`, inline: true }
         )
         .setTimestamp(message.createdAt);
-      const firstImage = attachments.find(a => String(a.content_type || '').startsWith('image/'));
+      const firstImage = publicAttachments.find(a => String(a.content_type || '').startsWith('image/'));
       if (firstImage) embed.setImage(firstImage.url);
-      const extraLinks = attachments.filter(a => !firstImage || a.id !== firstImage.id).slice(0, 8).map(a => `[${a.name || 'Attachment'}](${a.url})`);
+      const extraLinks = publicAttachments.filter(a => !firstImage || a.id !== firstImage.id).slice(0, 8).map(a => `[${a.name || 'Attachment'}](${a.url})`);
       if (extraLinks.length) embed.addFields({ name: 'More attachments', value: extraLinks.join('\n').slice(0, 1024) });
 
       const forwarded = await channel.send({ embeds: [embed] });
       await supabase.from('discord_success_posts').update({
         forwarding_status: 'forwarded', forwarded_message_id: forwarded.id, forwarded_at: new Date().toISOString(), forwarding_error: null
       }).eq('id', inserted.id);
+      setImmediate(() => reconcileCommunityImages());
     } catch (err) {
       console.error('[success-network] forward failed', err);
       if (message?.id) await supabase.from('discord_success_posts').update({ forwarding_status: 'failed', forwarding_error: cleanText(err.message, 1000) }).eq('discord_message_id', message.id).catch(() => {});
@@ -445,6 +651,7 @@ module.exports = function registerSuccessNetwork({ app, supabase, auth, admin, g
         }
       }
 
+      await deleteStoredAttachments(Array.isArray(post.attachments) ? post.attachments : []);
       const { error: deleteError } = await supabase.from('discord_success_posts').delete().eq('id', post.id);
       if (deleteError) throw deleteError;
       res.json({ ok: true, warnings });
@@ -453,9 +660,26 @@ module.exports = function registerSuccessNetwork({ app, supabase, auth, admin, g
     }
   });
 
+  app.post('/admin/success-network/migrate-images', auth, admin, async (req, res) => {
+    try {
+      const user = await getCurrentUser(req);
+      if (!isSuper(user, SUPER_ADMIN_EMAIL)) return res.status(403).json({ error: 'Super admin only' });
+      const result = await runOneTimeCommunityImageMigration({ force: req.body?.force === true });
+      res.json({ ok: true, ...result });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   app.get('/public/success-feed', async (req, res) => {
-    const { data, error } = await supabase.from('discord_success_posts').select('id,guild_name,author_name,author_avatar_url,message_text,attachments,posted_at').in('forwarding_status', ['forwarded', 'already_in_master']).eq('public_approved', true).order('posted_at', { ascending: false }).limit(24);
-    if (error) return res.json([]); res.set('Cache-Control', 'public, max-age=60'); res.json(data || []);
+    await reconcileCommunityImages();
+    const { data, error } = await supabase.from('discord_success_posts').select('id,guild_name,author_name,author_avatar_url,message_text,attachments,posted_at').in('forwarding_status', ['forwarded', 'already_in_master']).eq('public_approved', true).order('posted_at', { ascending: false }).limit(publicPostLimit);
+    if (error) return res.json([]);
+    const rows = (data || []).map(post => ({
+      ...post,
+      attachments: (Array.isArray(post.attachments) ? post.attachments : []).map(a => ({ ...a, url: a.storage_url || a.url || a.original_url || a.discord_url || null }))
+    }));
+    res.set('Cache-Control', 'public, max-age=30'); res.json(rows);
   });
 
   app.get('/public/checkout-success-feed', async (req, res) => {
@@ -614,5 +838,5 @@ module.exports = function registerSuccessNetwork({ app, supabase, auth, admin, g
     res.json(rows);
   });
 
-  if (token) setTimeout(() => ensureClient().catch(err => console.error('[success-network] startup failed', err)), 3000);
+  if (token) setTimeout(() => ensureClient().then(() => runOneTimeCommunityImageMigration()).then(() => reconcileCommunityImages()).catch(err => console.error('[success-network] startup failed', err)), 3000);
 };
