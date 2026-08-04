@@ -22,6 +22,7 @@ function esc(v){ return String(v||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&
 function sanitize(cfg={}){ return { host:'127.0.0.1', port:Number(cfg.port||43283), username:clean(cfg.username)||'inbox@aycd.me', password:clean(cfg.password), secure:!!cfg.secure, lookbackDays:Math.max(1,Math.min(365,Number(cfg.lookbackDays||240))) }; }
 function clientFor(c){ return new ImapFlow({ host:c.host, port:c.port, secure:c.secure, auth:{user:c.username,pass:c.password}, logger:false, connectionTimeout:15000, greetingTimeout:15000, socketTimeout:180000, tls:{rejectUnauthorized:false} }); }
 function sleep(ms){ return new Promise(resolve=>setTimeout(resolve,ms)); }
+function uidSet(uids){ return [...new Set((uids||[]).map(Number).filter(Boolean))].sort((a,b)=>a-b).join(','); }
 async function postJson(pathname, body, secret='', options={}){
   const attempts=Math.max(1,Number(options.attempts||1));
   const timeoutMs=Math.max(5000,Number(options.timeoutMs||180000));
@@ -55,7 +56,7 @@ async function discoverScanPlan(config){
   const rawState=readJson(STATE_FILE,{});
   // Preserve checkpoints created by every earlier bridge version.
   const state={
-    version:4,
+    version:5,
     lastUid:Number(rawState.lastUid||0),
     historicalComplete:!!rawState.historicalComplete,
     skippedUids:[...new Set((rawState.skippedUids||[]).map(Number).filter(Boolean))].sort((a,b)=>a-b)
@@ -67,16 +68,19 @@ async function discoverScanPlan(config){
     try{
       let uids=[];
       if(state.lastUid>0){
-        // This is the same UID SEARCH path used by the last version that reliably
-        // processed messages. It requests identifiers only, never message bodies.
-        uids=await client.search({uid:`${state.lastUid+1}:*`});
+        // Version 5 performs one bounded backfill because older bridge versions could
+        // advance the checkpoint past UIDs for which AYCD returned no body and no error.
+        // Re-sending already ingested mail is safe because the website deduplicates by
+        // message-id; this recovers the messages that were silently missed.
+        const needsRepair=Number(rawState.version||0)<5 && !rawState.v5BackfillComplete;
+        const startUid=needsRepair ? Math.max(1,state.lastUid-500) : state.lastUid+1;
+        uids=await client.search({uid:`${startUid}:*`});
+        state.v5BackfillComplete=needsRepair || !!rawState.v5BackfillComplete;
       }else{
         uids=await client.search({since:new Date(Date.now()-config.lookbackDays*86400000)});
       }
-      // Only continue forward from the durable high-water UID. Temporarily
-      // unavailable older UIDs are kept in a separate retry queue and must not
-      // be mixed into the main list, otherwise progress appears to restart.
-      uids=[...new Set((uids||[]).map(Number).filter(uid=>uid>state.lastUid))].sort((a,b)=>a-b);
+      uids=[...new Set((uids||[]).map(Number).filter(Boolean))].sort((a,b)=>a-b);
+      if(!state.v5BackfillComplete && state.lastUid>0) uids=uids.filter(uid=>uid>state.lastUid);
       return {uids,state,retryUids:[...(state.skippedUids||[])],mailboxCount:Number(client.mailbox?.exists||0)};
     }finally{ lock.release(); }
   }finally{ try{await client.logout();}catch(_){try{client.close()}catch(__){}} }
@@ -95,12 +99,15 @@ function recipientList(parsed){
   return [...out];
 }
 async function fetchMessageBatch(config,uids){
+  const requested=[...new Set((uids||[]).map(Number).filter(Boolean))].sort((a,b)=>a-b);
   const messages=[];
   const skipped=[];
+  const returned=new Set();
   let highest=0;
 
   async function parseMessage(msg){
     const uid=Number(msg.uid||0);
+    if(uid) returned.add(uid);
     highest=Math.max(highest,uid);
     try{
       const p=await simpleParser(msg.source);
@@ -117,30 +124,28 @@ async function fetchMessageBatch(config,uids){
     }
   }
 
+  async function fetchSet(client, list){
+    const set=uidSet(list);
+    if(!set) return;
+    for await(const msg of client.fetch(set,{uid:true,source:true},{uid:true})) await parseMessage(msg);
+  }
+
   const client=clientFor(config);
   try{
     await client.connect();
     const lock=await client.getMailboxLock('INBOX');
     try{
-      // First use the known-working multi-message fetch. If AYCD rejects the group
-      // because one body is temporarily unavailable, retry each UID independently so
-      // one bad email cannot stop the remaining 49.
       try{
-        for await(const msg of client.fetch(uids,{uid:true,source:true},{uid:true})) await parseMessage(msg);
+        await fetchSet(client,requested);
       }catch(groupError){
-        console.warn(`AYCD group fetch failed (${groupError.responseText||groupError.message}). Retrying ${uids.length} messages individually...`);
-        for(const rawUid of uids){
-          const uid=Number(rawUid||0);
-          if(!uid) continue;
+        console.warn(`AYCD group fetch failed (${groupError.responseText||groupError.message}). Retrying ${requested.length} messages individually...`);
+        for(const uid of requested){
           let completed=false;
           for(let attempt=1;attempt<=3;attempt++){
             try{
-              let seen=false;
-              for await(const msg of client.fetch([uid],{uid:true,source:true},{uid:true})){
-                seen=true;
-                await parseMessage(msg);
-              }
-              if(!seen) throw new Error('AYCD returned no body for this UID.');
+              const before=returned.has(uid);
+              await fetchSet(client,[uid]);
+              if(!returned.has(uid) && !before) throw new Error('AYCD returned no body for this UID.');
               completed=true;
               break;
             }catch(e){
@@ -157,8 +162,15 @@ async function fetchMessageBatch(config,uids){
           if(!completed && !skipped.includes(uid)) skipped.push(uid);
         }
       }
+
+      // AYCD sometimes returns no row and no error for a requested UID. Older bridge
+      // versions treated that as success and permanently skipped the message. Every
+      // requested UID that was not actually returned is now preserved for later retry.
+      for(const uid of requested){
+        if(!returned.has(uid) && !skipped.includes(uid)) skipped.push(uid);
+      }
     }finally{ lock.release(); }
-    return {messages,highest,skippedUids:[...new Set(skipped.filter(Boolean))].sort((a,b)=>a-b)};
+    return {messages,highest:Math.max(highest,...requested,0),skippedUids:[...new Set(skipped.filter(Boolean))].sort((a,b)=>a-b)};
   }finally{ try{await client.logout();}catch(_){try{client.close()}catch(__){}} }
 }
 
@@ -233,7 +245,7 @@ async function poll(){
         for(let i=0;i<plan.uids.length;i+=uidBatchSize) uidChunks.push(plan.uids.slice(i,i+uidBatchSize));
         if(!uidChunks.length){
           await postJson('/orders/aycd/bridge/result',{success:true,command_id:cmd.command_id,checked:0,messages:[],chunk_index:0,chunk_count:1,final:true},b.secret,{attempts:6});
-          saveJson(STATE_FILE,{version:4,lastUid:Number(plan.state.lastUid||0),skippedUids:plan.state.skippedUids||[],historicalComplete:true,lastScanAt:new Date().toISOString()});
+          saveJson(STATE_FILE,{version:5,lastUid:Number(plan.state.lastUid||0),skippedUids:plan.state.skippedUids||[],historicalComplete:true,v5BackfillComplete:!!plan.state.v5BackfillComplete,lastScanAt:new Date().toISOString()});
           console.log('AYCD scan complete: no new messages.');
         }else{
           let sent=0, uploadIndex=0;
@@ -258,10 +270,11 @@ async function poll(){
               const skippedSet=new Set([...(current.skippedUids||[]),...(batch.skippedUids||[])].map(Number).filter(Boolean));
               for(const message of messages) skippedSet.delete(Number(message.uid||0));
               saveJson(STATE_FILE,{
-                version:4,
-                lastUid:Math.max(Number(current.lastUid||0),acceptedHighest),
+                version:5,
+                lastUid:Math.max(Number(current.lastUid||0),Math.max(...sourceUids.map(Number),acceptedHighest)),
                 skippedUids:[...skippedSet].sort((a,b)=>a-b),
                 historicalComplete:isFinal,
+                v5BackfillComplete:!!plan.state.v5BackfillComplete,
                 lastScanAt:new Date().toISOString(),
                 uploadedMessages:Number(current.uploadedMessages||0)+messages.length
               });
@@ -277,14 +290,14 @@ async function poll(){
               const current=readJson(STATE_FILE,{});
               const skippedSet=new Set([...(current.skippedUids||[]),...(batch.skippedUids||[])].map(Number).filter(Boolean));
               const groupHighest=Math.max(...sourceUids.map(Number));
-              saveJson(STATE_FILE,{version:4,lastUid:Math.max(Number(current.lastUid||0),groupHighest),skippedUids:[...skippedSet].sort((a,b)=>a-b),historicalComplete:false,lastScanAt:new Date().toISOString(),uploadedMessages:Number(current.uploadedMessages||0)});
+              saveJson(STATE_FILE,{version:5,lastUid:Math.max(Number(current.lastUid||0),groupHighest),skippedUids:[...skippedSet].sort((a,b)=>a-b),historicalComplete:false,v5BackfillComplete:!!plan.state.v5BackfillComplete,lastScanAt:new Date().toISOString(),uploadedMessages:Number(current.uploadedMessages||0)});
               console.log(`No available bodies in this AYCD group. Saved ${skippedSet.size} UID(s) for retry and continued after UID ${groupHighest}.`);
             }
           }
 
           // Retry a limited number of older unavailable UIDs after forward progress
           // is safely checkpointed. These retries never lower or reset lastUid.
-          const retryQueue=[...new Set((readJson(STATE_FILE,{}).skippedUids||[]).map(Number).filter(Boolean))].sort((a,b)=>a-b).slice(0,25);
+          const retryQueue=[...new Set((readJson(STATE_FILE,{}).skippedUids||[]).map(Number).filter(Boolean))].sort((a,b)=>b-a).slice(0,8);
           for(const retryUid of retryQueue){
             try{
               const retryBatch=await fetchMessageBatch(cfg,[retryUid]);
@@ -300,7 +313,7 @@ async function poll(){
                 }
                 const current=readJson(STATE_FILE,{});
                 const remaining=(current.skippedUids||[]).map(Number).filter(uid=>uid!==retryUid);
-                saveJson(STATE_FILE,{...current,version:4,lastUid:Number(current.lastUid||0),skippedUids:remaining,lastScanAt:new Date().toISOString()});
+                saveJson(STATE_FILE,{...current,version:5,lastUid:Number(current.lastUid||0),skippedUids:remaining,lastScanAt:new Date().toISOString()});
                 console.log(`Recovered previously unavailable AYCD UID ${retryUid}. Durable checkpoint remains ${Number(current.lastUid||0)}.`);
               }
             }catch(e){
@@ -312,7 +325,7 @@ async function poll(){
           // when the final group contained only skipped messages.
           await postJson('/orders/aycd/bridge/result',{success:true,command_id:cmd.command_id,checked:0,messages:[],chunk_index:uploadIndex,chunk_count:0,final:true,scan_progress:{processed:plan.uids.length,total:plan.uids.length,mailbox_count:plan.mailboxCount}},b.secret,{attempts:6,timeoutMs:180000});
           const current=readJson(STATE_FILE,{});
-          saveJson(STATE_FILE,{...current,version:4,historicalComplete:true,lastScanAt:new Date().toISOString()});
+          saveJson(STATE_FILE,{...current,version:5,historicalComplete:true,v5BackfillComplete:!!plan.state.v5BackfillComplete,lastScanAt:new Date().toISOString()});
           console.log(`AYCD scan complete: ${sent} messages uploaded. ${Number(current.skippedUids?.length||0)} temporarily unavailable UID(s) remain queued for a later scan.`);
         }
       }catch(e){
