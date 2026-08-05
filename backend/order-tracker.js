@@ -62,7 +62,7 @@ function detectStatus(subject, text) {
   if (/refund(?:ed)?|refund issued/.test(hay)) return 'refunded';
   if (/shipped|has shipped|on the way|tracking number/.test(hay)) return 'shipped';
   if (/processing|preparing your order|getting your order ready/.test(hay)) return 'processing';
-  if (/confirmed|order received|thanks for your order|we've got your order|order placed/.test(hay)) return 'confirmed';
+  if (/confirmed|order received|thanks for your order|thanks for shopping with us|here(?:'|’)s your order|we've got your order|order placed/.test(hay)) return 'confirmed';
   return 'unknown';
 }
 
@@ -285,9 +285,14 @@ async function syncServiceOrders(supabase, userId, accounts = []) {
     const orderNumber = serviceOrderNumber(source);
     if (!orderNumber) continue;
     const { data: prior } = await supabase.from('tracked_orders').select('*').eq('source_order_id', source.id).maybeSingle();
+    const sourceEmails = findEmailValues(source.raw_payload || {});
+    const orderEmail = [...sourceEmails][0] || lower(source.metadata?.email || source.email || '');
+    const matchingAccount = accounts.find(account => lower(account.email) === lower(orderEmail));
+    const resolvedEmail = lower(orderEmail) || prior?.source_email || defaultEmail;
     const payload = {
       user_id: userId, source_order_id: source.id, service_order_external_id: source.external_order_id || null,
-      profile_id: prior?.profile_id || accounts[0]?.profile_id || null, source_email: prior?.source_email || defaultEmail,
+      profile_id: prior?.profile_id || matchingAccount?.profile_id || accounts[0]?.profile_id || null,
+      source_email: resolvedEmail,
       store, order_number: prior?.order_number || orderNumber,
       status: prior?.status || (['confirmed','processing','shipped','delivered','canceled','refunded'].includes(lower(source.status)) ? lower(source.status) : 'waiting_confirmation'),
       order_date: prior?.order_date || source.created_at || new Date().toISOString(),
@@ -305,7 +310,7 @@ async function syncServiceOrders(supabase, userId, accounts = []) {
         const fallback=await supabase.from('tracked_orders').select('*').eq('user_id', userId).eq('store', store).eq('order_number', orderNumber).maybeSingle();
         tracked=fallback.data;
         if (tracked?.id && !tracked.source_order_id) {
-          const linked=await supabase.from('tracked_orders').update({ source_order_id: source.id, service_order_external_id: source.external_order_id || null }).eq('id', tracked.id).select().single();
+          const linked=await supabase.from('tracked_orders').update({ source_order_id: source.id, service_order_external_id: source.external_order_id || null, source_email: resolvedEmail, profile_id: matchingAccount?.profile_id || tracked.profile_id || null }).eq('id', tracked.id).select().single();
           tracked=linked.data || tracked;
         }
       }
