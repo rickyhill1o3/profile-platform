@@ -2976,7 +2976,7 @@ async function sendCheckoutDiscordNotificationsForPayload(payload = {}, matchedU
         return [await sendQueuePassDiscordNotification(payload)];
     }
     if (extra?.order && typeof extra.order === 'object') {
-        return sendCheckoutDiscordNotifications(extra.order, matchedUser || null);
+        return sendCheckoutDiscordNotifications(extra.order, matchedUser || null, { routingMode: extra?.routingMode || 'all' });
     }
 
     const normalized = await enrichCheckoutProductFromStoredCatalog(normalizeIncomingOrderPayload(payload || {}));
@@ -2994,7 +2994,7 @@ async function sendCheckoutDiscordNotificationsForPayload(payload = {}, matchedU
         order_number: normalized.order_number,
         sku: normalized.sku
     };
-    return sendCheckoutDiscordNotifications(pseudoOrder, matchedUser || null);
+    return sendCheckoutDiscordNotifications(pseudoOrder, matchedUser || null, { routingMode: extra?.routingMode || 'all' });
 }
 
 async function sendUnmatchedCheckoutDiscordNotification(payload = {}, errorMessage = '') {
@@ -3742,18 +3742,24 @@ async function sendDiscordWebhookToTarget({
         description = rawDesc || normalized.product_name || order.product_name || 'Checkout error received';
         footerText = decodeHtmlEntities(String(embed?.footer?.text || '')).trim() || 'Checkout error captured by The Shore Shack';
     } else {
-        const awaitingConfirmation = String(order.status || '') === 'waiting_confirmation';
+        const statusValue = String(order.status || '');
+        const awaitingConfirmation = statusValue === 'waiting_confirmation';
+        const pendingAmazonEmailVerification = statusValue === 'pending_email_verification';
         title = isInsufficient
             ? `Checkout Logged • Credits Needed`
-            : awaitingConfirmation
-                ? `Checkout Submitted • Awaiting Email Confirmation • ${siteLabel}`
-                : `Successful Checkout • ${siteLabel}`;
+            : pendingAmazonEmailVerification
+                ? `Possible Amazon Checkout • Pending Email Verification`
+                : awaitingConfirmation
+                    ? `Checkout Submitted • Awaiting Email Confirmation • ${siteLabel}`
+                    : `Successful Checkout • ${siteLabel}`;
         description = normalized.product_name || order.product_name || 'Checkout received';
         footerText = isInsufficient
             ? 'Order saved without charging credits'
-            : awaitingConfirmation
-                ? 'The Shore Shack is waiting for the retailer confirmation email'
-                : 'Youve Been Served by The Shore Shack';
+            : pendingAmazonEmailVerification
+                ? 'Private super-admin alert only • no credits charged and no user-facing success sent yet'
+                : awaitingConfirmation
+                    ? 'The Shore Shack is waiting for the retailer confirmation email'
+                    : 'Youve Been Served by The Shore Shack';
     }
 
     const checkoutItems = extractCheckoutLineItems(payload);
@@ -3967,7 +3973,7 @@ function classifyCheckoutWebhookType(order) {
 }
 
 
-async function sendCheckoutDiscordNotifications(order, user) {
+async function sendCheckoutDiscordNotifications(order, user, options = {}) {
     const results = [];
     const userEmail = String(user?.email || '');
     const userSettings = user?.id ? await getUserSettings(user.id) : {};
@@ -3995,10 +4001,16 @@ async function sendCheckoutDiscordNotifications(order, user) {
         destinations.push({ scope, webhookUrl: url, ...extra });
     }
 
-    addDestination('super_admin', globalWebhookUrl, { brandLabel: '', username: 'The Shore Shack' });
+    const routingMode = String(options?.routingMode || 'all').trim().toLowerCase();
+    const includePrivateSuperAdmin = routingMode !== 'public_and_admin_only';
+    const includePublicAndAdmin = routingMode !== 'super_admin_only';
+
+    if (includePrivateSuperAdmin) {
+        addDestination('super_admin', globalWebhookUrl, { brandLabel: '', username: 'The Shore Shack' });
+    }
     // Optional super-admin public checkout feed for Discord channels where users can see checkouts.
     // This uses the same sanitized payload as an admin webhook: no proxy, password, offer ID, or private order ID.
-    if (checkoutType === 'success') {
+    if (checkoutType === 'success' && includePublicAndAdmin) {
         addDestination('super_admin_public', superPublicWebhookUrl, { brandLabel: '', username: 'The Shore Shack' });
     }
 
@@ -4006,7 +4018,7 @@ async function sendCheckoutDiscordNotifications(order, user) {
     // - top-level admins send their own personal checkouts to their own admin webhook.
     // - admins that still belong under another admin keep their personal checkouts under that owner admin.
     //   Their own admin webhook is used for users they invite/create, not for their original personal account.
-    if (user?.role === 'admin' && user?.id && !user?.owner_admin_id) {
+    if (includePublicAndAdmin && user?.role === 'admin' && user?.id && !user?.owner_admin_id) {
         const adminSettings = await getAdminWebhookSettings(user.id);
         const adminRoute = await getWebhookRouteFromDb({ scope: 'admin', userId: user.id, webhookType: checkoutType === 'error' ? 'checkout_error' : 'checkout_success', category: 'all' }).catch(() => null);
         const adminWebhookUrl = String((adminRoute?.webhook_url || (checkoutType === 'error' ? adminSettings?.checkout_error_webhook_url : adminSettings?.discord_webhook_url)) || '').trim();
@@ -4014,7 +4026,7 @@ async function sendCheckoutDiscordNotifications(order, user) {
         addDestination('owner_admin', adminWebhookUrl, { admin_user_id: user.id, brandLabel, username: brandLabel || 'The Shore Shack' });
     }
 
-    if (user?.owner_admin_id) {
+    if (includePublicAndAdmin && user?.owner_admin_id) {
         const adminSettings = await getAdminWebhookSettings(user.owner_admin_id);
         const adminRoute = await getWebhookRouteFromDb({ scope: 'admin', userId: user.owner_admin_id, webhookType: checkoutType === 'error' ? 'checkout_error' : 'checkout_success', category: 'all' }).catch(() => null);
         const adminWebhookUrl = String((adminRoute?.webhook_url || (checkoutType === 'error' ? adminSettings?.checkout_error_webhook_url : adminSettings?.discord_webhook_url)) || '').trim();
@@ -4025,7 +4037,7 @@ async function sendCheckoutDiscordNotifications(order, user) {
 
     // An admin may belong to an organization while retaining an upstream owner admin.
     // This sends the checkout to the organization's shared Discord in addition to the inviter's Discord.
-    const organizationDestinations = await getAdminOrganizationDestinations(user);
+    const organizationDestinations = includePublicAndAdmin ? await getAdminOrganizationDestinations(user) : [];
     for (const orgDest of organizationDestinations) {
         const settingsUserId = orgDest.webhook_owner_user_id;
         const orgSettings = await getAdminWebhookSettings(settingsUserId).catch(() => ({}));
@@ -4765,18 +4777,19 @@ app.post(["/webhooks/orders", "/webhooks/orders/:token"], async (req, res) => {
                 }
 
                 const pendingAmazonVerification = recordedOrder?.status === 'pending_email_verification' || recordedOrder?.metadata?.email_verification_required === true;
-                if (!pendingAmazonVerification) finalDiscordResults = await sendCheckoutDiscordNotificationsForPayload(payload, resolvedUser, {
-                    status: 'processed',
+                finalDiscordResults = await sendCheckoutDiscordNotificationsForPayload(payload, resolvedUser, {
+                    status: pendingAmazonVerification ? 'pending_email_verification' : 'processed',
                     ...(recordedOrder ? { order: recordedOrder } : {}),
-                    ...(recordedCreditsCharged !== null ? { credits_charged: recordedCreditsCharged } : {})
+                    ...(recordedCreditsCharged !== null ? { credits_charged: recordedCreditsCharged } : {}),
+                    routingMode: pendingAmazonVerification ? 'super_admin_only' : 'all'
                 }).catch((err) => {
                     console.error('Checkout discord relay failed:', err);
                     return [{ success: false, error: err.message || String(err) }];
                 });
-                checkoutDiscordSent = !pendingAmazonVerification;
+                checkoutDiscordSent = true;
                 if (pendingAmazonVerification) {
                     finalStatus = 'pending_email_verification';
-                    finalError = 'Amazon checkout is waiting for a one-to-one confirmation email before credits are charged or success is sent to Discord.';
+                    finalError = 'Amazon possible checkout sent privately to the super-admin. Waiting for one-to-one email confirmation before credits are charged or any user-facing success is sent.';
                 }
 
                 await updateWebhookLogEntry(logId, {
@@ -9531,7 +9544,7 @@ registerOrderTracker({
             const updatedOrder = updatedResult.data;
             const userResult = await supabase.from('users').select('*').eq('id', serviceOrder.user_id).maybeSingle();
             const discordResults = await sendCheckoutDiscordNotificationsForPayload(serviceOrder.raw_payload || {}, userResult.data || null, {
-                status: 'processed', order: updatedOrder, credits_charged: credits
+                status: 'processed', order: updatedOrder, credits_charged: credits, routingMode: 'public_and_admin_only'
             }).catch(err => [{ success: false, error: err.message || String(err) }]);
             return { order: updatedOrder, credits_charged: credits, balance_after: balanceAfter, discord_results: discordResults };
         } catch (err) {
