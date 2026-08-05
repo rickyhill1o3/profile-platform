@@ -463,6 +463,7 @@ async function archiveEmailMetadata(supabase, account, parsed, uid, classificati
     user_id: account.user_id, message_id: messageId, imap_uid: Number(uid || 0) || null,
     mailbox_email: lower(account.email), from_text: fromText.slice(0,1000), to_text: toText.slice(0,2000), cc_text: ccText.slice(0,2000),
     subject: subject.slice(0,1000), received_at: receivedAt, store, email_type: emailType, order_number: orderNumber,
+    source_type: account.ingestion_source === 'aycd' || String(account.provider?.name || '').startsWith('aycd') ? 'aycd' : 'direct_imap',
     snippet: bodyText.replace(/\s+/g,' ').slice(0,600), keep_forever: keepForever, is_order_related: keepForever,
     has_attachments: Array.isArray(parsed.attachments) && parsed.attachments.length > 0, attachment_count: Array.isArray(parsed.attachments) ? parsed.attachments.length : 0,
     updated_at: new Date().toISOString()
@@ -1080,6 +1081,7 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
       user_id: userId,
       profile_id: null,
       email: 'inbox@aycd.me',
+      ingestion_source: 'aycd',
       provider: { name: 'aycd-unified-imap', host: '127.0.0.1', port: 0, secure: false }
     };
     await syncServiceOrders(supabase, userId, [fallbackAccount]);
@@ -1349,7 +1351,8 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
     } catch (_) {}
     if (req.query.type && req.query.type !== 'all') q = q.eq('email_type', clean(req.query.type));
     if (req.query.store && req.query.store !== 'all') q = q.eq('store', clean(req.query.store));
-    if (req.query.mailbox) q = q.ilike('mailbox_email', `%${clean(req.query.mailbox)}%`);
+    if (req.query.mailbox && req.query.mailbox !== 'all') q = q.eq('mailbox_email', lower(req.query.mailbox));
+    if (req.query.source && req.query.source !== 'all') q = q.eq('source_type', clean(req.query.source));
     if (req.query.linked === 'yes') q = q.not('linked_order_id','is',null);
     if (req.query.linked === 'no') q = q.is('linked_order_id',null);
     const term = clean(req.query.q);
@@ -1359,6 +1362,40 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
     const { data: stats } = await supabase.from('email_messages').select('email_type,store,linked_order_id,keep_forever').eq('user_id',req.user_id);
     const summary=(stats||[]).reduce((a,e)=>{a.total++;a[e.email_type]=(a[e.email_type]||0)+1;if(e.linked_order_id)a.linked++;if(e.keep_forever)a.kept++;return a;},{total:0,linked:0,kept:0});
     res.json({emails:data||[],count:count||0,page,limit,summary});
+  });
+
+  app.get('/admin/email-center/mailboxes', auth, async (req,res)=>{
+    if(req.role!=='super_admin') return res.status(403).json({error:'Super admin only.'});
+    try{
+      const {data:rows,error}=await supabase.from('email_messages').select('mailbox_email,source_type,received_at').eq('user_id',req.user_id);
+      if(error) throw error;
+      let hiddenRows=[];
+      try{const r=await supabase.from('email_center_hidden_mailboxes').select('mailbox_email,is_hidden').eq('user_id',req.user_id);hiddenRows=r.data||[];}catch(_){}
+      const hidden=new Set(hiddenRows.filter(r=>r.is_hidden).map(r=>lower(r.mailbox_email)));
+      const map=new Map();
+      for(const row of rows||[]){
+        const email=lower(row.mailbox_email)||'inbox@aycd.me';
+        const source=clean(row.source_type)||'legacy';
+        const key=`${source}:${email}`;
+        const current=map.get(key)||{mailbox_email:email,source_type:source,count:0,last_received_at:null,hidden:hidden.has(email)};
+        current.count++;
+        if(!current.last_received_at || String(row.received_at||'')>String(current.last_received_at||'')) current.last_received_at=row.received_at;
+        map.set(key,current);
+      }
+      // Include configured direct IMAP accounts even if they have no indexed messages yet.
+      try{
+        const accounts=await loadScanAccounts(supabase,req.user_id);
+        for(const account of accounts||[]){
+          const email=lower(account.email); if(!email) continue;
+          const key=`direct_imap:${email}`;
+          if(!map.has(key)) map.set(key,{mailbox_email:email,source_type:'direct_imap',count:0,last_received_at:null,hidden:hidden.has(email)});
+        }
+      }catch(_){}
+      const aycdKey='aycd:inbox@aycd.me';
+      if(!map.has(aycdKey)) map.set(aycdKey,{mailbox_email:'inbox@aycd.me',source_type:'aycd',count:0,last_received_at:null,hidden:hidden.has('inbox@aycd.me')});
+      const mailboxes=[...map.values()].sort((a,b)=>String(a.source_type).localeCompare(String(b.source_type))||String(a.mailbox_email).localeCompare(String(b.mailbox_email)));
+      res.json({mailboxes});
+    }catch(error){res.status(500).json({error:error.message});}
   });
 
   app.get('/admin/email-center/orders', auth, async (req,res)=>{
