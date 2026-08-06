@@ -1969,7 +1969,18 @@ async function updateExportCount() {
         userFilter && userFilter.selectedIndex > 0
             ? userFilter.options[userFilter.selectedIndex].text
             : "all accounts";
-    const selectedGroupText = selectedGroup || "all groups";
+    const exportGroupLabels = {
+        general: "General",
+        walmart: "Walmart",
+        target: "Target",
+        samsclub: "Sam's Club",
+        crunchyroll: "Crunchyroll",
+        pokemoncenter: "Pokémon Center",
+        amazon: "Amazon",
+        bandai: "Premium Bandai",
+        raffle: "Raffle"
+    };
+    const selectedGroupText = selectedGroup ? (exportGroupLabels[selectedGroup] || selectedGroup) : "all groups";
 
     if (count === 1) {
         banner.textContent = `1 profile will be exported for ${selectedUserText} in ${selectedGroupText}.`;
