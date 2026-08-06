@@ -1090,8 +1090,11 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
     for (const item of (Array.isArray(messages) ? messages : [])) {
       checked += 1;
       try {
-        const linked = aycdMessageRecipients(item).map(email => recipientMap.get(email)).find(Boolean);
-        const account = linked ? { ...fallbackAccount, profile_id: linked.profile_id, email: linked.email } : fallbackAccount;
+        const directMailbox = lower(item.mailboxEmail);
+        const linked = (directMailbox ? recipientMap.get(directMailbox) : null) || aycdMessageRecipients(item).map(email => recipientMap.get(email)).find(Boolean);
+        const account = directMailbox
+          ? { ...fallbackAccount, profile_id: linked?.profile_id || null, email: directMailbox, provider: { ...fallbackAccount.provider, name: 'aycd-direct-account' } }
+          : (linked ? { ...fallbackAccount, profile_id: linked.profile_id, email: linked.email } : fallbackAccount);
         if (linked) linkedProfiles += 1;
         const parsed = {
           subject: clean(item.subject), from: { text: clean(item.from) },
@@ -1134,6 +1137,56 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
       }).eq('id', row.id).select().single();
       if (ue) throw ue;
       res.json({ success: true, device_id: updated.id, secret });
+    } catch (error) { res.status(500).json({ error: error.message }); }
+  });
+
+
+  app.get('/orders/aycd/bridge/accounts', async (req, res) => {
+    try {
+      const secret = String(req.headers['x-aycd-bridge-secret'] || '');
+      const row = await getBridgeBySecret(secret);
+      if (!row) return res.status(401).json({ error: 'Bridge is not paired.' });
+
+      const accounts = new Map();
+      const add = (email, priority = 50, source = 'history') => {
+        email = lower(email);
+        if (!email || email === 'inbox@aycd.me' || !email.includes('@')) return;
+        const existing = accounts.get(email);
+        if (!existing || priority < existing.priority) accounts.set(email, { email, priority, source });
+      };
+
+      // Explicit AYCD profile credentials are highest priority because these accounts
+      // are actively used for order verification.
+      const { data: profiles } = await supabase.from('profiles').select('id').eq('user_id', row.user_id);
+      const profileIds = (profiles || []).map(p => p.id);
+      for (let i = 0; i < profileIds.length; i += 75) {
+        try {
+          const r = await supabase.from('profile_store_credentials')
+            .select('login_email,use_aycd_inbox')
+            .in('profile_id', profileIds.slice(i, i + 75))
+            .eq('use_aycd_inbox', true);
+          for (const item of r.data || []) add(item.login_email, 1, 'profile');
+        } catch (_) {}
+      }
+
+      // Historical AYCD recipients let the bridge recover and directly scan accounts
+      // that are exposed in AYCD but are not currently attached to a saved profile.
+      try {
+        let from = 0;
+        while (true) {
+          const r = await supabase.from('email_messages')
+            .select('mailbox_email')
+            .eq('user_id', row.user_id)
+            .eq('source_type', 'aycd')
+            .range(from, from + 999);
+          if (r.error) throw r.error;
+          for (const item of r.data || []) add(item.mailbox_email, 20, 'history');
+          if (!r.data || r.data.length < 1000) break;
+          from += 1000;
+        }
+      } catch (_) {}
+
+      res.json({ success: true, accounts: [...accounts.values()].sort((a,b) => a.priority-b.priority || a.email.localeCompare(b.email)) });
     } catch (error) { res.status(500).json({ error: error.message }); }
   });
 

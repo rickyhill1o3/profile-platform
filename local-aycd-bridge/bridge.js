@@ -46,6 +46,25 @@ async function postJson(pathname, body, secret='', options={}){
   }
   throw lastError||new Error('Request failed');
 }
+
+async function getJson(pathname, secret='', options={}){
+  const attempts=Math.max(1,Number(options.attempts||3));
+  let lastError;
+  for(let attempt=1;attempt<=attempts;attempt++){
+    try{
+      const r=await fetch(API_BASE+pathname,{headers:{...(secret?{'x-aycd-bridge-secret':secret}:{})}});
+      const j=await r.json().catch(()=>({}));
+      if(!r.ok) throw new Error(j.error||`Website returned ${r.status}`);
+      return j;
+    }catch(e){
+      lastError=e;
+      if(attempt>=attempts) throw e;
+      await sleep(1000*attempt);
+    }
+  }
+  throw lastError;
+}
+
 async function testImap(config){
   if(!config.password) throw new Error('AYCD IMAP password has not been saved.');
   const client=clientFor(config);
@@ -181,6 +200,100 @@ async function fetchMessageBatch(config,uids){
 }
 
 
+
+let stateWriteChain=Promise.resolve();
+function updateDirectState(mutator){
+  stateWriteChain=stateWriteChain.then(()=>{const state=directState();mutator(state);saveJson(STATE_FILE,state);}).catch(e=>console.error('State save failed:',e.message));
+  return stateWriteChain;
+}
+
+function directState(){
+  const raw=readJson(STATE_FILE,{});
+  return {version:7,accounts:raw.accounts&&typeof raw.accounts==='object'?raw.accounts:{},lastScanAt:raw.lastScanAt||null};
+}
+
+async function scanOneAycdAccount(baseConfig,email,lookbackDays){
+  const state=directState();
+  const accountState=state.accounts[email]||{};
+  const config={...baseConfig,username:email};
+  const client=clientFor(config);
+  const messages=[];
+  let highest=Number(accountState.lastUid||0);
+  try{
+    await client.connect();
+    const lock=await client.getMailboxLock('INBOX');
+    try{
+      const rollingDays=Math.max(2,Math.min(30,Number(process.env.AYCD_DIRECT_ROLLING_DAYS||10)));
+      const recent=await client.search({since:new Date(Date.now()-rollingDays*86400000)});
+      let forward=[];
+      if(accountState.lastUid>0) forward=await client.search({uid:`${Number(accountState.lastUid)+1}:*`});
+      else forward=await client.search({since:new Date(Date.now()-lookbackDays*86400000)});
+      let uids=[...new Set([...(forward||[]),...(recent||[])].map(Number).filter(Boolean))].sort((a,b)=>a-b);
+      const cap=Math.max(20,Math.min(500,Number(process.env.AYCD_DIRECT_MAX_MESSAGES_PER_ACCOUNT||150)));
+      uids=uids.slice(-cap);
+      if(uids.length){
+        const set=uidSet(uids);
+        for await(const msg of client.fetch(set,{uid:true,source:true},{uid:true})){
+          highest=Math.max(highest,Number(msg.uid||0));
+          try{
+            const parsed=await simpleParser(msg.source);
+            messages.push({
+              uid:Number(msg.uid||0),mailboxEmail:email,
+              messageId:parsed.messageId||`aycd:${email}:${msg.uid}`,
+              subject:parsed.subject||'',from:parsed.from?.text||'',to:parsed.to?.text||'',cc:parsed.cc?.text||'',
+              recipients:[email,...recipientList(parsed)],text:String(parsed.text||'').slice(0,60000),
+              html:parsed.html?String(parsed.html).slice(0,60000):'',date:parsed.date||new Date()
+            });
+          }catch(e){ console.warn(`Parse failed for ${email} UID ${msg.uid}: ${e.message}`); }
+        }
+      }
+      await updateDirectState(current=>{
+        current.accounts[email]={lastUid:highest,lastSuccessAt:new Date().toISOString(),lastError:null};
+        current.lastScanAt=new Date().toISOString();
+      });
+      return {email,messages,highest,exists:Number(client.mailbox?.exists||0)};
+    }finally{lock.release();}
+  }catch(e){
+    await updateDirectState(current=>{current.accounts[email]={...(current.accounts[email]||accountState),lastError:e.message,lastAttemptAt:new Date().toISOString()};});
+    return {email,messages:[],error:e.message};
+  }finally{try{await client.logout();}catch(_){try{client.close()}catch(__){}}}
+}
+
+async function scanAycdAccountsDirect(cfg,bridge,cmd){
+  const response=await getJson('/orders/aycd/bridge/accounts',bridge.secret,{attempts:5});
+  const accounts=(response.accounts||[]).map(x=>typeof x==='string'?{email:x,priority:50}:x).filter(x=>x.email);
+  if(!accounts.length) throw new Error('No AYCD account addresses were found. Save profiles with Use AYCD Unified Inbox enabled or ingest the historical mailbox list first.');
+  const concurrency=Math.max(1,Math.min(20,Number(process.env.AYCD_DIRECT_CONCURRENCY||8)));
+  const maxPayloadBytes=Math.max(96*1024,Math.min(400*1024,Number(process.env.AYCD_UPLOAD_MAX_BYTES||250*1024)));
+  let cursor=0,finished=0,sent=0,uploadIndex=0,failed=0;
+  async function worker(){
+    while(true){
+      const index=cursor++;
+      if(index>=accounts.length) return;
+      const account=accounts[index];
+      const result=await scanOneAycdAccount(cfg,account.email,Number(cmd.payload?.lookbackDays||cfg.lookbackDays||240));
+      finished++;
+      if(result.error){failed++;console.warn(`AYCD direct account ${account.email} failed: ${result.error}`);continue;}
+      const parts=splitMessagesByPayloadSize(result.messages,maxPayloadBytes,10);
+      for(const messages of parts){
+        await postJson('/orders/aycd/bridge/result',{
+          success:true,command_id:cmd.command_id,checked:messages.length,messages,
+          chunk_index:uploadIndex++,chunk_count:0,final:false,
+          scan_progress:{processed:finished,total:accounts.length,mailbox_count:accounts.length,mode:'direct_accounts',current_account:account.email}
+        },bridge.secret,{attempts:6,timeoutMs:180000});
+        sent+=messages.length;
+        console.log(`Uploaded ${messages.length} message(s) from ${account.email}. Accounts ${finished}/${accounts.length}; total messages ${sent}.`);
+      }
+    }
+  }
+  await Promise.all(Array.from({length:Math.min(concurrency,accounts.length)},()=>worker()));
+  await postJson('/orders/aycd/bridge/result',{
+    success:true,command_id:cmd.command_id,checked:0,messages:[],chunk_index:uploadIndex,chunk_count:0,final:true,
+    scan_progress:{processed:accounts.length,total:accounts.length,mailbox_count:accounts.length,mode:'direct_accounts',failed_accounts:failed}
+  },bridge.secret,{attempts:6,timeoutMs:180000});
+  console.log(`AYCD direct-account scan complete: ${accounts.length-failed}/${accounts.length} accounts checked, ${sent} messages uploaded, ${failed} account(s) failed.`);
+}
+
 function splitMessagesByPayloadSize(messages, maxBytes=500*1024, maxMessages=50){
   const chunks=[];
   let current=[];
@@ -205,7 +318,7 @@ function splitMessagesByPayloadSize(messages, maxBytes=500*1024, maxMessages=50)
 
 function page(message=''){
   const c=readJson(CONFIG_FILE,{}), b=readJson(BRIDGE_FILE,{});
-  return `<!doctype html><meta charset="utf-8"><title>Shore Shack AYCD Bridge</title><style>body{font-family:Arial,sans-serif;background:#0f172a;color:#111827;margin:0;padding:30px}.card{max-width:760px;margin:auto;background:white;border-radius:18px;padding:26px;box-shadow:0 20px 60px #0008}label{display:grid;gap:5px;margin:12px 0;font-weight:700}input{padding:11px;border:1px solid #cbd5e1;border-radius:8px}button{padding:11px 15px;border:0;border-radius:8px;background:#2563eb;color:#fff;font-weight:700;margin-right:8px}.ok{color:#15803d}.bad{color:#b91c1c}.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.wide{grid-column:1/-1}.status{padding:12px;border-radius:10px;background:#f1f5f9}</style><div class="card"><h1>The Shore Shack AYCD Bridge</h1><p class="${message.startsWith('Error')?'bad':'ok'}">${esc(message||'Bridge is running on this laptop.')}</p><div class="status"><b>Local helper:</b> Online at http://${HOST}:${PORT}<br><b>Website:</b> ${esc(API_BASE)}<br><b>Pairing:</b> ${b.secret?'Paired':'Not paired yet'}</div><form method="post" action="/save"><div class="grid"><label>Pairing code<input name="pairCode" placeholder="6-digit code from Order Tracker"></label><label>AYCD port<input name="port" value="${esc(c.port||43283)}"></label><label class="wide">AYCD username<input name="username" value="${esc(c.username||'inbox@aycd.me')}"></label><label class="wide">AYCD IMAP password<input type="password" name="password" placeholder="Leave blank to keep saved password"></label><label>Lookback days<input name="lookbackDays" value="${esc(c.lookbackDays||240)}"></label><label>TLS/SSL<input type="checkbox" name="secure" ${c.secure?'checked':''}></label></div><button type="submit">Save and Pair</button></form><form method="post" action="/test" style="margin-top:12px"><button type="submit">Test AYCD IMAP</button></form><p>Keep AYCD Inbox and this command window open. The bridge checks the website for scan requests every few seconds.</p></div>`;
+  return `<!doctype html><meta charset="utf-8"><title>Shore Shack AYCD Bridge</title><style>body{font-family:Arial,sans-serif;background:#0f172a;color:#111827;margin:0;padding:30px}.card{max-width:760px;margin:auto;background:white;border-radius:18px;padding:26px;box-shadow:0 20px 60px #0008}label{display:grid;gap:5px;margin:12px 0;font-weight:700}input{padding:11px;border:1px solid #cbd5e1;border-radius:8px}button{padding:11px 15px;border:0;border-radius:8px;background:#2563eb;color:#fff;font-weight:700;margin-right:8px}.ok{color:#15803d}.bad{color:#b91c1c}.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.wide{grid-column:1/-1}.status{padding:12px;border-radius:10px;background:#f1f5f9}</style><div class="card"><h1>The Shore Shack AYCD Bridge</h1><p class="${message.startsWith('Error')?'bad':'ok'}">${esc(message||'Bridge is running on this laptop.')}</p><div class="status"><b>Local helper:</b> Online at http://${HOST}:${PORT}<br><b>Website:</b> ${esc(API_BASE)}<br><b>Pairing:</b> ${b.secret?'Paired':'Not paired yet'}</div><form method="post" action="/save"><div class="grid"><label>Pairing code<input name="pairCode" placeholder="6-digit code from Order Tracker"></label><label>AYCD port<input name="port" value="${esc(c.port||43283)}"></label><label class="wide">AYCD test username<input name="username" value="${esc(c.username||'inbox@aycd.me')}"></label><label class="wide">AYCD IMAP password<input type="password" name="password" placeholder="Leave blank to keep saved password"></label><label>Lookback days<input name="lookbackDays" value="${esc(c.lookbackDays||240)}"></label><label>TLS/SSL<input type="checkbox" name="secure" ${c.secure?'checked':''}></label></div><button type="submit">Save and Pair</button></form><form method="post" action="/test" style="margin-top:12px"><button type="submit">Test AYCD IMAP</button></form><p>Keep AYCD open with IMAP Server enabled and leave this command window open. Scans connect directly to each exposed AYCD account; the unified inbox is not used for ingestion.</p></div>`;
 }
 function send(res,status,type,body){ res.writeHead(status,{'Content-Type':type,'Cache-Control':'no-store'}); res.end(body); }
 async function parseBody(req){ return new Promise((resolve,reject)=>{let raw='';req.on('data',d=>{raw+=d;if(raw.length>1024*1024) reject(new Error('Request too large'));});req.on('end',()=>resolve(Object.fromEntries(new URLSearchParams(raw))));req.on('error',reject);}); }
@@ -244,6 +357,10 @@ async function poll(){
     }else if(cmd.command==='scan'){
       const current=readJson(CONFIG_FILE,{}); const cfg=sanitize({...current,lookbackDays:cmd.payload?.lookbackDays||current.lookbackDays});
       try{
+        // Version 7 scans every exposed AYCD mailbox directly. The unified inbox is no
+        // longer used for ingestion because it is an aggregate cache and can omit current mail.
+        await scanAycdAccountsDirect(cfg,{...b,secret:b.secret},cmd);
+        return;
         const plan=await discoverScanPlan(cfg);
         // Small 50-UID groups reduce AYCD pressure and make recovery granular.
         const uidBatchSize=Math.max(1,Math.min(25,Number(process.env.AYCD_UID_BATCH_SIZE||10)));

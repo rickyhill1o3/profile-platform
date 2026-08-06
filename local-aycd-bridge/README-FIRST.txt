@@ -10,3 +10,8 @@ THE SHORE SHACK AYCD BRIDGE
 If Chrome says 127.0.0.1 refused to connect, the helper is not running.
 Run test-aycd-bridge.bat. If startup fails, send install-log.txt or a screenshot
 of the black command window. This error happens before AYCD credentials are used.
+
+DIRECT ACCOUNT SCANNING (v7)
+The bridge now logs into exposed AYCD accounts individually rather than reading inbox@aycd.me.
+Use the same AYCD IMAP Server password. The username field on the local setup page is only used by the Test button.
+Each mailbox receives its own checkpoint, and the exact mailbox email is sent to the website with every message.
