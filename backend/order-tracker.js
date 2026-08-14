@@ -1084,7 +1084,11 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
       ingestion_source: 'aycd',
       provider: { name: 'aycd-unified-imap', host: '127.0.0.1', port: 0, secure: false }
     };
-    await syncServiceOrders(supabase, userId, [fallbackAccount]);
+    // Do NOT synchronize the entire service-order history for every bridge upload chunk.
+    // A large AYCD history import can send thousands of chunks; running syncServiceOrders()
+    // before every one caused Render requests to exceed the proxy timeout and return 520.
+    // saveParsedMessage() already synchronizes a specific platform order on demand when an
+    // order-related email actually needs it. This keeps bulk email ingestion fast.
     let checked = 0, matched = 0, ignored = 0, linkedProfiles = 0;
     const results = [];
     for (const item of (Array.isArray(messages) ? messages : [])) {

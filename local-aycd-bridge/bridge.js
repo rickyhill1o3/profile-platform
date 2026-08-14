@@ -25,11 +25,11 @@ function sleep(ms){ return new Promise(resolve=>setTimeout(resolve,ms)); }
 function uidSet(uids){ return [...new Set((uids||[]).map(Number).filter(Boolean))].sort((a,b)=>a-b).join(','); }
 async function postJson(pathname, body, secret='', options={}){
   const attempts=Math.max(1,Number(options.attempts||1));
-  const timeoutMs=Math.max(5000,Number(options.timeoutMs||180000));
+  const timeoutMs=Math.max(5000,Number(options.timeoutMs||45000));
   let lastError;
   for(let attempt=1;attempt<=attempts;attempt++){
     const controller=new AbortController();
-    const timer=setTimeout(()=>controller.abort(),timeoutMs);
+    const timer=setTimeout(()=>controller.abort(new Error(`Request timed out after ${Math.round(timeoutMs/1000)}s`)),timeoutMs);
     try{
       const r=await fetch(API_BASE+pathname,{method:'POST',headers:{'Content-Type':'application/json',...(secret?{'x-aycd-bridge-secret':secret}:{})},body:JSON.stringify(body||{}),signal:controller.signal});
       const j=await r.json().catch(()=>({}));
@@ -146,12 +146,12 @@ function preferredMailboxEmail(parsed){
 
 async function uploadAycdMessages(bridge,cmd,messages,progress,uploadState){
   const maxPayloadBytes=Math.max(96*1024,Math.min(400*1024,Number(process.env.AYCD_UPLOAD_MAX_BYTES||250*1024)));
-  const parts=splitMessagesByPayloadSize(messages,maxPayloadBytes,10);
+  const parts=splitMessagesByPayloadSize(messages,maxPayloadBytes,4);
   for(const chunk of parts){
     await postJson('/orders/aycd/bridge/result',{
       success:true,command_id:cmd.command_id,checked:chunk.length,messages:chunk,
       chunk_index:uploadState.index++,chunk_count:0,final:false,scan_progress:progress
-    },bridge.secret,{attempts:6,timeoutMs:180000});
+    },bridge.secret,{attempts:6,timeoutMs:45000});
     uploadState.sent+=chunk.length;
   }
 }
@@ -186,6 +186,8 @@ async function scanUnifiedInboxHistory(baseConfig,bridge,cmd){
       }
     }finally{lock.release();}
 
+    console.log('AYCD unified recent pass finished. Starting/resuming the COMPLETE unified inbox history from the oldest available UID.');
+
     // A checkpoint reset, a bridge upgrade, or an incomplete prior history pass causes a
     // complete walk of AYCD's unified mailbox. This intentionally has NO 1,500-message cap.
     // The Email Center deduplicates by Message-ID, so retrying a partially completed pass is safe.
@@ -197,7 +199,7 @@ async function scanUnifiedInboxHistory(baseConfig,bridge,cmd){
         const resumeAfter=Number(current.unifiedHistoricalLastUid||0);
         const pending=all.filter(uid=>uid>resumeAfter);
         console.log(`AYCD unified full-history pass: ${pending.length}/${all.length} UID(s) remaining (mailbox exposes ${mailboxCount||all.length}).`);
-        const batchSize=Math.max(5,Math.min(50,Number(process.env.AYCD_FULL_HISTORY_UID_BATCH||20)));
+        const batchSize=Math.max(5,Math.min(50,Number(process.env.AYCD_FULL_HISTORY_UID_BATCH||12)));
         for(let i=0;i<pending.length;i+=batchSize){
           const ids=pending.slice(i,i+batchSize);
           const rows=[];
@@ -392,13 +394,13 @@ async function scanAycdAccountsDirect(cfg,bridge,cmd){
       const result=await scanOneAycdAccount(cfg,account.email,Number(cmd.payload?.lookbackDays||cfg.lookbackDays||240));
       finished++;
       if(result.error){failed++;console.warn(`AYCD direct account ${account.email} failed: ${result.error}`);continue;}
-      const parts=splitMessagesByPayloadSize(result.messages,maxPayloadBytes,10);
+      const parts=splitMessagesByPayloadSize(result.messages,maxPayloadBytes,4);
       for(const messages of parts){
         await postJson('/orders/aycd/bridge/result',{
           success:true,command_id:cmd.command_id,checked:messages.length,messages,
           chunk_index:uploadIndex++,chunk_count:0,final:false,
           scan_progress:{processed:finished,total:accounts.length,mailbox_count:accounts.length,mode:'direct_accounts',current_account:account.email}
-        },bridge.secret,{attempts:6,timeoutMs:180000});
+        },bridge.secret,{attempts:6,timeoutMs:45000});
         sent+=messages.length;
         console.log(`Uploaded ${messages.length} message(s) from ${account.email}. Accounts ${finished}/${accounts.length}; total messages ${sent}.`);
       }
@@ -408,7 +410,7 @@ async function scanAycdAccountsDirect(cfg,bridge,cmd){
   await postJson('/orders/aycd/bridge/result',{
     success:true,command_id:cmd.command_id,checked:0,messages:[],chunk_index:uploadIndex,chunk_count:0,final:true,
     scan_progress:{processed:accounts.length,total:accounts.length,mailbox_count:accounts.length,mode:'direct_accounts',failed_accounts:failed}
-  },bridge.secret,{attempts:6,timeoutMs:180000});
+  },bridge.secret,{attempts:6,timeoutMs:45000});
   console.log(`AYCD direct-account scan complete: ${accounts.length-failed}/${accounts.length} accounts checked, ${sent} messages uploaded, ${failed} account(s) failed.`);
 }
 
@@ -467,7 +469,7 @@ async function poll(){
       try{
         if(fs.existsSync(STATE_FILE)) fs.unlinkSync(STATE_FILE);
         await postJson('/orders/aycd/bridge/result',{success:true,command_id:cmd.command_id,checked:0,messages:[],final:true,reset_checkpoint:true},b.secret,{attempts:6});
-        console.log('AYCD checkpoint reset. The next scan will walk the entire AYCD unified inbox, then resume direct-account scanning.');
+        console.log('AYCD checkpoint reset. Next scan = recent unified mail first, then EVERY available unified-inbox UID from oldest to newest, then direct-account scanning.');
       }catch(e){
         try{await postJson('/orders/aycd/bridge/result',{success:false,command_id:cmd.command_id,checked:0,error:e.message,final:true},b.secret);}catch(_){}
         console.error('AYCD checkpoint reset failed:',e.message);
@@ -475,8 +477,8 @@ async function poll(){
     }else if(cmd.command==='scan'){
       const current=readJson(CONFIG_FILE,{}); const cfg=sanitize({...current,lookbackDays:cmd.payload?.lookbackDays||current.lookbackDays});
       try{
-        // Version 7 scans every exposed AYCD mailbox directly. The unified inbox is no
-        // longer used for ingestion because it is an aggregate cache and can omit current mail.
+        // Version 9 scans BOTH the unified inbox (recent + complete history) and individual AYCD mailboxes. The unified inbox is no
+        // longer the only source: direct-account scans catch current mail that the aggregate view can miss.
         await scanAycdAccountsDirect(cfg,{...b,secret:b.secret},cmd);
         return;
         const plan=await discoverScanPlan(cfg);
