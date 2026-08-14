@@ -1412,16 +1412,29 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
     if (term) q = q.or(`subject.ilike.%${term.replace(/[,%]/g,'')}%,from_text.ilike.%${term.replace(/[,%]/g,'')}%,mailbox_email.ilike.%${term.replace(/[,%]/g,'')}%,order_number.ilike.%${term.replace(/[,%]/g,'')}%,snippet.ilike.%${term.replace(/[,%]/g,'')}%`);
     const { data, error, count } = await q.order('received_at',{ascending:false}).range(from,to);
     if (error) return res.status(500).json({error:error.message});
-    const { data: stats } = await supabase.from('email_messages').select('email_type,store,linked_order_id,keep_forever').eq('user_id',req.user_id);
-    const summary=(stats||[]).reduce((a,e)=>{a.total++;a[e.email_type]=(a[e.email_type]||0)+1;if(e.linked_order_id)a.linked++;if(e.keep_forever)a.kept++;return a;},{total:0,linked:0,kept:0});
+    // Supabase returns at most 1,000 rows per request by default. The Email Center can
+    // contain 10k+ AYCD messages, so build summary counts in paged reads instead of
+    // silently stopping at 1,000.
+    const summary={total:0,linked:0,kept:0};
+    for(let offset=0;;offset+=1000){
+      const sr=await supabase.from('email_messages').select('email_type,linked_order_id,keep_forever').eq('user_id',req.user_id).range(offset,offset+999);
+      if(sr.error) return res.status(500).json({error:sr.error.message});
+      for(const e of sr.data||[]){summary.total++;summary[e.email_type]=(summary[e.email_type]||0)+1;if(e.linked_order_id)summary.linked++;if(e.keep_forever)summary.kept++;}
+      if(!sr.data || sr.data.length<1000) break;
+    }
     res.json({emails:data||[],count:count||0,page,limit,summary});
   });
 
   app.get('/admin/email-center/mailboxes', auth, async (req,res)=>{
     if(req.role!=='super_admin') return res.status(403).json({error:'Super admin only.'});
     try{
-      const {data:rows,error}=await supabase.from('email_messages').select('mailbox_email,source_type,received_at').eq('user_id',req.user_id);
-      if(error) throw error;
+      const rows=[];
+      for(let offset=0;;offset+=1000){
+        const r=await supabase.from('email_messages').select('mailbox_email,source_type,received_at').eq('user_id',req.user_id).range(offset,offset+999);
+        if(r.error) throw r.error;
+        rows.push(...(r.data||[]));
+        if(!r.data || r.data.length<1000) break;
+      }
       let hiddenRows=[];
       try{const r=await supabase.from('email_center_hidden_mailboxes').select('mailbox_email,is_hidden').eq('user_id',req.user_id);hiddenRows=r.data||[];}catch(_){}
       const hidden=new Set(hiddenRows.filter(r=>r.is_hidden).map(r=>lower(r.mailbox_email)));

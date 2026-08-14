@@ -83,6 +83,10 @@ async function discoverScanPlan(config){
   const client=clientFor(config);
   try{
     await client.connect();
+    // Individual AYCD logins trigger background sync. Give AYCD a moment to populate the mailbox
+    // before SEARCH/FETCH or a brand-new connection may expose only 2-3 messages.
+    await sleep(Math.max(500,Math.min(8000,Number(process.env.AYCD_ACCOUNT_SYNC_SETTLE_MS||2000))));
+    try{await client.noop();}catch(_){}
     const lock=await client.getMailboxLock('INBOX');
     try{
       let uids=[];
@@ -123,6 +127,113 @@ function recipientList(parsed){
   }
   return [...out];
 }
+function preferredMailboxEmail(parsed){
+  const candidates=[];
+  const addHeader=name=>{
+    try{
+      const value=parsed.headers?.get(name);
+      if(value) candidates.push(String(value));
+    }catch(_){}
+  };
+  addHeader('delivered-to'); addHeader('x-original-to'); addHeader('envelope-to');
+  if(parsed.to?.text) candidates.push(String(parsed.to.text));
+  for(const value of candidates){
+    const match=String(value).match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
+    if(match && match[0].toLowerCase()!=='inbox@aycd.me') return match[0].toLowerCase();
+  }
+  return '';
+}
+
+async function uploadAycdMessages(bridge,cmd,messages,progress,uploadState){
+  const maxPayloadBytes=Math.max(96*1024,Math.min(400*1024,Number(process.env.AYCD_UPLOAD_MAX_BYTES||250*1024)));
+  const parts=splitMessagesByPayloadSize(messages,maxPayloadBytes,10);
+  for(const chunk of parts){
+    await postJson('/orders/aycd/bridge/result',{
+      success:true,command_id:cmd.command_id,checked:chunk.length,messages:chunk,
+      chunk_index:uploadState.index++,chunk_count:0,final:false,scan_progress:progress
+    },bridge.secret,{attempts:6,timeoutMs:180000});
+    uploadState.sent+=chunk.length;
+  }
+}
+
+async function scanUnifiedInboxHistory(baseConfig,bridge,cmd){
+  const state=directState();
+  const config={...baseConfig,username:'inbox@aycd.me'};
+  const client=clientFor(config);
+  const uploadState={index:0,sent:0};
+  let mailboxCount=0;
+  try{
+    await client.connect();
+    let lock=await client.getMailboxLock('INBOX');
+    try{
+      mailboxCount=Number(client.mailbox?.exists||0);
+      const rollingDays=Math.max(2,Math.min(30,Number(process.env.AYCD_DIRECT_ROLLING_DAYS||10)));
+      const recent=(await client.search({since:new Date(Date.now()-rollingDays*86400000)} )||[]).map(Number).filter(Boolean).sort((a,b)=>b-a);
+      if(recent.length){
+        console.log(`AYCD unified recent pass: ${recent.length} UID(s) from the last ${rollingDays} days.`);
+        for(let i=0;i<recent.length;i+=20){
+          const ids=recent.slice(i,i+20);
+          const rows=[];
+          for await(const msg of client.fetch(uidSet(ids),{uid:true,source:true},{uid:true})){
+            try{
+              const parsed=await simpleParser(msg.source);
+              const mailboxEmail=preferredMailboxEmail(parsed);
+              rows.push({uid:Number(msg.uid||0),mailboxEmail,messageId:parsed.messageId||`aycd:unified:${msg.uid}`,subject:parsed.subject||'',from:parsed.from?.text||'',to:parsed.to?.text||'',cc:parsed.cc?.text||'',recipients:recipientList(parsed),text:String(parsed.text||'').slice(0,60000),html:parsed.html?String(parsed.html).slice(0,60000):'',date:parsed.date||new Date()});
+            }catch(e){console.warn(`Unified recent parse failed UID ${msg.uid}: ${e.message}`);}
+          }
+          await uploadAycdMessages(bridge,cmd,rows,{mode:'unified_recent',processed:Math.min(i+20,recent.length),total:recent.length,mailbox_count:mailboxCount},uploadState);
+        }
+      }
+    }finally{lock.release();}
+
+    // A checkpoint reset, a bridge upgrade, or an incomplete prior history pass causes a
+    // complete walk of AYCD's unified mailbox. This intentionally has NO 1,500-message cap.
+    // The Email Center deduplicates by Message-ID, so retrying a partially completed pass is safe.
+    const current=directState();
+    if(!current.fullUnifiedComplete){
+      lock=await client.getMailboxLock('INBOX');
+      try{
+        const all=(await client.search({all:true})||[]).map(Number).filter(Boolean).sort((a,b)=>a-b);
+        const resumeAfter=Number(current.unifiedHistoricalLastUid||0);
+        const pending=all.filter(uid=>uid>resumeAfter);
+        console.log(`AYCD unified full-history pass: ${pending.length}/${all.length} UID(s) remaining (mailbox exposes ${mailboxCount||all.length}).`);
+        const batchSize=Math.max(5,Math.min(50,Number(process.env.AYCD_FULL_HISTORY_UID_BATCH||20)));
+        for(let i=0;i<pending.length;i+=batchSize){
+          const ids=pending.slice(i,i+batchSize);
+          const rows=[];
+          try{
+            for await(const msg of client.fetch(uidSet(ids),{uid:true,source:true},{uid:true})){
+              try{
+                const parsed=await simpleParser(msg.source);
+                const mailboxEmail=preferredMailboxEmail(parsed);
+                rows.push({uid:Number(msg.uid||0),mailboxEmail,messageId:parsed.messageId||`aycd:unified:${msg.uid}`,subject:parsed.subject||'',from:parsed.from?.text||'',to:parsed.to?.text||'',cc:parsed.cc?.text||'',recipients:recipientList(parsed),text:String(parsed.text||'').slice(0,60000),html:parsed.html?String(parsed.html).slice(0,60000):'',date:parsed.date||new Date()});
+              }catch(e){console.warn(`Unified history parse failed UID ${msg.uid}: ${e.message}`);}
+            }
+          }catch(e){
+            console.warn(`Unified history group ${ids[0]}-${ids[ids.length-1]} failed (${e.responseText||e.message}); retrying individually.`);
+            for(const uid of ids){
+              try{
+                for await(const msg of client.fetch(String(uid),{uid:true,source:true},{uid:true})){
+                  const parsed=await simpleParser(msg.source);
+                  const mailboxEmail=preferredMailboxEmail(parsed);
+                  rows.push({uid:Number(msg.uid||uid),mailboxEmail,messageId:parsed.messageId||`aycd:unified:${uid}`,subject:parsed.subject||'',from:parsed.from?.text||'',to:parsed.to?.text||'',cc:parsed.cc?.text||'',recipients:recipientList(parsed),text:String(parsed.text||'').slice(0,60000),html:parsed.html?String(parsed.html).slice(0,60000):'',date:parsed.date||new Date()});
+                }
+              }catch(one){console.warn(`Unified history UID ${uid} unavailable: ${one.responseText||one.message}`);}
+            }
+          }
+          await uploadAycdMessages(bridge,cmd,rows,{mode:'unified_full_history',processed:Math.min(i+ids.length,pending.length),total:pending.length,mailbox_count:mailboxCount},uploadState);
+          const high=Math.max(...ids);
+          await updateDirectState(st=>{st.version=8;st.unifiedHistoricalLastUid=Math.max(Number(st.unifiedHistoricalLastUid||0),high);st.fullUnifiedComplete=false;st.lastScanAt=new Date().toISOString();});
+          if((i/batchSize)%10===0) console.log(`AYCD unified history: ${Math.min(i+ids.length,pending.length)}/${pending.length} UID(s) processed; ${uploadState.sent} message(s) uploaded this pass.`);
+        }
+        await updateDirectState(st=>{st.version=8;st.fullUnifiedComplete=true;st.unifiedHistoricalLastUid=all.length?Math.max(...all):Number(st.unifiedHistoricalLastUid||0);st.lastScanAt=new Date().toISOString();});
+        console.log(`AYCD unified full-history complete. ${all.length} UID(s) walked.`);
+      }finally{lock.release();}
+    }
+    return {uploaded:uploadState.sent,mailboxCount,nextUploadIndex:uploadState.index};
+  }finally{try{await client.logout();}catch(_){try{client.close()}catch(__){}}}
+}
+
 async function fetchMessageBatch(config,uids){
   const requested=[...new Set((uids||[]).map(Number).filter(Boolean))].sort((a,b)=>a-b);
   const messages=[];
@@ -209,7 +320,7 @@ function updateDirectState(mutator){
 
 function directState(){
   const raw=readJson(STATE_FILE,{});
-  return {version:7,accounts:raw.accounts&&typeof raw.accounts==='object'?raw.accounts:{},lastScanAt:raw.lastScanAt||null};
+  return {version:8,accounts:raw.accounts&&typeof raw.accounts==='object'?raw.accounts:{},lastScanAt:raw.lastScanAt||null,fullUnifiedComplete:!!raw.fullUnifiedComplete,unifiedHistoricalLastUid:Number(raw.unifiedHistoricalLastUid||0)};
 }
 
 async function scanOneAycdAccount(baseConfig,email,lookbackDays){
@@ -221,6 +332,10 @@ async function scanOneAycdAccount(baseConfig,email,lookbackDays){
   let highest=Number(accountState.lastUid||0);
   try{
     await client.connect();
+    // AYCD's Individual Mail Account mode begins a background sync when this login connects.
+    // Waiting briefly prevents us from searching before that account's mailbox has populated.
+    await sleep(Math.max(500,Math.min(8000,Number(process.env.AYCD_ACCOUNT_SYNC_SETTLE_MS||2000))));
+    try{await client.noop();}catch(_){}
     const lock=await client.getMailboxLock('INBOX');
     try{
       const rollingDays=Math.max(2,Math.min(30,Number(process.env.AYCD_DIRECT_ROLLING_DAYS||10)));
@@ -260,12 +375,15 @@ async function scanOneAycdAccount(baseConfig,email,lookbackDays){
 }
 
 async function scanAycdAccountsDirect(cfg,bridge,cmd){
+  // Always read current unified mail first. On a checkpoint reset/first v8 run this also
+  // walks the ENTIRE AYCD unified inbox (all exposed history, no message-count cap).
+  const unified=await scanUnifiedInboxHistory(cfg,bridge,cmd);
   const response=await getJson('/orders/aycd/bridge/accounts',bridge.secret,{attempts:5});
   const accounts=(response.accounts||[]).map(x=>typeof x==='string'?{email:x,priority:50}:x).filter(x=>x.email);
   if(!accounts.length) throw new Error('No AYCD account addresses were found. Save profiles with Use AYCD Unified Inbox enabled or ingest the historical mailbox list first.');
   const concurrency=Math.max(1,Math.min(20,Number(process.env.AYCD_DIRECT_CONCURRENCY||8)));
   const maxPayloadBytes=Math.max(96*1024,Math.min(400*1024,Number(process.env.AYCD_UPLOAD_MAX_BYTES||250*1024)));
-  let cursor=0,finished=0,sent=0,uploadIndex=0,failed=0;
+  let cursor=0,finished=0,sent=Number(unified.uploaded||0),uploadIndex=Number(unified.nextUploadIndex||0),failed=0;
   async function worker(){
     while(true){
       const index=cursor++;
@@ -349,7 +467,7 @@ async function poll(){
       try{
         if(fs.existsSync(STATE_FILE)) fs.unlinkSync(STATE_FILE);
         await postJson('/orders/aycd/bridge/result',{success:true,command_id:cmd.command_id,checked:0,messages:[],final:true,reset_checkpoint:true},b.secret,{attempts:6});
-        console.log('AYCD checkpoint reset. The next scan will start from the beginning of the configured lookback window.');
+        console.log('AYCD checkpoint reset. The next scan will walk the entire AYCD unified inbox, then resume direct-account scanning.');
       }catch(e){
         try{await postJson('/orders/aycd/bridge/result',{success:false,command_id:cmd.command_id,checked:0,error:e.message,final:true},b.secret);}catch(_){}
         console.error('AYCD checkpoint reset failed:',e.message);
