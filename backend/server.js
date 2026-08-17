@@ -9048,6 +9048,159 @@ function csvLine(values) {
 }
 
 
+
+function countryForPolar(value) {
+    const text = String(value || "").trim();
+    if (!text || /^(united states|usa|us|u\.s\.|u\.s\.a\.)$/i.test(text)) return "United States";
+    return text;
+}
+
+function stateForPolar(value) {
+    const text = String(value || "").trim();
+    if (!text) return "";
+    const byCode = {
+        AL:"Alabama", AK:"Alaska", AZ:"Arizona", AR:"Arkansas", CA:"California", CO:"Colorado", CT:"Connecticut", DE:"Delaware",
+        FL:"Florida", GA:"Georgia", HI:"Hawaii", ID:"Idaho", IL:"Illinois", IN:"Indiana", IA:"Iowa", KS:"Kansas", KY:"Kentucky",
+        LA:"Louisiana", ME:"Maine", MD:"Maryland", MA:"Massachusetts", MI:"Michigan", MN:"Minnesota", MS:"Mississippi", MO:"Missouri",
+        MT:"Montana", NE:"Nebraska", NV:"Nevada", NH:"New Hampshire", NJ:"New Jersey", NM:"New Mexico", NY:"New York",
+        NC:"North Carolina", ND:"North Dakota", OH:"Ohio", OK:"Oklahoma", OR:"Oregon", PA:"Pennsylvania", RI:"Rhode Island",
+        SC:"South Carolina", SD:"South Dakota", TN:"Tennessee", TX:"Texas", UT:"Utah", VT:"Vermont", VA:"Virginia", WA:"Washington",
+        WV:"West Virginia", WI:"Wisconsin", WY:"Wyoming", DC:"District of Columbia", PR:"Puerto Rico"
+    };
+    const code = text.toUpperCase();
+    return byCode[code] || text;
+}
+
+function polarProfileGroupLabel(group) {
+    const key = String(group || "").trim().toLowerCase();
+    const labels = {
+        general: "general",
+        walmart: "walmart",
+        target: "target",
+        samsclub: "sam's club",
+        crunchyroll: "crunchyroll",
+        pokemoncenter: "pokemon center",
+        amazon: "amazon",
+        bandai: "premium bandai",
+        raffle: "raffle"
+    };
+    return labels[key] || (key || "all groups");
+}
+
+app.get("/admin/export/profiles-polar-json", auth, admin, async (req, res) => {
+    try {
+        const currentUser = await getCurrentUser(req);
+        const { user_id, group } = req.query;
+        const filename = (req.query.filename || "polar-profiles").replace(/[^a-zA-Z0-9-_]/g, "");
+        const activeOnly = String(req.query.active_only || "") === "1";
+
+        let query = supabase
+            .from("profiles")
+            .select(`
+                *,
+                addresses(*),
+                payments(*),
+                accounts(*)
+            `)
+            .order("created_at", { ascending: false });
+
+        if (currentUser.role === "super_admin") {
+            if (user_id) query = query.eq("user_id", user_id);
+        } else {
+            const ownedUserIds = await getScopeUserIdsForAdmin(currentUser);
+            if (user_id && !ownedUserIds.includes(user_id)) {
+                return res.status(403).json({ error: "Cannot export that account" });
+            }
+            query = query.in("user_id", safeIn(ownedUserIds));
+            if (user_id) query = query.eq("user_id", user_id);
+        }
+
+        const { data: profiles, error } = await query;
+        if (error) return res.status(500).json({ error: error.message });
+
+        let exportProfiles = await attachAndFilterProfilesByStore(profiles || [], group || "");
+        exportProfiles = await filterProfilesByActiveRunStatus(exportProfiles, group || "", activeOnly);
+
+        const rows = exportProfiles.map((profile) => {
+            const address = profile.addresses?.[0] || {};
+            const payment = profile.payments?.[0] || {};
+            let cardNumber = "";
+            let cardCvv = "";
+            try { cardNumber = payment.card_encrypted ? decrypt(payment.card_encrypted) : ""; } catch { }
+            try { cardCvv = payment.cvv_encrypted ? decrypt(payment.cvv_encrypted) : ""; } catch { }
+
+            const shippingName = `${address.first_name || ""} ${address.last_name || ""}`.trim();
+            const billingHasSeparate = Boolean(
+                address.billing_first_name || address.billing_last_name || address.billing_address1 || address.billing_address2 ||
+                address.billing_city || address.billing_state || address.billing_zip || address.billing_phone || address.billing_country
+            );
+            const billingName = billingHasSeparate
+                ? `${address.billing_first_name || ""} ${address.billing_last_name || ""}`.trim()
+                : shippingName;
+
+            const shippingAddress = {
+                name: shippingName,
+                email: address.email || "",
+                phone: address.phone || "",
+                line1: address.address1 || "",
+                line2: address.address2 || "",
+                line3: "",
+                postCode: address.zip || "",
+                city: address.city || "",
+                country: countryForPolar(address.country),
+                state: stateForPolar(address.state)
+            };
+            const billingAddress = billingHasSeparate ? {
+                name: billingName,
+                email: address.email || "",
+                phone: address.billing_phone || address.phone || "",
+                line1: address.billing_address1 || "",
+                line2: address.billing_address2 || "",
+                line3: "",
+                postCode: address.billing_zip || "",
+                city: address.billing_city || "",
+                country: countryForPolar(address.billing_country || address.country),
+                state: stateForPolar(address.billing_state || address.state)
+            } : { ...shippingAddress };
+
+            return {
+                name: profile.profile_name || "",
+                notes: "",
+                billingAddress,
+                shippingAddress,
+                paymentDetails: {
+                    nameOnCard: payment.card_name || shippingName,
+                    cardType: "",
+                    cardNumber,
+                    cardExpMonth: twoDigitMonth(payment.exp_month),
+                    cardExpYear: fourDigitYear(payment.exp_year),
+                    cardCvv
+                },
+                sameBillingAndShippingAddress: !billingHasSeparate,
+                onlyCheckoutOnce: false,
+                matchNameOnCardAndAddress: false
+            };
+        });
+
+        const payload = {
+            polarExport: {
+                version: 1,
+                kind: "profiles",
+                format: "aycd",
+                profileGroup: polarProfileGroupLabel(group),
+                exportedAt: new Date().toISOString(),
+                profiles: rows
+            }
+        };
+
+        res.setHeader("Content-Type", "application/json");
+        res.setHeader("Content-Disposition", `attachment; filename="${filename}.json"`);
+        res.send(JSON.stringify(payload, null, 2));
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
 app.get("/admin/export/profiles-stellar-json", auth, admin, async (req, res) => {
     try {
         const currentUser = await getCurrentUser(req);

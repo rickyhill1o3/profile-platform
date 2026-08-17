@@ -2107,6 +2107,21 @@ async function exportProfilesShikariCsv() {
     }
 }
 
+async function exportProfilesPolarJson() {
+    try {
+        const { params } = await getExportCountAndParams();
+        const filename = promptForExportFilename("polar-profiles");
+        if (!filename) return;
+
+        params.append("filename", filename);
+
+        const url = API + "/admin/export/profiles-polar-json" + (params.toString() ? "?" + params.toString() : "");
+        await downloadExportFile(url, filename + ".json");
+    } catch (err) {
+        if (err.message) alert(err.message);
+    }
+}
+
 async function exportAccountsTxt() {
     try {
         const { params } = await getExportCountAndParams();
@@ -4984,6 +4999,7 @@ async function initAdminStoreRunStatus() {
     const exportProfilesButton = document.getElementById('adminRunStatusExportProfilesButton');
     const exportStellarProfilesButton = document.getElementById('adminRunStatusExportStellarProfilesButton');
     const exportShikariProfilesButton = document.getElementById('adminRunStatusExportShikariProfilesButton');
+    const exportPolarProfilesButton = document.getElementById('adminRunStatusExportPolarProfilesButton');
     const exportAccountsButton = document.getElementById('adminRunStatusExportAccountsButton');
     const exportGmailButton = document.getElementById('adminRunStatusExportGmailButton');
     const summary = document.getElementById('adminRunStatusSummary');
@@ -5070,6 +5086,7 @@ async function initAdminStoreRunStatus() {
     if (exportProfilesButton) exportProfilesButton.addEventListener('click', () => exportActive('/admin/export/profiles-json', 'refract-profiles', '.json'));
     if (exportStellarProfilesButton) exportStellarProfilesButton.addEventListener('click', () => exportActive('/admin/export/profiles-stellar-json', 'stellar-profiles', '.json'));
     if (exportShikariProfilesButton) exportShikariProfilesButton.addEventListener('click', () => exportActive('/admin/export/profiles-shikari-csv', 'shikari-profiles', '.csv'));
+    if (exportPolarProfilesButton) exportPolarProfilesButton.addEventListener('click', () => exportActive('/admin/export/profiles-polar-json', 'polar-profiles', '.json'));
     if (exportAccountsButton) exportAccountsButton.addEventListener('click', () => exportActive('/admin/export/accounts-txt', 'accounts', '.txt'));
     if (exportGmailButton) exportGmailButton.addEventListener('click', () => exportActive('/admin/export/gmail-imap-txt', 'gmail-imap', '.txt'));
 

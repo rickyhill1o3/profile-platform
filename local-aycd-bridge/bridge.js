@@ -329,47 +329,88 @@ async function scanOneAycdAccount(baseConfig,email,lookbackDays){
   const state=directState();
   const accountState=state.accounts[email]||{};
   const config={...baseConfig,username:email};
-  const client=clientFor(config);
   const messages=[];
+  const seenUids=new Set();
   let highest=Number(accountState.lastUid||0);
+  let finalExists=0;
+
+  // AYCD individual-account IMAP is backed by a background sync. A mailbox can initially
+  // expose only 1-3 messages even though more are visible in the AYCD UI. Do not trust the
+  // first SEARCH result: keep the connection alive and wait until the recent UID set settles.
+  const settleMs=Math.max(750,Math.min(10000,Number(process.env.AYCD_ACCOUNT_SYNC_SETTLE_MS||2500)));
+  const settleRounds=Math.max(2,Math.min(8,Number(process.env.AYCD_ACCOUNT_STABLE_ROUNDS||3)));
+  const maxWaitMs=Math.max(5000,Math.min(45000,Number(process.env.AYCD_ACCOUNT_MAX_SYNC_WAIT_MS||18000)));
+  const rollingDays=Math.max(2,Math.min(30,Number(process.env.AYCD_DIRECT_ROLLING_DAYS||10)));
+  const cap=Math.max(20,Math.min(1000,Number(process.env.AYCD_DIRECT_MAX_MESSAGES_PER_ACCOUNT||300)));
+
+  const client=clientFor(config);
   try{
     await client.connect();
-    // AYCD's Individual Mail Account mode begins a background sync when this login connects.
-    // Waiting briefly prevents us from searching before that account's mailbox has populated.
-    await sleep(Math.max(500,Math.min(8000,Number(process.env.AYCD_ACCOUNT_SYNC_SETTLE_MS||2000))));
-    try{await client.noop();}catch(_){}
-    const lock=await client.getMailboxLock('INBOX');
-    try{
-      const rollingDays=Math.max(2,Math.min(30,Number(process.env.AYCD_DIRECT_ROLLING_DAYS||10)));
-      const recent=await client.search({since:new Date(Date.now()-rollingDays*86400000)});
-      let forward=[];
-      if(accountState.lastUid>0) forward=await client.search({uid:`${Number(accountState.lastUid)+1}:*`});
-      else forward=await client.search({since:new Date(Date.now()-lookbackDays*86400000)});
-      let uids=[...new Set([...(forward||[]),...(recent||[])].map(Number).filter(Boolean))].sort((a,b)=>a-b);
-      const cap=Math.max(20,Math.min(500,Number(process.env.AYCD_DIRECT_MAX_MESSAGES_PER_ACCOUNT||150)));
-      uids=uids.slice(-cap);
-      if(uids.length){
-        const set=uidSet(uids);
-        for await(const msg of client.fetch(set,{uid:true,source:true},{uid:true})){
-          highest=Math.max(highest,Number(msg.uid||0));
-          try{
-            const parsed=await simpleParser(msg.source);
-            messages.push({
-              uid:Number(msg.uid||0),mailboxEmail:email,
-              messageId:parsed.messageId||`aycd:${email}:${msg.uid}`,
-              subject:parsed.subject||'',from:parsed.from?.text||'',to:parsed.to?.text||'',cc:parsed.cc?.text||'',
-              recipients:[email,...recipientList(parsed)],text:String(parsed.text||'').slice(0,60000),
-              html:parsed.html?String(parsed.html).slice(0,60000):'',date:parsed.date||new Date()
-            });
-          }catch(e){ console.warn(`Parse failed for ${email} UID ${msg.uid}: ${e.message}`); }
-        }
+    const started=Date.now();
+    let stable=0;
+    let previousSignature='';
+    let candidateUids=[];
+
+    while(Date.now()-started < maxWaitMs){
+      await sleep(settleMs);
+      try{await client.noop();}catch(_){}
+      const lock=await client.getMailboxLock('INBOX');
+      try{
+        finalExists=Number(client.mailbox?.exists||0);
+        const recent=await client.search({since:new Date(Date.now()-rollingDays*86400000)});
+        let forward=[];
+        if(accountState.lastUid>0) forward=await client.search({uid:`${Number(accountState.lastUid)+1}:*`});
+        else forward=await client.search({since:new Date(Date.now()-lookbackDays*86400000)});
+        candidateUids=[...new Set([...(forward||[]),...(recent||[])].map(Number).filter(Boolean))].sort((a,b)=>a-b).slice(-cap);
+        const signature=`${finalExists}:${candidateUids.join(',')}`;
+        if(signature===previousSignature) stable++; else {stable=0;previousSignature=signature;}
+      }finally{lock.release();}
+      if(stable>=settleRounds-1) break;
+    }
+
+    // Fetch individually. AYCD can return a partial result for a UID set without throwing,
+    // which previously made a visible confirmation silently disappear from the bridge run.
+    for(const uid of candidateUids){
+      let fetched=false;
+      for(let attempt=1;attempt<=3 && !fetched;attempt++){
+        const lock=await client.getMailboxLock('INBOX');
+        try{
+          let returned=false;
+          for await(const msg of client.fetch(String(uid),{uid:true,source:true},{uid:true})){
+            returned=true;
+            highest=Math.max(highest,Number(msg.uid||uid));
+            try{
+              const parsed=await simpleParser(msg.source);
+              const actualUid=Number(msg.uid||uid);
+              if(seenUids.has(actualUid)) {fetched=true;continue;}
+              seenUids.add(actualUid);
+              messages.push({
+                uid:actualUid,mailboxEmail:email,
+                messageId:parsed.messageId||`aycd:${email}:${actualUid}`,
+                subject:parsed.subject||'',from:parsed.from?.text||'',to:parsed.to?.text||'',cc:parsed.cc?.text||'',
+                recipients:[email,...recipientList(parsed)],text:String(parsed.text||'').slice(0,60000),
+                html:parsed.html?String(parsed.html).slice(0,60000):'',date:parsed.date||new Date()
+              });
+              fetched=true;
+            }catch(e){ console.warn(`Parse failed for ${email} UID ${uid}: ${e.message}`); }
+          }
+          if(!returned) console.warn(`AYCD direct ${email} UID ${uid} returned no body on attempt ${attempt}/3.`);
+        }catch(e){
+          console.warn(`AYCD direct ${email} UID ${uid} fetch attempt ${attempt}/3 failed: ${e.responseText||e.message}`);
+        }finally{lock.release();}
+        if(!fetched && attempt<3){try{await client.noop();}catch(_){} await sleep(attempt*1500);}
       }
-      await updateDirectState(current=>{
-        current.accounts[email]={lastUid:highest,lastSuccessAt:new Date().toISOString(),lastError:null};
-        current.lastScanAt=new Date().toISOString();
-      });
-      return {email,messages,highest,exists:Number(client.mailbox?.exists||0)};
-    }finally{lock.release();}
+      if(!fetched) console.warn(`AYCD direct ${email} UID ${uid} is visible but its body is still unavailable; it will be retried on the next scan.`);
+    }
+
+    // Advance only to a UID whose body we actually obtained. This is deliberate: if AYCD
+    // exposes a UID but withholds its body, the next scan must ask for it again.
+    if(messages.length) highest=Math.max(Number(accountState.lastUid||0),...messages.map(x=>Number(x.uid||0)));
+    await updateDirectState(current=>{
+      current.accounts[email]={lastUid:highest,lastSuccessAt:new Date().toISOString(),lastError:null,lastMailboxCount:finalExists,lastFetchedCount:messages.length};
+      current.lastScanAt=new Date().toISOString();
+    });
+    return {email,messages,highest,exists:finalExists,candidateCount:candidateUids.length};
   }catch(e){
     await updateDirectState(current=>{current.accounts[email]={...(current.accounts[email]||accountState),lastError:e.message,lastAttemptAt:new Date().toISOString()};});
     return {email,messages:[],error:e.message};
