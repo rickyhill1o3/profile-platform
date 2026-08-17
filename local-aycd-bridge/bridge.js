@@ -22,6 +22,122 @@ function esc(v){ return String(v||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&
 function sanitize(cfg={}){ return { host:'127.0.0.1', port:Number(cfg.port||43283), username:clean(cfg.username)||'inbox@aycd.me', password:clean(cfg.password), secure:!!cfg.secure, lookbackDays:Math.max(1,Math.min(365,Number(cfg.lookbackDays||240))) }; }
 function clientFor(c){ return new ImapFlow({ host:c.host, port:c.port, secure:c.secure, auth:{user:c.username,pass:c.password}, logger:false, connectionTimeout:15000, greetingTimeout:15000, socketTimeout:180000, tls:{rejectUnauthorized:false} }); }
 function sleep(ms){ return new Promise(resolve=>setTimeout(resolve,ms)); }
+const BODY_FAILURE_LOG = path.join(CONFIG_DIR, 'aycd-body-failures.log');
+function appendFailureLog(message){
+  try{
+    fs.mkdirSync(CONFIG_DIR,{recursive:true});
+    fs.appendFileSync(BODY_FAILURE_LOG,`[${new Date().toISOString()}] ${message}\n`,'utf8');
+  }catch(_){ }
+}
+function formatEnvelopeAddresses(list){
+  if(!Array.isArray(list)) return '';
+  return list.map(x=>{
+    const address=clean(x?.address);
+    const name=clean(x?.name);
+    return address ? (name ? `${name} <${address}>` : address) : '';
+  }).filter(Boolean).join(', ');
+}
+function collectBodyPartIds(node,out=[]){
+  if(!node || typeof node!=='object') return out;
+  const part=clean(node.part || node.partId || node.partID || node.section);
+  const type=String(node.type||'').toLowerCase();
+  const subtype=String(node.subtype||'').toLowerCase();
+  if(part && (type==='text' || subtype==='plain' || subtype==='html')) out.push(part);
+  const children=node.childNodes || node.children || node.parts || [];
+  if(Array.isArray(children)) children.forEach(child=>collectBodyPartIds(child,out));
+  return [...new Set(out)];
+}
+function bodyPartsToText(bodyParts){
+  if(!bodyParts) return '';
+  const values=[];
+  try{
+    if(bodyParts instanceof Map){ for(const value of bodyParts.values()) values.push(value); }
+    else if(typeof bodyParts==='object'){ for(const value of Object.values(bodyParts)) values.push(value); }
+  }catch(_){ }
+  return values.map(value=>Buffer.isBuffer(value)?value.toString('utf8'):String(value||'')).filter(Boolean).join('\n');
+}
+async function fetchSingleRecord(client, uid, email){
+  const diagnostic={uid,email,strategies:[]};
+  let metadata=null;
+
+  // Strategy 1: normal full RFC822 source. This is the preferred path.
+  try{
+    let row=null;
+    for await(const msg of client.fetch(String(uid),{uid:true,source:true,envelope:true,internalDate:true},{uid:true})){
+      diagnostic.strategies.push('source:returned');
+      if(msg.source && Buffer.byteLength(msg.source)>0){
+        const parsed=await simpleParser(msg.source);
+        row={
+          uid:Number(msg.uid||uid),mailboxEmail:email,
+          messageId:parsed.messageId||`aycd:${email}:${uid}`,
+          subject:parsed.subject||'',from:parsed.from?.text||'',to:parsed.to?.text||'',cc:parsed.cc?.text||'',
+          recipients:[email,...recipientList(parsed)],text:String(parsed.text||'').slice(0,60000),
+          html:parsed.html?String(parsed.html).slice(0,60000):'',date:parsed.date||msg.internalDate||new Date(),
+          bodyMissing:false,fetchStrategy:'source'
+        };
+        return {row,diagnostic};
+      }
+      metadata=msg;
+    }
+    diagnostic.strategies.push('source:empty');
+  }catch(e){ diagnostic.strategies.push(`source:error:${e.responseText||e.message}`); }
+
+  // Strategy 2: ask only for envelope/body structure. AYCD frequently returns this even
+  // when it refuses BODY[]/RFC822. Subject-only Target confirmations can still be matched.
+  try{
+    for await(const msg of client.fetch(String(uid),{uid:true,envelope:true,bodyStructure:true,internalDate:true,size:true},{uid:true})){
+      metadata=msg;
+      diagnostic.strategies.push('metadata:returned');
+    }
+  }catch(e){ diagnostic.strategies.push(`metadata:error:${e.responseText||e.message}`); }
+
+  // Strategy 3: request concrete MIME text sections discovered from BODYSTRUCTURE.
+  // This works around servers that reject full-source FETCH but allow BODY.PEEK[part].
+  const partIds=collectBodyPartIds(metadata?.bodyStructure).slice(0,24);
+  const partAttempts=[];
+  if(partIds.length) partAttempts.push(partIds);
+  partAttempts.push(['TEXT'],['1'],['1.1'],['1.2']);
+  for(const parts of partAttempts){
+    try{
+      for await(const msg of client.fetch(String(uid),{uid:true,envelope:true,internalDate:true,bodyParts:parts},{uid:true})){
+        metadata=metadata||msg;
+        const text=bodyPartsToText(msg.bodyParts);
+        if(text){
+          diagnostic.strategies.push(`bodyParts:${parts.join('|')}:returned`);
+          const env=msg.envelope||metadata?.envelope||{};
+          const from=formatEnvelopeAddresses(env.from);
+          const to=formatEnvelopeAddresses(env.to);
+          const cc=formatEnvelopeAddresses(env.cc);
+          const messageId=clean(env.messageId)||`aycd:${email}:${uid}`;
+          return {row:{
+            uid:Number(msg.uid||uid),mailboxEmail:email,messageId,
+            subject:clean(env.subject),from,to,cc,recipients:[email,to,cc].filter(Boolean),
+            text:String(text).slice(0,60000),html:/<html|<body|<table|<div|<span/i.test(text)?String(text).slice(0,60000):'',
+            date:env.date||msg.internalDate||new Date(),bodyMissing:false,fetchStrategy:`bodyParts:${parts.join('|')}`
+          },diagnostic};
+        }
+      }
+      diagnostic.strategies.push(`bodyParts:${parts.join('|')}:empty`);
+    }catch(e){ diagnostic.strategies.push(`bodyParts:${parts.join('|')}:error:${e.responseText||e.message}`); }
+  }
+
+  // Last-resort metadata record. This is deliberately uploaded instead of throwing the
+  // message away. Target confirmations/cancellations normally include the order number and
+  // status wording in the subject, so the Order Tracker can still act on them without HTML.
+  const env=metadata?.envelope||{};
+  if(metadata && clean(env.subject)){
+    diagnostic.strategies.push('metadata-only:used');
+    return {row:{
+      uid:Number(metadata.uid||uid),mailboxEmail:email,
+      messageId:clean(env.messageId)||`aycd:${email}:${uid}`,
+      subject:clean(env.subject),from:formatEnvelopeAddresses(env.from),to:formatEnvelopeAddresses(env.to),cc:formatEnvelopeAddresses(env.cc),
+      recipients:[email,formatEnvelopeAddresses(env.to),formatEnvelopeAddresses(env.cc)].filter(Boolean),
+      text:'',html:'',date:env.date||metadata.internalDate||new Date(),bodyMissing:true,fetchStrategy:'metadata-only'
+    },diagnostic};
+  }
+
+  return {row:null,diagnostic};
+}
 function uidSet(uids){ return [...new Set((uids||[]).map(Number).filter(Boolean))].sort((a,b)=>a-b).join(','); }
 async function postJson(pathname, body, secret='', options={}){
   const attempts=Math.max(1,Number(options.attempts||1));
@@ -330,30 +446,24 @@ async function scanOneAycdAccount(baseConfig,email,lookbackDays){
   const accountState=state.accounts[email]||{};
   const config={...baseConfig,username:email};
   const messages=[];
-  const seenUids=new Set();
   let highest=Number(accountState.lastUid||0);
   let finalExists=0;
+  let bodyRecovered=0, metadataOnly=0, unavailable=0;
 
-  // AYCD individual-account IMAP is backed by a background sync. A mailbox can initially
-  // expose only 1-3 messages even though more are visible in the AYCD UI. Do not trust the
-  // first SEARCH result: keep the connection alive and wait until the recent UID set settles.
   const settleMs=Math.max(750,Math.min(10000,Number(process.env.AYCD_ACCOUNT_SYNC_SETTLE_MS||2500)));
   const settleRounds=Math.max(2,Math.min(8,Number(process.env.AYCD_ACCOUNT_STABLE_ROUNDS||3)));
   const maxWaitMs=Math.max(5000,Math.min(45000,Number(process.env.AYCD_ACCOUNT_MAX_SYNC_WAIT_MS||18000)));
   const rollingDays=Math.max(2,Math.min(30,Number(process.env.AYCD_DIRECT_ROLLING_DAYS||10)));
-  const cap=Math.max(20,Math.min(1000,Number(process.env.AYCD_DIRECT_MAX_MESSAGES_PER_ACCOUNT||300)));
+  const cap=Math.max(20,Math.min(2000,Number(process.env.AYCD_DIRECT_MAX_MESSAGES_PER_ACCOUNT||500)));
 
   const client=clientFor(config);
   try{
     await client.connect();
     const started=Date.now();
-    let stable=0;
-    let previousSignature='';
-    let candidateUids=[];
-
+    let stable=0, previousSignature='', candidateUids=[];
     while(Date.now()-started < maxWaitMs){
       await sleep(settleMs);
-      try{await client.noop();}catch(_){}
+      try{await client.noop();}catch(_){ }
       const lock=await client.getMailboxLock('INBOX');
       try{
         finalExists=Number(client.mailbox?.exists||0);
@@ -368,52 +478,43 @@ async function scanOneAycdAccount(baseConfig,email,lookbackDays){
       if(stable>=settleRounds-1) break;
     }
 
-    // Fetch individually. AYCD can return a partial result for a UID set without throwing,
-    // which previously made a visible confirmation silently disappear from the bridge run.
     for(const uid of candidateUids){
-      let fetched=false;
-      for(let attempt=1;attempt<=3 && !fetched;attempt++){
+      let recovered=null;
+      for(let attempt=1;attempt<=2 && !recovered;attempt++){
         const lock=await client.getMailboxLock('INBOX');
         try{
-          let returned=false;
-          for await(const msg of client.fetch(String(uid),{uid:true,source:true},{uid:true})){
-            returned=true;
-            highest=Math.max(highest,Number(msg.uid||uid));
-            try{
-              const parsed=await simpleParser(msg.source);
-              const actualUid=Number(msg.uid||uid);
-              if(seenUids.has(actualUid)) {fetched=true;continue;}
-              seenUids.add(actualUid);
-              messages.push({
-                uid:actualUid,mailboxEmail:email,
-                messageId:parsed.messageId||`aycd:${email}:${actualUid}`,
-                subject:parsed.subject||'',from:parsed.from?.text||'',to:parsed.to?.text||'',cc:parsed.cc?.text||'',
-                recipients:[email,...recipientList(parsed)],text:String(parsed.text||'').slice(0,60000),
-                html:parsed.html?String(parsed.html).slice(0,60000):'',date:parsed.date||new Date()
-              });
-              fetched=true;
-            }catch(e){ console.warn(`Parse failed for ${email} UID ${uid}: ${e.message}`); }
-          }
-          if(!returned) console.warn(`AYCD direct ${email} UID ${uid} returned no body on attempt ${attempt}/3.`);
-        }catch(e){
-          console.warn(`AYCD direct ${email} UID ${uid} fetch attempt ${attempt}/3 failed: ${e.responseText||e.message}`);
-        }finally{lock.release();}
-        if(!fetched && attempt<3){try{await client.noop();}catch(_){} await sleep(attempt*1500);}
+          const result=await fetchSingleRecord(client,uid,email);
+          if(result.row) recovered=result;
+          else appendFailureLog(`${email} UID ${uid} attempt ${attempt}: ${result.diagnostic.strategies.join(' || ')}`);
+        }catch(e){ appendFailureLog(`${email} UID ${uid} attempt ${attempt} exception: ${e.responseText||e.message}`); }
+        finally{lock.release();}
+        if(!recovered && attempt<2){try{await client.noop();}catch(_){ } await sleep(1200);}
       }
-      if(!fetched) console.warn(`AYCD direct ${email} UID ${uid} is visible but its body is still unavailable; it will be retried on the next scan.`);
+      if(recovered?.row){
+        messages.push(recovered.row);
+        highest=Math.max(highest,Number(recovered.row.uid||uid));
+        if(recovered.row.bodyMissing){
+          metadataOnly++;
+          appendFailureLog(`${email} UID ${uid}: full body unavailable; METADATA-ONLY uploaded. ${recovered.diagnostic.strategies.join(' || ')}`);
+        }else if(recovered.row.fetchStrategy!=='source'){
+          bodyRecovered++;
+          appendFailureLog(`${email} UID ${uid}: recovered with ${recovered.row.fetchStrategy}. ${recovered.diagnostic.strategies.join(' || ')}`);
+        }
+      }else{
+        unavailable++;
+        appendFailureLog(`${email} UID ${uid}: NO SOURCE, BODY PARTS, OR METADATA returned; will retry next scan.`);
+      }
     }
 
-    // Advance only to a UID whose body we actually obtained. This is deliberate: if AYCD
-    // exposes a UID but withholds its body, the next scan must ask for it again.
-    if(messages.length) highest=Math.max(Number(accountState.lastUid||0),...messages.map(x=>Number(x.uid||0)));
     await updateDirectState(current=>{
-      current.accounts[email]={lastUid:highest,lastSuccessAt:new Date().toISOString(),lastError:null,lastMailboxCount:finalExists,lastFetchedCount:messages.length};
+      current.accounts[email]={lastUid:highest,lastSuccessAt:new Date().toISOString(),lastError:null,lastMailboxCount:finalExists,lastFetchedCount:messages.length,lastMetadataOnly:metadataOnly,lastRecoveredBodies:bodyRecovered,lastUnavailable:unavailable};
       current.lastScanAt=new Date().toISOString();
     });
-    return {email,messages,highest,exists:finalExists,candidateCount:candidateUids.length};
+    return {email,messages,highest,exists:finalExists,candidateCount:candidateUids.length,bodyRecovered,metadataOnly,unavailable};
   }catch(e){
     await updateDirectState(current=>{current.accounts[email]={...(current.accounts[email]||accountState),lastError:e.message,lastAttemptAt:new Date().toISOString()};});
-    return {email,messages:[],error:e.message};
+    appendFailureLog(`${email}: account scan failed: ${e.responseText||e.message}`);
+    return {email,messages:[],error:e.message,bodyRecovered,metadataOnly,unavailable};
   }finally{try{await client.logout();}catch(_){try{client.close()}catch(__){}}}
 }
 
@@ -426,7 +527,8 @@ async function scanAycdAccountsDirect(cfg,bridge,cmd){
   if(!accounts.length) throw new Error('No AYCD account addresses were found. Save profiles with Use AYCD Unified Inbox enabled or ingest the historical mailbox list first.');
   const concurrency=Math.max(1,Math.min(20,Number(process.env.AYCD_DIRECT_CONCURRENCY||8)));
   const maxPayloadBytes=Math.max(96*1024,Math.min(400*1024,Number(process.env.AYCD_UPLOAD_MAX_BYTES||250*1024)));
-  let cursor=0,finished=0,sent=Number(unified.uploaded||0),uploadIndex=Number(unified.nextUploadIndex||0),failed=0;
+  let cursor=0,finished=0,sent=Number(unified.uploaded||0),uploadIndex=Number(unified.nextUploadIndex||0),failed=0,recoveredBodies=0,metadataOnly=0,unavailable=0;
+  console.log(`AYCD direct recovery scan started: ${accounts.length} account(s). Detailed body failures are being written to ${BODY_FAILURE_LOG}`);
   async function worker(){
     while(true){
       const index=cursor++;
@@ -434,7 +536,8 @@ async function scanAycdAccountsDirect(cfg,bridge,cmd){
       const account=accounts[index];
       const result=await scanOneAycdAccount(cfg,account.email,Number(cmd.payload?.lookbackDays||cfg.lookbackDays||240));
       finished++;
-      if(result.error){failed++;console.warn(`AYCD direct account ${account.email} failed: ${result.error}`);continue;}
+      if(result.error){failed++; if(failed<=5) console.warn(`AYCD direct account ${account.email} failed: ${result.error}`); continue;}
+      recoveredBodies+=Number(result.bodyRecovered||0); metadataOnly+=Number(result.metadataOnly||0); unavailable+=Number(result.unavailable||0);
       const parts=splitMessagesByPayloadSize(result.messages,maxPayloadBytes,4);
       for(const messages of parts){
         await postJson('/orders/aycd/bridge/result',{
@@ -443,7 +546,7 @@ async function scanAycdAccountsDirect(cfg,bridge,cmd){
           scan_progress:{processed:finished,total:accounts.length,mailbox_count:accounts.length,mode:'direct_accounts',current_account:account.email}
         },bridge.secret,{attempts:6,timeoutMs:45000});
         sent+=messages.length;
-        console.log(`Uploaded ${messages.length} message(s) from ${account.email}. Accounts ${finished}/${accounts.length}; total messages ${sent}.`);
+        if(finished===1 || finished%25===0 || finished===accounts.length) console.log(`AYCD DIRECT: ${finished}/${accounts.length} accounts | uploaded ${sent} | alternate-body recovered ${recoveredBodies} | metadata-only ${metadataOnly} | still unavailable ${unavailable}`);
       }
     }
   }
@@ -452,7 +555,8 @@ async function scanAycdAccountsDirect(cfg,bridge,cmd){
     success:true,command_id:cmd.command_id,checked:0,messages:[],chunk_index:uploadIndex,chunk_count:0,final:true,
     scan_progress:{processed:accounts.length,total:accounts.length,mailbox_count:accounts.length,mode:'direct_accounts',failed_accounts:failed}
   },bridge.secret,{attempts:6,timeoutMs:45000});
-  console.log(`AYCD direct-account scan complete: ${accounts.length-failed}/${accounts.length} accounts checked, ${sent} messages uploaded, ${failed} account(s) failed.`);
+  console.log(`AYCD direct-account scan complete: ${accounts.length-failed}/${accounts.length} accounts checked | ${sent} uploaded | ${recoveredBodies} alternate-body recoveries | ${metadataOnly} metadata-only messages | ${unavailable} still unavailable | ${failed} account failures.`);
+  console.log(`Detailed AYCD body diagnostics: ${BODY_FAILURE_LOG}`);
 }
 
 function splitMessagesByPayloadSize(messages, maxBytes=500*1024, maxMessages=50){
