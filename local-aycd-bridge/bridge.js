@@ -213,13 +213,13 @@ async function discoverScanPlan(config){
         // rolling recent-date search. The website deduplicates by message-id.
         const needsRepair=Number(rawState.version||0)<6 && !rawState.v6BackfillComplete;
         const startUid=needsRepair ? Math.max(1,state.lastUid-750) : state.lastUid+1;
-        const forward=await client.search({uid:`${startUid}:*`});
+        const forward=await client.search({uid:`${startUid}:*`},{uid:true});
         const rollingDays=Math.max(2,Math.min(30,Number(process.env.AYCD_ROLLING_LOOKBACK_DAYS||10)));
-        const recent=await client.search({since:new Date(Date.now()-rollingDays*86400000)});
+        const recent=await client.search({since:new Date(Date.now()-rollingDays*86400000)},{uid:true});
         uids=[...(forward||[]),...(recent||[])];
         state.v6BackfillComplete=needsRepair || !!rawState.v6BackfillComplete;
       }else{
-        uids=await client.search({since:new Date(Date.now()-config.lookbackDays*86400000)});
+        uids=await client.search({since:new Date(Date.now()-config.lookbackDays*86400000)},{uid:true});
       }
       // Newest-first is intentional: current confirmations must be uploaded before a large
       // backlog of old temporarily unavailable AYCD bodies.
@@ -284,7 +284,7 @@ async function scanUnifiedInboxHistory(baseConfig,bridge,cmd){
     try{
       mailboxCount=Number(client.mailbox?.exists||0);
       const rollingDays=Math.max(2,Math.min(30,Number(process.env.AYCD_DIRECT_ROLLING_DAYS||10)));
-      const recent=(await client.search({since:new Date(Date.now()-rollingDays*86400000)} )||[]).map(Number).filter(Boolean).sort((a,b)=>b-a);
+      const recent=(await client.search({since:new Date(Date.now()-rollingDays*86400000)},{uid:true})||[]).map(Number).filter(Boolean).sort((a,b)=>b-a);
       if(recent.length){
         console.log(`AYCD unified recent pass: ${recent.length} UID(s) from the last ${rollingDays} days.`);
         for(let i=0;i<recent.length;i+=20){
@@ -311,7 +311,7 @@ async function scanUnifiedInboxHistory(baseConfig,bridge,cmd){
     if(!current.fullUnifiedComplete){
       lock=await client.getMailboxLock('INBOX');
       try{
-        const all=(await client.search({all:true})||[]).map(Number).filter(Boolean).sort((a,b)=>a-b);
+        const all=(await client.search({all:true},{uid:true})||[]).map(Number).filter(Boolean).sort((a,b)=>a-b);
         const resumeAfter=Number(current.unifiedHistoricalLastUid||0);
         const pending=all.filter(uid=>uid>resumeAfter);
         console.log(`AYCD unified full-history pass: ${pending.length}/${all.length} UID(s) remaining (mailbox exposes ${mailboxCount||all.length}).`);
@@ -467,10 +467,10 @@ async function scanOneAycdAccount(baseConfig,email,lookbackDays){
       const lock=await client.getMailboxLock('INBOX');
       try{
         finalExists=Number(client.mailbox?.exists||0);
-        const recent=await client.search({since:new Date(Date.now()-rollingDays*86400000)});
+        const recent=await client.search({since:new Date(Date.now()-rollingDays*86400000)},{uid:true});
         let forward=[];
-        if(accountState.lastUid>0) forward=await client.search({uid:`${Number(accountState.lastUid)+1}:*`});
-        else forward=await client.search({since:new Date(Date.now()-lookbackDays*86400000)});
+        if(accountState.lastUid>0) forward=await client.search({uid:`${Number(accountState.lastUid)+1}:*`},{uid:true});
+        else forward=await client.search({since:new Date(Date.now()-lookbackDays*86400000)},{uid:true});
         candidateUids=[...new Set([...(forward||[]),...(recent||[])].map(Number).filter(Boolean))].sort((a,b)=>a-b).slice(-cap);
         const signature=`${finalExists}:${candidateUids.join(',')}`;
         if(signature===previousSignature) stable++; else {stable=0;previousSignature=signature;}
