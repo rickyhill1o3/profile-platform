@@ -1567,7 +1567,7 @@ async function findUserForWebhook(payload) {
         if (!ids.length) return [];
         const { data, error } = await supabase
             .from('profiles')
-            .select('id, user_id, profile_name, account_type, email, created_at')
+            .select('id, user_id, profile_name, account_type, created_at')
             .in('id', ids);
         if (error) throw new Error(error.message);
         return data || [];
@@ -1657,30 +1657,11 @@ async function findUserForWebhook(payload) {
             console.warn('Webhook store credential email lookup failed', credentialLookupError.message || credentialLookupError);
         }
 
-        // Some older profiles may have the checkout email only in profiles.email.
-        const { data: profileEmailMatches, error: profileEmailError } = await supabase
-            .from('profiles')
-            .select('id, user_id, profile_name, account_type, email, created_at')
-            .ilike('email', normalizedEmail)
-            .order('created_at', { ascending: false });
-        if (profileEmailError && !String(profileEmailError.message || '').includes('column')) throw new Error(profileEmailError.message);
-        if (profileEmailMatches?.length) {
-            let profiles = profileEmailMatches;
-            if (normalizedSite) {
-                const siteMatched = profiles.filter((profile) =>
-                    normalizeProfileAccountType(profile?.account_type || '') === normalizedSite
-                );
-                if (siteMatched.length) profiles = siteMatched;
-            }
-            if (normalizedProfileName && profiles.length > 1) {
-                const nameMatched = profiles.filter((profile) =>
-                    String(profile?.profile_name || '').trim().toLowerCase() === normalizedProfileName.toLowerCase()
-                );
-                if (nameMatched.length) profiles = nameMatched;
-            }
-            const user = await uniqueUserFromProfiles(profiles, 'profile-email');
-            if (user) return user;
-        }
+        // Older deployments do not have a profiles.email column. Checkout/login
+        // identity lives in accounts.login_email and profile_store_credentials.login_email.
+        // Do not query a non-existent profiles.email fallback here; for authoritative
+        // Shikari Account emails it is safer to leave the webhook unmatched than to
+        // fall back to a shared profile name.
     }
 
     // Shikari gives us an authoritative Account field such as
