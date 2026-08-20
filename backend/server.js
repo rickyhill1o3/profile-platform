@@ -1553,68 +1553,102 @@ async function findUserForWebhook(payload) {
         if (user) return user;
     }
 
-    // 1. PROFILE NAME FIRST
-    if (normalized.profile_name) {
-        const { data: profiles, error } = await supabase
+    const normalizedEmail = String(normalized.account_email || '').trim().toLowerCase();
+    const normalizedProfileName = String(normalized.profile_name || '').trim();
+    const normalizedSite = normalizeProfileAccountType(normalized.site || '');
+
+    const loadProfilesByIds = async (profileIds = []) => {
+        const ids = [...new Set((profileIds || []).filter(Boolean).map(String))];
+        if (!ids.length) return [];
+        const { data, error } = await supabase
             .from('profiles')
-            .select('user_id, profile_name, created_at')
-            .ilike('profile_name', String(normalized.profile_name).trim())
-            .order('created_at', { ascending: false });
-
+            .select('id, user_id, profile_name, account_type, email, created_at')
+            .in('id', ids);
         if (error) throw new Error(error.message);
+        return data || [];
+    };
 
-        if (profiles?.length) {
-            const profile = profiles[0];
-            if (profile?.user_id) {
-                const user = await getUserById(profile.user_id);
-                if (user) return user;
+    const uniqueUserFromProfiles = async (profiles = [], reason = '') => {
+        const ids = [...new Set((profiles || []).map((row) => String(row?.user_id || '')).filter(Boolean))];
+        if (ids.length !== 1) {
+            if (ids.length > 1) {
+                console.warn(`Webhook match refused ambiguous ${reason || 'profile'} match across ${ids.length} users`, {
+                    account_email: normalizedEmail || null,
+                    profile_name: normalizedProfileName || null,
+                    site: normalizedSite || null,
+                    user_ids: ids
+                });
             }
+            return null;
         }
-    }
+        return getUserById(ids[0]);
+    };
 
-    // 2. ACCOUNT / PROFILE EMAIL SECOND
-    if (normalized.account_email) {
-        const normalizedEmail = String(normalized.account_email).trim().toLowerCase();
+    // 1. ACCOUNT LOGIN EMAIL FIRST.
+    // Bot profile names such as "Target" are commonly reused by different users, so
+    // they are not safe as a primary identity key. The checkout account email is.
+    if (normalizedEmail) {
         const { data: accounts, error: accountError } = await supabase
             .from('accounts')
-            .select('profile_id, login_email, created_at')
+            .select('profile_id, login_email, provider, created_at')
             .ilike('login_email', normalizedEmail)
             .order('created_at', { ascending: false });
 
         if (accountError) throw new Error(accountError.message);
 
         if (accounts?.length) {
-            const account = accounts[0];
-
-            if (account?.profile_id) {
-                const { data: profiles, error: profileError } = await supabase
-                    .from('profiles')
-                    .select('user_id, created_at')
-                    .eq('id', account.profile_id)
-                    .order('created_at', { ascending: false });
-
-                if (profileError) throw new Error(profileError.message);
-
-                if (profiles?.length && profiles[0]?.user_id) {
-                    const user = await getUserById(profiles[0].user_id);
-                    if (user) return user;
-                }
+            let accountRows = accounts;
+            if (normalizedSite) {
+                const siteMatched = accounts.filter((account) =>
+                    normalizeProfileAccountType(account?.provider || '') === normalizedSite
+                );
+                if (siteMatched.length) accountRows = siteMatched;
             }
+
+            let profiles = await loadProfilesByIds(accountRows.map((account) => account.profile_id));
+
+            // If the webhook also supplies a profile name, use it only to narrow the
+            // already-email-matched candidates. Never use it to jump to another user.
+            if (normalizedProfileName && profiles.length > 1) {
+                const nameMatched = profiles.filter((profile) =>
+                    String(profile?.profile_name || '').trim().toLowerCase() === normalizedProfileName.toLowerCase()
+                );
+                if (nameMatched.length) profiles = nameMatched;
+            }
+
+            const user = await uniqueUserFromProfiles(profiles, 'account-email');
+            if (user) return user;
         }
 
+        // Some older profiles may have the checkout email only in profiles.email.
         const { data: profileEmailMatches, error: profileEmailError } = await supabase
             .from('profiles')
-            .select('user_id, created_at')
+            .select('id, user_id, profile_name, account_type, email, created_at')
             .ilike('email', normalizedEmail)
             .order('created_at', { ascending: false });
         if (profileEmailError && !String(profileEmailError.message || '').includes('column')) throw new Error(profileEmailError.message);
-        if (profileEmailMatches?.length && profileEmailMatches[0]?.user_id) {
-            const user = await getUserById(profileEmailMatches[0].user_id);
+        if (profileEmailMatches?.length) {
+            let profiles = profileEmailMatches;
+            if (normalizedSite) {
+                const siteMatched = profiles.filter((profile) =>
+                    normalizeProfileAccountType(profile?.account_type || '') === normalizedSite
+                );
+                if (siteMatched.length) profiles = siteMatched;
+            }
+            if (normalizedProfileName && profiles.length > 1) {
+                const nameMatched = profiles.filter((profile) =>
+                    String(profile?.profile_name || '').trim().toLowerCase() === normalizedProfileName.toLowerCase()
+                );
+                if (nameMatched.length) profiles = nameMatched;
+            }
+            const user = await uniqueUserFromProfiles(profiles, 'profile-email');
             if (user) return user;
         }
     }
 
-    // 3. USER EMAIL LAST
+    // 2. USER EMAIL.
+    // If the webhook account address is also the website user's email, this remains
+    // an exact, unambiguous identity signal and is safer than profile_name.
     const emailCandidates = [
         payload.user_email,
         payload.email,
@@ -1625,14 +1659,40 @@ async function findUserForWebhook(payload) {
     ].filter(Boolean);
 
     for (const email of emailCandidates) {
+        const cleanEmail = String(email).trim();
+        if (!cleanEmail) continue;
         const { data: users, error } = await supabase
-            .from("users")
-            .select("*")
-            .ilike("email", String(email).trim())
+            .from('users')
+            .select('*')
+            .ilike('email', cleanEmail)
+            .order('created_at', { ascending: false });
+        if (error) throw new Error(error.message);
+        if (users?.length === 1) return users[0];
+    }
+
+    // 3. PROFILE NAME LAST, AND ONLY WHEN IT IS UNIQUE TO ONE USER.
+    // Previously the newest profile named "Target" won globally. That allowed one
+    // user's checkout to be assigned to another user who happened to use the same
+    // profile name. Ambiguous names are now deliberately left unmatched instead.
+    if (normalizedProfileName) {
+        const { data: profiles, error } = await supabase
+            .from('profiles')
+            .select('id, user_id, profile_name, account_type, created_at')
+            .ilike('profile_name', normalizedProfileName)
             .order('created_at', { ascending: false });
 
         if (error) throw new Error(error.message);
-        if (users?.length) return users[0];
+        if (profiles?.length) {
+            let candidatesByStore = profiles;
+            if (normalizedSite) {
+                const siteMatched = profiles.filter((profile) =>
+                    normalizeProfileAccountType(profile?.account_type || '') === normalizedSite
+                );
+                if (siteMatched.length) candidatesByStore = siteMatched;
+            }
+            const user = await uniqueUserFromProfiles(candidatesByStore, 'profile-name');
+            if (user) return user;
+        }
     }
 
     return null;
