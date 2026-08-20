@@ -4339,12 +4339,20 @@ function initTargetCheckoutListAdmin() {
             const missing = Array.isArray(data.missing_skus) ? data.missing_skus : [];
             const sync = data.user_sync || {};
             const removedSkus = Array.isArray(sync.removed_skus) ? sync.removed_skus : [];
+            const addedSkus = Array.isArray(sync.added_skus) ? sync.added_skus : [];
             const affectedUsers = Number(sync.affected_users || 0);
             const removedPreferences = Number(sync.product_preferences_removed || 0);
+            const addedPreferences = Number(sync.product_preferences_added || 0);
             if (message) {
                 const parts = ["Target checkout list saved."];
                 if (removedSkus.length) {
-                    parts.push(`Removed ${removedSkus.length} SKU${removedSkus.length === 1 ? "" : "s"} from ${affectedUsers} user${affectedUsers === 1 ? "" : "s"} who currently have this checkout list selected (${removedPreferences} saved product selection${removedPreferences === 1 ? "" : "s"} removed).`);
+                    parts.push(`Removed ${removedSkus.length} SKU${removedSkus.length === 1 ? "" : "s"} from users who currently have this checkout list selected (${removedPreferences} saved product selection${removedPreferences === 1 ? "" : "s"} removed).`);
+                }
+                if (addedSkus.length) {
+                    parts.push(`Added ${addedSkus.length} new SKU${addedSkus.length === 1 ? "" : "s"} to users who currently have this checkout list selected (${addedPreferences} new saved product selection${addedPreferences === 1 ? "" : "s"} added).`);
+                }
+                if ((removedSkus.length || addedSkus.length) && affectedUsers) {
+                    parts.push(`${affectedUsers} user${affectedUsers === 1 ? "" : "s"} had product selections updated.`);
                 }
                 if (missing.length) {
                     parts.push(`Added missing SKU${missing.length === 1 ? "" : "s"} to catalog as placeholder${missing.length === 1 ? "" : "s"}: ${missing.join(", ")}. Go to Countdowns + Catalog, search the SKU, then fill product name/credits if needed.`);

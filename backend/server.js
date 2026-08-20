@@ -5380,13 +5380,14 @@ function normalizeTargetCheckoutLists(value) {
     })).filter((list) => list.items.length);
 }
 
-async function syncRemovedTargetCheckoutListSkusToUsers({ listId, previousList, nextList, allLists }) {
+async function syncTargetCheckoutListChangesToUsers({ listId, previousList, nextList, allLists }) {
     const previousSkus = new Set((previousList?.items || []).map((item) => String(item.sku || '').trim()).filter(Boolean));
     const nextSkus = new Set((nextList?.items || []).map((item) => String(item.sku || '').trim()).filter(Boolean));
     const removedSkus = [...previousSkus].filter((sku) => !nextSkus.has(sku));
+    const addedSkus = [...nextSkus].filter((sku) => !previousSkus.has(sku));
 
-    if (!previousList || !removedSkus.length) {
-        return { removed_skus: [], affected_users: 0, product_preferences_removed: 0 };
+    if (!previousList || (!removedSkus.length && !addedSkus.length)) {
+        return { removed_skus: [], added_skus: [], affected_users: 0, product_preferences_removed: 0, product_preferences_added: 0 };
     }
 
     // A checkout list is authoritative for users who chose it. Find every account whose
@@ -5408,27 +5409,29 @@ async function syncRemovedTargetCheckoutListSkusToUsers({ listId, previousList, 
     }).filter((row) => row.user_id && row.selected_list_ids.includes(String(listId)));
 
     if (!affected.length) {
-        return { removed_skus: removedSkus, affected_users: 0, product_preferences_removed: 0 };
+        return { removed_skus: removedSkus, added_skus: addedSkus, affected_users: 0, product_preferences_removed: 0, product_preferences_added: 0 };
     }
 
     // Resolve removed SKUs to catalog product IDs. Multi-SKU catalog rows are included
     // whenever any SKU on the row matches one of the removed checkout-list SKUs.
     const { data: catalogRows, error: catalogError } = await supabase
         .from('catalog_products')
-        .select('id,sku')
+        .select('id,sku,default_max_price,release_mode_default')
         .eq('site', 'target');
     if (catalogError) throw new Error(catalogError.message);
 
-    const rowsByRemovedSku = new Map(removedSkus.map((sku) => [sku, []]));
+    const changedSkus = [...new Set([...removedSkus, ...addedSkus])];
+    const rowsBySku = new Map(changedSkus.map((sku) => [sku, []]));
     for (const row of (catalogRows || [])) {
         const rowSkus = parseMultiSkuValue(row.sku);
-        for (const sku of removedSkus) {
-            if (rowSkus.includes(sku)) rowsByRemovedSku.get(sku).push(row);
+        for (const sku of changedSkus) {
+            if (rowSkus.includes(sku)) rowsBySku.get(sku).push(row);
         }
     }
 
     const listMap = new Map((allLists || []).map((list) => [String(list.id), list]));
     let preferencesRemoved = 0;
+    let preferencesAdded = 0;
     let usersChanged = 0;
     const changedAt = new Date().toISOString();
 
@@ -5442,20 +5445,52 @@ async function syncRemovedTargetCheckoutListSkusToUsers({ listId, previousList, 
                 .filter(Boolean)
         );
         const skusToRemoveForUser = removedSkus.filter((sku) => !otherSelectedSkus.has(sku));
-        const productIds = [...new Set(skusToRemoveForUser.flatMap((sku) => (rowsByRemovedSku.get(sku) || []).map((row) => String(row.id))))];
-        if (!productIds.length) continue;
+        const productIds = [...new Set(skusToRemoveForUser.flatMap((sku) => (rowsBySku.get(sku) || []).map((row) => String(row.id))))];
 
         const { data: deletedRows, error: deleteError } = await supabase
             .from('user_product_preferences')
             .delete()
             .eq('user_id', account.user_id)
-            .in('catalog_product_id', productIds)
+            .in('catalog_product_id', productIds.length ? productIds : ['00000000-0000-0000-0000-000000000000'])
             .select('id');
         if (deleteError) throw new Error(deleteError.message);
 
         const deletedCount = (deletedRows || []).length;
-        if (!deletedCount) continue;
         preferencesRemoved += deletedCount;
+
+        // Any SKU newly added to a checkout list is immediately selected for every user
+        // who already has that list selected. Existing/manual selections are left intact.
+        const addedProducts = [...new Map(
+            addedSkus.flatMap((sku) => rowsBySku.get(sku) || []).map((row) => [String(row.id), row])
+        ).values()];
+        let addedCount = 0;
+        if (addedProducts.length) {
+            const addIds = addedProducts.map((row) => String(row.id));
+            const { data: existingAddedRows, error: existingAddedError } = await supabase
+                .from('user_product_preferences')
+                .select('catalog_product_id')
+                .eq('user_id', account.user_id)
+                .in('catalog_product_id', addIds);
+            if (existingAddedError) throw new Error(existingAddedError.message);
+            const existingAddedIds = new Set((existingAddedRows || []).map((row) => String(row.catalog_product_id)));
+            const rowsToInsert = addedProducts.filter((row) => !existingAddedIds.has(String(row.id)));
+            if (rowsToInsert.length) {
+                const { error: insertError } = await supabase.from('user_product_preferences').insert(rowsToInsert.map((product) => ({
+                    user_id: account.user_id,
+                    catalog_product_id: product.id,
+                    selected: true,
+                    run_mode: product.release_mode_default || 'current',
+                    max_price: product.default_max_price ?? null,
+                    quantity: 1,
+                    is_primary: false
+                })));
+                if (insertError) throw new Error(insertError.message);
+                addedCount = rowsToInsert.length;
+                preferencesAdded += addedCount;
+            }
+        }
+
+        if (!deletedCount && !addedCount) continue;
         usersChanged += 1;
 
         // Touch the user's remaining Target selections so the existing admin/user export
@@ -5479,8 +5514,10 @@ async function syncRemovedTargetCheckoutListSkusToUsers({ listId, previousList, 
 
     return {
         removed_skus: removedSkus,
+        added_skus: addedSkus,
         affected_users: usersChanged,
-        product_preferences_removed: preferencesRemoved
+        product_preferences_removed: preferencesRemoved,
+        product_preferences_added: preferencesAdded
     };
 }
 
@@ -5631,13 +5668,13 @@ app.post('/admin/target-checkout-lists', auth, admin, async (req, res) => {
         // were deleted from that list from every user who currently has that exact list
         // selected. Users who did not choose this list are never touched.
         const userSync = existing
-            ? await syncRemovedTargetCheckoutListSkusToUsers({
+            ? await syncTargetCheckoutListChangesToUsers({
                 listId: id,
                 previousList: existing,
                 nextList,
                 allLists: next
             })
-            : { removed_skus: [], affected_users: 0, product_preferences_removed: 0 };
+            : { removed_skus: [], added_skus: [], affected_users: 0, product_preferences_removed: 0, product_preferences_added: 0 };
 
         res.json({
             success: true,
