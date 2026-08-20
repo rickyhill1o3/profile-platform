@@ -5989,61 +5989,204 @@ async function recheckSuccessfulOrderCredits({ currentUser, order = null, webhoo
 
 
 async function moveTrackedOrderToCorrectUser({ serviceOrder, fromUser, toUser, accountEmail = '' }) {
-    if (!serviceOrder?.id || !toUser?.id) return { moved: false, tracked_order_id: null };
+    if (!serviceOrder?.id || !toUser?.id) return { moved: false, created: false, tracked_order_id: null, action: 'none' };
+
+    const normalized = normalizeIncomingOrderPayload(serviceOrder.raw_payload || {});
+    const store = String(serviceOrder.site || serviceOrder.metadata?.site || normalized.site || 'unknown')
+        .trim().toLowerCase().replace(/[^a-z0-9]/g, '');
+    const orderNumber = String(
+        serviceOrder.external_order_id ||
+        normalized.external_order_id ||
+        normalized.order_number ||
+        normalized.order_id ||
+        ''
+    ).trim();
+    const normalizedEmail = String(accountEmail || normalized.account_email || '').trim().toLowerCase();
+
+    // Resolve the exact profile that owns the retailer account email. This is important
+    // when multiple users reuse generic profile names such as "Target".
+    let targetProfileId = null;
+    try {
+        const { data: profileRows } = await supabase.from('profiles').select('id,user_id').eq('user_id', toUser.id).limit(2000);
+        const profileIds = (profileRows || []).map(p => p.id).filter(Boolean);
+        if (profileIds.length && normalizedEmail) {
+            for (let i = 0; i < profileIds.length && !targetProfileId; i += 75) {
+                const chunk = profileIds.slice(i, i + 75);
+                const { data: creds, error: credsError } = await supabase
+                    .from('profile_store_credentials')
+                    .select('profile_id,store,login_email')
+                    .in('profile_id', chunk)
+                    .ilike('login_email', normalizedEmail);
+                if (!credsError) {
+                    const exact = (creds || []).find(c => {
+                        const cStore = String(c.store || '').trim().toLowerCase().replace(/[^a-z0-9]/g, '');
+                        return String(c.login_email || '').trim().toLowerCase() === normalizedEmail && (!store || cStore === store);
+                    }) || (creds || []).find(c => String(c.login_email || '').trim().toLowerCase() === normalizedEmail);
+                    if (exact?.profile_id) targetProfileId = exact.profile_id;
+                }
+            }
+            // Legacy credentials fallback.
+            if (!targetProfileId) {
+                for (let i = 0; i < profileIds.length && !targetProfileId; i += 75) {
+                    const chunk = profileIds.slice(i, i + 75);
+                    const { data: accounts, error: accountsError } = await supabase
+                        .from('accounts')
+                        .select('profile_id,login_email')
+                        .in('profile_id', chunk)
+                        .ilike('login_email', normalizedEmail);
+                    if (!accountsError) {
+                        const exact = (accounts || []).find(a => String(a.login_email || '').trim().toLowerCase() === normalizedEmail);
+                        if (exact?.profile_id) targetProfileId = exact.profile_id;
+                    }
+                }
+            }
+        }
+    } catch (_) {}
+
+    // Find any tracker row already created for this service order, regardless of which
+    // user owns it. Older bad webhook assignments may have created the tracker under the
+    // wrong owner, so source_order_id is the canonical link here.
     const { data: oldTrackedRows, error: oldTrackedError } = await supabase
         .from('tracked_orders')
         .select('*')
         .eq('source_order_id', serviceOrder.id);
     if (oldTrackedError && !/does not exist|schema cache|relation/i.test(String(oldTrackedError.message || ''))) throw new Error(oldTrackedError.message);
     const oldTracked = (oldTrackedRows || [])[0] || null;
-    if (!oldTracked?.id) return { moved: false, tracked_order_id: null };
 
-    // If the correct user already has this exact retailer order, keep that row and remove
-    // the stale row from the incorrectly assigned user instead of creating a duplicate.
-    const { data: correctExisting, error: correctExistingError } = await supabase
-        .from('tracked_orders')
-        .select('*')
-        .eq('user_id', toUser.id)
-        .eq('store', oldTracked.store)
-        .eq('order_number', oldTracked.order_number)
-        .maybeSingle();
-    if (correctExistingError && !/multiple rows/i.test(String(correctExistingError.message || ''))) throw new Error(correctExistingError.message);
+    // If the correct user already has the same retailer order, reuse it instead of making
+    // a duplicate. This also repairs a tracker row that may have been created by IMAP first.
+    let correctExisting = null;
+    if (orderNumber) {
+        let existingQuery = supabase.from('tracked_orders').select('*').eq('user_id', toUser.id).eq('order_number', orderNumber);
+        if (store) existingQuery = existingQuery.eq('store', store);
+        const existingResult = await existingQuery.limit(5);
+        if (existingResult.error) throw new Error(existingResult.error.message);
+        correctExisting = (existingResult.data || [])[0] || null;
+    }
 
-    let targetTrackedId = oldTracked.id;
-    if (correctExisting?.id && String(correctExisting.id) !== String(oldTracked.id)) {
+    let targetTrackedId = correctExisting?.id || oldTracked?.id || null;
+    let action = 'none';
+
+    if (correctExisting?.id) {
         targetTrackedId = correctExisting.id;
-        await supabase.from('tracked_order_events').update({ user_id: toUser.id, order_id: targetTrackedId }).eq('order_id', oldTracked.id);
-        await supabase.from('email_messages').update({ linked_order_id: targetTrackedId }).eq('linked_order_id', oldTracked.id);
-        const del = await supabase.from('tracked_orders').delete().eq('id', oldTracked.id);
-        if (del.error) throw new Error(del.error.message);
-    } else {
         const patch = {
             user_id: toUser.id,
-            source_email: String(accountEmail || oldTracked.source_email || '').trim().toLowerCase(),
+            source_order_id: serviceOrder.id,
+            service_order_external_id: serviceOrder.external_order_id || null,
+            source_email: normalizedEmail || correctExisting.source_email || '',
+            profile_id: targetProfileId || correctExisting.profile_id || null,
             credits_spent: Number(serviceOrder.credits_charged || 0),
+            product_summary: String(serviceOrder.product_name || normalized.product_name || serviceOrder.sku || correctExisting.product_summary || 'Checkout').trim().slice(0, 500),
+            updated_at: new Date().toISOString()
+        };
+        const updated = await supabase.from('tracked_orders').update(patch).eq('id', targetTrackedId).select('*').single();
+        if (updated.error) throw new Error(updated.error.message);
+        action = oldTracked?.id && String(oldTracked.id) !== String(targetTrackedId) ? 'merged' : 'linked';
+
+        if (oldTracked?.id && String(oldTracked.id) !== String(targetTrackedId)) {
+            await supabase.from('tracked_order_events').update({ user_id: toUser.id, order_id: targetTrackedId }).eq('order_id', oldTracked.id);
+            await supabase.from('email_messages').update({ linked_order_id: targetTrackedId }).eq('linked_order_id', oldTracked.id);
+            const del = await supabase.from('tracked_orders').delete().eq('id', oldTracked.id);
+            if (del.error) throw new Error(del.error.message);
+        }
+    } else if (oldTracked?.id) {
+        const patch = {
+            user_id: toUser.id,
+            source_email: normalizedEmail || oldTracked.source_email || '',
+            profile_id: targetProfileId || oldTracked.profile_id || null,
+            credits_spent: Number(serviceOrder.credits_charged || 0),
+            product_summary: String(serviceOrder.product_name || normalized.product_name || serviceOrder.sku || oldTracked.product_summary || 'Checkout').trim().slice(0, 500),
             updated_at: new Date().toISOString()
         };
         const moved = await supabase.from('tracked_orders').update(patch).eq('id', oldTracked.id).select('*').single();
         if (moved.error) throw new Error(moved.error.message);
+        targetTrackedId = oldTracked.id;
         await supabase.from('tracked_order_events').update({ user_id: toUser.id }).eq('order_id', oldTracked.id);
+        action = 'moved';
+    } else {
+        // No tracker row exists yet. Reassignment must still create one for the corrected
+        // owner so that Jose (or any corrected user) can immediately see the checkout and
+        // the Order Tracker can scan that exact account email for confirmation/shipping mail.
+        const statusRaw = String(serviceOrder.status || '').trim().toLowerCase();
+        const trackedStatus = ['confirmed','processing','shipped','delivered','canceled','refunded'].includes(statusRaw)
+            ? statusRaw
+            : 'waiting_confirmation';
+        const payload = {
+            user_id: toUser.id,
+            source_order_id: serviceOrder.id,
+            service_order_external_id: serviceOrder.external_order_id || null,
+            profile_id: targetProfileId || null,
+            source_email: normalizedEmail,
+            store: store || 'unknown',
+            order_number: orderNumber,
+            status: trackedStatus,
+            order_date: serviceOrder.created_at || new Date().toISOString(),
+            last_status_at: serviceOrder.created_at || new Date().toISOString(),
+            credits_spent: Number(serviceOrder.credits_charged || 0),
+            product_summary: String(serviceOrder.product_name || normalized.product_name || serviceOrder.sku || 'Checkout').trim().slice(0, 500),
+            updated_at: new Date().toISOString()
+        };
+        const inserted = await supabase.from('tracked_orders').insert(payload).select('*').single();
+        if (inserted.error) {
+            // A concurrent IMAP/order sync may have created it between our lookup and insert.
+            if (!/duplicate|unique/i.test(String(inserted.error.message || ''))) throw new Error(inserted.error.message);
+            let fallbackQuery = supabase.from('tracked_orders').select('*').eq('user_id', toUser.id).eq('order_number', orderNumber);
+            if (store) fallbackQuery = fallbackQuery.eq('store', store);
+            const fallback = await fallbackQuery.limit(5);
+            if (fallback.error) throw new Error(fallback.error.message);
+            const row = (fallback.data || [])[0] || null;
+            if (!row?.id) throw new Error('Tracked order could not be created or recovered after reassignment.');
+            targetTrackedId = row.id;
+            await supabase.from('tracked_orders').update({
+                source_order_id: serviceOrder.id,
+                service_order_external_id: serviceOrder.external_order_id || null,
+                source_email: normalizedEmail || row.source_email || '',
+                profile_id: targetProfileId || row.profile_id || null,
+                credits_spent: Number(serviceOrder.credits_charged || 0),
+                updated_at: new Date().toISOString()
+            }).eq('id', row.id);
+            action = 'linked';
+        } else {
+            targetTrackedId = inserted.data?.id || null;
+            action = 'created';
+        }
+    }
+
+    // Any email metadata already linked to this service order's stale tracker should follow
+    // the corrected tracker. Future IMAP/AYCD scans will use source_email/profile_id to find
+    // the correct mailbox and update this row normally.
+    if (targetTrackedId && normalizedEmail) {
+        try {
+            await supabase.from('email_messages')
+                .update({ linked_order_id: targetTrackedId })
+                .eq('order_number', orderNumber)
+                .eq('mailbox_email', normalizedEmail);
+        } catch (_) {}
     }
 
     // Investment rows are derived from the same service order and should follow the owner.
     try {
-        await supabase.from('investment_products').update({ user_id: toUser.id, updated_at: new Date().toISOString() }).eq('source_order_id', serviceOrder.id);
+        await supabase.from('investment_products').update({ user_id: toUser.id, order_id: targetTrackedId || undefined, updated_at: new Date().toISOString() }).eq('source_order_id', serviceOrder.id);
     } catch (_) {}
 
-    return { moved: true, tracked_order_id: targetTrackedId };
+    return {
+        moved: ['moved','merged','linked','created'].includes(action),
+        created: action === 'created',
+        tracked_order_id: targetTrackedId,
+        action,
+        source_email: normalizedEmail,
+        profile_id: targetProfileId || null
+    };
 }
 
 async function sendAccountReassignmentNotices({ serviceOrder, previousUser, correctUser, credits, accountEmail }) {
     const stamp = `${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
     const oldMessage = credits > 0
-        ? `This checkout was matched to the wrong account. ${credits} credits were returned to ${previousUser?.email || 'the previous user'}, and the order was removed from that user's Order Tracker.`
-        : `This checkout was matched to the wrong account. The order was removed from ${previousUser?.email || 'the previous user'} and no credit refund was required.`;
+        ? `This checkout was matched to the wrong account. ${credits} credits were returned to ${previousUser?.email || 'the previous user'}. Any tracker ownership for this checkout has been removed from the previous user.`
+        : `This checkout was matched to the wrong account. Any tracker ownership for this checkout has been removed from ${previousUser?.email || 'the previous user'} and no credit refund was required.`;
     const newMessage = credits > 0
-        ? `This checkout belongs to ${correctUser?.email || accountEmail}. ${credits} credits were charged to the correct user and the order is now available in that user's Order Tracker.`
-        : `This checkout belongs to ${correctUser?.email || accountEmail}. The order is now assigned to the correct user and available in that user's Order Tracker.`;
+        ? `This checkout belongs to ${correctUser?.email || accountEmail}. ${credits} credits were charged to the correct user. The Order Tracker is now linked to ${accountEmail || 'the corrected retailer account'} so confirmation and shipping emails can be matched under the correct user.`
+        : `This checkout belongs to ${correctUser?.email || accountEmail}. The Order Tracker is now linked to ${accountEmail || 'the corrected retailer account'} so confirmation and shipping emails can be matched under the correct user.`;
 
     const makeNoticeOrder = (userRole, message, creditsCharged) => ({
         ...serviceOrder,
@@ -6131,6 +6274,8 @@ app.post('/admin/webhooks/logs/:id/recheck-account-user', auth, admin, async (re
                 correct_user_id: correctUser.id,
                 correct_user_email: correctUser.email || '',
                 tracked_order_moved: !!trackerResult.moved,
+                tracked_order_action: trackerResult.action || 'none',
+                tracked_order_created: !!trackerResult.created,
                 refunded_credits: 0,
                 charged_credits: 0
             });
@@ -6218,6 +6363,8 @@ app.post('/admin/webhooks/logs/:id/recheck-account-user', auth, admin, async (re
             refund_already_applied: alreadyRefunded,
             charge_already_applied: alreadyCharged,
             tracked_order_moved: !!trackerResult.moved,
+            tracked_order_action: trackerResult.action || 'none',
+            tracked_order_created: !!trackerResult.created,
             tracked_order_id: trackerResult.tracked_order_id || null,
             discord_results: discordResults
         });

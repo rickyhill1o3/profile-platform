@@ -3027,7 +3027,7 @@ async function recheckWebhookAccountUser(id, button) {
                 `To: ${data.correct_user_email || data.correct_user_id || 'unknown'}\n` +
                 `Credits refunded: ${Number(data.refunded_credits || 0)}\n` +
                 `Credits charged: ${Number(data.charged_credits || 0)}\n` +
-                `Tracked order moved: ${data.tracked_order_moved ? 'Yes' : 'No'}`
+                `Order Tracker: ${data.tracked_order_action === 'created' ? 'Created under correct user' : data.tracked_order_action === 'moved' ? 'Moved to correct user' : data.tracked_order_action === 'merged' ? 'Merged into correct user order' : data.tracked_order_action === 'linked' ? 'Linked to correct user' : (data.tracked_order_moved ? 'Updated for correct user' : 'No tracker change')}`
             );
         } else {
             alert(`Account recheck complete. ${data.message || 'This checkout is already assigned to the correct user.'}`);
