@@ -4337,10 +4337,19 @@ function initTargetCheckoutListAdmin() {
                 body: JSON.stringify({ id: id || undefined, title, sku_list: skuList })
             });
             const missing = Array.isArray(data.missing_skus) ? data.missing_skus : [];
+            const sync = data.user_sync || {};
+            const removedSkus = Array.isArray(sync.removed_skus) ? sync.removed_skus : [];
+            const affectedUsers = Number(sync.affected_users || 0);
+            const removedPreferences = Number(sync.product_preferences_removed || 0);
             if (message) {
-                message.textContent = missing.length
-                    ? `Target checkout list saved. Added missing SKU${missing.length === 1 ? "" : "s"} to catalog as placeholder${missing.length === 1 ? "" : "s"}: ${missing.join(", ")}. Go to Countdowns + Catalog, search the SKU, then fill product name/credits if needed.`
-                    : "Target checkout list saved.";
+                const parts = ["Target checkout list saved."];
+                if (removedSkus.length) {
+                    parts.push(`Removed ${removedSkus.length} SKU${removedSkus.length === 1 ? "" : "s"} from ${affectedUsers} user${affectedUsers === 1 ? "" : "s"} who currently have this checkout list selected (${removedPreferences} saved product selection${removedPreferences === 1 ? "" : "s"} removed).`);
+                }
+                if (missing.length) {
+                    parts.push(`Added missing SKU${missing.length === 1 ? "" : "s"} to catalog as placeholder${missing.length === 1 ? "" : "s"}: ${missing.join(", ")}. Go to Countdowns + Catalog, search the SKU, then fill product name/credits if needed.`);
+                }
+                message.textContent = parts.join(" ");
             }
             clearTargetCheckoutListAdminForm();
             await loadTargetCheckoutListsAdmin();

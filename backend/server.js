@@ -5380,6 +5380,110 @@ function normalizeTargetCheckoutLists(value) {
     })).filter((list) => list.items.length);
 }
 
+async function syncRemovedTargetCheckoutListSkusToUsers({ listId, previousList, nextList, allLists }) {
+    const previousSkus = new Set((previousList?.items || []).map((item) => String(item.sku || '').trim()).filter(Boolean));
+    const nextSkus = new Set((nextList?.items || []).map((item) => String(item.sku || '').trim()).filter(Boolean));
+    const removedSkus = [...previousSkus].filter((sku) => !nextSkus.has(sku));
+
+    if (!previousList || !removedSkus.length) {
+        return { removed_skus: [], affected_users: 0, product_preferences_removed: 0 };
+    }
+
+    // A checkout list is authoritative for users who chose it. Find every account whose
+    // saved checkout-list selection still contains this list ID.
+    const { data: selectionSettings, error: settingsError } = await supabase
+        .from('app_settings')
+        .select('key,value_json')
+        .ilike('key', 'target_checkout_list_selections:%');
+    if (settingsError) throw new Error(settingsError.message);
+
+    const affected = (selectionSettings || []).map((row) => {
+        const selectedIds = Array.isArray(row?.value_json?.selected_list_ids)
+            ? row.value_json.selected_list_ids.map(String)
+            : [];
+        return {
+            user_id: String(row.key || '').slice('target_checkout_list_selections:'.length),
+            selected_list_ids: selectedIds
+        };
+    }).filter((row) => row.user_id && row.selected_list_ids.includes(String(listId)));
+
+    if (!affected.length) {
+        return { removed_skus: removedSkus, affected_users: 0, product_preferences_removed: 0 };
+    }
+
+    // Resolve removed SKUs to catalog product IDs. Multi-SKU catalog rows are included
+    // whenever any SKU on the row matches one of the removed checkout-list SKUs.
+    const { data: catalogRows, error: catalogError } = await supabase
+        .from('catalog_products')
+        .select('id,sku')
+        .eq('site', 'target');
+    if (catalogError) throw new Error(catalogError.message);
+
+    const rowsByRemovedSku = new Map(removedSkus.map((sku) => [sku, []]));
+    for (const row of (catalogRows || [])) {
+        const rowSkus = parseMultiSkuValue(row.sku);
+        for (const sku of removedSkus) {
+            if (rowSkus.includes(sku)) rowsByRemovedSku.get(sku).push(row);
+        }
+    }
+
+    const listMap = new Map((allLists || []).map((list) => [String(list.id), list]));
+    let preferencesRemoved = 0;
+    let usersChanged = 0;
+    const changedAt = new Date().toISOString();
+
+    for (const account of affected) {
+        // Do not remove a SKU if another checkout list that this same user selected
+        // still supplies it.
+        const otherSelectedSkus = new Set(
+            account.selected_list_ids
+                .filter((id) => String(id) !== String(listId))
+                .flatMap((id) => (listMap.get(String(id))?.items || []).map((item) => String(item.sku || '').trim()))
+                .filter(Boolean)
+        );
+        const skusToRemoveForUser = removedSkus.filter((sku) => !otherSelectedSkus.has(sku));
+        const productIds = [...new Set(skusToRemoveForUser.flatMap((sku) => (rowsByRemovedSku.get(sku) || []).map((row) => String(row.id))))];
+        if (!productIds.length) continue;
+
+        const { data: deletedRows, error: deleteError } = await supabase
+            .from('user_product_preferences')
+            .delete()
+            .eq('user_id', account.user_id)
+            .in('catalog_product_id', productIds)
+            .select('id');
+        if (deleteError) throw new Error(deleteError.message);
+
+        const deletedCount = (deletedRows || []).length;
+        if (!deletedCount) continue;
+        preferencesRemoved += deletedCount;
+        usersChanged += 1;
+
+        // Touch the user's remaining Target selections so the existing admin/user export
+        // status correctly reports that their bot list changed and needs to be recopied.
+        const { data: remainingTargetRows } = await supabase
+            .from('user_product_preferences')
+            .select('id,catalog_products!inner(site)')
+            .eq('user_id', account.user_id)
+            .eq('selected', true)
+            .eq('catalog_products.site', 'target')
+            .limit(1);
+        const remainingId = remainingTargetRows?.[0]?.id;
+        if (remainingId) {
+            const { error: touchError } = await supabase
+                .from('user_product_preferences')
+                .update({ updated_at: changedAt })
+                .eq('id', remainingId);
+            if (touchError) throw new Error(touchError.message);
+        }
+    }
+
+    return {
+        removed_skus: removedSkus,
+        affected_users: usersChanged,
+        product_preferences_removed: preferencesRemoved
+    };
+}
+
 app.get('/target-checkout-lists', auth, async (req, res) => {
     try {
         await ensureUserNotRevoked(req.user_id);
@@ -5522,13 +5626,27 @@ app.post('/admin/target-checkout-lists', auth, admin, async (req, res) => {
         };
         const next = [nextList, ...current.filter((list) => list.id !== id)];
         await setAppSetting('target_checkout_lists', next);
+
+        // When an admin edits an existing checkout list, immediately remove SKUs that
+        // were deleted from that list from every user who currently has that exact list
+        // selected. Users who did not choose this list are never touched.
+        const userSync = existing
+            ? await syncRemovedTargetCheckoutListSkusToUsers({
+                listId: id,
+                previousList: existing,
+                nextList,
+                allLists: next
+            })
+            : { removed_skus: [], affected_users: 0, product_preferences_removed: 0 };
+
         res.json({
             success: true,
             list: nextList,
             lists: next,
             missing_skus: catalogResult.missing_skus || [],
             created_products: catalogResult.created_products || [],
-            warning: catalogResult.warning || null
+            warning: catalogResult.warning || null,
+            user_sync: userSync
         });
     } catch (err) {
         res.status(500).json({ error: err.message });
