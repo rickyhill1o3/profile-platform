@@ -826,7 +826,7 @@ function summarizeCreditTransactions(rows = []) {
             else if (reason.includes('refund')) summary.refunded += delta;
             else summary.free_or_bonus += delta;
         } else if (delta < 0) {
-            if (reason === 'successful_checkout' || reason === 'successful_checkout_credit_recheck') {
+            if (reason === 'successful_checkout' || reason === 'successful_checkout_credit_recheck' || reason === 'webhook_account_reassignment_charge') {
                 summary.checkout_charged += Math.abs(delta);
             } else {
                 summary.manual_removed += Math.abs(delta);
@@ -1556,6 +1556,11 @@ async function findUserForWebhook(payload) {
     const normalizedEmail = String(normalized.account_email || '').trim().toLowerCase();
     const normalizedProfileName = String(normalized.profile_name || '').trim();
     const normalizedSite = normalizeProfileAccountType(normalized.site || '');
+    const normalizedSource = String(normalized.source || '').trim().toLowerCase();
+    const hasAuthoritativeAccountEmail = !!normalizedEmail && (
+        normalizedSource === 'shikari' ||
+        !!buildFieldMapFromEmbeds(payload || {}).fields?.account
+    );
 
     const loadProfilesByIds = async (profileIds = []) => {
         const ids = [...new Set((profileIds || []).filter(Boolean).map(String))];
@@ -1620,6 +1625,38 @@ async function findUserForWebhook(payload) {
             if (user) return user;
         }
 
+        // Current profile editor stores per-store login emails here. This is the
+        // strongest source for Shikari because its Account field is literally
+        // "email:password". Match the extracted email to the credential row,
+        // then resolve that profile's owning user.
+        try {
+            const { data: credentialMatches, error: credentialError } = await supabase
+                .from('profile_store_credentials')
+                .select('profile_id, store, login_email')
+                .ilike('login_email', normalizedEmail);
+            if (credentialError && !/does not exist|schema cache|relation/i.test(String(credentialError.message || ''))) {
+                throw new Error(credentialError.message);
+            }
+            if (credentialMatches?.length) {
+                let rows = credentialMatches;
+                if (normalizedSite) {
+                    const siteMatched = rows.filter((row) => normalizeProfileAccountType(row?.store || '') === normalizedSite);
+                    if (siteMatched.length) rows = siteMatched;
+                }
+                let profiles = await loadProfilesByIds(rows.map((row) => row.profile_id));
+                if (normalizedProfileName && profiles.length > 1) {
+                    const nameMatched = profiles.filter((profile) =>
+                        String(profile?.profile_name || '').trim().toLowerCase() === normalizedProfileName.toLowerCase()
+                    );
+                    if (nameMatched.length) profiles = nameMatched;
+                }
+                const user = await uniqueUserFromProfiles(profiles, 'store-credential-email');
+                if (user) return user;
+            }
+        } catch (credentialLookupError) {
+            console.warn('Webhook store credential email lookup failed', credentialLookupError.message || credentialLookupError);
+        }
+
         // Some older profiles may have the checkout email only in profiles.email.
         const { data: profileEmailMatches, error: profileEmailError } = await supabase
             .from('profiles')
@@ -1644,6 +1681,20 @@ async function findUserForWebhook(payload) {
             const user = await uniqueUserFromProfiles(profiles, 'profile-email');
             if (user) return user;
         }
+    }
+
+    // Shikari gives us an authoritative Account field such as
+    // "customer@example.com:password". If that email did not resolve to exactly
+    // one profile/user above, STOP here. Falling through to a shared profile name
+    // like "Target" would risk assigning the checkout to the wrong customer.
+    if (hasAuthoritativeAccountEmail) {
+        console.warn('Webhook account email was present but did not resolve uniquely; refusing weaker fallback match', {
+            source: normalizedSource || null,
+            account_email: normalizedEmail,
+            profile_name: normalizedProfileName || null,
+            site: normalizedSite || null
+        });
+        return null;
     }
 
     // 2. USER EMAIL.
@@ -3841,7 +3892,15 @@ async function sendDiscordWebhookToTarget({
     }
 
     const isCreditRecheckNotice = !!order.metadata?.credit_recheck_notice;
-    if (isCreditRecheckNotice && checkoutType === 'success') {
+    const isAccountReassignmentNotice = !!order.metadata?.account_reassignment_notice;
+    if (isAccountReassignmentNotice && checkoutType === 'success') {
+        const reassignmentRole = String(order.metadata?.account_reassignment_role || '').toLowerCase();
+        title = reassignmentRole === 'previous_user'
+            ? `Checkout Account Corrected • Credits Refunded • ${siteLabel}`
+            : `Checkout Account Corrected • Assigned to You • ${siteLabel}`;
+        description = normalized.product_name || order.product_name || 'Checkout account assignment corrected';
+        footerText = 'The Shore Shack corrected the checkout owner from the authoritative account email in the webhook';
+    } else if (isCreditRecheckNotice && checkoutType === 'success') {
         title = `Credit Recheck • ${title}`;
     }
 
@@ -3858,7 +3917,13 @@ async function sendDiscordWebhookToTarget({
         timestamp: new Date().toISOString()
     };
 
-    if (isCreditRecheckNotice) {
+    if (isAccountReassignmentNotice) {
+        embed.fields.unshift({
+            name: 'Account Correction',
+            value: String(order.metadata.account_reassignment_message || 'The checkout account owner was corrected.'),
+            inline: false
+        });
+    } else if (isCreditRecheckNotice) {
         embed.fields.unshift({
             name: 'Credit Recheck',
             value: String(order.metadata.credit_recheck_message || 'Credits were rechecked for this checkout.'),
@@ -5940,6 +6005,246 @@ async function recheckSuccessfulOrderCredits({ currentUser, order = null, webhoo
         results
     };
 }
+
+
+async function moveTrackedOrderToCorrectUser({ serviceOrder, fromUser, toUser, accountEmail = '' }) {
+    if (!serviceOrder?.id || !toUser?.id) return { moved: false, tracked_order_id: null };
+    const { data: oldTrackedRows, error: oldTrackedError } = await supabase
+        .from('tracked_orders')
+        .select('*')
+        .eq('source_order_id', serviceOrder.id);
+    if (oldTrackedError && !/does not exist|schema cache|relation/i.test(String(oldTrackedError.message || ''))) throw new Error(oldTrackedError.message);
+    const oldTracked = (oldTrackedRows || [])[0] || null;
+    if (!oldTracked?.id) return { moved: false, tracked_order_id: null };
+
+    // If the correct user already has this exact retailer order, keep that row and remove
+    // the stale row from the incorrectly assigned user instead of creating a duplicate.
+    const { data: correctExisting, error: correctExistingError } = await supabase
+        .from('tracked_orders')
+        .select('*')
+        .eq('user_id', toUser.id)
+        .eq('store', oldTracked.store)
+        .eq('order_number', oldTracked.order_number)
+        .maybeSingle();
+    if (correctExistingError && !/multiple rows/i.test(String(correctExistingError.message || ''))) throw new Error(correctExistingError.message);
+
+    let targetTrackedId = oldTracked.id;
+    if (correctExisting?.id && String(correctExisting.id) !== String(oldTracked.id)) {
+        targetTrackedId = correctExisting.id;
+        await supabase.from('tracked_order_events').update({ user_id: toUser.id, order_id: targetTrackedId }).eq('order_id', oldTracked.id);
+        await supabase.from('email_messages').update({ linked_order_id: targetTrackedId }).eq('linked_order_id', oldTracked.id);
+        const del = await supabase.from('tracked_orders').delete().eq('id', oldTracked.id);
+        if (del.error) throw new Error(del.error.message);
+    } else {
+        const patch = {
+            user_id: toUser.id,
+            source_email: String(accountEmail || oldTracked.source_email || '').trim().toLowerCase(),
+            credits_spent: Number(serviceOrder.credits_charged || 0),
+            updated_at: new Date().toISOString()
+        };
+        const moved = await supabase.from('tracked_orders').update(patch).eq('id', oldTracked.id).select('*').single();
+        if (moved.error) throw new Error(moved.error.message);
+        await supabase.from('tracked_order_events').update({ user_id: toUser.id }).eq('order_id', oldTracked.id);
+    }
+
+    // Investment rows are derived from the same service order and should follow the owner.
+    try {
+        await supabase.from('investment_products').update({ user_id: toUser.id, updated_at: new Date().toISOString() }).eq('source_order_id', serviceOrder.id);
+    } catch (_) {}
+
+    return { moved: true, tracked_order_id: targetTrackedId };
+}
+
+async function sendAccountReassignmentNotices({ serviceOrder, previousUser, correctUser, credits, accountEmail }) {
+    const stamp = `${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
+    const oldMessage = credits > 0
+        ? `This checkout was matched to the wrong account. ${credits} credits were returned to ${previousUser?.email || 'the previous user'}, and the order was removed from that user's Order Tracker.`
+        : `This checkout was matched to the wrong account. The order was removed from ${previousUser?.email || 'the previous user'} and no credit refund was required.`;
+    const newMessage = credits > 0
+        ? `This checkout belongs to ${correctUser?.email || accountEmail}. ${credits} credits were charged to the correct user and the order is now available in that user's Order Tracker.`
+        : `This checkout belongs to ${correctUser?.email || accountEmail}. The order is now assigned to the correct user and available in that user's Order Tracker.`;
+
+    const makeNoticeOrder = (userRole, message, creditsCharged) => ({
+        ...serviceOrder,
+        // Vary the raw payload title so the Discord in-flight dedupe key is different
+        // for the previous-user and correct-user correction messages.
+        raw_payload: {
+            ...(serviceOrder.raw_payload || {}),
+            _shore_shack_reassignment_notice: `${userRole}:${stamp}`,
+            product_name: serviceOrder.product_name || normalizeIncomingOrderPayload(serviceOrder.raw_payload || {}).product_name || '',
+            embeds: Array.isArray(serviceOrder.raw_payload?.embeds)
+                ? serviceOrder.raw_payload.embeds.map((embed, index) => index === 0 ? { ...embed, title: `${embed?.title || 'Successful Checkout'} • Account Correction • ${userRole} • ${stamp}` } : embed)
+                : serviceOrder.raw_payload?.embeds
+        },
+        status: 'success',
+        credits_charged: creditsCharged,
+        metadata: {
+            ...(serviceOrder.metadata || {}),
+            account_reassignment_notice: true,
+            account_reassignment_role: userRole,
+            account_reassignment_message: message,
+            account_reassignment_at: new Date().toISOString(),
+            account_email: accountEmail || null
+        }
+    });
+
+    const results = [];
+    if (previousUser?.id) {
+        const oldOrder = makeNoticeOrder('previous_user', oldMessage, 0);
+        results.push(...await sendCheckoutDiscordNotifications(oldOrder, previousUser, { routingMode: 'all' }).catch(err => [{ success: false, scope: 'previous_user', error: err.message || String(err) }]));
+    }
+    if (correctUser?.id) {
+        const newOrder = makeNoticeOrder('correct_user', newMessage, credits);
+        results.push(...await sendCheckoutDiscordNotifications(newOrder, correctUser, { routingMode: 'all' }).catch(err => [{ success: false, scope: 'correct_user', error: err.message || String(err) }]));
+    }
+    return results;
+}
+
+app.post('/admin/webhooks/logs/:id/recheck-account-user', auth, admin, async (req, res) => {
+    try {
+        const currentUser = await getCurrentUser(req);
+        if (currentUser.role !== 'super_admin') return res.status(403).json({ error: 'Only super admin can recheck checkout account ownership.' });
+
+        const rows = await getWebhookLogEntries({ limit: 50000 });
+        const row = (rows || []).find((item) => String(item.id) === String(req.params.id));
+        if (!row) return res.status(404).json({ error: 'Webhook log not found.' });
+        if (String(row.type || '') !== 'checkout') return res.status(400).json({ error: 'Only checkout webhook logs can have their account user rechecked.' });
+        if (!row.payload) return res.status(400).json({ error: 'This webhook log does not contain the raw checkout payload.' });
+
+        const normalized = normalizeIncomingOrderPayload(row.payload || {});
+        const accountEmail = String(normalized.account_email || '').trim().toLowerCase();
+        if (!accountEmail) return res.status(400).json({ error: 'The webhook does not contain an Account email, so the user cannot be reassigned safely.' });
+
+        // This uses the hardened authoritative-account matcher. For Shikari, an Account
+        // email that cannot resolve uniquely is NOT allowed to fall back to profile name.
+        const correctUser = await findUserForWebhook(row.payload || {});
+        if (!correctUser?.id) return res.status(409).json({ error: `No unique user could be matched to checkout account ${accountEmail}. No credits or orders were changed.` });
+
+        const externalOrderId = String(normalized.external_order_id || normalized.order_number || normalized.order_id || '').trim();
+        if (!externalOrderId) return res.status(400).json({ error: 'The webhook does not contain a usable order ID.' });
+
+        const { data: orderRows, error: orderError } = await supabase.from('orders').select('*').eq('external_order_id', externalOrderId).order('created_at', { ascending: false }).limit(20);
+        if (orderError) throw new Error(orderError.message);
+        let serviceOrder = (orderRows || []).find((order) => {
+            const orderPayload = order.raw_payload || {};
+            const orderNormalized = normalizeIncomingOrderPayload(orderPayload);
+            return String(orderNormalized.account_email || '').trim().toLowerCase() === accountEmail;
+        }) || (orderRows || [])[0] || null;
+        if (!serviceOrder?.id) return res.status(404).json({ error: `No saved service order was found for ${externalOrderId}.` });
+
+        const previousUser = await getUserById(serviceOrder.user_id);
+        if (!previousUser?.id) return res.status(404).json({ error: 'The currently assigned user could not be loaded.' });
+
+        if (String(previousUser.id) === String(correctUser.id)) {
+            const trackerResult = await moveTrackedOrderToCorrectUser({ serviceOrder, fromUser: previousUser, toUser: correctUser, accountEmail });
+            await updateWebhookLogEntry(row.id, {
+                status: 'processed',
+                error: '',
+                user_email: correctUser.email || '',
+                user_display: formatDiscordDisplayName(correctUser)
+            }).catch(() => null);
+            return res.json({
+                success: true,
+                changed: false,
+                message: `This checkout is already assigned to ${correctUser.email || accountEmail}.`,
+                correct_user_id: correctUser.id,
+                correct_user_email: correctUser.email || '',
+                tracked_order_moved: !!trackerResult.moved,
+                refunded_credits: 0,
+                charged_credits: 0
+            });
+        }
+
+        const credits = asWholeCredits(serviceOrder.credits_charged, 0);
+        const reassignmentKey = `account-reassignment:${serviceOrder.id}:${previousUser.id}:${correctUser.id}`;
+
+        // Ledger-level idempotency: if a previous attempt completed one side of the
+        // transfer before an error, pressing the button again only performs the missing side.
+        const { data: priorTx, error: priorTxError } = await supabase.from('credit_transactions')
+            .select('id,user_id,amount_delta,reason,metadata')
+            .eq('order_id', serviceOrder.id)
+            .in('reason', ['webhook_account_reassignment_refund', 'webhook_account_reassignment_charge']);
+        if (priorTxError && !/does not exist|schema cache|relation/i.test(String(priorTxError.message || ''))) throw new Error(priorTxError.message);
+        const txRows = priorTx || [];
+        const alreadyRefunded = txRows.some(tx => tx.reason === 'webhook_account_reassignment_refund' && String(tx.user_id) === String(previousUser.id) && String(tx.metadata?.reassignment_key || '') === reassignmentKey);
+        const alreadyCharged = txRows.some(tx => tx.reason === 'webhook_account_reassignment_charge' && String(tx.user_id) === String(correctUser.id) && String(tx.metadata?.reassignment_key || '') === reassignmentKey);
+
+        let refundedCredits = 0;
+        let chargedCredits = 0;
+        if (credits > 0 && !alreadyRefunded) {
+            await adjustUserCredits({
+                userId: previousUser.id,
+                delta: credits,
+                reason: 'webhook_account_reassignment_refund',
+                note: `Refunded ${credits} credits because checkout ${externalOrderId} belongs to ${correctUser.email || accountEmail}`,
+                metadata: { reassignment_key: reassignmentKey, webhook_log_id: row.id, correct_user_id: correctUser.id, account_email: accountEmail },
+                createdBy: currentUser.id,
+                orderId: serviceOrder.id
+            });
+            refundedCredits = credits;
+        }
+        if (credits > 0 && !alreadyCharged) {
+            await adjustUserCredits({
+                userId: correctUser.id,
+                delta: -credits,
+                reason: 'webhook_account_reassignment_charge',
+                note: `Charged ${credits} credits after checkout ${externalOrderId} was reassigned from ${previousUser.email || previousUser.id}`,
+                metadata: { reassignment_key: reassignmentKey, webhook_log_id: row.id, previous_user_id: previousUser.id, account_email: accountEmail },
+                createdBy: currentUser.id,
+                orderId: serviceOrder.id
+            });
+            chargedCredits = credits;
+        }
+
+        const updatedMetadata = {
+            ...(serviceOrder.metadata || {}),
+            matched_user_email: correctUser.email || accountEmail,
+            checkout_account_email: accountEmail,
+            account_reassigned_at: new Date().toISOString(),
+            account_reassigned_by: currentUser.id,
+            account_reassigned_from_user_id: previousUser.id,
+            account_reassigned_from_email: previousUser.email || '',
+            account_reassigned_to_user_id: correctUser.id,
+            account_reassigned_to_email: correctUser.email || '',
+            account_reassignment_key: reassignmentKey
+        };
+        const updatedOrderResult = await supabase.from('orders').update({ user_id: correctUser.id, metadata: updatedMetadata }).eq('id', serviceOrder.id).select('*').single();
+        if (updatedOrderResult.error) throw new Error(updatedOrderResult.error.message);
+        serviceOrder = updatedOrderResult.data;
+
+        const trackerResult = await moveTrackedOrderToCorrectUser({ serviceOrder, fromUser: previousUser, toUser: correctUser, accountEmail });
+        const discordResults = await sendAccountReassignmentNotices({ serviceOrder, previousUser, correctUser, credits, accountEmail });
+
+        await updateWebhookLogEntry(row.id, {
+            status: 'processed_reassigned',
+            error: `Account user corrected from ${previousUser.email || previousUser.id} to ${correctUser.email || accountEmail}`,
+            user_email: correctUser.email || '',
+            user_display: formatDiscordDisplayName(correctUser),
+            discord_targets: discordResults
+        }).catch(() => null);
+
+        return res.json({
+            success: true,
+            changed: true,
+            external_order_id: externalOrderId,
+            account_email: accountEmail,
+            previous_user_id: previousUser.id,
+            previous_user_email: previousUser.email || '',
+            correct_user_id: correctUser.id,
+            correct_user_email: correctUser.email || '',
+            refunded_credits: alreadyRefunded ? 0 : refundedCredits,
+            charged_credits: alreadyCharged ? 0 : chargedCredits,
+            refund_already_applied: alreadyRefunded,
+            charge_already_applied: alreadyCharged,
+            tracked_order_moved: !!trackerResult.moved,
+            tracked_order_id: trackerResult.tracked_order_id || null,
+            discord_results: discordResults
+        });
+    } catch (err) {
+        console.error('Webhook account user recheck failed:', err);
+        return res.status(500).json({ error: err.message || String(err) });
+    }
+});
 
 app.post('/admin/webhooks/logs/:id/recheck-credits', auth, admin, async (req, res) => {
     try {

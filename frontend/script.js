@@ -3006,6 +3006,44 @@ async function resendWebhookLog(id, button) {
     }
 }
 
+async function recheckWebhookAccountUser(id, button) {
+    if (!id) return;
+    const originalText = button ? button.textContent : '';
+    const confirmed = window.confirm(
+        'Recheck this checkout account against the webhook Account email?\n\n' +
+        'If it belongs to a different user, the system will refund the wrongly charged user, charge the correct user, move the tracked order, and send correction notices to Discord.'
+    );
+    if (!confirmed) return;
+    try {
+        if (button) {
+            button.disabled = true;
+            button.textContent = 'Rechecking user...';
+        }
+        const data = await authJSON(API + `/admin/webhooks/logs/${encodeURIComponent(id)}/recheck-account-user`, { method: 'POST' });
+        if (data.changed) {
+            alert(
+                `Checkout reassigned successfully.\n\n` +
+                `From: ${data.previous_user_email || data.previous_user_id || 'unknown'}\n` +
+                `To: ${data.correct_user_email || data.correct_user_id || 'unknown'}\n` +
+                `Credits refunded: ${Number(data.refunded_credits || 0)}\n` +
+                `Credits charged: ${Number(data.charged_credits || 0)}\n` +
+                `Tracked order moved: ${data.tracked_order_moved ? 'Yes' : 'No'}`
+            );
+        } else {
+            alert(`Account recheck complete. ${data.message || 'This checkout is already assigned to the correct user.'}`);
+        }
+        await loadWebhookLogs();
+        return data;
+    } catch (err) {
+        alert(err.message || 'Failed to recheck checkout account user.');
+    } finally {
+        if (button) {
+            button.disabled = false;
+            button.textContent = originalText || 'Recheck account user';
+        }
+    }
+}
+
 async function recheckWebhookCredits(id, button) {
     if (!id) return;
     const originalText = button ? button.textContent : '';
@@ -3122,7 +3160,7 @@ async function loadWebhookLogs() {
               <td class="webhook-log-product">${productCell}</td>
               <td class="webhook-log-sku"><span class="webhook-log-truncate" title="${escapeHtml(item.sku || '-')}">${escapeHtml(item.sku || '-')}</span></td>
               <td class="webhook-log-debug"><div class="webhook-log-error">${escapeHtml(item.error || '')}</div>${details}${targetDetails}${payloadDetails}</td>
-              <td class="webhook-log-actions"><div class="webhook-log-action-buttons"><button class="secondary" type="button" onclick="resendWebhookLog('${escapeHtml(item.id || '')}', this)">Resend</button><button class="secondary" type="button" onclick="recheckWebhookCredits('${escapeHtml(item.id || '')}', this)">Recheck credits</button>${String(item.type || '').toLowerCase()==='checkout' && productValue !== '-' && !isProductUrl ? `<button class="secondary" type="button" onclick='hideHomepageCheckoutProduct(${JSON.stringify(productValue)}, this)'>Hide from homepage</button>` : ''}</div></td>
+              <td class="webhook-log-actions"><div class="webhook-log-action-buttons"><button class="secondary" type="button" onclick="resendWebhookLog('${escapeHtml(item.id || '')}', this)">Resend</button><button class="secondary" type="button" onclick="recheckWebhookCredits('${escapeHtml(item.id || '')}', this)">Recheck credits</button>${String(item.type || '').toLowerCase()==='checkout' ? `<button class="secondary" type="button" onclick="recheckWebhookAccountUser('${escapeHtml(item.id || '')}', this)">Recheck account user</button>` : ''}${String(item.type || '').toLowerCase()==='checkout' && productValue !== '-' && !isProductUrl ? `<button class="secondary" type="button" onclick='hideHomepageCheckoutProduct(${JSON.stringify(productValue)}, this)'>Hide from homepage</button>` : ''}</div></td>
             </tr>`;
         }).join('');
         container.innerHTML = `

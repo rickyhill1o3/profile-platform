@@ -6,6 +6,11 @@ function clean(value = '') {
     .trim();
 }
 
+function extractEmail(value = '') {
+  const match = String(value || '').match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
+  return match ? match[0].toLowerCase() : '';
+}
+
 function fieldMap(embed = {}) {
   const map = {};
   for (const field of embed.fields || []) {
@@ -57,7 +62,7 @@ function normalizeWebhookPayload(payload = {}) {
     mode: clean(fields.mode),
 
     profile: clean(fields.profile),
-    email: clean(fields.account || fields.email),
+    email: extractEmail(fields.account || fields.email),
     proxy: clean(fields.proxy || fields['proxy details']),
 
     orderId: clean(fields['order id'] || fields['order number']),
