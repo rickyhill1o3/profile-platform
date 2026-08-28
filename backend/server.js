@@ -94,7 +94,7 @@ const cheerio = require("cheerio");
 const registerProductCatalogRoutes = require("./product-catalog-routes");
 const registerShopRoutes = require("./shop-routes");
 const registerSuccessNetwork = require("./success-network");
-const { registerOrderTracker } = require("./order-tracker");
+const { registerOrderTracker, notifyCheckoutForOrderTracker } = require("./order-tracker");
 const { registerMarketValueEngine } = require("./market-value-engine");
 const { registerMasterProductCatalog } = require("./master-product-catalog");
 const supabase = require("./database");
@@ -2230,6 +2230,7 @@ const FAILSAFE_QUEUE_DIR = path.join(__dirname, 'webhook_failover_queue');
 const FAILSAFE_REPLAY_INTERVAL_MS = Number(process.env.WEBHOOK_FAILSAFE_REPLAY_INTERVAL_MS || 60000);
 const FAILSAFE_REPLAY_BATCH_SIZE = Number(process.env.WEBHOOK_FAILSAFE_REPLAY_BATCH_SIZE || 25);
 const FAILSAFE_ALERT_TARGETS_FILE = path.join(FAILSAFE_QUEUE_DIR, 'database_outage_checkout_webhooks.json');
+const FAILSAFE_DEAD_LETTER_DIR = path.join(FAILSAFE_QUEUE_DIR, 'dead-letter');
 let outageAlertTargetsCache = [];
 let lastOutageAlertTargetRefreshAt = 0;
 let lastDatabaseOutageAlertAt = 0;
@@ -2240,6 +2241,7 @@ let failsafeReplayRunning = false;
 function ensureFailsafeQueueDir() {
     try {
         fs.mkdirSync(FAILSAFE_QUEUE_DIR, { recursive: true });
+        fs.mkdirSync(FAILSAFE_DEAD_LETTER_DIR, { recursive: true });
     } catch (err) {
         console.error('Failed to create webhook failover queue directory:', err);
     }
@@ -2474,6 +2476,19 @@ async function replayQueuedWebhookFile(file) {
             body: JSON.stringify(job.payload || {})
         });
         if (!response.ok && response.status !== 204) {
+            if (response.status === 401 || response.status === 403) {
+                // Old queued jobs can contain a retired/missing inbound token. Retrying forever only
+                // creates log noise and can never succeed. Preserve the payload in dead-letter storage.
+                job.attempts = Number(job.attempts || 0) + 1;
+                job.last_error = `Permanent replay authorization failure (${response.status})`;
+                job.last_attempt_at = new Date().toISOString();
+                job.dead_lettered_at = new Date().toISOString();
+                const deadFile = path.join(FAILSAFE_DEAD_LETTER_DIR, path.basename(file));
+                fs.writeFileSync(deadFile, JSON.stringify(job, null, 2));
+                fs.unlinkSync(file);
+                console.warn(`Dead-lettered queued webhook ${path.basename(file)} after permanent ${response.status} authorization failure.`);
+                return { dead_lettered: true };
+            }
             throw new Error(`Replay POST failed with status ${response.status}`);
         }
         fs.unlinkSync(file);
@@ -4897,6 +4912,9 @@ app.post(["/webhooks/orders", "/webhooks/orders/:token"], async (req, res) => {
                         const result = await recordSuccessfulCheckout(payload);
                         recordedOrder = result?.order || null;
                         recordedCreditsCharged = result?.order?.credits_charged ?? result?.credits_charged ?? null;
+                        // Persist/refresh Order Tracker immediately after a checkout webhook. The user should
+                        // never need to open Order Tracker to cause mailbox work or tracked-order creation.
+                        notifyCheckoutForOrderTracker(resolvedUser.id);
                         if (result?.duplicate) {
                             finalStatus = 'duplicate_skipped';
                             finalError = 'Skipped duplicate checkout webhook by order id';

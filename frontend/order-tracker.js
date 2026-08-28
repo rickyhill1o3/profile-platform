@@ -19,14 +19,16 @@ function render(){const q=$('searchOrders').value.toLowerCase();const selectedSt
 async function openReceipt(id){const r=await fetch(`${API}/orders/receipt/${id}`,{headers:{Authorization:`Bearer ${token}`}});if(!r.ok){alert('Receipt could not be opened');return}const html=await r.text();const w=window.open('','_blank');w.document.open();w.document.write(html);w.document.close()}
 async function editOrder(id){const o=allOrders.find(x=>x.id===id);const status=prompt('Status: waiting_confirmation, confirmed, processing, shipped, delivered, canceled, refunded',o.status);if(!status)return;const credits=prompt('Credits spent for this order',o.credits_spent||0);await api('/orders/tracked/'+id,{method:'PATCH',body:JSON.stringify({status,credits_spent:Number(credits||0)})});loadOrders()}
 async function deleteOrder(id){if(!confirm('Delete this tracked order and its stored receipt?'))return;await api('/orders/tracked/'+id,{method:'DELETE'});loadOrders()}
-async function runAutomaticScan(){setProgress(8,'Preparing your order tracker…','Loading existing orders and connected mailbox records.');const first=await bootstrap();if(!Number(first.connected_count||0)){setProgress(100,'Order tracker ready','No connected IMAP accounts were found. Existing website orders are still available.');return}
-  setProgress(12,'Starting automatic email scan…','Only messages newer than each mailbox’s saved scan position will be checked.');
-  const started=await api('/orders/scan/start',{method:'POST',body:'{}'});let job=started.job;const deadline=Date.now()+20*60*1000;
-  while(job&&job.status==='running'&&Date.now()<deadline){const message=job.email?`Scanning ${job.email}`:'Scanning connected mailboxes';setProgress(Math.max(12,job.percent||12),message,job.message||'Checking unscanned email messages…');await new Promise(r=>setTimeout(r,1200));job=(await api('/orders/scan-progress')).job}
-  if(job?.status==='failed')showWarning(job.error||'The email scan finished with an error. Saved orders will still load.');
-  if(Date.now()>=deadline)showWarning('The scan is still running in the background. The page loaded saved orders while it continues.');
-  setProgress(97,'Refreshing order statuses…','Loading confirmations, cancellations, shipping, and delivery updates.');await bootstrap();setProgress(100,'Order tracker ready','All saved results are loaded. Future visits only check newer messages, so they should be much faster than the first historical scan.');
+async function runAutomaticScan(){
+  // Order Tracker is now a fast read-only view. Render scans mailboxes in the background and
+  // checkout webhooks trigger priority scans, so opening this page must not wait on IMAP.
+  setProgress(35,'Loading saved orders…','Reading the latest tracked order records. No mailbox scan is required to open this page.');
+  const first=await bootstrap();
+  const mins=Math.max(1,Math.round(Number(first.scan_interval_ms||300000)/60000));
+  $('scanMessage').textContent=`Order Tracker loads from saved records. Render scans connected mailboxes in the background about every ${mins} minute${mins===1?'':'s'}, and new checkout webhooks are prioritized automatically.`;
+  setProgress(100,'Order tracker ready','Saved orders loaded. Email scanning continues on Render in the background.');
 }
+
 async function refreshAycdStatus(){
   try{
     const j=await api('/orders/aycd/device-status');

@@ -24,14 +24,32 @@ function importedStatusClass(status){return status==='connected'?'status-ok':sta
 function fmtDate(v){return v?new Date(v).toLocaleString():'—'}
 function renderImportedAccounts(summary={}){
   $('importedSummary').innerHTML=`<span>${Number(summary.total||0)} imported</span><span>${Number(summary.enabled||0)} enabled</span><span>${Number(summary.matched||0)} profile matched</span><span>${Number(summary.ambiguous||0)} ambiguous</span>`;
-  $('importedAccountsBody').innerHTML=importedAccounts.length?importedAccounts.map(a=>`<tr><td><b>${esc(a.email)}</b><div class="muted">${esc(a.category||'')}</div></td><td>${esc(a.provider||'')}</td><td>${esc(a.auth_method||'')}</td><td>${esc(a.match_status||'unmatched')}</td><td class="${importedStatusClass(a.status)}"><b>${esc(a.status||'')}</b>${a.last_error?`<div class="muted" title="${esc(a.last_error)}">${esc(String(a.last_error).slice(0,100))}</div>`:''}</td><td>${fmtDate(a.last_scan_at||a.last_test_at)}</td><td><button class="btn" onclick="testImportedAccount('${a.id}')">Test</button><button class="btn" onclick="toggleImportedAccount('${a.id}',${a.is_enabled?'false':'true'})">${a.is_enabled?'Disable':'Enable'}</button></td></tr>`).join(''):'<tr><td colspan="7" class="muted">No AYCD CSV accounts imported yet.</td></tr>';
+  $('importedAccountsBody').innerHTML=importedAccounts.length?importedAccounts.map(a=>`<tr><td><b>${esc(a.email)}</b><div class="muted">${esc(a.category||'')}</div></td><td>${esc(a.provider||'')}</td><td>${esc(a.auth_method||'')}</td><td>${esc(a.match_status||'unmatched')}</td><td class="${importedStatusClass(a.status)}"><b>${esc(a.status||'')}</b>${a.last_error?`<div class="muted" title="${esc(a.last_error)}">${esc(String(a.last_error).slice(0,100))}</div>`:''}</td><td>${fmtDate(a.last_scan_at||a.last_test_at)}</td><td><button class="btn" onclick="testImportedAccount('${a.id}')">Test</button><button class="btn" onclick="rescanImportedHistory('${a.id}','${esc(a.email)}')">Rescan history</button><button class="btn" onclick="toggleImportedAccount('${a.id}',${a.is_enabled?'false':'true'})">${a.is_enabled?'Disable':'Enable'}</button></td></tr>`).join(''):'<tr><td colspan="7" class="muted">No AYCD CSV accounts imported yet.</td></tr>';
 }
 async function loadImportedAccounts(){try{const j=await api('/admin/email-center/imported-accounts');importedAccounts=j.accounts||[];renderImportedAccounts(j.summary||{});$('importedStatus').textContent=''}catch(e){$('importedStatus').textContent=e.message}}
 $('chooseAycdCsvBtn').onclick=()=>$('aycdCsvFile').click();
 $('aycdCsvFile').onchange=async()=>{const file=$('aycdCsvFile').files?.[0];if(!file)return;try{$('importedStatus').textContent=`Reading ${file.name}…`;const csv=await file.text();$('importedStatus').textContent='Encrypting and importing mailbox credentials…';const j=await api('/admin/email-center/import-aycd-accounts',{method:'POST',body:JSON.stringify({csv})});$('importedStatus').textContent=`${j.message} Matched: ${j.matched||0}; placeholders/unsupported: ${j.placeholders||0}.`;await loadImportedAccounts();await loadMailboxes();}catch(e){$('importedStatus').textContent=e.message}finally{$('aycdCsvFile').value=''}};
-$('scanImportedBtn').onclick=async()=>{try{$('importedStatus').textContent='Starting direct mailbox scan…';const j=await api('/orders/scan/start',{method:'POST',body:'{}'});$('importedStatus').textContent='Direct mailbox scan started on the server. Pending checkout mailboxes are scanned first.';setTimeout(()=>{loadImportedAccounts();loadMailboxes();load()},5000)}catch(e){$('importedStatus').textContent=e.message}};
+async function pollDirectScan(){
+  const deadline=Date.now()+30*60*1000;
+  while(Date.now()<deadline){
+    const j=await api('/orders/scan-progress'); const job=j.job;
+    if(!job){$('importedStatus').textContent='No active direct mailbox scan.';return}
+    if(job.status==='running'){
+      const accountPart=job.accountTotal?`${job.accountIndex||0}/${job.accountTotal} mailboxes`:'mailboxes';
+      const msgPart=job.total?` · ${job.checked||0}/${job.total} messages`:'';
+      $('importedStatus').textContent=`Direct scan ${job.percent||0}% — ${job.email||'preparing'} — ${accountPart}${msgPart}`;
+      await new Promise(r=>setTimeout(r,1200)); continue;
+    }
+    $('importedStatus').textContent=job.status==='complete'?'Direct mailbox scan complete.':`Direct mailbox scan ${job.status}: ${job.error||job.message||''}`;
+    await Promise.all([loadImportedAccounts(),loadMailboxes(),load()]); return;
+  }
+  $('importedStatus').textContent='Direct mailbox scan is still running in the background. You can leave this page safely.';
+}
+$('scanImportedBtn').onclick=async()=>{try{$('importedStatus').textContent='Starting direct mailbox scan…';await api('/orders/scan/start',{method:'POST',body:'{}'});pollDirectScan().catch(e=>$('importedStatus').textContent=e.message)}catch(e){$('importedStatus').textContent=e.message}};
 $('rematchImportedBtn').onclick=async()=>{try{$('importedStatus').textContent='Rechecking imported mailbox ownership against profile login emails…';const j=await api('/admin/email-center/imported-accounts/rematch',{method:'POST',body:'{}'});$('importedStatus').textContent=`Rematch complete: ${j.matched||0} matched, ${j.ambiguous||0} ambiguous, ${j.unmatched||0} unmatched.`;await loadImportedAccounts()}catch(e){$('importedStatus').textContent=e.message}};
 $('refreshImportedBtn').onclick=()=>loadImportedAccounts();
 window.testImportedAccount=async id=>{try{$('importedStatus').textContent='Testing direct mailbox connection…';const j=await api(`/admin/email-center/imported-accounts/${id}/test`,{method:'POST',body:'{}'});$('importedStatus').textContent=`Connected to ${j.email}. Inbox currently exposes ${j.messages} messages.`;await loadImportedAccounts()}catch(e){$('importedStatus').textContent=e.message;await loadImportedAccounts()}};
 window.toggleImportedAccount=async(id,is_enabled)=>{try{await api(`/admin/email-center/imported-accounts/${id}`,{method:'PATCH',body:JSON.stringify({is_enabled})});await loadImportedAccounts()}catch(e){$('importedStatus').textContent=e.message}};
 Promise.all([loadMailboxes(),load(),loadImportedAccounts()]);
+
+window.rescanImportedHistory=async(id,email)=>{if(!confirm(`Reset the saved IMAP checkpoint for ${email} and rescan its available history? This only affects this mailbox.`))return;try{$('importedStatus').textContent=`Resetting ${email} history checkpoint…`;const j=await api(`/admin/email-center/imported-accounts/${id}/rescan-history`,{method:'POST',body:'{}'});$('importedStatus').textContent=j.message||`History rescan started for ${email}.`;setTimeout(()=>loadImportedAccounts(),5000)}catch(e){$('importedStatus').textContent=e.message}};

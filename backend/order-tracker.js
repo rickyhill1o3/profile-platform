@@ -3,7 +3,7 @@ const { simpleParser } = require('mailparser');
 const crypto = require('crypto');
 const { encrypt, decrypt } = require('./encryption');
 
-const SCAN_INTERVAL_MS = Math.max(5 * 60 * 1000, Number(process.env.IMAP_SCAN_INTERVAL_MS || 15 * 60 * 1000));
+const SCAN_INTERVAL_MS = Math.max(60 * 1000, Number(process.env.IMAP_SCAN_INTERVAL_MS || 5 * 60 * 1000));
 const INITIAL_LOOKBACK_DAYS = Math.max(7, Number(process.env.IMAP_INITIAL_LOOKBACK_DAYS || 365));
 const INITIAL_SCAN_START = process.env.IMAP_INITIAL_SCAN_START || '2026-01-01T00:00:00.000Z';
 const MAX_MESSAGES_PER_SCAN = Math.max(25, Number(process.env.IMAP_MAX_MESSAGES_PER_SCAN || 250));
@@ -11,6 +11,20 @@ const MAX_ACCOUNTS_PER_CYCLE = Math.max(1, Number(process.env.IMAP_MAX_ACCOUNTS_
 const MIN_RESCAN_INTERVAL_MS = Math.max(0, Number(process.env.IMAP_MIN_RESCAN_INTERVAL_MS || 2 * 60 * 1000));
 let backgroundAccountCursor = 0;
 const userScanJobs = new Map();
+let checkoutScanRuntime = null;
+const checkoutScanTimers = new Map();
+
+function notifyCheckoutForOrderTracker(userId) {
+  if (!userId || !checkoutScanRuntime) return;
+  const key = String(userId);
+  const existing = checkoutScanTimers.get(key);
+  if (existing) clearTimeout(existing);
+  const timer = setTimeout(() => {
+    checkoutScanTimers.delete(key);
+    Promise.resolve(checkoutScanRuntime(key)).catch(err => console.error('Checkout-triggered Order Tracker refresh failed:', err.message || err));
+  }, 5000);
+  checkoutScanTimers.set(key, timer);
+}
 
 function clean(v) { return String(v || '').trim(); }
 function lower(v) { return clean(v).toLowerCase(); }
@@ -793,6 +807,7 @@ async function scanImportedAccount(supabase, account, adjustCredits = null, onPr
   const folderState = row.folder_state && typeof row.folder_state === 'object' ? { ...row.folder_state } : {};
   const started = new Date().toISOString();
   try {
+    console.log(`[DIRECT IMAP] START ${account.email}`);
     await client.connect();
     let boxes=[]; try{boxes=await client.list();}catch(_){}
     const requested = new Set(String(row.folders || 'Inbox').split(',').map(v=>lower(v)).filter(Boolean));
@@ -814,12 +829,13 @@ async function scanImportedAccount(supabase, account, adjustCredits = null, onPr
         const prior=folderState[key]||{};
         let highestUid=Number(prior.last_seen_uid||0);
         let ids=[];
-        if(highestUid>0) ids=await client.search({uid:`${highestUid+1}:*`});
+        if(highestUid>0) ids=await client.search({uid:`${highestUid+1}:*`},{uid:true});
         else {
           const configuredStart=new Date(INITIAL_SCAN_START);const fallbackStart=new Date(Date.now()-INITIAL_LOOKBACK_DAYS*86400000);
-          ids=await client.search({since:Number.isNaN(configuredStart.getTime())?fallbackStart:configuredStart});
+          ids=await client.search({since:Number.isNaN(configuredStart.getTime())?fallbackStart:configuredStart},{uid:true});
         }
         ids=(ids||[]).map(Number).filter(Boolean).sort((a,b)=>a-b).slice(0,MAX_MESSAGES_PER_SCAN);
+        console.log(`[DIRECT IMAP] ${account.email} folder=${mailboxName} checkpoint=${highestUid || 0} queued=${ids.length}`);
         total += ids.length;
         if(onProgress)onProgress({checked,total,saved,folder:mailboxName});
         for await (const msg of client.fetch(ids,{uid:true,source:true,envelope:true})) {
@@ -833,8 +849,10 @@ async function scanImportedAccount(supabase, account, adjustCredits = null, onPr
     const now=new Date().toISOString();
     await supabase.from('imported_mail_accounts').update({folder_state:folderState,last_scan_at:now,last_success_at:now,last_error:null,status:'connected',updated_at:now}).eq('id',account.imported_account_id);
     await upsertScanState(supabase,account,{last_scan_at:now,last_success_at:now,last_error:null,is_enabled:true,scan_started_at:started,scanned_through_at:now,initial_scan_start_at:INITIAL_SCAN_START});
+    console.log(`[DIRECT IMAP] COMPLETE ${account.email} checked=${checked} indexed=${saved} folders=${folders.length}`);
     return {checked,total,saved,folders:folders.length};
   } catch(err) {
+    console.error(`[DIRECT IMAP] FAILED ${account.email}:`, err.message || err);
     const now=new Date().toISOString();
     try{await supabase.from('imported_mail_accounts').update({last_scan_at:now,last_error:String(err.message||err).slice(0,1000),status:'error',updated_at:now}).eq('id',account.imported_account_id);}catch(_){}
     throw err;
@@ -871,12 +889,12 @@ async function scanAccount(supabase, account, adjustCredits = null, onProgress =
     try {
       let uids = [];
       if (highestUid > 0) {
-        uids = await client.search({ uid: `${highestUid + 1}:*` });
+        uids = await client.search({ uid: `${highestUid + 1}:*` }, { uid: true });
       } else {
         const configuredStart = new Date(INITIAL_SCAN_START);
         const fallbackStart = new Date(Date.now() - INITIAL_LOOKBACK_DAYS * 86400000);
         const since = Number.isNaN(configuredStart.getTime()) ? fallbackStart : configuredStart;
-        uids = await client.search({ since });
+        uids = await client.search({ since }, { uid: true });
       }
       uids = (uids || []).map(Number).filter(Boolean).sort((a,b)=>a-b);
       total = uids.length;
@@ -909,6 +927,22 @@ async function scanAccount(supabase, account, adjustCredits = null, onProgress =
   } finally { try { await client.logout(); } catch (_) {} }
 }
 
+async function syncRecentServiceOrdersForBackground(supabase, accounts = []) {
+  try {
+    const since = new Date(Date.now() - 7 * 86400000).toISOString();
+    const r = await supabase.from('orders').select('user_id,created_at').gte('created_at', since)
+      .order('created_at',{ascending:false}).limit(2000);
+    if (r.error) throw r.error;
+    const userIds = [...new Set((r.data || []).map(x => x.user_id).filter(Boolean))].slice(0,100);
+    for (const userId of userIds) {
+      const userAccounts = accounts.filter(a => String(a.user_id) === String(userId));
+      try { await syncServiceOrders(supabase, userId, userAccounts); }
+      catch (err) { console.warn(`[ORDER TRACKER] Background order sync failed for ${userId}:`, err.message || err); }
+    }
+    if (userIds.length) console.log(`[ORDER TRACKER] Background synced tracked-order records for ${userIds.length} recent user(s).`);
+  } catch (err) { console.warn('[ORDER TRACKER] Background recent-order sync skipped:', err.message || err); }
+}
+
 let scanRunning = false;
 async function scanAll(supabase, userId = null, adjustCredits = null, onProgress = null, confirmPendingAmazonCheckout = null) {
   if (scanRunning && !userId) return { skipped: true };
@@ -916,6 +950,7 @@ async function scanAll(supabase, userId = null, adjustCredits = null, onProgress
   try {
     let accounts = await loadScanAccounts(supabase, userId);
     if (userId) await syncServiceOrders(supabase, userId, accounts);
+    else await syncRecentServiceOrdersForBackground(supabase, accounts);
     // Mailboxes referenced by pending checkouts are always scanned first so a 500-account
     // imported AYCD pool does not delay a fresh retailer confirmation behind the round-robin queue.
     let pendingEmails = new Set();
@@ -944,6 +979,7 @@ async function scanAll(supabase, userId = null, adjustCredits = null, onProgress
       if (regular.length && remainingSlots) backgroundAccountCursor = (start + remainingSlots) % regular.length;
     }
     const results = [];
+    console.log(`[ORDER TRACKER] ${userId ? 'User/manual' : 'Background'} IMAP cycle: ${accounts.length} mailbox(es), ${pendingEmails.size} pending-checkout email(s) prioritized.`);
     if (onProgress) onProgress({ phase: 'scanning', accountIndex: 0, accountTotal: accounts.length, checked: 0, total: 0 });
     for (let index = 0; index < accounts.length; index++) {
       const account = accounts[index];
@@ -1167,6 +1203,24 @@ async function scanAycdForUser(supabase, userId, adjustCredits = null, confirmPe
 }
 
 function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, confirmPendingAmazonCheckout }) {
+  checkoutScanRuntime = async (userId) => {
+    // A checkout webhook is the strongest signal that this user's mailbox should be checked now.
+    // First persist the webhook order into tracked_orders, then scan only this user's relevant mailboxes.
+    const accounts = await loadScanAccounts(supabase, userId);
+    await syncServiceOrders(supabase, userId, accounts);
+    // A fresh checkout must bypass the normal anti-thrash rescan window. Clear only this user's
+    // last-success timestamps; UID checkpoints remain intact, so only genuinely newer mail is fetched.
+    try { await supabase.from('imap_scan_accounts').update({ last_success_at:null }).eq('user_id', userId); } catch (_) {}
+    try { await supabase.from('imported_mail_accounts').update({ last_success_at:null }).eq('matched_user_id', userId).eq('is_enabled', true); } catch (_) {}
+    console.log(`[ORDER TRACKER] Checkout-triggered mailbox scan for user ${userId}; ${accounts.length} mailbox(es).`);
+    await scanAll(supabase, userId, adjustUserCredits, null, confirmPendingAmazonCheckout);
+    // Confirmation emails can arrive a little after the webhook. Schedule one quiet follow-up pass
+    // outside the minimum rescan interval so users do not have to open Order Tracker to cause it.
+    setTimeout(() => {
+      scanAll(supabase, userId, adjustUserCredits, null, confirmPendingAmazonCheckout)
+        .catch(err => console.error('[ORDER TRACKER] Follow-up checkout scan failed:', err.message || err));
+    }, Math.max(MIN_RESCAN_INTERVAL_MS + 5000, 150000));
+  };
 
   app.post('/admin/email-center/import-aycd-accounts', auth, async (req, res) => {
     if (req.role !== 'super_admin') return res.status(403).json({ error: 'Super admin only.' });
@@ -1269,6 +1323,36 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
       res.status(400).json({error:error.message});
     }
   });
+  app.post('/admin/email-center/imported-accounts/:id/rescan-history', auth, async (req, res) => {
+    if (req.role !== 'super_admin') return res.status(403).json({ error:'Super admin only.' });
+    try {
+      const { data:row, error } = await supabase.from('imported_mail_accounts').select('*')
+        .eq('id',req.params.id).eq('imported_by_user_id',req.user_id).maybeSingle();
+      if (error || !row) return res.status(404).json({ error:error?.message || 'Imported account not found.' });
+      const resetAt = new Date().toISOString();
+      const reset = await supabase.from('imported_mail_accounts').update({
+        folder_state:{}, last_scan_at:null, last_success_at:null, last_error:null, status:'ready', updated_at:resetAt
+      }).eq('id',row.id);
+      if (reset.error) throw reset.error;
+      // Also clear the legacy scan checkpoint for the same mailbox if one exists.
+      try {
+        await supabase.from('imap_scan_accounts').update({ last_seen_uid:0, last_scan_at:null, last_success_at:null, last_error:null })
+          .eq('email', lower(row.email));
+      } catch (_) {}
+      const provider = providerFromImportedRow(row);
+      if (provider) {
+        const account = { user_id:row.matched_user_id||row.imported_by_user_id, archive_user_id:row.imported_by_user_id,
+          profile_id:row.matched_profile_id||null, email:lower(row.email), provider, imported_account_id:row.id,
+          auth_method:lower(row.auth_method), refresh_token_enc:row.refresh_token_enc, client_id_enc:row.client_id_enc,
+          client_secret_enc:row.client_secret_enc, app_password_enc:row.app_password_enc, password_enc:row.password_enc,
+          folders:row.folders, folder_state:{}, ingestion_source:'aycd_import' };
+        Promise.resolve().then(() => scanImportedAccount(supabase, account, adjustUserCredits, null, confirmPendingAmazonCheckout))
+          .catch(err => console.error(`[DIRECT IMAP] History rescan failed ${row.email}:`, err.message || err));
+      }
+      res.status(202).json({ success:true, email:row.email, message:'Mailbox history checkpoint reset and rescan started.' });
+    } catch (error) { res.status(500).json({ error:error.message }); }
+  });
+
   app.post('/orders/imap-test', auth, async (req, res) => {
     const email = lower(req.body?.email);
     const provider = providerForEmail(email);
@@ -1340,73 +1424,49 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
 
 
   app.get('/orders/bootstrap', auth, async (req, res) => {
-    // Bootstrap must always return saved orders even when one optional mailbox table,
-    // legacy schema, or service-order synchronization step is temporarily unavailable.
+    // FAST READ-ONLY BOOTSTRAP: opening Order Tracker must never trigger mailbox scans or
+    // rebuild tracked orders. Background/webhook workers keep tracked_orders current.
     const warnings = [];
-    let discovered = [];
-    try {
-      discovered = await loadScanAccounts(supabase, req.user_id);
-    } catch (error) {
-      warnings.push(`Mailbox discovery: ${error.message}`);
-    }
-
-    try {
-      await syncServiceOrders(supabase, req.user_id, discovered);
-    } catch (error) {
-      warnings.push(`Order synchronization: ${error.message}`);
-    }
-
-    for (const account of discovered) {
-      try { await upsertScanState(supabase, account, { is_enabled: true }); } catch (_) {}
-    }
-
     let states = [];
     try {
-      const stateResult = await supabase.from('imap_scan_accounts').select('*').eq('user_id', req.user_id).order('email');
+      const stateResult = await supabase.from('imap_scan_accounts')
+        .select('email,provider,last_scan_at,last_success_at,last_error,scanned_through_at,is_enabled')
+        .eq('user_id', req.user_id).eq('is_enabled', true).order('email').limit(100);
       if (stateResult.error) warnings.push(`Mailbox status: ${stateResult.error.message}`);
       else states = stateResult.data || [];
-    } catch (error) {
-      warnings.push(`Mailbox status: ${error.message}`);
-    }
+    } catch (error) { warnings.push(`Mailbox status: ${error.message}`); }
 
-    const stateByEmail = new Map(states.map(row => [lower(row.email), row]));
-    const accounts = discovered.map(account => ({
-      ...(stateByEmail.get(account.email) || {}),
-      user_id: account.user_id,
-      profile_id: account.profile_id,
-      email: account.email,
-      provider: account.provider.name,
-      connected: true,
-      credential_ready: true
-    }));
-    for (const state of states) {
-      const email = lower(state.email);
-      if (!email || accounts.some(a => lower(a.email) === email)) continue;
-      accounts.push({ ...state, email, provider: state.provider || 'imap', connected: true, credential_ready: false });
-    }
+    let importedCount = 0;
+    try {
+      // Count only; do not send hundreds of imported credentials/status rows to the tracker page.
+      const r = await supabase.from('imported_mail_accounts').select('id', { count:'exact', head:true })
+        .eq('is_enabled', true).eq('is_placeholder', false)
+        .or(`matched_user_id.eq.${req.user_id},imported_by_user_id.eq.${req.user_id}`);
+      if (!r.error) importedCount = Number(r.count || 0);
+    } catch (_) {}
 
+    const accounts = states.map(state => ({ ...state, connected:true, credential_ready:true }));
     let orders = [];
     try {
-      let result = await supabase.from('tracked_orders').select('*, tracked_order_events(*)').eq('user_id', req.user_id).order('order_date', { ascending: false }).limit(1000);
-      if (result.error) {
-        // Some deployments do not expose the relationship in the PostgREST schema cache.
-        result = await supabase.from('tracked_orders').select('*').eq('user_id', req.user_id).order('order_date', { ascending: false }).limit(1000);
-      }
+      let result = await supabase.from('tracked_orders').select('*, tracked_order_events(*)')
+        .eq('user_id', req.user_id).order('order_date', { ascending:false }).limit(1000);
+      if (result.error) result = await supabase.from('tracked_orders').select('*')
+        .eq('user_id', req.user_id).order('order_date', { ascending:false }).limit(1000);
       if (result.error) throw result.error;
       orders = result.data || [];
-    } catch (error) {
-      warnings.push(`Tracked orders: ${error.message}`);
-    }
+    } catch (error) { warnings.push(`Tracked orders: ${error.message}`); }
 
     const summary = orders.reduce((a,o) => { a.total += Number(o.total || 0); a[o.status] = (a[o.status]||0)+1; return a; }, { total:0 });
     summary.success_rate = orders.length ? Math.round(((summary.delivered || 0) + (summary.shipped || 0)) / orders.length * 1000) / 10 : 0;
     return res.json({
       accounts,
-      connected_count: accounts.length,
+      connected_count: Math.max(states.length, importedCount),
       orders,
       summary,
       warnings,
       partial: warnings.length > 0,
+      background_scanning: process.env.IMAP_ORDER_TRACKER_ENABLED !== 'false',
+      scan_interval_ms: SCAN_INTERVAL_MS,
       aycd: { configured: req.role === 'super_admin', mode: 'local_unified_imap_bridge' },
       is_super_admin: req.role === 'super_admin'
     });
@@ -1732,20 +1792,28 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
   });
 
   app.get('/orders/tracked', auth, async (req, res) => {
-    const discovered = await loadScanAccounts(supabase, req.user_id);
-    await syncServiceOrders(supabase, req.user_id, discovered);
-    let q = supabase.from('tracked_orders').select('*, tracked_order_events(*)').eq('user_id', req.user_id).order('order_date', { ascending: false }).limit(1000);
+    // Read only. Email scanning and service-order synchronization happen in background workers.
+    let q = supabase.from('tracked_orders').select('*, tracked_order_events(*)')
+      .eq('user_id', req.user_id).order('order_date', { ascending:false }).limit(1000);
     if (req.query.status) q = q.eq('status', clean(req.query.status));
     if (req.query.year) {
-      const y = Number(req.query.year); q = q.gte('order_date', `${y}-01-01T00:00:00Z`).lt('order_date', `${y+1}-01-01T00:00:00Z`);
+      const y = Number(req.query.year);
+      q = q.gte('order_date', `${y}-01-01T00:00:00Z`).lt('order_date', `${y+1}-01-01T00:00:00Z`);
     }
-    const { data, error } = await q;
-    if (error) return res.status(500).json({ error: error.message });
+    let { data, error } = await q;
+    if (error && /relationship|schema cache/i.test(String(error.message || ''))) {
+      q = supabase.from('tracked_orders').select('*').eq('user_id', req.user_id).order('order_date', { ascending:false }).limit(1000);
+      if (req.query.status) q = q.eq('status', clean(req.query.status));
+      if (req.query.year) { const y=Number(req.query.year); q=q.gte('order_date',`${y}-01-01T00:00:00Z`).lt('order_date',`${y+1}-01-01T00:00:00Z`); }
+      ({data,error}=await q);
+    }
+    if (error) return res.status(500).json({ error:error.message });
     const orders = data || [];
-    const summary = orders.reduce((a,o) => { a.total += Number(o.total || 0); a[o.status] = (a[o.status]||0)+1; return a; }, { total:0 });
-    summary.success_rate = orders.length ? Math.round(((summary.delivered || 0) + (summary.shipped || 0)) / orders.length * 1000) / 10 : 0;
-    res.json({ orders, summary });
+    const summary = orders.reduce((a,o) => { a.total += Number(o.total || 0); a[o.status]=(a[o.status]||0)+1; return a; }, {total:0});
+    summary.success_rate = orders.length ? Math.round(((summary.delivered || 0)+(summary.shipped || 0))/orders.length*1000)/10 : 0;
+    res.json({ orders, summary, background_scanning: process.env.IMAP_ORDER_TRACKER_ENABLED !== 'false' });
   });
+
 
   app.patch('/orders/tracked/:id', auth, async (req, res) => {
     const allowed = ['status','credits_spent','product_summary','total','subtotal','tax','shipping','tracking_number','carrier'];
@@ -2002,4 +2070,4 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
   }
 }
 
-module.exports = { registerOrderTracker, scanAll };
+module.exports = { registerOrderTracker, scanAll, notifyCheckoutForOrderTracker };
