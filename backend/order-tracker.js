@@ -790,6 +790,23 @@ async function saveParsedMessage(supabase, account, parsed, uid, adjustCredits =
   return { saved: true, order_id: order.id, status };
 }
 
+function imapUidSet(values = []) {
+  return [...new Set((values || []).map(Number).filter(Number.isFinite).filter(v => v > 0))]
+    .sort((a, b) => a - b)
+    .join(',');
+}
+
+function describeImapError(err, mailboxName = '') {
+  const parts = [];
+  if (mailboxName) parts.push(`folder=${mailboxName}`);
+  if (err?.message) parts.push(`message=${err.message}`);
+  if (err?.responseText) parts.push(`response=${err.responseText}`);
+  if (err?.responseStatus) parts.push(`status=${err.responseStatus}`);
+  if (err?.code) parts.push(`code=${err.code}`);
+  if (err?.command) parts.push(`command=${err.command}`);
+  return parts.join(' | ') || String(err || 'Unknown IMAP error');
+}
+
 async function scanImportedAccount(supabase, account, adjustCredits = null, onProgress = null, confirmPendingAmazonCheckout = null) {
   const { data: row, error: rowError } = await supabase.from('imported_mail_accounts').select('*').eq('id', account.imported_account_id).maybeSingle();
   if (rowError || !row) throw rowError || new Error('Imported mailbox row no longer exists.');
@@ -804,6 +821,7 @@ async function scanImportedAccount(supabase, account, adjustCredits = null, onPr
     connectionTimeout:30000,greetingTimeout:30000,socketTimeout:120000
   });
   let checked=0,saved=0,total=0;
+  let activeMailbox = '';
   const folderState = row.folder_state && typeof row.folder_state === 'object' ? { ...row.folder_state } : {};
   const started = new Date().toISOString();
   try {
@@ -823,6 +841,7 @@ async function scanImportedAccount(supabase, account, adjustCredits = null, onPr
       }
     }
     for (const mailboxName of folders) {
+      activeMailbox = mailboxName;
       const lock=await client.getMailboxLock(mailboxName);
       try {
         const key=lower(mailboxName);
@@ -838,7 +857,13 @@ async function scanImportedAccount(supabase, account, adjustCredits = null, onPr
         console.log(`[DIRECT IMAP] ${account.email} folder=${mailboxName} checkpoint=${highestUid || 0} queued=${ids.length}`);
         total += ids.length;
         if(onProgress)onProgress({checked,total,saved,folder:mailboxName});
-        for await (const msg of client.fetch(ids,{uid:true,source:true,envelope:true})) {
+        const uidRange = imapUidSet(ids);
+        if (!uidRange) continue;
+        // search(..., { uid:true }) returns message UIDs. ImapFlow fetch() treats
+        // its range as sequence numbers unless uid:true is supplied in the
+        // THIRD options argument. Without this, Outlook commonly replies with
+        // a generic "Command failed" for perfectly valid UID values.
+        for await (const msg of client.fetch(uidRange,{uid:true,source:true,envelope:true},{uid:true})) {
           checked++; highestUid=Math.max(highestUid,Number(msg.uid||0));
           try{const parsed=await simpleParser(msg.source);const result=await saveParsedMessage(supabase,account,parsed,msg.uid,adjustCredits,confirmPendingAmazonCheckout);if(result.saved)saved++;}catch(e){console.error('Imported IMAP parse failed',account.email,mailboxName,msg.uid,e.message)}
           if(onProgress)onProgress({checked,total,saved,folder:mailboxName});
@@ -852,7 +877,7 @@ async function scanImportedAccount(supabase, account, adjustCredits = null, onPr
     console.log(`[DIRECT IMAP] COMPLETE ${account.email} checked=${checked} indexed=${saved} folders=${folders.length}`);
     return {checked,total,saved,folders:folders.length};
   } catch(err) {
-    console.error(`[DIRECT IMAP] FAILED ${account.email}:`, err.message || err);
+    console.error(`[DIRECT IMAP] FAILED ${account.email}: ${describeImapError(err, activeMailbox)}`);
     const now=new Date().toISOString();
     try{await supabase.from('imported_mail_accounts').update({last_scan_at:now,last_error:String(err.message||err).slice(0,1000),status:'error',updated_at:now}).eq('id',account.imported_account_id);}catch(_){}
     throw err;
@@ -907,7 +932,9 @@ async function scanAccount(supabase, account, adjustCredits = null, onProgress =
       const batch = uids.slice(0, MAX_MESSAGES_PER_SCAN);
       total = batch.length;
       if (onProgress) onProgress({ checked: 0, total, saved: 0 });
-      for await (const msg of client.fetch(batch, { uid: true, source: true, envelope: true })) {
+      const uidRange = imapUidSet(batch);
+      if (!uidRange) return { checked: 0, total: 0, saved: 0 };
+      for await (const msg of client.fetch(uidRange, { uid: true, source: true, envelope: true }, { uid: true })) {
         checked += 1;
         highestUid = Math.max(highestUid, Number(msg.uid || 0));
         try {
@@ -922,7 +949,8 @@ async function scanAccount(supabase, account, adjustCredits = null, onProgress =
     await upsertScanState(supabase, account, { last_scan_at: now, last_success_at: now, last_error: null, last_seen_uid: highestUid, is_enabled: true, scan_started_at: scanStartedAt, scanned_through_at: now, initial_scan_start_at: state.initial_scan_start_at || INITIAL_SCAN_START });
     return { checked, total, saved };
   } catch (err) {
-    await upsertScanState(supabase, account, { last_scan_at: new Date().toISOString(), last_error: String(err.message || err).slice(0, 1000), last_seen_uid: highestUid, scan_started_at: scanStartedAt });
+    console.error(`[DIRECT IMAP] FAILED ${account.email}: ${describeImapError(err, 'INBOX')}`);
+    await upsertScanState(supabase, account, { last_scan_at: new Date().toISOString(), last_error: describeImapError(err, 'INBOX').slice(0, 1000), last_seen_uid: highestUid, scan_started_at: scanStartedAt });
     throw err;
   } finally { try { await client.logout(); } catch (_) {} }
 }
