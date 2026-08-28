@@ -1,12 +1,13 @@
 const { ImapFlow } = require('imapflow');
 const { simpleParser } = require('mailparser');
 const crypto = require('crypto');
+const { encrypt, decrypt } = require('./encryption');
 
 const SCAN_INTERVAL_MS = Math.max(5 * 60 * 1000, Number(process.env.IMAP_SCAN_INTERVAL_MS || 15 * 60 * 1000));
 const INITIAL_LOOKBACK_DAYS = Math.max(7, Number(process.env.IMAP_INITIAL_LOOKBACK_DAYS || 365));
 const INITIAL_SCAN_START = process.env.IMAP_INITIAL_SCAN_START || '2026-01-01T00:00:00.000Z';
 const MAX_MESSAGES_PER_SCAN = Math.max(25, Number(process.env.IMAP_MAX_MESSAGES_PER_SCAN || 250));
-const MAX_ACCOUNTS_PER_CYCLE = Math.max(1, Number(process.env.IMAP_MAX_ACCOUNTS_PER_CYCLE || 25));
+const MAX_ACCOUNTS_PER_CYCLE = Math.max(1, Number(process.env.IMAP_MAX_ACCOUNTS_PER_CYCLE || 50));
 const MIN_RESCAN_INTERVAL_MS = Math.max(0, Number(process.env.IMAP_MIN_RESCAN_INTERVAL_MS || 2 * 60 * 1000));
 let backgroundAccountCursor = 0;
 const userScanJobs = new Map();
@@ -41,6 +42,187 @@ function providerForEmail(email) {
   if (['yahoo.com','ymail.com','rocketmail.com'].includes(domain)) return { name: 'yahoo', host: 'imap.mail.yahoo.com', port: 993, secure: true };
   if (['icloud.com','me.com','mac.com'].includes(domain)) return { name: 'icloud', host: 'imap.mail.me.com', port: 993, secure: true };
   return null;
+}
+
+function providerFromImportedRow(row = {}) {
+  const emailProvider = providerForEmail(row.email);
+  const rawProvider = lower(row.provider || row.provider_name || '');
+  const host = clean(row.imap_host || row.host || emailProvider?.host);
+  const port = Number(row.imap_port || row.port || emailProvider?.port || 993);
+  const secure = row.imap_secure == null ? (emailProvider?.secure !== false) : !!row.imap_secure;
+  let name = emailProvider?.name || rawProvider.replace(/[^a-z0-9]/g, '') || 'imap';
+  if (/outlook|hotmail|microsoft|live/.test(rawProvider)) name = 'outlook';
+  if (/gmail|google/.test(rawProvider)) name = 'gmail';
+  if (/yahoo/.test(rawProvider)) name = 'yahoo';
+  if (/icloud|apple/.test(rawProvider)) name = 'icloud';
+  if (!host) return null;
+  return { name, host, port, secure };
+}
+
+function decryptQuiet(value) {
+  try { return value ? decrypt(value) : ''; } catch (_) { return ''; }
+}
+
+function parseCsvRecords(text) {
+  const rows = [];
+  let row = [], field = '', quoted = false;
+  const input = String(text || '').replace(/^\uFEFF/, '');
+  for (let i = 0; i < input.length; i++) {
+    const ch = input[i];
+    if (quoted) {
+      if (ch === '"' && input[i + 1] === '"') { field += '"'; i++; }
+      else if (ch === '"') quoted = false;
+      else field += ch;
+    } else {
+      if (ch === '"') quoted = true;
+      else if (ch === ',') { row.push(field); field = ''; }
+      else if (ch === '\n') { row.push(field.replace(/\r$/, '')); rows.push(row); row = []; field = ''; }
+      else field += ch;
+    }
+  }
+  if (field.length || row.length) { row.push(field.replace(/\r$/, '')); rows.push(row); }
+  if (!rows.length) return [];
+  const headers = rows.shift().map(h => clean(h));
+  return rows.filter(r => r.some(v => clean(v))).map(values => {
+    const obj = {};
+    headers.forEach((h, i) => { obj[h] = values[i] == null ? '' : values[i]; });
+    return obj;
+  });
+}
+
+async function fetchAllSupabaseRows(queryFactory, pageSize = 1000) {
+  const out = [];
+  for (let from = 0; ; from += pageSize) {
+    const r = await queryFactory().range(from, from + pageSize - 1);
+    if (r.error) throw r.error;
+    const batch = r.data || [];
+    out.push(...batch);
+    if (batch.length < pageSize) break;
+  }
+  return out;
+}
+
+async function buildMailboxOwnerMap(supabase) {
+  const profiles = await fetchAllSupabaseRows(() => supabase.from('profiles').select('id,user_id'));
+  const pmap = new Map(profiles.map(p => [String(p.id), p]));
+  const emailMap = new Map();
+  const add = (profileId, value) => {
+    const email = lower(value);
+    const profile = pmap.get(String(profileId));
+    if (!email || !profile) return;
+    const current = emailMap.get(email) || { profileIds: new Set(), userIds: new Set() };
+    current.profileIds.add(String(profile.id)); current.userIds.add(String(profile.user_id));
+    emailMap.set(email, current);
+  };
+  try {
+    const rows = await fetchAllSupabaseRows(() => supabase.from('profile_store_credentials').select('profile_id,login_email'));
+    for (const row of rows) add(row.profile_id, row.login_email);
+  } catch (_) {}
+  try {
+    const rows = await fetchAllSupabaseRows(() => supabase.from('accounts').select('profile_id,login_email'));
+    for (const row of rows) add(row.profile_id, row.login_email);
+  } catch (_) {}
+  const out = new Map();
+  for (const [email, value] of emailMap.entries()) {
+    const userIds = [...value.userIds], profileIds = [...value.profileIds];
+    out.set(email, userIds.length === 1
+      ? { match_status: 'matched', matched_user_id: userIds[0], matched_profile_id: profileIds.length === 1 ? profileIds[0] : null }
+      : { match_status: userIds.length > 1 ? 'ambiguous' : 'unmatched', matched_user_id: null, matched_profile_id: null });
+  }
+  return out;
+}
+
+async function refreshImportedMailboxMatches(supabase, importedByUserId = null) {
+  const ownerMap = await buildMailboxOwnerMap(supabase);
+  let q = supabase.from('imported_mail_accounts').select('id,email,imported_by_user_id');
+  if (importedByUserId) q = q.eq('imported_by_user_id', importedByUserId);
+  const { data, error } = await q;
+  if (error) throw error;
+  let matched = 0, ambiguous = 0, unmatched = 0;
+  for (const row of data || []) {
+    const match = ownerMap.get(lower(row.email)) || { match_status: 'unmatched', matched_user_id: null, matched_profile_id: null };
+    if (match.match_status === 'matched') matched++; else if (match.match_status === 'ambiguous') ambiguous++; else unmatched++;
+    await supabase.from('imported_mail_accounts').update({ ...match, updated_at: new Date().toISOString() }).eq('id', row.id);
+  }
+  return { matched, ambiguous, unmatched, total: (data || []).length };
+}
+
+async function refreshImportedAccessToken(supabase, account) {
+  const refreshToken = decryptQuiet(account.refresh_token_enc);
+  const clientId = decryptQuiet(account.client_id_enc);
+  const clientSecret = decryptQuiet(account.client_secret_enc);
+  if (!refreshToken || !clientId) throw new Error('OAuth refresh token or client ID is missing.');
+  const provider = lower(account.provider?.name);
+  let url = '', params = null;
+  if (provider === 'outlook') {
+    url = 'https://login.microsoftonline.com/common/oauth2/v2.0/token';
+    params = new URLSearchParams({
+      client_id: clientId,
+      grant_type: 'refresh_token',
+      refresh_token: refreshToken,
+      scope: 'https://outlook.office.com/IMAP.AccessAsUser.All offline_access'
+    });
+    if (clientSecret) params.set('client_secret', clientSecret);
+  } else if (provider === 'gmail') {
+    url = 'https://oauth2.googleapis.com/token';
+    params = new URLSearchParams({ client_id: clientId, grant_type: 'refresh_token', refresh_token: refreshToken });
+    if (clientSecret) params.set('client_secret', clientSecret);
+  } else {
+    throw new Error(`OAuth refresh is not supported yet for ${provider || 'this provider'}.`);
+  }
+  const response = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: params });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok || !payload.access_token) throw new Error(clean(payload.error_description || payload.error || `OAuth refresh failed (${response.status})`));
+  const patch = {
+    status: 'connected', last_error: null, last_test_at: new Date().toISOString(), updated_at: new Date().toISOString()
+  };
+  if (payload.refresh_token && payload.refresh_token !== refreshToken) patch.refresh_token_enc = encrypt(payload.refresh_token);
+  if (account.imported_account_id) await supabase.from('imported_mail_accounts').update(patch).eq('id', account.imported_account_id);
+  return payload.access_token;
+}
+
+async function imapAuthForAccount(supabase, account) {
+  if (account.imported_account_id && account.auth_method === 'oauth2') {
+    const accessToken = await refreshImportedAccessToken(supabase, account);
+    return { user: account.email, accessToken };
+  }
+  const pass = account.password || decryptQuiet(account.app_password_enc) || decryptQuiet(account.password_enc);
+  if (!pass) throw new Error('No usable mailbox credential is available.');
+  return { user: account.email, pass: normalizeMailboxPassword(pass, account.provider?.name) };
+}
+
+async function loadImportedScanAccounts(supabase, onlyUserId = null) {
+  let q = supabase.from('imported_mail_accounts').select('*').eq('is_enabled', true).eq('is_placeholder', false);
+  if (onlyUserId) q = q.or(`imported_by_user_id.eq.${onlyUserId},matched_user_id.eq.${onlyUserId}`);
+  const { data, error } = await q.order('last_scan_at', { ascending: true, nullsFirst: true });
+  if (error) {
+    if (/imported_mail_accounts|relation .* does not exist|schema cache/i.test(String(error.message || ''))) return [];
+    throw error;
+  }
+  const out = [];
+  for (const row of data || []) {
+    const provider = providerFromImportedRow(row);
+    if (!provider) continue;
+    const effectiveUserId = row.matched_user_id || row.imported_by_user_id;
+    out.push({
+      user_id: effectiveUserId,
+      archive_user_id: row.imported_by_user_id,
+      profile_id: row.matched_profile_id || null,
+      email: lower(row.email),
+      provider,
+      ingestion_source: 'aycd_import',
+      imported_account_id: row.id,
+      auth_method: lower(row.auth_method),
+      refresh_token_enc: row.refresh_token_enc,
+      client_id_enc: row.client_id_enc,
+      client_secret_enc: row.client_secret_enc,
+      app_password_enc: row.app_password_enc,
+      password_enc: row.password_enc,
+      folders: row.folders,
+      folder_state: row.folder_state || {}
+    });
+  }
+  return out;
 }
 
 function detectStore(from, subject, text) {
@@ -346,7 +528,6 @@ async function loadScanAccounts(supabase, onlyUserId = null) {
     ...(profiles || []).map(p => p.id),
     ...verifiedStates.map(row => row.profile_id).filter(Boolean)
   ])];
-  if (!ids.length) return [];
 
   const pmap = new Map((profiles || []).map(p => [String(p.id), p]));
   for (const state of verifiedStates) {
@@ -436,14 +617,29 @@ async function loadScanAccounts(supabase, onlyUserId = null) {
     }
   }
 
+  const imported = await loadImportedScanAccounts(supabase, onlyUserId);
+  for (const account of imported) {
+    const key = `${account.user_id}:${account.email}`;
+    if (!byKey.has(key)) byKey.set(key, account);
+  }
   return [...byKey.values()];
 }
 
 async function upsertScanState(supabase, account, patch) {
+  const stateUserId = account.archive_user_id || account.user_id;
   await supabase.from('imap_scan_accounts').upsert({
-    user_id: account.user_id, profile_id: account.profile_id, email: account.email,
+    user_id: stateUserId, profile_id: account.profile_id, email: account.email,
     provider: account.provider.name, updated_at: new Date().toISOString(), ...patch
   }, { onConflict: 'user_id,email' });
+  if (account.imported_account_id) {
+    const importedPatch = { updated_at: new Date().toISOString() };
+    if (Object.prototype.hasOwnProperty.call(patch, 'last_scan_at')) importedPatch.last_scan_at = patch.last_scan_at;
+    if (Object.prototype.hasOwnProperty.call(patch, 'last_success_at')) importedPatch.last_success_at = patch.last_success_at;
+    if (Object.prototype.hasOwnProperty.call(patch, 'last_seen_uid')) importedPatch.last_seen_uid = patch.last_seen_uid;
+    if (Object.prototype.hasOwnProperty.call(patch, 'last_error')) importedPatch.last_error = patch.last_error;
+    importedPatch.status = patch.last_error ? 'error' : (patch.last_success_at ? 'connected' : 'ready');
+    try { await supabase.from('imported_mail_accounts').update(importedPatch).eq('id', account.imported_account_id); } catch (_) {}
+  }
 }
 
 
@@ -460,10 +656,10 @@ async function archiveEmailMetadata(supabase, account, parsed, uid, classificati
   const receivedAt = (parsed.date || new Date()).toISOString();
   const keepForever = ['confirmed','processing','shipped','delivered','canceled','refunded'].includes(emailType);
   const row = {
-    user_id: account.user_id, message_id: messageId, imap_uid: Number(uid || 0) || null,
+    user_id: account.archive_user_id || account.user_id, message_id: messageId, imap_uid: Number(uid || 0) || null,
     mailbox_email: lower(account.email), from_text: fromText.slice(0,1000), to_text: toText.slice(0,2000), cc_text: ccText.slice(0,2000),
     subject: subject.slice(0,1000), received_at: receivedAt, store, email_type: emailType, order_number: orderNumber,
-    source_type: account.ingestion_source === 'aycd' || String(account.provider?.name || '').startsWith('aycd') ? 'aycd' : 'direct_imap',
+    source_type: account.ingestion_source || (String(account.provider?.name || '').startsWith('aycd') ? 'aycd' : 'direct_imap'),
     snippet: bodyText.replace(/\s+/g,' ').slice(0,600), keep_forever: keepForever, is_order_related: keepForever,
     has_attachments: Array.isArray(parsed.attachments) && parsed.attachments.length > 0, attachment_count: Array.isArray(parsed.attachments) ? parsed.attachments.length : 0,
     updated_at: new Date().toISOString()
@@ -580,8 +776,75 @@ async function saveParsedMessage(supabase, account, parsed, uid, adjustCredits =
   return { saved: true, order_id: order.id, status };
 }
 
+async function scanImportedAccount(supabase, account, adjustCredits = null, onProgress = null, confirmPendingAmazonCheckout = null) {
+  const { data: row, error: rowError } = await supabase.from('imported_mail_accounts').select('*').eq('id', account.imported_account_id).maybeSingle();
+  if (rowError || !row) throw rowError || new Error('Imported mailbox row no longer exists.');
+  const lastSuccessMs = row.last_success_at ? new Date(row.last_success_at).getTime() : 0;
+  if (MIN_RESCAN_INTERVAL_MS > 0 && lastSuccessMs && Date.now() - lastSuccessMs < MIN_RESCAN_INTERVAL_MS) {
+    if (onProgress) onProgress({ checked:0,total:0,saved:0,skippedRecent:true });
+    return { checked:0,total:0,saved:0,skipped_recent:true };
+  }
+  const client = new ImapFlow({
+    host:account.provider.host,port:account.provider.port,secure:account.provider.secure,
+    auth:await imapAuthForAccount(supabase,account),logger:false,
+    connectionTimeout:30000,greetingTimeout:30000,socketTimeout:120000
+  });
+  let checked=0,saved=0,total=0;
+  const folderState = row.folder_state && typeof row.folder_state === 'object' ? { ...row.folder_state } : {};
+  const started = new Date().toISOString();
+  try {
+    await client.connect();
+    let boxes=[]; try{boxes=await client.list();}catch(_){}
+    const requested = new Set(String(row.folders || 'Inbox').split(',').map(v=>lower(v)).filter(Boolean));
+    const folders=[];
+    const addFolder = name => { if(name && !folders.includes(name)) folders.push(name); };
+    if (account.provider.name === 'gmail') {
+      addFolder(boxes.find(b=>b.specialUse==='\\All')?.path || 'INBOX');
+    } else {
+      addFolder(boxes.find(b=>lower(b.path)==='inbox')?.path || 'INBOX');
+      if ([...requested].some(v=>/junk|spam/.test(v))) {
+        const junk=boxes.find(b=>b.specialUse==='\\Junk') || boxes.find(b=>/junk|spam/i.test(String(b.path||b.name||'')));
+        if(junk?.path)addFolder(junk.path);
+      }
+    }
+    for (const mailboxName of folders) {
+      const lock=await client.getMailboxLock(mailboxName);
+      try {
+        const key=lower(mailboxName);
+        const prior=folderState[key]||{};
+        let highestUid=Number(prior.last_seen_uid||0);
+        let ids=[];
+        if(highestUid>0) ids=await client.search({uid:`${highestUid+1}:*`});
+        else {
+          const configuredStart=new Date(INITIAL_SCAN_START);const fallbackStart=new Date(Date.now()-INITIAL_LOOKBACK_DAYS*86400000);
+          ids=await client.search({since:Number.isNaN(configuredStart.getTime())?fallbackStart:configuredStart});
+        }
+        ids=(ids||[]).map(Number).filter(Boolean).sort((a,b)=>a-b).slice(0,MAX_MESSAGES_PER_SCAN);
+        total += ids.length;
+        if(onProgress)onProgress({checked,total,saved,folder:mailboxName});
+        for await (const msg of client.fetch(ids,{uid:true,source:true,envelope:true})) {
+          checked++; highestUid=Math.max(highestUid,Number(msg.uid||0));
+          try{const parsed=await simpleParser(msg.source);const result=await saveParsedMessage(supabase,account,parsed,msg.uid,adjustCredits,confirmPendingAmazonCheckout);if(result.saved)saved++;}catch(e){console.error('Imported IMAP parse failed',account.email,mailboxName,msg.uid,e.message)}
+          if(onProgress)onProgress({checked,total,saved,folder:mailboxName});
+        }
+        folderState[key]={last_seen_uid:highestUid,updated_at:new Date().toISOString()};
+      } finally {lock.release();}
+    }
+    const now=new Date().toISOString();
+    await supabase.from('imported_mail_accounts').update({folder_state:folderState,last_scan_at:now,last_success_at:now,last_error:null,status:'connected',updated_at:now}).eq('id',account.imported_account_id);
+    await upsertScanState(supabase,account,{last_scan_at:now,last_success_at:now,last_error:null,is_enabled:true,scan_started_at:started,scanned_through_at:now,initial_scan_start_at:INITIAL_SCAN_START});
+    return {checked,total,saved,folders:folders.length};
+  } catch(err) {
+    const now=new Date().toISOString();
+    try{await supabase.from('imported_mail_accounts').update({last_scan_at:now,last_error:String(err.message||err).slice(0,1000),status:'error',updated_at:now}).eq('id',account.imported_account_id);}catch(_){}
+    throw err;
+  } finally {try{await client.logout();}catch(_){}}
+}
+
 async function scanAccount(supabase, account, adjustCredits = null, onProgress = null, confirmPendingAmazonCheckout = null) {
-  const stateResp = await supabase.from('imap_scan_accounts').select('*').eq('user_id', account.user_id).eq('email', account.email).maybeSingle();
+  if (account.imported_account_id) return scanImportedAccount(supabase, account, adjustCredits, onProgress, confirmPendingAmazonCheckout);
+  const stateOwnerId = account.archive_user_id || account.user_id;
+  const stateResp = await supabase.from('imap_scan_accounts').select('*').eq('user_id', stateOwnerId).eq('email', account.email).maybeSingle();
   const state = stateResp.data || {};
   const lastSuccessMs = state.last_success_at ? new Date(state.last_success_at).getTime() : 0;
   if (MIN_RESCAN_INTERVAL_MS > 0 && lastSuccessMs && Date.now() - lastSuccessMs < MIN_RESCAN_INTERVAL_MS) {
@@ -590,7 +853,7 @@ async function scanAccount(supabase, account, adjustCredits = null, onProgress =
   }
   const client = new ImapFlow({
     host: account.provider.host, port: account.provider.port, secure: account.provider.secure,
-    auth: { user: account.email, pass: account.password }, logger: false,
+    auth: await imapAuthForAccount(supabase, account), logger: false,
     connectionTimeout: 30000, greetingTimeout: 30000, socketTimeout: 120000
   });
   let saved = 0, checked = 0, highestUid = Number(state.last_seen_uid || 0), total = 0;
@@ -653,10 +916,32 @@ async function scanAll(supabase, userId = null, adjustCredits = null, onProgress
   try {
     let accounts = await loadScanAccounts(supabase, userId);
     if (userId) await syncServiceOrders(supabase, userId, accounts);
+    // Mailboxes referenced by pending checkouts are always scanned first so a 500-account
+    // imported AYCD pool does not delay a fresh retailer confirmation behind the round-robin queue.
+    let pendingEmails = new Set();
+    try {
+      let oq = supabase.from('orders').select('raw_payload,metadata,status,created_at').order('created_at',{ascending:false}).limit(2000);
+      if (userId) oq = oq.eq('user_id', userId);
+      const or = await oq;
+      if (!or.error) {
+        for (const order of or.data || []) {
+          const status = lower(order.status || order.metadata?.confirmation_status);
+          if (['delivered','canceled','refunded'].includes(status)) continue;
+          for (const email of findEmailValues(order.raw_payload || {})) pendingEmails.add(email);
+          for (const email of findEmailValues(order.metadata || {})) pendingEmails.add(email);
+        }
+      }
+    } catch (_) {}
+    accounts.sort((a,b) => Number(pendingEmails.has(b.email)) - Number(pendingEmails.has(a.email)));
     if (!userId && accounts.length > MAX_ACCOUNTS_PER_CYCLE) {
-      const start = backgroundAccountCursor % accounts.length;
-      accounts = [...accounts.slice(start), ...accounts.slice(0, start)].slice(0, MAX_ACCOUNTS_PER_CYCLE);
-      backgroundAccountCursor = (start + accounts.length) % Math.max(1, (await loadScanAccounts(supabase, null)).length);
+      const priority = accounts.filter(a => pendingEmails.has(a.email));
+      const regular = accounts.filter(a => !pendingEmails.has(a.email));
+      const prioritySlice = priority.slice(0, MAX_ACCOUNTS_PER_CYCLE);
+      const remainingSlots = Math.max(0, MAX_ACCOUNTS_PER_CYCLE - prioritySlice.length);
+      const start = regular.length ? backgroundAccountCursor % regular.length : 0;
+      const rotated = regular.length ? [...regular.slice(start), ...regular.slice(0,start)] : [];
+      accounts = [...prioritySlice, ...rotated.slice(0, remainingSlots)];
+      if (regular.length && remainingSlots) backgroundAccountCursor = (start + remainingSlots) % regular.length;
     }
     const results = [];
     if (onProgress) onProgress({ phase: 'scanning', accountIndex: 0, accountTotal: accounts.length, checked: 0, total: 0 });
@@ -882,6 +1167,108 @@ async function scanAycdForUser(supabase, userId, adjustCredits = null, confirmPe
 }
 
 function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, confirmPendingAmazonCheckout }) {
+
+  app.post('/admin/email-center/import-aycd-accounts', auth, async (req, res) => {
+    if (req.role !== 'super_admin') return res.status(403).json({ error: 'Super admin only.' });
+    try {
+      const csvText = String(req.body?.csv || '');
+      if (!csvText.trim()) return res.status(400).json({ error: 'Choose an AYCD CSV export first.' });
+      if (Buffer.byteLength(csvText, 'utf8') > 8 * 1024 * 1024) return res.status(413).json({ error: 'CSV is too large for a single import.' });
+      const records = parseCsvRecords(csvText);
+      if (!records.length) return res.status(400).json({ error: 'No account rows were found in the CSV.' });
+      const ownerMap = await buildMailboxOwnerMap(supabase);
+      let imported = 0, ready = 0, placeholders = 0, matched = 0, ambiguous = 0, unsupported = 0;
+      const errors = [];
+      for (const record of records) {
+        const email = lower(record.Username || record.Email || record.email);
+        if (!email || !email.includes('@')) continue;
+        const provider = clean(record.Provider || providerForEmail(email)?.name || '');
+        const inferred = providerForEmail(email);
+        const rawHost = clean(record.Host || inferred?.host || '');
+        const rawPort = Number(record.Port || inferred?.port || 993) || 993;
+        const rawSecure = record['Requires SSL'] === '' ? (inferred?.secure !== false) : !/^(false|0|no)$/i.test(clean(record['Requires SSL']));
+        const refreshToken = clean(record['OAuth2 Refresh Token']);
+        const clientId = clean(record['OAuth2 Client ID']);
+        const clientSecret = clean(record['OAuth2 Client Secret']);
+        const appPassword = clean(record['App Password']);
+        const password = clean(record.Password);
+        const loginType = clean(record['Login Type'] || record['IMAP Auth Method']);
+        let authMethod = refreshToken && clientId ? 'oauth2' : (appPassword ? 'app_password' : (password ? 'password' : 'unsupported'));
+        const p = lower(provider);
+        // Outlook/Hotmail basic auth is no longer a dependable server-side path. Do not mark
+        // a password-only Microsoft row ready; keep it visible as unsupported until OAuth exists.
+        if (/outlook|hotmail|microsoft|live/.test(p) && authMethod === 'password') authMethod = 'unsupported';
+        const isPlaceholder = authMethod === 'unsupported';
+        const match = ownerMap.get(email) || { match_status:'unmatched', matched_user_id:null, matched_profile_id:null };
+        const row = {
+          imported_by_user_id: req.user_id,
+          email, provider, category: clean(record.Category),
+          imap_host: rawHost || null, imap_port: rawPort, imap_secure: rawSecure,
+          folders: clean(record.Folders) || null, login_type: loginType || null, auth_method: authMethod,
+          password_enc: password ? encrypt(password) : null,
+          app_password_enc: appPassword ? encrypt(appPassword) : null,
+          refresh_token_enc: refreshToken ? encrypt(refreshToken) : null,
+          client_id_enc: clientId ? encrypt(clientId) : null,
+          client_secret_enc: clientSecret ? encrypt(clientSecret) : null,
+          mail_proxy_enc: clean(record['Mail Proxy']) ? encrypt(clean(record['Mail Proxy'])) : null,
+          browser_proxy_enc: clean(record['Browser Proxy']) ? encrypt(clean(record['Browser Proxy'])) : null,
+          is_enabled: !isPlaceholder, is_placeholder: isPlaceholder,
+          status: isPlaceholder ? 'placeholder' : 'ready', last_error: null,
+          matched_user_id: match.matched_user_id, matched_profile_id: match.matched_profile_id, match_status: match.match_status,
+          updated_at: new Date().toISOString()
+        };
+        const result = await supabase.from('imported_mail_accounts').upsert(row, { onConflict:'imported_by_user_id,email' });
+        if (result.error) { errors.push(`${email}: ${result.error.message}`); continue; }
+        imported++; if (isPlaceholder) placeholders++; else ready++;
+        if (match.match_status === 'matched') matched++; else if (match.match_status === 'ambiguous') ambiguous++;
+        if (authMethod === 'unsupported') unsupported++;
+      }
+      res.json({ success:true, imported, ready, placeholders, matched, ambiguous, unsupported, errors:errors.slice(0,25), message:`Imported ${imported} AYCD account rows. ${ready} are ready for direct scanning.` });
+    } catch (error) { res.status(500).json({ error:error.message }); }
+  });
+
+  app.get('/admin/email-center/imported-accounts', auth, async (req, res) => {
+    if (req.role !== 'super_admin') return res.status(403).json({ error: 'Super admin only.' });
+    const { data, error } = await supabase.from('imported_mail_accounts')
+      .select('id,email,provider,category,auth_method,is_enabled,is_placeholder,status,last_error,last_test_at,last_scan_at,last_success_at,match_status,matched_user_id,matched_profile_id,created_at,updated_at')
+      .eq('imported_by_user_id', req.user_id).order('email');
+    if (error) return res.status(500).json({ error:error.message });
+    const rows = data || [];
+    const summary = rows.reduce((a,r) => { a.total++; a[r.status || 'unknown']=(a[r.status || 'unknown']||0)+1; if(r.is_enabled)a.enabled++; if(r.match_status==='matched')a.matched++; if(r.match_status==='ambiguous')a.ambiguous++; return a; }, {total:0,enabled:0,matched:0,ambiguous:0});
+    res.json({ accounts:rows, summary });
+  });
+
+  app.post('/admin/email-center/imported-accounts/rematch', auth, async (req, res) => {
+    if (req.role !== 'super_admin') return res.status(403).json({ error: 'Super admin only.' });
+    try { res.json({ success:true, ...(await refreshImportedMailboxMatches(supabase, req.user_id)) }); }
+    catch (error) { res.status(500).json({ error:error.message }); }
+  });
+
+  app.patch('/admin/email-center/imported-accounts/:id', auth, async (req, res) => {
+    if (req.role !== 'super_admin') return res.status(403).json({ error: 'Super admin only.' });
+    const patch = { updated_at:new Date().toISOString() };
+    if (Object.prototype.hasOwnProperty.call(req.body || {}, 'is_enabled')) patch.is_enabled = !!req.body.is_enabled;
+    const { data, error } = await supabase.from('imported_mail_accounts').update(patch).eq('id',req.params.id).eq('imported_by_user_id',req.user_id).select('id,email,is_enabled,status').maybeSingle();
+    if (error) return res.status(500).json({error:error.message});
+    res.json({success:true,account:data});
+  });
+
+  app.post('/admin/email-center/imported-accounts/:id/test', auth, async (req, res) => {
+    if (req.role !== 'super_admin') return res.status(403).json({ error: 'Super admin only.' });
+    try {
+      const { data:row, error } = await supabase.from('imported_mail_accounts').select('*').eq('id',req.params.id).eq('imported_by_user_id',req.user_id).maybeSingle();
+      if (error || !row) return res.status(404).json({error:error?.message || 'Imported account not found.'});
+      const provider = providerFromImportedRow(row); if(!provider) return res.status(400).json({error:'No supported IMAP host is available for this row.'});
+      const account = { user_id:row.matched_user_id||row.imported_by_user_id, archive_user_id:row.imported_by_user_id, profile_id:row.matched_profile_id||null, email:lower(row.email), provider, imported_account_id:row.id, auth_method:lower(row.auth_method), refresh_token_enc:row.refresh_token_enc, client_id_enc:row.client_id_enc, client_secret_enc:row.client_secret_enc, app_password_enc:row.app_password_enc, password_enc:row.password_enc, ingestion_source:'aycd_import' };
+      const client = new ImapFlow({ host:provider.host,port:provider.port,secure:provider.secure,auth:await imapAuthForAccount(supabase,account),logger:false,connectionTimeout:20000,greetingTimeout:20000,socketTimeout:30000 });
+      await client.connect(); const lock=await client.getMailboxLock('INBOX'); let messages=0; try{messages=Number(client.mailbox?.exists||0);}finally{lock.release();} await client.logout();
+      await supabase.from('imported_mail_accounts').update({status:'connected',last_error:null,last_test_at:new Date().toISOString(),updated_at:new Date().toISOString()}).eq('id',row.id);
+      res.json({success:true,email:row.email,provider:provider.name,messages});
+    } catch (error) {
+      try { await supabase.from('imported_mail_accounts').update({status:'error',last_error:String(error.message||error).slice(0,1000),last_test_at:new Date().toISOString(),updated_at:new Date().toISOString()}).eq('id',req.params.id).eq('imported_by_user_id',req.user_id); } catch (_) {}
+      res.status(400).json({error:error.message});
+    }
+  });
   app.post('/orders/imap-test', auth, async (req, res) => {
     const email = lower(req.body?.email);
     const provider = providerForEmail(email);
