@@ -4081,9 +4081,20 @@ function classifyCheckoutWebhookType(order) {
 
 async function sendCheckoutDiscordNotifications(order, user, options = {}) {
     const results = [];
-    const userEmail = String(user?.email || '');
-    const userSettings = user?.id ? await getUserSettings(user.id) : {};
-    const discordHandle = normalizeDiscordUserId(user?.discord_user_id || userSettings?.discord_user_id || '');
+
+    // Always hydrate the matched user from the users table before deciding Discord
+    // destinations. Some webhook matching paths can carry a partial user object.
+    // owner_admin_id is authoritative for routing a normal user's checkout to the
+    // admin group that owns that user.
+    let routingUser = user || null;
+    if (user?.id) {
+        const freshUser = await getUserById(user.id).catch(() => null);
+        if (freshUser?.id) routingUser = freshUser;
+    }
+
+    const userEmail = String(routingUser?.email || user?.email || '');
+    const userSettings = routingUser?.id ? await getUserSettings(routingUser.id) : {};
+    const discordHandle = normalizeDiscordUserId(routingUser?.discord_user_id || userSettings?.discord_user_id || '');
 
     const checkoutType = classifyCheckoutWebhookType(order);
     const globalSettings = await getAppSetting('webhook_settings', {});
@@ -4124,26 +4135,49 @@ async function sendCheckoutDiscordNotifications(order, user, options = {}) {
     // - top-level admins send their own personal checkouts to their own admin webhook.
     // - admins that still belong under another admin keep their personal checkouts under that owner admin.
     //   Their own admin webhook is used for users they invite/create, not for their original personal account.
-    if (includePublicAndAdmin && user?.role === 'admin' && user?.id && !user?.owner_admin_id) {
-        const adminSettings = await getAdminWebhookSettings(user.id);
-        const adminRoute = await getWebhookRouteFromDb({ scope: 'admin', userId: user.id, webhookType: checkoutType === 'error' ? 'checkout_error' : 'checkout_success', category: 'all' }).catch(() => null);
+    if (includePublicAndAdmin && routingUser?.role === 'admin' && routingUser?.id && !routingUser?.owner_admin_id) {
+        const adminSettings = await getAdminWebhookSettings(routingUser.id);
+        const adminRoute = await getWebhookRouteFromDb({ scope: 'admin', userId: routingUser.id, webhookType: checkoutType === 'error' ? 'checkout_error' : 'checkout_success', category: 'all' }).catch(() => null);
         const adminWebhookUrl = String((adminRoute?.webhook_url || (checkoutType === 'error' ? adminSettings?.checkout_error_webhook_url : adminSettings?.discord_webhook_url)) || '').trim();
         const brandLabel = String(adminSettings?.brand_label || '').trim();
-        addDestination('owner_admin', adminWebhookUrl, { admin_user_id: user.id, brandLabel, username: brandLabel || 'The Shore Shack' });
+        addDestination('owner_admin', adminWebhookUrl, { admin_user_id: routingUser.id, brandLabel, username: brandLabel || 'The Shore Shack' });
     }
 
-    if (includePublicAndAdmin && user?.owner_admin_id) {
-        const adminSettings = await getAdminWebhookSettings(user.owner_admin_id);
-        const adminRoute = await getWebhookRouteFromDb({ scope: 'admin', userId: user.owner_admin_id, webhookType: checkoutType === 'error' ? 'checkout_error' : 'checkout_success', category: 'all' }).catch(() => null);
-        const adminWebhookUrl = String((adminRoute?.webhook_url || (checkoutType === 'error' ? adminSettings?.checkout_error_webhook_url : adminSettings?.discord_webhook_url)) || '').trim();
-        const brandLabel = String(adminSettings?.brand_label || '').trim();
-        addDestination('owner_admin', adminWebhookUrl, { admin_user_id: user.owner_admin_id, brandLabel, username: brandLabel || 'The Shore Shack' });
+    if (includePublicAndAdmin && routingUser?.owner_admin_id) {
+        const ownerAdminId = routingUser.owner_admin_id;
+
+        // First preserve the owning admin's own configured checkout destination.
+        const ownerSettings = await getAdminWebhookSettings(ownerAdminId).catch(() => ({}));
+        const ownerRoute = await getWebhookRouteFromDb({ scope: 'admin', userId: ownerAdminId, webhookType: checkoutType === 'error' ? 'checkout_error' : 'checkout_success', category: 'all' }).catch(() => null);
+        const ownerWebhookUrl = String((ownerRoute?.webhook_url || (checkoutType === 'error' ? ownerSettings?.checkout_error_webhook_url : ownerSettings?.discord_webhook_url)) || '').trim();
+        const ownerBrandLabel = String(ownerSettings?.brand_label || '').trim();
+        addDestination('owner_admin', ownerWebhookUrl, { admin_user_id: ownerAdminId, brandLabel: ownerBrandLabel, username: ownerBrandLabel || 'The Shore Shack' });
+
+        // If that admin is part of an admin organization, also route the user's
+        // checkout to the organization's selected shared webhook owner. This is
+        // intentionally additive; the Shore Shack/private destination above and
+        // the admin's own destination are not removed.
+        const ownerOrg = await getAdminOrganizationForUser(ownerAdminId).catch(() => null);
+        if (ownerOrg?.webhook_owner_user_id) {
+            const orgSettingsUserId = ownerOrg.webhook_owner_user_id;
+            const orgSettings = await getAdminWebhookSettings(orgSettingsUserId).catch(() => ({}));
+            const orgRoute = await getWebhookRouteFromDb({ scope: 'admin', userId: orgSettingsUserId, webhookType: checkoutType === 'error' ? 'checkout_error' : 'checkout_success', category: 'all' }).catch(() => null);
+            const orgWebhookUrl = String((orgRoute?.webhook_url || (checkoutType === 'error' ? orgSettings?.checkout_error_webhook_url : orgSettings?.discord_webhook_url)) || '').trim();
+            const orgBrandLabel = String(orgSettings?.brand_label || ownerOrg.name || '').trim();
+            addDestination('owner_admin_organization', orgWebhookUrl, {
+                admin_user_id: orgSettingsUserId,
+                owner_admin_id: ownerAdminId,
+                organization_id: ownerOrg.id,
+                brandLabel: orgBrandLabel,
+                username: orgBrandLabel || 'The Shore Shack'
+            });
+        }
     }
 
 
     // An admin may belong to an organization while retaining an upstream owner admin.
     // This sends the checkout to the organization's shared Discord in addition to the inviter's Discord.
-    const organizationDestinations = includePublicAndAdmin ? await getAdminOrganizationDestinations(user) : [];
+    const organizationDestinations = includePublicAndAdmin ? await getAdminOrganizationDestinations(routingUser) : [];
     for (const orgDest of organizationDestinations) {
         const settingsUserId = orgDest.webhook_owner_user_id;
         const orgSettings = await getAdminWebhookSettings(settingsUserId).catch(() => ({}));
