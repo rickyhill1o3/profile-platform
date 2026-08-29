@@ -64,10 +64,15 @@ $('scanAycd').onclick=async()=>{try{await api('/orders/aycd/scan-request',{metho
 $('refreshAycd').onclick=refreshAycdStatus;
 setInterval(()=>{if(!$('aycdPanel').hidden)refreshAycdStatus()},10000);
 $('printYear').onclick=async()=>{const y=$('yearFilter').value||new Date().getFullYear();const r=await fetch(`${API}/orders/tax-export?year=${y}`,{headers:{Authorization:`Bearer ${token}`}});if(!r.ok){alert('Annual receipt archive could not be opened');return}const html=await r.text();const w=window.open('','_blank');w.document.open();w.document.write(html);w.document.close()};
-$('reconcileRetailer').onclick=async()=>{const b=$('reconcileRetailer');const old=b.textContent;b.disabled=true;b.textContent='Reconciling…';try{const j=await api('/orders/reconcile-retailer-emails',{method:'POST',body:JSON.stringify({max_messages:2500})});alert(`${j.message}
-Matched: ${j.matched}
-Ignored: ${j.ignored}
-Failed: ${j.failed}`);await loadOrders()}catch(e){alert(e.message)}finally{b.disabled=false;b.textContent=old}};
+$('reconcileRetailer').onclick=async()=>{const b=$('reconcileRetailer');const old=b.textContent;b.disabled=true;b.textContent='Reconciling…';try{const j=await api('/orders/reconcile-retailer-emails',{method:'POST',body:JSON.stringify({max_messages:2500,repair_orders:250})});const r=j.repair||{};alert(`${j.message}
+Archive matched: ${j.matched}
+Archive ignored: ${j.ignored}
+Failed: ${j.failed}
+Damaged Target orders prioritized: ${j.damaged_target_orders||0}
+Live mailbox orders checked: ${r.checked_orders||0}
+Live MIME messages matched: ${r.matched_messages||0}
+Orders repaired: ${r.repaired_orders||0}${r.skipped?`
+Repair skipped: ${r.reason||'no candidates'}`:''}`);await loadOrders()}catch(e){alert(e.message)}finally{b.disabled=false;b.textContent=old}};
 $('refreshOrders').onclick=loadOrders;$('statusFilter').onchange=()=>{render();loadOrders().catch(e=>showWarning(e.message));};$('yearFilter').onchange=()=>{render();loadOrders().catch(e=>showWarning(e.message));};$('searchOrders').oninput=render;
 initYears();
 runAutomaticScan().catch(async e=>{showWarning(e.message);try{await bootstrap()}catch(_){}setProgress(100,'Order tracker loaded with saved data','The automatic mailbox scan could not finish, but your existing orders are available.')}).finally(()=>{setTimeout(()=>{$('scanOverlay').hidden=true;$('trackerApp').hidden=false},350)});

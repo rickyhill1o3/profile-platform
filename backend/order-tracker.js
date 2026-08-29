@@ -92,6 +92,51 @@ function readableEmailText(parsed = {}) {
   return plain;
 }
 
+
+function archivedTargetBodyNeedsRepair(value = {}) {
+  const bodyText = clean(value.body_text || value.text || value.snippet || '');
+  const bodyHtml = clean(value.body_html || value.html || '');
+  const combined = `${bodyText}
+${bodyHtml}`;
+  const noiseCount = (combined.match(/&#(?:8199|847);/gi) || []).length + (combined.match(/[\u034f\u2007\u00ad]/g) || []).length;
+  const usefulText = bodyText
+    .replace(/&#(?:8199|847);/gi, ' ')
+    .replace(/[\u034f\u2007\u00ad]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const htmlReadable = bodyHtml ? htmlToReadableEmailText(bodyHtml) : '';
+  return noiseCount >= 20 || (!htmlReadable && usefulText.length < 80);
+}
+
+async function backfillDamagedTargetArchiveCopies(supabase, account, archivedRow, row) {
+  if (!archivedRow?.id || lower(row.store) !== 'target' || archivedTargetBodyNeedsRepair(row)) return 0;
+  if (!clean(row.order_number) || !clean(row.email_type) || !clean(row.subject)) return 0;
+  try {
+    const q = await supabase.from('email_messages')
+      .select('id,body_text,body_html,snippet')
+      .eq('user_id', row.user_id)
+      .eq('mailbox_email', row.mailbox_email)
+      .eq('order_number', row.order_number)
+      .eq('email_type', row.email_type)
+      .eq('subject', row.subject)
+      .limit(25);
+    if (q.error) return 0;
+    let repaired = 0;
+    for (const old of q.data || []) {
+      if (String(old.id) === String(archivedRow.id) || !archivedTargetBodyNeedsRepair(old)) continue;
+      const patch = {
+        body_text: row.body_text,
+        body_html: row.body_html,
+        snippet: row.snippet,
+        updated_at: new Date().toISOString()
+      };
+      const r = await supabase.from('email_messages').update(patch).eq('id', old.id);
+      if (!r.error) repaired++;
+    }
+    return repaired;
+  } catch (_) { return 0; }
+}
+
 function providerForEmail(email) {
   const domain = lower(email).split('@')[1] || '';
   if (domain === 'gmail.com' || domain === 'googlemail.com') return { name: 'gmail', host: 'imap.gmail.com', port: 993, secure: true };
@@ -1039,6 +1084,11 @@ async function archiveEmailMetadata(supabase, account, parsed, uid, classificati
     if (!/email_messages|relation .* does not exist|schema cache/i.test(String(error.message||''))) throw error;
     return null;
   }
+  // Older AYCD imports sometimes stored only Target's invisible preheader while a later OAuth/IMAP
+  // fetch has the complete RFC822 message. If the fresh copy is readable, repair any legacy copy
+  // of the same Target event as well. This keeps existing tracked_order_emails links and the
+  // "View all order emails" screen from continuing to show the stale &#8199;/&#847; body.
+  try { await backfillDamagedTargetArchiveCopies(supabase, account, data, row); } catch (_) {}
   return data;
 }
 async function linkOrderEmail(supabase, orderId, emailId, status, eventAt) {
@@ -1633,15 +1683,33 @@ async function reconcileHistoricalOrderProfileIdentity(supabase, rows = []) {
 }
 
 async function repairHistoricalOrderEmails(supabase, userId = null, adjustCredits = null, confirmPendingAmazonCheckout = null, options = {}) {
-  const maxOrders = Math.max(1, Math.min(100, Number(options.maxOrders || 20)));
+  const maxOrders = Math.max(1, Math.min(500, Number(options.maxOrders || 20)));
+  const priorityIds = [...new Set((options.priorityOrderIds || []).map(String).filter(Boolean))];
+  const rowsById = new Map();
+
+  // Always load explicitly damaged/linked orders first, even when they are months old. The old
+  // implementation only inspected the newest 100 candidates, so an older broken Target order
+  // could be reported as "reconciled" without ever being fetched from its OAuth/IMAP mailbox.
+  for (let i = 0; i < priorityIds.length; i += 100) {
+    let pq = supabase.from('tracked_orders')
+      .select('id,user_id,source_order_id,profile_id,source_email,store,order_number,order_date,status,reconciliation_status')
+      .in('id', priorityIds.slice(i, i + 100));
+    if (userId) pq = pq.eq('user_id', userId);
+    const pr = await pq;
+    if (pr.error) throw pr.error;
+    for (const row of pr.data || []) rowsById.set(String(row.id), row);
+  }
+
   let q = supabase.from('tracked_orders')
     .select('id,user_id,source_order_id,profile_id,source_email,store,order_number,order_date,status,reconciliation_status')
     .not('order_number','is',null)
     .order('order_date',{ascending:false})
     .limit(Math.max(maxOrders * 8, 100));
   if (userId) q = q.eq('user_id', userId);
-  const { data: rows, error } = await q;
-  if (error) throw error;
+  const recent = await q;
+  if (recent.error) throw recent.error;
+  for (const row of recent.data || []) if (!rowsById.has(String(row.id))) rowsById.set(String(row.id), row);
+  const rows = [...rowsById.values()];
 
   // Legacy bot/Astral webhooks frequently carried only a Profile name. Re-resolve that
   // profile inside the already-known website user before deciding which mailbox to search.
@@ -1656,7 +1724,12 @@ async function repairHistoricalOrderEmails(supabase, userId = null, adjustCredit
   // Normally historical repair only touches orders with no linked mail. Manual retailer
   // reconciliation can force a source re-fetch for already-linked orders whose AYCD copy was
   // truncated to an invisible Target preheader before HTML parsing was fixed.
-  const candidates = (options.forceLinked ? validRows : validRows.filter(order => !linked.has(String(order.id)))).slice(0, maxOrders);
+  const eligible = options.forceLinked ? validRows : validRows.filter(order => !linked.has(String(order.id)));
+  const prioritySet = new Set(priorityIds);
+  const candidates = [
+    ...eligible.filter(order => prioritySet.has(String(order.id))),
+    ...eligible.filter(order => !prioritySet.has(String(order.id)))
+  ].slice(0, maxOrders);
   if (!candidates.length) return { checked_orders:0, matched_messages:0, repaired_orders:0, identity_corrected:identityRepair.corrected, wrong_links_removed:identityRepair.unlinked, skipped:true };
 
   const accounts = await loadScanAccounts(supabase, userId);
@@ -2624,13 +2697,21 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
           if(result?.saved)matched++; else ignored++;
         }catch(e){ failed++; console.warn('[RECONCILE ARCHIVE]',email.id,e.message||e); }
       }
+      // Prioritize orders whose archived Target event is visibly the broken preheader-only copy.
+      // These may be much older than the newest 100 orders and therefore must be named explicitly.
+      const damagedLinkedOrderIds = [...new Set(retailerEmails
+        .filter(email => lower(email.store) === 'target' && email.linked_order_id && archivedTargetBodyNeedsRepair(email))
+        .map(email => String(email.linked_order_id)))];
       let repair = null;
       try {
-        repair = await runHistoricalOrderEmailRepair(supabase, req.user_id, adjustUserCredits, confirmPendingAmazonCheckout, { maxOrders: Math.min(100, Number(req.body?.repair_orders || 100)), forceLinked: true });
+        const requested = Math.max(Number(req.body?.repair_orders || 100), damagedLinkedOrderIds.length);
+        repair = await runHistoricalOrderEmailRepair(supabase, req.user_id, adjustUserCredits, confirmPendingAmazonCheckout, {
+          maxOrders: Math.min(500, requested), forceLinked: true, priorityOrderIds: damagedLinkedOrderIds
+        });
       } catch (repairError) {
         console.warn('[RECONCILE TARGETED REPAIR]', repairError.message || repairError);
       }
-      res.json({success:true,checked,matched,ignored,failed,repair,message:`Reprocessed ${checked} Target/Supreme retailer emails and ran a targeted IMAP repair so older truncated Target bodies can be replaced with their full MIME/HTML copy.`});
+      res.json({success:true,checked,matched,ignored,failed,damaged_target_orders:damagedLinkedOrderIds.length,repair,message:`Reprocessed ${checked} Target/Supreme retailer emails and directly prioritized ${damagedLinkedOrderIds.length} Target order(s) whose archived bodies still contain truncated/preheader-only data.`});
     } catch(error){ res.status(500).json({error:error.message}); }
   });
 
