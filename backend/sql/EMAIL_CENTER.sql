@@ -14,6 +14,8 @@ create table if not exists public.email_messages (
   order_number text,
   tracking_number text,
   snippet text,
+  body_text text,
+  body_html text,
   linked_order_id uuid references public.tracked_orders(id) on delete set null,
   is_order_related boolean not null default false,
   keep_forever boolean not null default false,
@@ -30,3 +32,20 @@ create index if not exists email_messages_linked_idx on public.email_messages(li
 alter table public.email_messages enable row level security;
 drop policy if exists email_messages_service_policy on public.email_messages;
 create policy email_messages_service_policy on public.email_messages for all using (true) with check (true);
+
+
+create table if not exists public.tracked_order_emails (
+  id uuid primary key default gen_random_uuid(),
+  order_id uuid not null references public.tracked_orders(id) on delete cascade,
+  email_id uuid not null references public.email_messages(id) on delete cascade,
+  event_type text not null default 'unknown',
+  event_at timestamptz,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  unique(order_id,email_id)
+);
+create index if not exists tracked_order_emails_order_idx on public.tracked_order_emails(order_id,event_at);
+create index if not exists tracked_order_emails_email_idx on public.tracked_order_emails(email_id);
+alter table public.tracked_order_emails enable row level security;
+drop policy if exists tracked_order_emails_service_policy on public.tracked_order_emails;
+create policy tracked_order_emails_service_policy on public.tracked_order_emails for all using (true) with check (true);
