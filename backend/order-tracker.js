@@ -558,6 +558,28 @@ async function loadServiceOrders(supabase, userId) {
   return data || [];
 }
 
+function trackedOrderActualCost(tracked = {}, serviceOrder = {}) {
+  // Investment Value should represent what the retailer actually charged, not the
+  // bot/webhook item-price estimate. Once a retailer confirmation is linked, the
+  // tracked order contains the receipt total (merchandise + tax + shipping/fees).
+  const receiptTotal = Number(tracked.total);
+  if (Number.isFinite(receiptTotal) && receiptTotal > 0) return Math.round(receiptTotal * 100) / 100;
+
+  // Some retailers expose the components without a labeled grand total. In that
+  // case reconstruct the actual charge from the receipt components.
+  const parts = [tracked.subtotal, tracked.tax, tracked.shipping]
+    .map(Number)
+    .filter(Number.isFinite);
+  if (parts.length && parts.some(v => v > 0)) {
+    return Math.round(parts.reduce((sum, value) => sum + value, 0) * 100) / 100;
+  }
+
+  // Before a retailer email is available keep the existing webhook fallback. This
+  // value is automatically replaced as soon as a confirmed receipt is processed.
+  const fallback = Number(serviceOrder.metadata?.purchase_price || serviceOrder.raw_payload?.price || 0);
+  return Number.isFinite(fallback) && fallback > 0 ? Math.round(fallback * 100) / 100 : 0;
+}
+
 async function ensureInvestmentRow(supabase, tracked, serviceOrder, active = true) {
   const { data: existing } = await supabase.from('investment_products').select('id').eq('user_id', tracked.user_id).eq('source_order_id', serviceOrder.id).maybeSingle();
   const payload = {
@@ -565,7 +587,9 @@ async function ensureInvestmentRow(supabase, tracked, serviceOrder, active = tru
     store: tracked.store, order_number: tracked.order_number,
     product_name: clean(serviceOrder.product_name || tracked.product_summary || 'Tracked product').slice(0, 500),
     sku: clean(serviceOrder.sku), quantity: Number(serviceOrder.metadata?.quantity || serviceOrder.raw_payload?.quantity || 1) || 1,
-    purchase_price: Number(serviceOrder.metadata?.purchase_price || serviceOrder.raw_payload?.price || 0) || 0,
+    // purchase_price is intentionally the TOTAL retailer spend for this tracked
+    // order. The Investment page already sums this field once per order row.
+    purchase_price: trackedOrderActualCost(tracked, serviceOrder),
     credits_value: Number(serviceOrder.credits_charged || 0) || 0,
     is_active: active, canceled_at: active ? null : new Date().toISOString(), updated_at: new Date().toISOString()
   };
