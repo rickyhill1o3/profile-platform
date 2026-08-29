@@ -2126,7 +2126,25 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
     const patch = {}; for (const k of allowed) if (Object.prototype.hasOwnProperty.call(req.body || {}, k)) patch[k] = req.body[k];
     patch.updated_at = new Date().toISOString();
     const { data, error } = await supabase.from('tracked_orders').update(patch).eq('id', req.params.id).eq('user_id', req.user_id).select().single();
-    if (error) return res.status(500).json({ error: error.message }); res.json({ order: data });
+    if (error) return res.status(500).json({ error: error.message });
+
+    // A manual status correction must immediately propagate to Investment Value too.
+    // Canceled/refunded orders are kept for audit/order-history purposes, but are not
+    // part of the user's live collection or portfolio totals.
+    if (Object.prototype.hasOwnProperty.call(patch, 'status')) {
+      const inactive = ['canceled','refunded'].includes(lower(data.status));
+      const investmentPatch = {
+        is_active: !inactive,
+        canceled_at: inactive ? new Date().toISOString() : null,
+        updated_at: new Date().toISOString()
+      };
+      await supabase.from('investment_products')
+        .update(investmentPatch)
+        .eq('user_id', req.user_id)
+        .eq('order_id', data.id);
+    }
+
+    res.json({ order: data });
   });
 
   app.delete('/orders/tracked/:id', auth, async (req, res) => {
@@ -2381,7 +2399,10 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
   });
 
   app.get('/investment', auth, async (req, res) => {
-    const { data, error } = await supabase.from('investment_products').select('*').eq('user_id', req.user_id).order('created_at', { ascending:false });
+    // Keep canceled/refunded purchases in the database for audit/history, but never
+    // return them as part of the active investment collection. Legacy/manual rows
+    // may have is_active=NULL, so NULL is treated as active for compatibility.
+    const { data, error } = await supabase.from('investment_products').select('*').eq('user_id', req.user_id).or('is_active.is.null,is_active.eq.true').order('created_at', { ascending:false });
     if (error) return res.status(500).json({ error: error.message });
     const items = data || [];
     const summary = items.reduce((a,i)=>{ const q=Number(i.quantity||1); a.purchase+=Number(i.purchase_price||0); a.credits+=Number(i.credits_value||0); a.market+=Number(i.market_price||0)*q; return a; },{purchase:0,credits:0,market:0});

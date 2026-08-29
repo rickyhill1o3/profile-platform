@@ -208,7 +208,7 @@ async function refreshOne(supabase,item){
   return {id:item.id,name:item.product_name,price:result.price,sources:result.sourcePrices,errors};
 }
 async function createSnapshot(supabase,userId){
-  const {data}=await supabase.from('investment_products').select('*').eq('user_id',userId);
+  const {data}=await supabase.from('investment_products').select('*').eq('user_id',userId).or('is_active.is.null,is_active.eq.true');
   const items=data||[]; const summary=items.reduce((a,i)=>{const q=Number(i.quantity||1);a.purchase+=Number(i.purchase_price||0);a.credits+=Number(i.credits_value||0);a.market+=Number(i.market_price||0)*q;return a},{purchase:0,credits:0,market:0});
   summary.invested=summary.purchase+summary.credits; summary.gain=summary.market-summary.invested;
   await supabase.from('portfolio_value_snapshots').upsert({user_id:userId,snapshot_date:new Date().toISOString().slice(0,10),purchase_value:summary.purchase,credits_value:summary.credits,market_value:summary.market,gain_value:summary.gain,item_count:items.length},{onConflict:'user_id,snapshot_date'});
@@ -218,7 +218,7 @@ async function checkAlerts(supabase,userId){
   for(const a of alerts||[]){const p=Number(a.investment_products?.market_price||0); let hit=false; if(a.direction==='above')hit=p>=Number(a.target_price); else hit=p<=Number(a.target_price); if(hit&&!a.triggered_at)await supabase.from('market_value_alerts').update({triggered_at:now(),last_trigger_price:p}).eq('id',a.id);}
 }
 async function refreshUser(supabase,userId,force=false){
-  let q=supabase.from('investment_products').select('*').eq('user_id',userId).order('market_updated_at',{ascending:true,nullsFirst:true}).limit(MAX_PRODUCTS_PER_RUN);
+  let q=supabase.from('investment_products').select('*').eq('user_id',userId).or('is_active.is.null,is_active.eq.true').order('market_updated_at',{ascending:true,nullsFirst:true}).limit(MAX_PRODUCTS_PER_RUN);
   if(!force)q=q.or(`market_updated_at.is.null,market_updated_at.lt.${new Date(Date.now()-REFRESH_HOURS*3600000).toISOString()}`);
   const {data,error}=await q;if(error)throw error;const results=[];for(const item of data||[])results.push(await refreshOne(supabase,item));await createSnapshot(supabase,userId);await checkAlerts(supabase,userId);return results;
 }
