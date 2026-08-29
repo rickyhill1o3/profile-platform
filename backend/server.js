@@ -1730,6 +1730,102 @@ async function findUserForWebhook(payload) {
     return null;
 }
 
+function extractCheckoutEmailForHistory(order = {}) {
+    const metadata = order.metadata || {};
+    const directCandidates = [
+        metadata.checkout_account_email,
+        metadata.account_email,
+        metadata.purchase_email,
+        metadata.login_email,
+        order.account_email,
+        order.purchase_email
+    ];
+    for (const candidate of directCandidates) {
+        const email = extractEmail(candidate || '');
+        if (email) return String(email).trim().toLowerCase();
+    }
+
+    try {
+        const normalized = normalizeIncomingOrderPayload(order.raw_payload || {});
+        const normalizedEmail = extractEmail(normalized.account_email || normalized.user_email || '');
+        if (normalizedEmail) return String(normalizedEmail).trim().toLowerCase();
+    } catch (_) {}
+
+    // Last-resort historical recovery. Prefer values stored in the original webhook
+    // rather than the website user's login email saved by later processing.
+    const raw = order.raw_payload || {};
+    const accountValue = extractCheckoutReferenceDeep(raw, [
+        'account', 'account_email', 'accountEmail', 'login_email', 'loginEmail',
+        'purchase_email', 'purchaseEmail', 'email'
+    ]);
+    const recovered = extractEmail(accountValue || '');
+    if (recovered) return String(recovered).trim().toLowerCase();
+    return '';
+}
+
+function extractOrderHistoryImage(order = {}) {
+    const metadata = order.metadata || {};
+    try {
+        const normalized = normalizeIncomingOrderPayload(order.raw_payload || {});
+        if (normalized.image_url) return String(normalized.image_url).trim();
+    } catch (_) {}
+    return String(metadata.image_url || metadata.product_image || order.image_url || '').trim();
+}
+
+function extractOrderHistoryProductUrl(order = {}) {
+    const metadata = order.metadata || {};
+    try {
+        const normalized = normalizeIncomingOrderPayload(order.raw_payload || {});
+        if (normalized.product_url) return String(normalized.product_url).trim();
+    } catch (_) {}
+    return String(metadata.product_url || order.product_url || '').trim();
+}
+
+async function decorateOrderHistoryRows(rows = []) {
+    const items = (rows || []).map((row) => ({
+        ...row,
+        checkout_email: extractCheckoutEmailForHistory(row),
+        image_url: extractOrderHistoryImage(row),
+        product_url: extractOrderHistoryProductUrl(row)
+    }));
+
+    // Old webhook rows normally still contain their thumbnail. If one does not,
+    // fill the image/link from the product catalog by SKU so historical purchases
+    // remain visually useful without rewriting the old order row.
+    const missing = items.filter((row) => !row.image_url && String(row.sku || '').trim());
+    const skus = [...new Set(missing.map((row) => String(row.sku || '').trim()).filter(Boolean))];
+    if (skus.length) {
+        try {
+            const { data, error } = await supabase
+                .from('master_product_catalog')
+                .select('site,sku,image_url,product_url,product_name')
+                .in('sku', skus)
+                .limit(1000);
+            if (!error) {
+                const rowsBySku = new Map();
+                for (const product of data || []) {
+                    const key = String(product.sku || '').trim();
+                    if (!key) continue;
+                    if (!rowsBySku.has(key)) rowsBySku.set(key, []);
+                    rowsBySku.get(key).push(product);
+                }
+                for (const item of missing) {
+                    const candidates = rowsBySku.get(String(item.sku || '').trim()) || [];
+                    const sameSite = candidates.find((product) =>
+                        normalizeProfileAccountType(product.site || '') === normalizeProfileAccountType(item.site || '')
+                    );
+                    const product = sameSite || candidates[0];
+                    if (!product) continue;
+                    if (!item.image_url) item.image_url = String(product.image_url || '').trim();
+                    if (!item.product_url) item.product_url = String(product.product_url || '').trim();
+                    if ((!item.product_name || item.product_name === item.sku) && product.product_name) item.product_name = product.product_name;
+                }
+            }
+        } catch (_) {}
+    }
+    return items;
+}
+
 async function createOrderRecord(payload) {
     const insertPayload = {
         user_id: payload.user_id,
@@ -4272,6 +4368,9 @@ async function recordSuccessfulCheckout(payload) {
         metadata: {
             ...(payload.metadata || {}),
             matched_user_email: user.email,
+            checkout_account_email: normalized.account_email || null,
+            image_url: normalized.image_url || null,
+            product_url: normalized.product_url || null,
             purchase_id: normalized.purchase_id || normalized.order_number || null,
             order_number: normalized.order_number || null,
             confirmation_status: isAmazonPendingVerification ? 'pending_email_verification' : 'waiting_confirmation',
@@ -5115,6 +5214,8 @@ app.get("/admin/users/:id/credits/history", auth, admin, async (req, res) => {
             })()
         ]);
 
+        const decoratedOrders = await decorateOrderHistoryRows(orderRows);
+
         res.json({
             user: { id: targetUser.id, email: targetUser.email, role: targetUser.role, discord_username: targetUser.discord_username || '', discord_display_name: targetUser.discord_display_name || '', user_display: formatDiscordDisplayName(targetUser) },
             balance: asSignedCredits(balanceRow.balance, 0),
@@ -5123,7 +5224,7 @@ app.get("/admin/users/:id/credits/history", auth, admin, async (req, res) => {
             credit_summary: summarizeCreditTransactions(txRows),
             needs_removal: asSignedCredits(balanceRow.balance, 0) < 0,
             transactions: txRows,
-            orders: orderRows
+            orders: decoratedOrders
         });
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -5149,8 +5250,9 @@ app.get("/admin/orders", auth, admin, async (req, res) => {
             (users || []).forEach((row) => userMap.set(row.id, row.email));
         }
 
+        const decoratedOrders = await decorateOrderHistoryRows(orders || []);
         res.json({
-            items: (orders || []).map((row) => ({
+            items: decoratedOrders.map((row) => ({
                 ...row,
                 user_email: userMap.get(row.user_id) || row.user_id
             }))
@@ -7297,6 +7399,8 @@ app.get("/user/activity", auth, async (req, res) => {
             })()
         ]);
 
+        const decoratedOrders = await decorateOrderHistoryRows(orderRows);
+
         res.json({
             user: { id: currentUser.id, email: currentUser.email, role: currentUser.role },
             balance: asSignedCredits(balanceRow.balance, 0),
@@ -7304,7 +7408,7 @@ app.get("/user/activity", auth, async (req, res) => {
             lifetime_credits_spent: asWholeCredits(balanceRow.lifetime_credits_spent, 0),
             needs_removal: asSignedCredits(balanceRow.balance, 0) < 0,
             transactions: txRows,
-            orders: orderRows
+            orders: decoratedOrders
         });
     } catch (err) {
         res.status(500).json({ error: err.message });

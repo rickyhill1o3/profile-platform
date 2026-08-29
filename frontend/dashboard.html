@@ -411,20 +411,20 @@
               </div>
             </div>
             <div class="banner banner-soft" id="userHistorySummary">Loading your history...</div>
-            <div class="selection-grid-two">
-              <div class="selection-card">
-                <h3>Orders</h3>
-                <div class="table-wrap table-wrap--admin-scroll">
-                  <table class="admin-table">
-                    <thead><tr><th>When</th><th>Site</th><th>Product</th><th>Status</th><th>Credits</th></tr></thead>
-                    <tbody id="userHistoryOrdersBody"><tr><td colspan="5">Loading...</td></tr></tbody>
-                  </table>
+            <div class="history-layout">
+              <div class="selection-card history-orders-card">
+                <div class="history-card-heading">
+                  <div>
+                    <h3>Purchases</h3>
+                    <p class="subtle-text">Your checkout history, including the retailer account used for each order.</p>
+                  </div>
                 </div>
+                <div id="userHistoryOrdersBody" class="history-order-list"><div class="history-empty">Loading purchases...</div></div>
               </div>
-              <div class="selection-card">
-                <h3>Credit Transactions</h3>
-                <div class="table-wrap table-wrap--admin-scroll">
-                  <table class="admin-table">
+              <div class="selection-card history-credit-card">
+                <h3>Credit Activity</h3>
+                <div class="table-wrap table-wrap--admin-scroll history-credit-scroll">
+                  <table class="admin-table history-credit-table">
                     <thead><tr><th>When</th><th>Change</th><th>Reason</th><th>Note</th></tr></thead>
                     <tbody id="userHistoryTransactionsBody"><tr><td colspan="4">Loading...</td></tr></tbody>
                   </table>

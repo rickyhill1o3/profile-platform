@@ -1148,3 +1148,27 @@ h1,h2,h3,h4,p{margin:0}
 
 /* Bulk profile editor */
 .bulk-edit-modal{display:none;position:fixed;inset:0;z-index:10000;align-items:center;justify-content:center;padding:20px}.bulk-edit-modal.is-open{display:flex}.bulk-edit-backdrop{position:absolute;inset:0;background:rgba(12,22,48,.62);backdrop-filter:blur(3px)}.bulk-edit-dialog{position:relative;width:min(620px,100%);max-height:90vh;overflow:auto;background:#fff;border:1px solid #dbe3f1;border-radius:18px;box-shadow:0 24px 70px rgba(7,20,50,.28)}.bulk-edit-header,.bulk-edit-footer{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:20px 22px}.bulk-edit-header{border-bottom:1px solid #e7ecf4}.bulk-edit-header h3{margin:4px 0 5px}.bulk-edit-body{display:grid;gap:18px;padding:22px}.bulk-edit-body .field{display:grid;gap:7px}.bulk-edit-body small{color:#66748c;line-height:1.35}.bulk-edit-footer{align-items:center;justify-content:flex-end;border-top:1px solid #e7ecf4}.form-help.success{color:#087443}.form-help.error{color:#b42318}@media(max-width:640px){.bulk-edit-header{flex-direction:column}.bulk-edit-footer{flex-wrap:wrap}.bulk-edit-footer .btn{flex:1}}
+
+/* ===== Customer order history rebuild ===== */
+.history-layout{display:grid;grid-template-columns:minmax(0,1.65fr) minmax(320px,.75fr);gap:16px;align-items:start}
+.history-orders-card,.history-credit-card{min-width:0}
+.history-card-heading{display:flex;justify-content:space-between;gap:12px;align-items:flex-start;margin-bottom:12px}
+.history-card-heading h3,.history-credit-card h3{margin:0 0 4px}
+.history-order-list{display:grid;gap:12px;max-height:620px;overflow:auto;padding:2px 6px 4px 0}
+.history-order-item{display:grid;grid-template-columns:112px minmax(0,1fr);gap:14px;padding:13px;border:1px solid #dbe4f0;border-radius:15px;background:#fff;box-shadow:0 5px 16px rgba(15,23,42,.05)}
+.history-order-media{width:112px;height:112px;border-radius:12px;overflow:hidden;background:#f8fafc;border:1px solid #e4eaf2;display:grid;place-items:center}
+.history-order-media a{display:block;width:100%;height:100%}
+.history-order-image{width:100%;height:100%;object-fit:contain;display:block;padding:6px;background:#fff}
+.history-order-image-placeholder,.history-order-media.image-failed::after{font-size:12px;color:#718096;text-align:center;padding:10px;content:'No image';display:grid;place-items:center;width:100%;height:100%}
+.history-order-main{min-width:0}
+.history-order-topline{display:flex;justify-content:space-between;gap:10px;align-items:center;margin-bottom:7px}
+.history-order-store{font-size:11px;font-weight:800;letter-spacing:.07em;color:#5c6b82}
+.history-order-main h4{font-size:15px;line-height:1.3;margin:0 0 12px;color:#15233a}
+.history-status{display:inline-flex;align-items:center;border-radius:999px;padding:4px 8px;font-size:11px;font-weight:800;background:#eef2f7;color:#475569;white-space:nowrap}
+.history-status.is-success{background:#dcfce7;color:#166534}.history-status.is-shipped{background:#dbeafe;color:#1e40af}.history-status.is-info{background:#e0f2fe;color:#075985}.history-status.is-waiting{background:#fef3c7;color:#92400e}.history-status.is-danger{background:#fee2e2;color:#991b1b}
+.history-order-meta{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px 14px}
+.history-order-meta div{min-width:0}.history-order-meta span{display:block;font-size:10px;text-transform:uppercase;letter-spacing:.04em;color:#7b8798;margin-bottom:2px}.history-order-meta strong{display:block;font-size:12px;color:#26354d;overflow-wrap:anywhere}
+.history-empty{padding:28px 16px;border:1px dashed #cbd5e1;border-radius:12px;text-align:center;color:#64748b;background:#f8fafc}
+.history-credit-scroll{max-height:620px}.history-credit-table{min-width:650px}
+@media(max-width:980px){.history-layout{grid-template-columns:1fr}.history-credit-scroll{max-height:340px}}
+@media(max-width:640px){.history-order-item{grid-template-columns:82px minmax(0,1fr);gap:10px;padding:10px}.history-order-media{width:82px;height:82px}.history-order-meta{grid-template-columns:1fr}.history-order-topline{align-items:flex-start}.history-order-main h4{font-size:14px}}

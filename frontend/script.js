@@ -4418,16 +4418,58 @@ async function loadUserActivity() {
         const balance = Number(data.balance || 0);
         summary.textContent = `Current balance: ${balance} credits • Lifetime granted: ${Number(data.lifetime_credits_granted || 0)} • Lifetime spent: ${Number(data.lifetime_credits_spent || 0)}${data.needs_removal ? ' • Flagged for removal until positive balance is restored' : ''}`;
         const orders = Array.isArray(data.orders) ? data.orders : [];
-        ordersBody.innerHTML = orders.length ? orders.map((order) => `
-            <tr><td>${escapeHTML(formatDateTime(order.created_at))}</td><td>${escapeHTML(order.site || '-')}</td><td>${escapeHTML(order.product_name || '-')}</td><td>${escapeHTML(order.status || '-')}</td><td>${escapeHTML(String(order.credits_charged || 0))}</td></tr>
-        `).join('') : '<tr><td colspan="5">No orders yet.</td></tr>';
+        const statusLabel = (value) => {
+            const raw = String(value || '').trim().toLowerCase();
+            const labels = {
+                success: 'Checkout received', waiting_confirmation: 'Waiting for confirmation', pending_email_verification: 'Waiting for confirmation',
+                confirmed: 'Confirmed', processing: 'Processing', shipped: 'Shipped', delivered: 'Delivered', canceled: 'Canceled', refunded: 'Refunded',
+                insufficient_credits: 'Insufficient credits', paid: 'Paid'
+            };
+            return labels[raw] || (raw ? raw.replace(/_/g, ' ') : 'Recorded');
+        };
+        const statusClass = (value) => {
+            const raw = String(value || '').toLowerCase();
+            if (raw.includes('cancel') || raw.includes('refund') || raw.includes('insufficient')) return 'is-danger';
+            if (raw.includes('deliver')) return 'is-success';
+            if (raw.includes('ship')) return 'is-shipped';
+            if (raw.includes('confirm') || raw.includes('processing') || raw === 'success') return 'is-info';
+            if (raw.includes('waiting') || raw.includes('pending')) return 'is-waiting';
+            return '';
+        };
+        ordersBody.innerHTML = orders.length ? orders.map((order) => {
+            const productName = order.product_name || order.sku || 'Checkout';
+            const checkoutEmail = order.checkout_email || '';
+            const image = order.image_url || '';
+            const productUrl = order.product_url || '';
+            const orderNumber = order.external_order_id || '-';
+            const imageHtml = image
+                ? `${productUrl ? `<a href="${escapeHTML(productUrl)}" target="_blank" rel="noopener">` : ''}<img class="history-order-image" src="${escapeHTML(image)}" alt="${escapeHTML(productName)}" loading="lazy" referrerpolicy="no-referrer" onerror="this.closest('.history-order-media').classList.add('image-failed');this.remove();">${productUrl ? '</a>' : ''}`
+                : '<div class="history-order-image-placeholder">No image</div>';
+            return `
+              <article class="history-order-item">
+                <div class="history-order-media">${imageHtml}</div>
+                <div class="history-order-main">
+                  <div class="history-order-topline">
+                    <span class="history-order-store">${escapeHTML(String(order.site || 'store').toUpperCase())}</span>
+                    <span class="history-status ${statusClass(order.status)}">${escapeHTML(statusLabel(order.status))}</span>
+                  </div>
+                  <h4>${escapeHTML(productName)}</h4>
+                  <div class="history-order-meta">
+                    <div><span>Checkout email</span><strong>${escapeHTML(checkoutEmail || 'Not captured in original webhook')}</strong></div>
+                    <div><span>Order / checkout ID</span><strong>${escapeHTML(orderNumber)}</strong></div>
+                    <div><span>Date</span><strong>${escapeHTML(formatDateTime(order.created_at))}</strong></div>
+                    <div><span>Credits</span><strong>${escapeHTML(String(order.credits_charged || 0))}</strong></div>
+                  </div>
+                </div>
+              </article>`;
+        }).join('') : '<div class="history-empty">No purchases yet.</div>';
         const txs = Array.isArray(data.transactions) ? data.transactions : [];
         txBody.innerHTML = txs.length ? txs.map((tx) => `
             <tr><td>${escapeHTML(formatDateTime(tx.created_at))}</td><td>${escapeHTML(String((tx.delta || 0) > 0 ? '+' : '') + String(tx.delta || 0))}</td><td>${escapeHTML(tx.reason || '-')}</td><td>${escapeHTML(tx.note || '-')}</td></tr>
         `).join('') : '<tr><td colspan="4">No credit transactions yet.</td></tr>';
     } catch (err) {
         summary.textContent = err.message;
-        ordersBody.innerHTML = '<tr><td colspan="5">Could not load orders.</td></tr>';
+        ordersBody.innerHTML = '<div class="history-empty">Could not load orders.</div>';
         txBody.innerHTML = '<tr><td colspan="4">Could not load credit transactions.</td></tr>';
     }
 }
@@ -4480,6 +4522,7 @@ async function loadUserCreditReceipt(userId) {
               <td>${escapeHTML(formatEasternTime(item.created_at || ''))} ET</td>
               <td>${escapeHTML(item.site || '-')}</td>
               <td>${escapeHTML(item.product_name || item.sku || '-')}</td>
+              <td><strong>${escapeHTML(item.checkout_email || 'Not captured')}</strong></td>
               <td>${statusHtml}</td>
               <td>${escapeHTML(String(credits))}</td>
               <td>${escapeHTML(item.external_order_id || '-')}</td>
@@ -4574,6 +4617,7 @@ async function loadCreditsAdminPane() {
               <td>${escapeHTML(item.user_email || '-')}</td>
               <td>${escapeHTML(item.source || '-')}</td>
               <td>${escapeHTML(item.product_name || item.sku || '-')}</td>
+              <td><strong>${escapeHTML(item.checkout_email || 'Not captured')}</strong></td>
               <td>${String(item.status || '') === 'insufficient_credits' ? '<span class="status-tag status-tag--danger">Insufficient Credits</span>' : '<span class="status-tag status-tag--success">Charged</span>'}</td>
               <td>${escapeHTML(String(item.credits_charged || 0))}</td>
               <td>${escapeHTML(item.external_order_id || '-')}</td>
@@ -4581,7 +4625,7 @@ async function loadCreditsAdminPane() {
                 ${Number(item.credits_charged || 0) > 0 ? `<button class="btn" type="button" data-refund-order="${escapeHTML(item.id)}" data-refund-amount="${escapeHTML(String(item.credits_charged || 0))}">Refund Credits</button>` : '<span class="subtle-text">No charge</span>'}
                 <button class="btn secondary" type="button" data-recheck-order="${escapeHTML(item.id)}">Recheck Credits</button>
               </div></td>
-            </tr>`).join('') : '<tr><td colspan="8">No orders found yet.</td></tr>';
+            </tr>`).join('') : '<tr><td colspan="9">No orders found yet.</td></tr>';
 
         ordersBody.querySelectorAll('[data-recheck-order]').forEach((button) => {
             button.addEventListener('click', async () => {
@@ -4607,8 +4651,8 @@ async function loadCreditsAdminPane() {
             });
         });
     } catch (err) {
-        usersBody.innerHTML = `<tr><td colspan="6">${escapeHTML(err.message)}</td></tr>`;
-        ordersBody.innerHTML = `<tr><td colspan="7">${escapeHTML(err.message)}</td></tr>`;
+        usersBody.innerHTML = `<tr><td colspan="9">${escapeHTML(err.message)}</td></tr>`;
+        ordersBody.innerHTML = `<tr><td colspan="9">${escapeHTML(err.message)}</td></tr>`;
     }
 }
 

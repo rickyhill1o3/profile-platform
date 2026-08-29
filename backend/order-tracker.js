@@ -606,9 +606,24 @@ async function syncServiceOrders(supabase, userId, accounts = []) {
     if (!orderNumber) continue;
     const { data: prior } = await supabase.from('tracked_orders').select('*').eq('source_order_id', source.id).maybeSingle();
     const sourceEmails = findEmailValues(source.raw_payload || {});
-    const orderEmail = [...sourceEmails][0] || lower(source.metadata?.email || source.email || '');
-    const matchingAccount = accounts.find(account => lower(account.email) === lower(orderEmail));
-    const resolvedEmail = lower(orderEmail) || prior?.source_email || defaultEmail;
+    const metadataEmail = lower(
+      source.metadata?.checkout_account_email ||
+      source.metadata?.account_email ||
+      source.metadata?.purchase_email ||
+      source.metadata?.login_email ||
+      source.metadata?.email ||
+      source.email || ''
+    );
+    // Historical webhook payloads can contain several addresses (website user, bot
+    // account, notification address). Prefer the address that is actually one of
+    // this user's configured retailer mailboxes. This repairs old rows that were
+    // previously labeled waiting-for-imap@local.
+    const matchingAccount = accounts.find(account => sourceEmails.has(lower(account.email)))
+      || accounts.find(account => lower(account.email) === metadataEmail);
+    const orderEmail = lower(matchingAccount?.email || metadataEmail || [...sourceEmails][0] || '');
+    const priorEmail = lower(prior?.source_email || '');
+    const priorIsPlaceholder = !priorEmail || priorEmail === 'waiting-for-imap@local';
+    const resolvedEmail = orderEmail || (priorIsPlaceholder ? defaultEmail : priorEmail);
     const payload = {
       user_id: userId, source_order_id: source.id, service_order_external_id: source.external_order_id || null,
       profile_id: prior?.profile_id || matchingAccount?.profile_id || accounts[0]?.profile_id || null,
