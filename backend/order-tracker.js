@@ -1,6 +1,7 @@
 const { ImapFlow } = require('imapflow');
 const { simpleParser } = require('mailparser');
 const crypto = require('crypto');
+const cheerio = require('cheerio');
 const { encrypt, decrypt } = require('./encryption');
 const { parseRetailEmail, expectedWebhookItems, matchScore, mainItemMatch, deriveOverallStatus, norm: reconcileNorm } = require('./retailer-reconciliation');
 
@@ -50,6 +51,45 @@ function sanitizeReceiptHtml(value) {
     .replace(/<(?:iframe|object|embed|form)\b[^>]*>[\s\S]*?<\/(?:iframe|object|embed|form)>/gi, '')
     .replace(/\son\w+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '')
     .replace(/javascript:/gi, '');
+}
+
+function htmlToReadableEmailText(value) {
+  const html = String(value || '');
+  if (!html) return '';
+  try {
+    const $ = cheerio.load(html, { decodeEntities: true });
+    $('script,style,head,title,meta,link,noscript,svg').remove();
+    // Retailers such as Target deliberately inject thousands of invisible preheader glyphs.
+    // They are harmless in an email client but poison plain-text parsing and our email viewer.
+    $('[aria-hidden="true"], [hidden]').remove();
+    $('*').each((_, el) => {
+      const style = lower($(el).attr('style') || '').replace(/\s+/g, '');
+      if (/display:none|visibility:hidden|mso-hide:all|max-height:0(?:px)?|font-size:0(?:px)?/.test(style)) $(el).remove();
+    });
+    $('br').replaceWith('\n');
+    $('p,div,tr,li,h1,h2,h3,h4,h5,h6,section,article,table').each((_, el) => $(el).append('\n'));
+    return String($.root().text() || '')
+      .replace(/[\u00ad\u034f\u2007\u200b-\u200f\u2060\ufeff]/g, ' ')
+      .replace(/&#(?:8199|847);/gi, ' ')
+      .replace(/[ \t]+/g, ' ')
+      .replace(/ *\n */g, '\n')
+      .replace(/\n{3,}/g, '\n\n')
+      .trim();
+  } catch (_) { return ''; }
+}
+
+function readableEmailText(parsed = {}) {
+  const plain = clean(parsed.text || '').replace(/\u0000/g, '');
+  const htmlText = htmlToReadableEmailText(parsed.html || '');
+  if (!htmlText) return plain;
+  if (!plain) return htmlText;
+  // Prefer HTML-derived text when the text/plain alternative is mostly Target preheader noise,
+  // or when HTML contains materially more useful retailer content.
+  const plainNoise = (plain.match(/&#(?:8199|847);/gi) || []).length + (plain.match(/[\u034f\u2007\u00ad]/g) || []).length;
+  const usefulPlain = plain.replace(/&#(?:8199|847);/gi, '').replace(/[\u034f\u2007\u00ad\s]/g, '').length;
+  const usefulHtml = htmlText.replace(/\s/g, '').length;
+  if (plainNoise >= 20 || usefulHtml > Math.max(250, usefulPlain * 1.25)) return htmlText;
+  return plain;
 }
 
 function providerForEmail(email) {
@@ -969,7 +1009,7 @@ async function archiveEmailMetadata(supabase, account, parsed, uid, classificati
   const fromText = clean(parsed.from?.text || parsed.from || '');
   const toText = clean(parsed.to?.text || parsed.to || '');
   const ccText = clean(parsed.cc?.text || parsed.cc || '');
-  const bodyText = clean(parsed.text || parsed.html || '').replace(/\u0000/g, '');
+  const bodyText = readableEmailText(parsed);
   const store = classification.store || detectStore(fromText, subject, bodyText) || 'unknown';
   const emailType = classification.status || detectStatus(subject, bodyText) || 'unknown';
   const orderNumber = classification.orderNumber || (store !== 'unknown' ? extractOrderNumber(store, subject, bodyText) : '') || null;
@@ -1153,7 +1193,7 @@ async function matchSupremeServiceOrder(supabase, account, serviceOrders, retail
 async function saveParsedMessage(supabase, account, parsed, uid, adjustCredits = null, confirmPendingAmazonCheckout = null) {
   const subject = clean(parsed.subject);
   const from = parsed.from?.text || '';
-  const text = clean(parsed.text || parsed.html || '').replace(/\u0000/g, '');
+  const text = readableEmailText(parsed);
   const store = detectStore(from, subject, text);
   const status = detectStatus(subject, text);
   if (!store || status === 'unknown') {
@@ -1613,7 +1653,10 @@ async function repairHistoricalOrderEmails(supabase, userId = null, adjustCredit
     return email && email !== 'waiting-for-imap@local' && email.includes('@') && clean(order.order_number);
   });
   const linked = await linkedTrackedOrderIds(supabase, validRows.map(order => order.id));
-  const candidates = validRows.filter(order => !linked.has(String(order.id))).slice(0, maxOrders);
+  // Normally historical repair only touches orders with no linked mail. Manual retailer
+  // reconciliation can force a source re-fetch for already-linked orders whose AYCD copy was
+  // truncated to an invisible Target preheader before HTML parsing was fixed.
+  const candidates = (options.forceLinked ? validRows : validRows.filter(order => !linked.has(String(order.id)))).slice(0, maxOrders);
   if (!candidates.length) return { checked_orders:0, matched_messages:0, repaired_orders:0, identity_corrected:identityRepair.corrected, wrong_links_removed:identityRepair.unlinked, skipped:true };
 
   const accounts = await loadScanAccounts(supabase, userId);
@@ -2556,9 +2599,22 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
       const {data,error}=await q; if(error)throw error;
       let checked=0,matched=0,ignored=0,failed=0;
       const retailerEmails=(data||[]).filter(email=>['target','supreme'].includes(detectStore(email.from_text||'',email.subject||'',email.body_text||email.snippet||''))).reverse();
-      // Also request a live mailbox pass. The archive is reconciled immediately; any messages not
-      // indexed yet will be parsed by the background job as they arrive.
+      // Also request live mailbox passes. Direct IMAP accounts scan on Render. For the super-admin
+      // AYCD setup, queue a local bridge scan too so historical Target messages can be re-fetched
+      // from their original RFC822 source and replace old preheader-only archive copies.
       try { startUserScanJob(supabase,req.user_id,adjustUserCredits,confirmPendingAmazonCheckout); } catch (_) {}
+      if (req.role === 'super_admin') {
+        try {
+          const bridge = await supabase.from('aycd_bridge_devices').select('id,pending_command').eq('user_id',req.user_id).eq('is_paired',true).order('created_at',{ascending:false}).limit(1).maybeSingle();
+          if (bridge.data?.id && !clean(bridge.data.pending_command)) {
+            await supabase.from('aycd_bridge_devices').update({
+              pending_command:'scan', command_id:crypto.randomUUID(),
+              command_payload:{ lookbackDays:365, reason:'retailer_reconciliation' },
+              status:'scan_requested', last_error:null
+            }).eq('id',bridge.data.id);
+          }
+        } catch (_) {}
+      }
       for(const email of retailerEmails){
         checked++;
         try{
@@ -2568,7 +2624,13 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
           if(result?.saved)matched++; else ignored++;
         }catch(e){ failed++; console.warn('[RECONCILE ARCHIVE]',email.id,e.message||e); }
       }
-      res.json({success:true,checked,matched,ignored,failed,message:`Reprocessed ${checked} Target/Supreme retailer emails across all indexed mailboxes and requested a live mailbox scan.`});
+      let repair = null;
+      try {
+        repair = await runHistoricalOrderEmailRepair(supabase, req.user_id, adjustUserCredits, confirmPendingAmazonCheckout, { maxOrders: Math.min(100, Number(req.body?.repair_orders || 100)), forceLinked: true });
+      } catch (repairError) {
+        console.warn('[RECONCILE TARGETED REPAIR]', repairError.message || repairError);
+      }
+      res.json({success:true,checked,matched,ignored,failed,repair,message:`Reprocessed ${checked} Target/Supreme retailer emails and ran a targeted IMAP repair so older truncated Target bodies can be replaced with their full MIME/HTML copy.`});
     } catch(error){ res.status(500).json({error:error.message}); }
   });
 
