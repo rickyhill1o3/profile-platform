@@ -444,6 +444,67 @@ function extractTracking(text) {
   return m?.[1] || null;
 }
 
+function detectCarrierFromTracking(trackingNumber, hint = '') {
+  const code = clean(trackingNumber).replace(/\s+/g, '').toUpperCase();
+  const h = lower(hint);
+  if (/fedex/.test(h)) return 'fedex';
+  if (/\bups\b/.test(h)) return 'ups';
+  if (/usps|postal service/.test(h)) return 'usps';
+  if (/^1Z[0-9A-Z]{16}$/.test(code)) return 'ups';
+  if (/^(94|93|92|95)\d{18,20}$/.test(code) || /^\d{20,22}$/.test(code)) return 'usps';
+  if (/^\d{12}$/.test(code) || /^\d{15}$/.test(code) || /^\d{20}$/.test(code)) return 'fedex';
+  return '';
+}
+
+function carrierTrackingUrl(carrier, trackingNumber) {
+  const code = encodeURIComponent(clean(trackingNumber));
+  if (!code) return '';
+  if (carrier === 'ups') return `https://www.ups.com/track?tracknum=${code}`;
+  if (carrier === 'usps') return `https://tools.usps.com/go/TrackConfirmAction?tLabels=${code}`;
+  if (carrier === 'fedex') return `https://www.fedex.com/fedextrack/?trknbr=${code}`;
+  return '';
+}
+
+async function checkEasyPostDelivered(supabase) {
+  const key = clean(process.env.EASYPOST_API_KEY);
+  if (!key) return { checked: 0, delivered: 0, disabled: true };
+  const auth = `Basic ${Buffer.from(`${key}:`).toString('base64')}`;
+  const { data, error } = await supabase.from('tracked_orders').select('id,tracking_number,carrier,status').eq('status','shipped').not('tracking_number','is',null).limit(100);
+  if (error) throw error;
+  let checked = 0, delivered = 0;
+  for (const order of data || []) {
+    const code = clean(order.tracking_number);
+    if (!code) continue;
+    try {
+      let tracker = null;
+      const lookup = await fetch(`https://api.easypost.com/v2/trackers?tracking_code=${encodeURIComponent(code)}`, { headers: { Authorization: auth } });
+      if (lookup.ok) {
+        const payload = await lookup.json().catch(()=>({}));
+        tracker = (payload.trackers || []).find(t => clean(t.tracking_code) === code) || null;
+      }
+      if (!tracker) {
+        const body = new URLSearchParams();
+        body.set('tracker[tracking_code]', code);
+        const carrier = clean(order.carrier);
+        if (carrier) body.set('tracker[carrier]', carrier);
+        const created = await fetch('https://api.easypost.com/v2/trackers', { method:'POST', headers:{ Authorization:auth, 'content-type':'application/x-www-form-urlencoded' }, body });
+        if (created.ok) tracker = await created.json().catch(()=>null);
+      }
+      checked++;
+      if (tracker && lower(tracker.status) === 'delivered') {
+        await supabase.from('tracked_orders').update({ status:'delivered', last_status_at:new Date().toISOString(), carrier: lower(tracker.carrier || order.carrier) || order.carrier || null, updated_at:new Date().toISOString() }).eq('id', order.id).eq('status','shipped');
+        delivered++;
+      } else if (tracker?.carrier && !order.carrier) {
+        await supabase.from('tracked_orders').update({ carrier: lower(tracker.carrier), updated_at:new Date().toISOString() }).eq('id', order.id);
+      }
+    } catch (err) {
+      console.warn(`[TRACKING] ${code}: ${err.message || err}`);
+    }
+  }
+  if (checked) console.log(`[TRACKING] EasyPost checked ${checked} shipped order(s); ${delivered} marked delivered.`);
+  return { checked, delivered };
+}
+
 function extractProductSummary(subject, text, store) {
   const lines = text.split(/\r?\n/).map(x => x.replace(/\s+/g, ' ').trim()).filter(Boolean);
   const ignore = /^(order|subtotal|tax|shipping|total|payment|delivery|track|hello|hi |thank|view order|manage order|quantity|qty|price)/i;
@@ -828,6 +889,7 @@ async function saveParsedMessage(supabase, account, parsed, uid, adjustCredits =
       shipping: preserveFinancials ? existing?.shipping ?? null : (amounts.shipping ?? existing?.shipping ?? null),
       total: preserveFinancials ? existing?.total ?? null : (amounts.total ?? existing?.total ?? null),
       tracking_number: extractTracking(text) || existing?.tracking_number || null,
+      carrier: detectCarrierFromTracking(extractTracking(text) || existing?.tracking_number || '', `${subject} ${text.slice(0,2000)}`) || existing?.carrier || null,
       product_summary: (status === 'confirmed' ? productSummary : existing?.product_summary || productSummary) || null,
       receipt_html: status === 'confirmed' || !existing?.receipt_html ? receiptHtml : existing.receipt_html,
       receipt_text: status === 'confirmed' || !existing?.receipt_text ? text.slice(0, 250000) : existing.receipt_text,
@@ -1614,12 +1676,11 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
     let junctionWorked = false;
     try {
       const { data, error } = await supabase.from('tracked_order_emails')
-        .select('order_id,event_type,email_messages!inner(id,user_id)')
+        .select('order_id,event_type,email_messages!inner(id)')
         .in('order_id', ids);
       if (!error) {
         junctionWorked = true;
         for (const row of data || []) {
-          if (row.email_messages?.user_id !== userId) continue;
           const c = counts.get(row.order_id); if (!c) continue;
           const t = lower(row.event_type || 'unknown');
           c.total += 1; c[t] = (c[t] || 0) + 1;
@@ -1628,7 +1689,7 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
     } catch (_) {}
     if (!junctionWorked) {
       try {
-        const { data } = await supabase.from('email_messages').select('id,linked_order_id,email_type').eq('user_id', userId).in('linked_order_id', ids);
+        const { data } = await supabase.from('email_messages').select('id,linked_order_id,email_type').in('linked_order_id', ids);
         for (const row of data || []) {
           const c = counts.get(row.linked_order_id); if (!c) continue;
           const t = lower(row.email_type || 'unknown');
@@ -1639,7 +1700,8 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
     return (orders || []).map(o => ({
       ...o,
       email_counts: counts.get(o.id) || { total:0 },
-      has_linked_email: Number(counts.get(o.id)?.total || 0) > 0
+      has_linked_email: Number(counts.get(o.id)?.total || 0) > 0,
+      tracking_url: carrierTrackingUrl(o.carrier || detectCarrierFromTracking(o.tracking_number || ''), o.tracking_number || '')
     }));
   }
 
@@ -2063,12 +2125,12 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
         .order('event_at', { ascending:true });
       if (!error) {
         emails = (data || []).map(row => ({ ...(row.email_messages || {}), event_type: row.event_type, event_at: row.event_at }))
-          .filter(e => e.id && e.user_id === req.user_id);
+          .filter(e => e.id);
       }
     } catch (_) {}
     if (!emails.length) {
       try {
-        const { data } = await supabase.from('email_messages').select('*').eq('user_id', req.user_id).eq('linked_order_id', order.id).order('received_at', { ascending:true });
+        const { data } = await supabase.from('email_messages').select('*').eq('linked_order_id', order.id).order('received_at', { ascending:true });
         emails = data || [];
       } catch (_) {}
     }
@@ -2334,6 +2396,10 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
   if (process.env.IMAP_ORDER_TRACKER_ENABLED !== 'false') {
     setTimeout(() => scanAll(supabase, null, adjustUserCredits, null, confirmPendingAmazonCheckout).catch(e => console.error('Initial IMAP order scan failed:', e.message)), 30000);
     setInterval(() => scanAll(supabase, null, adjustUserCredits, null, confirmPendingAmazonCheckout).catch(e => console.error('Scheduled IMAP order scan failed:', e.message)), SCAN_INTERVAL_MS);
+  }
+  if (clean(process.env.EASYPOST_API_KEY)) {
+    setTimeout(() => checkEasyPostDelivered(supabase).catch(e => console.error('Initial tracking verification failed:', e.message)), 60000);
+    setInterval(() => checkEasyPostDelivered(supabase).catch(e => console.error('Scheduled tracking verification failed:', e.message)), Math.max(15 * 60 * 1000, Number(process.env.TRACKING_SCAN_INTERVAL_MS || 30 * 60 * 1000)));
   }
 }
 

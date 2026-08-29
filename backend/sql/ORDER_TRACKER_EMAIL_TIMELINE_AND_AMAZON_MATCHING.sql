@@ -100,12 +100,18 @@ insert into public.tracked_order_emails (order_id,email_id,event_type,event_at)
 select t.id, em.id, coalesce(em.email_type,'unknown'), em.received_at
 from public.email_messages em
 join public.tracked_orders t
-  on t.user_id=em.user_id
- and lower(coalesce(t.store,''))=lower(coalesce(em.store,''))
+  on lower(coalesce(t.store,''))=lower(coalesce(em.store,''))
  and coalesce(t.order_number,'')<>''
  and coalesce(em.order_number,'')<>''
  and upper(regexp_replace(t.order_number,'[^A-Z0-9]','','g'))=upper(regexp_replace(em.order_number,'[^A-Z0-9]','','g'))
-on conflict (order_id,email_id) do nothing;
+ and (
+      t.user_id=em.user_id
+      or lower(coalesce(t.source_email,''))=lower(coalesce(em.mailbox_email,''))
+ )
+on conflict (order_id,email_id) do update
+set event_type=excluded.event_type,
+    event_at=excluded.event_at,
+    updated_at=now();
 
 -- Amazon may combine several separately placed orders into one shipment email. Link that one
 -- message to every already-confirmed Amazon order number that is actually present in the
@@ -114,12 +120,51 @@ insert into public.tracked_order_emails (order_id,email_id,event_type,event_at)
 select t.id, em.id, coalesce(em.email_type,'unknown'), em.received_at
 from public.email_messages em
 join public.tracked_orders t
-  on t.user_id=em.user_id
- and lower(coalesce(t.store,''))='amazon'
+  on lower(coalesce(t.store,''))='amazon'
  and lower(coalesce(em.store,''))='amazon'
+ and (
+      t.user_id=em.user_id
+      or lower(coalesce(t.source_email,''))=lower(coalesce(em.mailbox_email,''))
+ )
  and coalesce(t.order_number,'') ~ '^\d{3}-\d{7}-\d{7}$'
 where (coalesce(em.subject,'') || ' ' || coalesce(em.snippet,'')) like ('%' || t.order_number || '%')
 on conflict (order_id,email_id) do nothing;
+
+
+-- Imported AYCD/direct mailbox rows may be archived under the super-admin archive owner rather
+-- than the checkout owner's user_id. Recover those historical links by the actual purchase
+-- mailbox + retailer order number. This is safe because the order must already belong to that
+-- purchase mailbox and the retailer order reference must match exactly after punctuation removal.
+insert into public.tracked_order_emails (order_id,email_id,event_type,event_at)
+select t.id, em.id, coalesce(em.email_type,'unknown'), em.received_at
+from public.tracked_orders t
+join public.email_messages em
+  on lower(coalesce(em.mailbox_email,''))=lower(coalesce(t.source_email,''))
+ and lower(coalesce(em.store,''))=lower(coalesce(t.store,''))
+ and coalesce(em.order_number,'')<>''
+ and coalesce(t.order_number,'')<>''
+ and upper(regexp_replace(em.order_number,'[^A-Z0-9]','','g'))=upper(regexp_replace(t.order_number,'[^A-Z0-9]','','g'))
+where coalesce(t.source_email,'')<>''
+on conflict (order_id,email_id) do update
+set event_type=excluded.event_type,
+    event_at=excluded.event_at,
+    updated_at=now();
+
+-- Preserve the older single-link column too, but only when it is currently empty. This lets
+-- legacy Email Center screens continue to find at least one retailer email without breaking the
+-- newer many-email timeline.
+update public.email_messages em
+set linked_order_id = matched.order_id,
+    is_order_related = true,
+    keep_forever = true,
+    updated_at = now()
+from (
+  select distinct on (toe.email_id) toe.email_id, toe.order_id
+  from public.tracked_order_emails toe
+  order by toe.email_id, toe.event_at asc nulls last
+) matched
+where em.id=matched.email_id
+  and em.linked_order_id is null;
 
 -- Rebuild current tracker status from the strongest linked retailer email. Waiting rows with no
 -- linked email remain waiting/yellow.
