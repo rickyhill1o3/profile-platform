@@ -2,6 +2,7 @@ const { ImapFlow } = require('imapflow');
 const { simpleParser } = require('mailparser');
 const crypto = require('crypto');
 const { encrypt, decrypt } = require('./encryption');
+const { parseRetailEmail, expectedWebhookItems, matchScore, mainItemMatch, deriveOverallStatus, norm: reconcileNorm } = require('./retailer-reconciliation');
 
 const SCAN_INTERVAL_MS = Math.max(60 * 1000, Number(process.env.IMAP_SCAN_INTERVAL_MS || 5 * 60 * 1000));
 const INITIAL_LOOKBACK_DAYS = Math.max(7, Number(process.env.IMAP_INITIAL_LOOKBACK_DAYS || 365));
@@ -249,6 +250,7 @@ function detectStore(from, subject, text) {
   if (/amazon\.com|amazon order|amazon\.com/.test(hay)) return 'amazon';
   if (/pokemoncenter\.com|pok[eé]mon center/.test(hay)) return 'pokemoncenter';
   if (/crunchyroll/.test(hay)) return 'crunchyroll';
+  if (/supremenewyork\.com|us\.supreme\.com|\bsupreme\b/.test(hay)) return 'supreme';
   if (/books\s*-?\s*a\s*-?\s*million|booksamillion(?:\.com)?|\bbam!?(?:\s|$)/i.test(hay)) return 'booksamillion';
   return '';
 }
@@ -268,7 +270,7 @@ function detectStatus(subject, text) {
 
   // A retailer confirmation/summary subject is authoritative. This prevents phrases such as
   // "we will email you as soon as your order has shipped" from being mistaken for a shipment.
-  if (/order confirmation|order confirmed|ordered:|thanks for your order|thanks for shopping with us|order received|order placed|order summary/.test(subj)) return 'confirmed';
+  if (/order confirmation|order confirmed|ordered:|thanks for your order|thanks for shopping with us|order received|order placed|order summary|^online shop order$/.test(subj)) return 'confirmed';
 
   if (/\bdelivered\b|delivery complete|items? (?:has|have) arrived/.test(subj) ||
       /(?:your|the|this) (?:package|order|shipment) (?:has been|was|is) delivered|delivery (?:is )?complete|items? (?:has|have) arrived from order/.test(body)) return 'delivered';
@@ -293,6 +295,7 @@ function extractOrderNumber(store, subject, text) {
     samsclub: [/\b(?:order(?: number| #)?\s*[:#]?\s*)([A-Z0-9-]{8,30})\b/i],
     pokemoncenter: [/\b(?:order(?: number| #)?\s*[:#]?\s*)([A-Z0-9-]{6,30})\b/i],
     crunchyroll: [/\b(?:order(?: number| #)?\s*[:#]?\s*)([A-Z0-9-]{6,30})\b/i],
+    supreme: [/\bOrder\s+(\d{6,20})\b/i, /\border\s*#?\s*(\d{6,20})\b/i],
     booksamillion: [
       /\b(?:order\s*(?:number|no\.?|#)?\s*[:#-]?\s*)(\d{8,20})\b/i,
       /\b(?:delivery\s+orders?\s*)?(?:order\s*)?#\s*[:#-]?\s*(\d{8,20})\b/i,
@@ -784,7 +787,8 @@ async function syncServiceOrders(supabase, userId, accounts = []) {
     // Astral/bot webhooks that did not include the account email. This is what separates
     // profiles such as "Carnival" and "red card 8032 stickydelivery" even when the old
     // checkout webhook only stored the profile name.
-    const resolvedEmail = lower(exactProfileIdentity?.email || orderEmail || (priorIsPlaceholder ? defaultEmail : priorEmail));
+    const retailerReconciled = ['matched','probable'].includes(lower(prior?.reconciliation_status));
+    const resolvedEmail = lower(retailerReconciled && !priorIsPlaceholder ? priorEmail : (exactProfileIdentity?.email || orderEmail || (priorIsPlaceholder ? defaultEmail : priorEmail)));
     const payload = {
       user_id: userId, source_order_id: source.id, service_order_external_id: source.external_order_id || null,
       profile_id: exactProfileIdentity?.profile_id || matchingAccount?.profile_id || prior?.profile_id || accounts[0]?.profile_id || null,
@@ -811,7 +815,7 @@ async function syncServiceOrders(supabase, userId, accounts = []) {
         }
       }
     }
-    if (tracked && exactProfileIdentity?.email) {
+    if (tracked && exactProfileIdentity?.email && !['supreme'].includes(store) && !['matched','probable'].includes(lower(tracked.reconciliation_status))) {
       await removeMismatchedOrderEmailLinks(supabase, tracked.id, exactProfileIdentity.email);
     }
     if (tracked && ['confirmed','processing','shipped','delivered'].includes(lower(tracked.status))) {
@@ -1012,6 +1016,140 @@ async function linkOrderEmail(supabase, orderId, emailId, status, eventAt) {
   }
 }
 
+
+async function reconcileTrackedOrderItems(supabase, trackedOrder, serviceOrder, retail, status, eventAt, emailId) {
+  if (!trackedOrder?.id || !['target','supreme'].includes(lower(trackedOrder.store))) return null;
+  const expected = expectedWebhookItems(serviceOrder);
+  const parsedItems = Array.isArray(retail?.items) ? retail.items : [];
+  let existing = [];
+  try {
+    const r = await supabase.from('tracked_order_items').select('*').eq('order_id', trackedOrder.id).order('created_at');
+    if (r.error) throw r.error;
+    existing = r.data || [];
+  } catch (error) {
+    if (/tracked_order_items|relation .* does not exist|schema cache/i.test(String(error.message || ''))) return null;
+    throw error;
+  }
+
+  const matchedIds = [];
+  for (const item of parsedItems) {
+    let best = null, bestScore = 0;
+    for (const old of existing) {
+      const score = Math.max(
+        mainItemMatch([{ product_name: old.product_name, sku: old.sku }], item) ? 1 : 0,
+        reconcileNorm(old.product_name) === reconcileNorm(item.product_name) ? 1 : 0
+      );
+      const sizeCompatible = !old.size || !item.size || reconcileNorm(old.size) === reconcileNorm(item.size);
+      if (score > bestScore && sizeCompatible) { best = old; bestScore = score; }
+    }
+    const isMain = expected.some(e => mainItemMatch([e], item) && (!e.size || !item.size || reconcileNorm(e.size) === reconcileNorm(item.size)));
+    const role = isMain ? 'main' : (lower(trackedOrder.store) === 'target' ? 'filler' : 'normal');
+    const itemStatus = lower(item.status || status || 'confirmed');
+    const payload = {
+      retailer_order_number: trackedOrder.order_number,
+      product_name: clean(item.product_name).slice(0,500),
+      sku: clean(item.sku) || best?.sku || null,
+      size: clean(item.size) || best?.size || null,
+      style: clean(item.style) || best?.style || null,
+      quantity: Math.max(1, Number(item.quantity || best?.quantity || 1)),
+      price: item.price == null ? (best?.price ?? null) : Number(item.price),
+      role: best?.role === 'main' ? 'main' : role,
+      status: itemStatus === 'pending' ? 'confirmed' : itemStatus,
+      last_event_at: eventAt,
+      last_email_id: emailId || null,
+      updated_at: new Date().toISOString()
+    };
+    let saved;
+    if (best?.id) {
+      const r = await supabase.from('tracked_order_items').update(payload).eq('id', best.id).select().single();
+      if (r.error) throw r.error; saved = r.data;
+      existing = existing.map(x => x.id === best.id ? saved : x);
+    } else {
+      const r = await supabase.from('tracked_order_items').insert({ order_id: trackedOrder.id, ...payload }).select().single();
+      if (r.error) throw r.error; saved = r.data; existing.push(saved);
+    }
+    if (saved?.id) matchedIds.push(saved.id);
+  }
+
+  // A Target confirmation containing only the filler is the critical ghost-success case.
+  // Create an explicit missing main-item row so an unrelated filler cancellation cannot be
+  // interpreted as a successful checkout or as a cancellation of the desired product.
+  if (status === 'confirmed' && expected.length) {
+    for (const e of expected) {
+      const hasMain = existing.some(i => i.role === 'main' && mainItemMatch([e], i));
+      const emailContainsMain = parsedItems.some(i => mainItemMatch([e], i));
+      if (!hasMain && !emailContainsMain) {
+        const r = await supabase.from('tracked_order_items').insert({
+          order_id: trackedOrder.id, retailer_order_number: trackedOrder.order_number,
+          product_name: clean(e.product_name || e.sku || trackedOrder.product_summary || 'Expected item').slice(0,500),
+          sku: clean(e.sku) || null, size: clean(e.size) || null, quantity: Math.max(1,Number(e.quantity||1)), price:e.price==null?null:Number(e.price),
+          role:'main', status:'missing', last_event_at:eventAt, last_email_id:emailId||null, updated_at:new Date().toISOString()
+        }).select().single();
+        if (!r.error && r.data) existing.push(r.data);
+      }
+    }
+  }
+
+  // Shipping is many-to-many: one order can have several tracking numbers and one shipment
+  // can contain only a subset of a multi-item Supreme order.
+  const tracking = clean(retail?.tracking_number);
+  if (tracking && ['shipped','delivered'].includes(status)) {
+    const carrier = detectCarrierFromTracking(tracking, '');
+    const shipPayload = {
+      order_id: trackedOrder.id, retailer_order_number: trackedOrder.order_number,
+      tracking_number: tracking, carrier: carrier || null, status,
+      shipped_at: status === 'shipped' ? eventAt : undefined,
+      delivered_at: status === 'delivered' ? eventAt : null,
+      last_email_id: emailId || null, updated_at: new Date().toISOString()
+    };
+    if (shipPayload.shipped_at === undefined) delete shipPayload.shipped_at;
+    let sr = await supabase.from('tracked_order_shipments').upsert(shipPayload,{onConflict:'order_id,tracking_number'}).select().single();
+    if (sr.error) throw sr.error;
+    for (const itemId of matchedIds) {
+      await supabase.from('tracked_order_shipment_items').upsert({ shipment_id: sr.data.id, item_id: itemId, quantity:1 }, { onConflict:'shipment_id,item_id' });
+    }
+  } else if (status === 'delivered' && matchedIds.length) {
+    // Target delivery mail may omit the tracking number. Mark the shipment(s) already linked
+    // to the delivered item rather than inventing a new package.
+    const links = await supabase.from('tracked_order_shipment_items').select('shipment_id').in('item_id', matchedIds);
+    const shipmentIds = [...new Set((links.data||[]).map(x=>x.shipment_id).filter(Boolean))];
+    if (shipmentIds.length) await supabase.from('tracked_order_shipments').update({status:'delivered',delivered_at:eventAt,updated_at:new Date().toISOString()}).in('id',shipmentIds);
+  }
+
+  const refreshed = await supabase.from('tracked_order_items').select('*').eq('order_id',trackedOrder.id).order('created_at');
+  if (refreshed.error) throw refreshed.error;
+  const overall = deriveOverallStatus(refreshed.data || []);
+  const mainMissing = (refreshed.data || []).some(i => i.role === 'main' && i.status === 'missing');
+  const note = mainMissing ? 'Main webhook item was not present in the retailer confirmation; filler-only order detected.' : null;
+  await supabase.from('tracked_orders').update({
+    status: overall,
+    reconciliation_status: mainMissing ? 'main_item_missing' : 'matched',
+    reconciliation_note: note,
+    last_status_at: eventAt,
+    updated_at: new Date().toISOString()
+  }).eq('id',trackedOrder.id);
+  return { items: refreshed.data || [], overall_status: overall, main_missing: mainMissing };
+}
+
+async function matchSupremeServiceOrder(supabase, account, serviceOrders, retail, eventAt, messageId) {
+  const candidates = [];
+  const already = await supabase.from('tracked_orders').select('source_order_id,order_number').eq('user_id',account.user_id).eq('store','supreme');
+  const consumed = new Set((already.data||[]).filter(x=>normalizeOrderRef(x.order_number)===normalizeOrderRef(retail.order_number)).map(x=>String(x.source_order_id)));
+  for (const order of serviceOrders) {
+    const site = normalizeStoreKey(order.site || order.metadata?.site || extractNamedPayloadValue(order.raw_payload || {}, ['site','store']));
+    if (site !== 'supreme' || consumed.has(String(order.id))) continue;
+    const score = matchScore(order, retail, eventAt, account.email);
+    if (score >= 60) candidates.push({ order, score });
+  }
+  candidates.sort((a,b)=>b.score-a.score || Math.abs(new Date(a.order.created_at)-new Date(eventAt))-Math.abs(new Date(b.order.created_at)-new Date(eventAt)));
+  const winner = candidates[0];
+  if (!winner) return null;
+  // Do not auto-link an ambiguous pair of near-identical checkouts. It can be reconciled later
+  // when a shipment or another item provides stronger evidence.
+  if (candidates[1] && winner.score < 90 && Math.abs(winner.score-candidates[1].score) < 8) return null;
+  return winner;
+}
+
 async function saveParsedMessage(supabase, account, parsed, uid, adjustCredits = null, confirmPendingAmazonCheckout = null) {
   const subject = clean(parsed.subject);
   const from = parsed.from?.text || '';
@@ -1032,6 +1170,10 @@ async function saveParsedMessage(supabase, account, parsed, uid, adjustCredits =
   const eventAt = (parsed.date || new Date()).toISOString();
   const amounts = extractAmounts(text);
   const productSummary = extractProductSummary(subject, text, store);
+  const retail = parseRetailEmail(store, status, subject, text);
+  retail.order_number = retail.order_number || primaryOrderNumber;
+  const bodyLinesForName = text.replace(/\r/g,'').split('\n').map(x=>x.trim()).filter(Boolean);
+  if (store === 'supreme') { const di = bodyLinesForName.findIndex(x=>/^Dear\b/i.test(x)); if (di>=0) retail.customer_name = bodyLinesForName.slice(di,di+3).join(' ').replace(/^Dear\s*/i,'').replace(/,$/,'').trim(); }
   const receiptHtml = parsed.html ? sanitizeReceiptHtml(String(parsed.html).slice(0, 250000)) : `<pre>${htmlEscape(text.slice(0, 250000))}</pre>`;
   const serviceOrders = await loadServiceOrders(supabase, account.user_id);
 
@@ -1046,6 +1188,15 @@ async function saveParsedMessage(supabase, account, parsed, uid, adjustCredits =
     else {
       amazonPendingMatch = await matchPendingAmazonOrder(supabase, account, parsed, primaryOrderNumber, amounts, messageId);
       if (amazonPendingMatch?.serviceOrder) matchedServiceOrders = [amazonPendingMatch.serviceOrder];
+    }
+  } else if (store === 'supreme') {
+    // Once the confirmation has taught us the Supreme order number, shipment messages match it
+    // directly. Before that, reconcile the confirmation globally by item set + checkout time.
+    const direct = serviceOrders.find(o => collectOrderRefs(o).includes(normalizeOrderRef(primaryOrderNumber)));
+    if (direct) matchedServiceOrders = [direct];
+    else {
+      const winner = await matchSupremeServiceOrder(supabase, account, serviceOrders, retail, eventAt, messageId);
+      if (winner?.order) matchedServiceOrders = [winner.order];
     }
   } else {
     const incomingRefs = new Set(orderNumbers.map(normalizeOrderRef).filter(Boolean));
@@ -1102,6 +1253,10 @@ async function saveParsedMessage(supabase, account, parsed, uid, adjustCredits =
     };
     const { data: order, error } = await supabase.from('tracked_orders').update(patch).eq('id', existing.id).select().single();
     if (error) throw error;
+    if (store === 'supreme') {
+      const score = matchScore(serviceOrder, retail, eventAt, account.email);
+      await supabase.from('tracked_orders').update({ reconciliation_score: score, reconciliation_status: score >= 80 ? 'matched' : 'probable', updated_at:new Date().toISOString() }).eq('id', order.id).then(()=>{}).catch(()=>{});
+    }
 
     if (archivedEmail?.id) {
       // Keep the legacy single-link populated for older UI/code, and also record the new
@@ -1114,6 +1269,12 @@ async function saveParsedMessage(supabase, account, parsed, uid, adjustCredits =
       await linkOrderEmail(supabase, order.id, archivedEmail.id, status, eventAt);
     }
 
+    let lineReconciliation = null;
+    if (['target','supreme'].includes(store)) {
+      try { lineReconciliation = await reconcileTrackedOrderItems(supabase, order, serviceOrder, retail, status, eventAt, archivedEmail?.id || null); }
+      catch (reconcileError) { console.warn(`[ORDER-ITEMS] ${store} ${matchedOrderNumber}: ${reconcileError.message || reconcileError}`); }
+    }
+
     if (index === 0) {
       await supabase.from('tracked_order_events').upsert({
         order_id: order.id, user_id: account.user_id, status, event_at: eventAt, subject,
@@ -1121,12 +1282,14 @@ async function saveParsedMessage(supabase, account, parsed, uid, adjustCredits =
       }, { onConflict: 'user_id,message_id', ignoreDuplicates: true });
     }
 
+    const effectiveStatus = lineReconciliation?.overall_status || status;
     const sourceMetadata = {
       ...(serviceOrder.metadata || {}),
       purchase_id: serviceOrder.metadata?.purchase_id || matchedOrderNumber,
       order_number: matchedOrderNumber,
       confirmation_status: status,
-      imap_status: status,
+      imap_status: effectiveStatus,
+      item_level_reconciled_at: lineReconciliation ? eventAt : (serviceOrder.metadata?.item_level_reconciled_at || null),
       imap_last_message_at: eventAt,
       imap_last_message_id: messageId
     };
@@ -1134,7 +1297,7 @@ async function saveParsedMessage(supabase, account, parsed, uid, adjustCredits =
 
     const deferAmazonConfirmation = store === 'amazon' && status === 'confirmed' && amazonPendingMatch && serviceOrder.id === amazonPendingMatch.serviceOrder?.id && typeof confirmPendingAmazonCheckout === 'function';
     if (!deferAmazonConfirmation) {
-      await supabase.from('orders').update({ status, external_order_id: matchedOrderNumber, metadata: sourceMetadata }).eq('id', serviceOrder.id);
+      await supabase.from('orders').update({ status: effectiveStatus, external_order_id: matchedOrderNumber, metadata: sourceMetadata }).eq('id', serviceOrder.id);
     }
     if (deferAmazonConfirmation) {
       const confirmed = await confirmPendingAmazonCheckout({
@@ -1147,11 +1310,11 @@ async function saveParsedMessage(supabase, account, parsed, uid, adjustCredits =
       }
     }
 
-    const inactive = ['canceled','refunded'].includes(status);
+    const inactive = ['canceled','refunded'].includes(effectiveStatus);
     await ensureInvestmentRow(supabase, order, serviceOrder, !inactive);
     if (inactive && !existing.credits_refunded && Number(serviceOrder.credits_charged || 0) > 0 && typeof adjustCredits === 'function') {
       const refund = Number(serviceOrder.credits_charged || 0);
-      await adjustCredits({ userId: account.user_id, delta: refund, reason: 'imap_order_canceled_refund', note: `Credits refunded after ${store} order ${matchedOrderNumber} was ${status}`, metadata: { tracked_order_id: order.id, source_order_id: serviceOrder.id, imap_status: status }, orderId: serviceOrder.id });
+      await adjustCredits({ userId: account.user_id, delta: refund, reason: 'imap_order_canceled_refund', note: `Credits refunded after ${store} order ${matchedOrderNumber} was ${effectiveStatus}`, metadata: { tracked_order_id: order.id, source_order_id: serviceOrder.id, imap_status: effectiveStatus }, orderId: serviceOrder.id });
       await supabase.from('tracked_orders').update({ credits_refunded: true, credits_refunded_at: new Date().toISOString() }).eq('id', order.id);
       await supabase.from('orders').update({ status: 'canceled', metadata: { ...sourceMetadata, imap_canceled_at: new Date().toISOString(), credits_refunded_by_imap: refund } }).eq('id', serviceOrder.id);
     }
@@ -1405,6 +1568,7 @@ async function reconcileHistoricalOrderProfileIdentity(supabase, rows = []) {
   const indexes = new Map();
   let corrected = 0, unlinked = 0;
   for (const order of rows || []) {
+    if (lower(order.store) === 'supreme' || ['matched','probable'].includes(lower(order.reconciliation_status))) continue;
     const source = sourceMap.get(String(order.source_order_id || ''));
     if (!source) continue;
     const uid = String(order.user_id || source.user_id || '');
@@ -1431,7 +1595,7 @@ async function reconcileHistoricalOrderProfileIdentity(supabase, rows = []) {
 async function repairHistoricalOrderEmails(supabase, userId = null, adjustCredits = null, confirmPendingAmazonCheckout = null, options = {}) {
   const maxOrders = Math.max(1, Math.min(100, Number(options.maxOrders || 20)));
   let q = supabase.from('tracked_orders')
-    .select('id,user_id,source_order_id,profile_id,source_email,store,order_number,order_date,status')
+    .select('id,user_id,source_order_id,profile_id,source_email,store,order_number,order_date,status,reconciliation_status')
     .not('order_number','is',null)
     .order('order_date',{ascending:false})
     .limit(Math.max(maxOrders * 8, 100));
@@ -2054,10 +2218,26 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
         }
       } catch (_) {}
     }
+    const itemMap = new Map(ids.map(id => [String(id), []]));
+    const shipmentMap = new Map(ids.map(id => [String(id), []]));
+    try {
+      for (let i=0;i<ids.length;i+=100) {
+        const r=await supabase.from('tracked_order_items').select('*').in('order_id',ids.slice(i,i+100)).order('created_at');
+        if (r.error) throw r.error;
+        for (const row of r.data||[]) (itemMap.get(String(row.order_id))||[]).push(row);
+      }
+      for (let i=0;i<ids.length;i+=100) {
+        const r=await supabase.from('tracked_order_shipments').select('*').in('order_id',ids.slice(i,i+100)).order('created_at');
+        if (r.error) throw r.error;
+        for (const row of r.data||[]) (shipmentMap.get(String(row.order_id))||[]).push({ ...row, tracking_url: carrierTrackingUrl(row.carrier || detectCarrierFromTracking(row.tracking_number || ''), row.tracking_number || '') });
+      }
+    } catch (_) { /* item-level migration is optional until installed */ }
     return (orders || []).map(o => ({
       ...o,
       email_counts: counts.get(o.id) || { total:0 },
       has_linked_email: Number(counts.get(o.id)?.total || 0) > 0,
+      items: itemMap.get(String(o.id)) || [],
+      shipments: shipmentMap.get(String(o.id)) || [],
       tracking_url: carrierTrackingUrl(o.carrier || detectCarrierFromTracking(o.tracking_number || ''), o.tracking_number || '')
     }));
   }
@@ -2365,6 +2545,31 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
     if (req.role !== 'super_admin') return res.status(403).json({ error: 'Only the super admin can use AYCD Unified Inbox.' });
     try { res.json({ success: true, ...(await ingestAycdMessages(req.user_id, req.body?.messages || [])) }); }
     catch (error) { res.status(500).json({ error: error.message }); }
+  });
+
+  app.post('/orders/reconcile-retailer-emails', auth, async (req, res) => {
+    try {
+      // Reprocess the already-indexed retailer archive across ALL of this user's connected
+      // mailboxes. This intentionally ignores the webhook's previously guessed purchase email.
+      const maxMessages=Math.max(50,Math.min(5000,Number(req.body?.max_messages||2500)));
+      let q=supabase.from('email_messages').select('*').eq('user_id',req.user_id).order('received_at',{ascending:false}).limit(maxMessages);
+      const {data,error}=await q; if(error)throw error;
+      let checked=0,matched=0,ignored=0,failed=0;
+      const retailerEmails=(data||[]).filter(email=>['target','supreme'].includes(detectStore(email.from_text||'',email.subject||'',email.body_text||email.snippet||''))).reverse();
+      // Also request a live mailbox pass. The archive is reconciled immediately; any messages not
+      // indexed yet will be parsed by the background job as they arrive.
+      try { startUserScanJob(supabase,req.user_id,adjustUserCredits,confirmPendingAmazonCheckout); } catch (_) {}
+      for(const email of retailerEmails){
+        checked++;
+        try{
+          const account={ user_id:req.user_id, archive_user_id:req.user_id, profile_id:null, email:lower(email.mailbox_email), provider:providerForEmail(email.mailbox_email)||{name:'archive'}, ingestion_source:email.source_type||'archive_reconcile' };
+          const parsed={ subject:email.subject||'', from:{text:email.from_text||''}, to:{text:email.to_text||''}, cc:{text:email.cc_text||''}, text:email.body_text||email.snippet||'', html:email.body_html||null, date:new Date(email.received_at||Date.now()), messageId:email.message_id };
+          const result=await saveParsedMessage(supabase,account,parsed,email.imap_uid||0,adjustUserCredits,confirmPendingAmazonCheckout);
+          if(result?.saved)matched++; else ignored++;
+        }catch(e){ failed++; console.warn('[RECONCILE ARCHIVE]',email.id,e.message||e); }
+      }
+      res.json({success:true,checked,matched,ignored,failed,message:`Reprocessed ${checked} Target/Supreme retailer emails across all indexed mailboxes and requested a live mailbox scan.`});
+    } catch(error){ res.status(500).json({error:error.message}); }
   });
 
   app.post('/orders/scan/start', auth, async (req, res) => {
