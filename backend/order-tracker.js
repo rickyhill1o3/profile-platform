@@ -559,6 +559,160 @@ async function loadServiceOrders(supabase, userId) {
   return data || [];
 }
 
+
+function normalizeStoreKey(value) {
+  return lower(value).replace(/[^a-z0-9]/g, '');
+}
+
+function normalizePayloadKey(value) {
+  return lower(value).replace(/[^a-z0-9]/g, '');
+}
+
+function unwrapDiscordValue(value) {
+  return clean(value).replace(/^\|\|/, '').replace(/\|\|$/, '').trim();
+}
+
+function extractNamedPayloadValue(payload, names = []) {
+  const wanted = new Set(names.map(normalizePayloadKey));
+  const found = [];
+  const visit = (value, key = '', depth = 0) => {
+    if (depth > 10 || value == null) return;
+    if (Array.isArray(value)) {
+      for (const item of value) visit(item, key, depth + 1);
+      return;
+    }
+    if (typeof value === 'object') {
+      const fieldName = normalizePayloadKey(value.name || '');
+      if (fieldName && wanted.has(fieldName) && value.value != null) {
+        const candidate = unwrapDiscordValue(value.value);
+        if (candidate) found.push(candidate);
+      }
+      for (const [childKey, childValue] of Object.entries(value)) visit(childValue, childKey, depth + 1);
+      return;
+    }
+    if (wanted.has(normalizePayloadKey(key))) {
+      const candidate = unwrapDiscordValue(value);
+      if (candidate) found.push(candidate);
+    }
+  };
+  visit(payload);
+  return found.find(Boolean) || '';
+}
+
+function serviceOrderProfileName(source = {}) {
+  return clean(
+    source.metadata?.profile_name || source.metadata?.profile ||
+    extractNamedPayloadValue(source.raw_payload || {}, ['profile_name','profileName','profile'])
+  );
+}
+
+async function buildProfileMailboxIndex(supabase, userId = null) {
+  let pq = supabase.from('profiles').select('id,user_id,profile_name,account_type');
+  if (userId) pq = pq.eq('user_id', userId);
+  const { data: profiles, error } = await pq;
+  if (error) throw error;
+  const list = profiles || [];
+  const ids = list.map(p => p.id).filter(Boolean);
+  const credentials = new Map();
+  const addCredential = (row = {}, storeValue = '') => {
+    const profileId = String(row.profile_id || '');
+    const email = lower(row.login_email);
+    if (!profileId || !email || !email.includes('@')) return;
+    const current = credentials.get(profileId) || [];
+    current.push({ email, store: normalizeStoreKey(storeValue) });
+    credentials.set(profileId, current);
+  };
+  for (let i = 0; i < ids.length; i += 75) {
+    const chunk = ids.slice(i, i + 75);
+    try {
+      const r = await supabase.from('profile_store_credentials').select('profile_id,store,login_email').in('profile_id', chunk);
+      if (!r.error) for (const row of r.data || []) addCredential(row, row.store);
+    } catch (_) {}
+    try {
+      const r = await supabase.from('accounts').select('profile_id,provider,login_email').in('profile_id', chunk);
+      if (!r.error) for (const row of r.data || []) addCredential(row, row.provider);
+    } catch (_) {}
+  }
+  return { profiles: list, credentials };
+}
+
+function resolveExactProfileMailbox(source = {}, index = {}) {
+  const profileName = serviceOrderProfileName(source);
+  if (!profileName) return null;
+  const userId = String(source.user_id || '');
+  const store = normalizeStoreKey(source.site || source.metadata?.site || extractNamedPayloadValue(source.raw_payload || {}, ['site','store']));
+  let matches = (index.profiles || []).filter(p =>
+    String(p.user_id || '') === userId && lower(p.profile_name) === lower(profileName)
+  );
+  if (!matches.length) return null;
+  if (store) {
+    const byStore = matches.filter(p => normalizeStoreKey(p.account_type) === store ||
+      (index.credentials.get(String(p.id)) || []).some(c => !c.store || c.store === store));
+    if (byStore.length) matches = byStore;
+  }
+  const candidates = [];
+  for (const profile of matches) {
+    let creds = index.credentials.get(String(profile.id)) || [];
+    if (store) {
+      const storeCreds = creds.filter(c => !c.store || c.store === store);
+      if (storeCreds.length) creds = storeCreds;
+    }
+    for (const cred of creds) candidates.push({ profile_id: profile.id, email: cred.email, profile_name: profile.profile_name });
+  }
+  const uniqueEmails = [...new Set(candidates.map(c => c.email).filter(Boolean))];
+  if (uniqueEmails.length !== 1) return null;
+  const exact = candidates.find(c => c.email === uniqueEmails[0]);
+  return exact || null;
+}
+
+async function removeMismatchedOrderEmailLinks(supabase, trackedOrderId, authoritativeEmail) {
+  const orderId = clean(trackedOrderId);
+  const email = lower(authoritativeEmail);
+  if (!orderId || !email) return 0;
+  let removed = 0;
+  try {
+    const links = await supabase.from('tracked_order_emails').select('id,email_id').eq('order_id', orderId);
+    if (!links.error && links.data?.length) {
+      const emailIds = links.data.map(r => r.email_id).filter(Boolean);
+      if (emailIds.length) {
+        const messages = await supabase.from('email_messages').select('id,mailbox_email').in('id', emailIds);
+        if (!messages.error) {
+          const mailboxById = new Map((messages.data || []).map(m => [String(m.id), lower(m.mailbox_email)]));
+          const badIds = links.data.filter(link => mailboxById.get(String(link.email_id)) && mailboxById.get(String(link.email_id)) !== email).map(link => link.id);
+          if (badIds.length) {
+            const del = await supabase.from('tracked_order_emails').delete().in('id', badIds);
+            if (!del.error) removed += badIds.length;
+          }
+        }
+      }
+    }
+  } catch (_) {}
+  try {
+    const legacy = await supabase.from('email_messages').select('id,mailbox_email').eq('linked_order_id', orderId);
+    if (!legacy.error) {
+      const bad = (legacy.data || []).filter(m => lower(m.mailbox_email) && lower(m.mailbox_email) !== email).map(m => m.id);
+      if (bad.length) {
+        const upd = await supabase.from('email_messages').update({ linked_order_id: null, updated_at: new Date().toISOString() }).in('id', bad);
+        if (!upd.error) removed += bad.length;
+      }
+    }
+  } catch (_) {}
+  // Remove status events that came from a different mailbox too. Otherwise an old
+  // wrong-mailbox confirmation can keep an order blue/green even after its email link
+  // has been detached from the corrected profile.
+  try {
+    const events = await supabase.from('tracked_order_events').select('id,source_email').eq('order_id', orderId);
+    if (!events.error) {
+      const badEventIds = (events.data || []).filter(e => lower(e.source_email) && lower(e.source_email) !== email).map(e => e.id);
+      if (badEventIds.length) {
+        const del = await supabase.from('tracked_order_events').delete().in('id', badEventIds);
+        if (!del.error) removed += badEventIds.length;
+      }
+    }
+  } catch (_) {}
+  return removed;
+}
+
 function trackedOrderActualCost(tracked = {}, serviceOrder = {}) {
   // Investment Value should represent what the retailer actually charged, not the
   // bot/webhook item-price estimate. Once a retailer confirmation is linked, the
@@ -600,6 +754,7 @@ async function ensureInvestmentRow(supabase, tracked, serviceOrder, active = tru
 
 async function syncServiceOrders(supabase, userId, accounts = []) {
   const serviceOrders = await loadServiceOrders(supabase, userId);
+  const profileMailboxIndex = await buildProfileMailboxIndex(supabase, userId);
   const defaultEmail = accounts[0]?.email || 'waiting-for-imap@local';
   for (const source of serviceOrders) {
     const store = lower(source.site || source.metadata?.site || source.raw_payload?.site || 'unknown').replace(/[^a-z0-9]/g, '');
@@ -619,15 +774,20 @@ async function syncServiceOrders(supabase, userId, accounts = []) {
     // account, notification address). Prefer the address that is actually one of
     // this user's configured retailer mailboxes. This repairs old rows that were
     // previously labeled waiting-for-imap@local.
+    const exactProfileIdentity = resolveExactProfileMailbox(source, profileMailboxIndex);
     const matchingAccount = accounts.find(account => sourceEmails.has(lower(account.email)))
       || accounts.find(account => lower(account.email) === metadataEmail);
-    const orderEmail = lower(matchingAccount?.email || metadataEmail || [...sourceEmails][0] || '');
+    const orderEmail = lower(exactProfileIdentity?.email || matchingAccount?.email || metadataEmail || [...sourceEmails][0] || '');
     const priorEmail = lower(prior?.source_email || '');
     const priorIsPlaceholder = !priorEmail || priorEmail === 'waiting-for-imap@local';
-    const resolvedEmail = orderEmail || (priorIsPlaceholder ? defaultEmail : priorEmail);
+    // An exact profile-name match inside THIS website user is authoritative for legacy
+    // Astral/bot webhooks that did not include the account email. This is what separates
+    // profiles such as "Carnival" and "red card 8032 stickydelivery" even when the old
+    // checkout webhook only stored the profile name.
+    const resolvedEmail = lower(exactProfileIdentity?.email || orderEmail || (priorIsPlaceholder ? defaultEmail : priorEmail));
     const payload = {
       user_id: userId, source_order_id: source.id, service_order_external_id: source.external_order_id || null,
-      profile_id: prior?.profile_id || matchingAccount?.profile_id || accounts[0]?.profile_id || null,
+      profile_id: exactProfileIdentity?.profile_id || matchingAccount?.profile_id || prior?.profile_id || accounts[0]?.profile_id || null,
       source_email: resolvedEmail,
       store, order_number: prior?.order_number || orderNumber,
       status: prior?.status || (['confirmed','processing','shipped','delivered','canceled','refunded'].includes(lower(source.status)) ? lower(source.status) : 'waiting_confirmation'),
@@ -650,6 +810,9 @@ async function syncServiceOrders(supabase, userId, accounts = []) {
           tracked=linked.data || tracked;
         }
       }
+    }
+    if (tracked && exactProfileIdentity?.email) {
+      await removeMismatchedOrderEmailLinks(supabase, tracked.id, exactProfileIdentity.email);
     }
     if (tracked && ['confirmed','processing','shipped','delivered'].includes(lower(tracked.status))) {
       await ensureInvestmentRow(supabase, tracked, source, true);
@@ -1231,11 +1394,44 @@ async function linkedTrackedOrderIds(supabase, orderIds = []) {
   return linked;
 }
 
+async function reconcileHistoricalOrderProfileIdentity(supabase, rows = []) {
+  const sourceIds = [...new Set((rows || []).map(r => r.source_order_id).filter(Boolean))];
+  if (!sourceIds.length) return { corrected: 0, unlinked: 0 };
+  const sourceMap = new Map();
+  for (let i = 0; i < sourceIds.length; i += 100) {
+    const r = await supabase.from('orders').select('id,user_id,site,metadata,raw_payload').in('id', sourceIds.slice(i, i + 100));
+    if (!r.error) for (const source of r.data || []) sourceMap.set(String(source.id), source);
+  }
+  const indexes = new Map();
+  let corrected = 0, unlinked = 0;
+  for (const order of rows || []) {
+    const source = sourceMap.get(String(order.source_order_id || ''));
+    if (!source) continue;
+    const uid = String(order.user_id || source.user_id || '');
+    if (!uid) continue;
+    if (!indexes.has(uid)) indexes.set(uid, await buildProfileMailboxIndex(supabase, uid));
+    const identity = resolveExactProfileMailbox(source, indexes.get(uid));
+    if (!identity?.email) continue;
+    const currentEmail = lower(order.source_email);
+    const currentProfileId = String(order.profile_id || '');
+    if (currentEmail !== lower(identity.email) || currentProfileId !== String(identity.profile_id || '')) {
+      const patch = { source_email: lower(identity.email), profile_id: identity.profile_id || order.profile_id || null, updated_at: new Date().toISOString() };
+      const upd = await supabase.from('tracked_orders').update(patch).eq('id', order.id);
+      if (!upd.error) {
+        order.source_email = patch.source_email;
+        order.profile_id = patch.profile_id;
+        corrected++;
+      }
+    }
+    unlinked += await removeMismatchedOrderEmailLinks(supabase, order.id, identity.email);
+  }
+  return { corrected, unlinked };
+}
+
 async function repairHistoricalOrderEmails(supabase, userId = null, adjustCredits = null, confirmPendingAmazonCheckout = null, options = {}) {
   const maxOrders = Math.max(1, Math.min(100, Number(options.maxOrders || 20)));
   let q = supabase.from('tracked_orders')
-    .select('id,user_id,source_order_id,source_email,store,order_number,order_date,status')
-    .not('source_email','is',null)
+    .select('id,user_id,source_order_id,profile_id,source_email,store,order_number,order_date,status')
     .not('order_number','is',null)
     .order('order_date',{ascending:false})
     .limit(Math.max(maxOrders * 8, 100));
@@ -1243,13 +1439,18 @@ async function repairHistoricalOrderEmails(supabase, userId = null, adjustCredit
   const { data: rows, error } = await q;
   if (error) throw error;
 
+  // Legacy bot/Astral webhooks frequently carried only a Profile name. Re-resolve that
+  // profile inside the already-known website user before deciding which mailbox to search.
+  // This prevents a historical order from being searched in another profile's mailbox.
+  const identityRepair = await reconcileHistoricalOrderProfileIdentity(supabase, rows || []);
+
   const validRows = (rows || []).filter(order => {
     const email = lower(order.source_email);
     return email && email !== 'waiting-for-imap@local' && email.includes('@') && clean(order.order_number);
   });
   const linked = await linkedTrackedOrderIds(supabase, validRows.map(order => order.id));
   const candidates = validRows.filter(order => !linked.has(String(order.id))).slice(0, maxOrders);
-  if (!candidates.length) return { checked_orders:0, matched_messages:0, repaired_orders:0, skipped:true };
+  if (!candidates.length) return { checked_orders:0, matched_messages:0, repaired_orders:0, identity_corrected:identityRepair.corrected, wrong_links_removed:identityRepair.unlinked, skipped:true };
 
   const accounts = await loadScanAccounts(supabase, userId);
   const accountMap = new Map(accounts.map(account => [`${account.user_id}:${lower(account.email)}`, account]));
@@ -1315,7 +1516,7 @@ async function repairHistoricalOrderEmails(supabase, userId = null, adjustCredit
       console.warn(`[ORDER REPAIR] FAILED ${account.email}: ${describeImapError(mailboxError)}`);
     } finally { try { await client.logout(); } catch (_) {} }
   }
-  return { checked_orders:checkedOrders, matched_messages:matchedMessages, repaired_orders:repairedOrders, mailbox_failures:mailboxFailures, candidates:candidates.length };
+  return { checked_orders:checkedOrders, matched_messages:matchedMessages, repaired_orders:repairedOrders, mailbox_failures:mailboxFailures, candidates:candidates.length, identity_corrected:identityRepair.corrected, wrong_links_removed:identityRepair.unlinked };
 }
 
 async function runHistoricalOrderEmailRepair(supabase, userId = null, adjustCredits = null, confirmPendingAmazonCheckout = null, options = {}) {

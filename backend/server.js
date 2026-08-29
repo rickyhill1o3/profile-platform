@@ -1781,6 +1781,84 @@ function extractOrderHistoryProductUrl(order = {}) {
     return String(metadata.product_url || order.product_url || '').trim();
 }
 
+async function recoverOrderHistoryEmailsFromExactProfiles(rows = []) {
+    const candidates = (rows || []).filter((row) => row?.id && row?.user_id && row?.raw_payload);
+    if (!candidates.length) return new Map();
+
+    const userIds = [...new Set(candidates.map((row) => String(row.user_id)).filter(Boolean))];
+    const profileRows = [];
+    for (let i = 0; i < userIds.length; i += 75) {
+        const { data, error } = await supabase
+            .from('profiles')
+            .select('id,user_id,profile_name,account_type')
+            .in('user_id', userIds.slice(i, i + 75));
+        if (error) throw error;
+        profileRows.push(...(data || []));
+    }
+
+    const profileIds = profileRows.map((row) => row.id).filter(Boolean);
+    const credentialMap = new Map();
+    const addCredential = (row = {}, store = '') => {
+        const profileId = String(row.profile_id || '');
+        const email = extractEmail(row.login_email || '');
+        if (!profileId || !email) return;
+        const current = credentialMap.get(profileId) || [];
+        current.push({
+            email: String(email).trim().toLowerCase(),
+            store: normalizeProfileAccountType(store || '')
+        });
+        credentialMap.set(profileId, current);
+    };
+
+    for (let i = 0; i < profileIds.length; i += 75) {
+        const chunk = profileIds.slice(i, i + 75);
+        try {
+            const { data } = await supabase.from('profile_store_credentials').select('profile_id,store,login_email').in('profile_id', chunk);
+            for (const row of data || []) addCredential(row, row.store);
+        } catch (_) {}
+        try {
+            const { data } = await supabase.from('accounts').select('profile_id,provider,login_email').in('profile_id', chunk);
+            for (const row of data || []) addCredential(row, row.provider);
+        } catch (_) {}
+    }
+
+    const recovered = new Map();
+    for (const order of candidates) {
+        let normalized;
+        try { normalized = normalizeIncomingOrderPayload(order.raw_payload || {}); } catch (_) { continue; }
+        const profileName = String(normalized.profile_name || order.metadata?.profile_name || '').trim();
+        if (!profileName) continue;
+        const site = normalizeProfileAccountType(normalized.site || order.site || order.metadata?.site || '');
+        let profiles = profileRows.filter((profile) =>
+            String(profile.user_id || '') === String(order.user_id || '') &&
+            String(profile.profile_name || '').trim().toLowerCase() === profileName.toLowerCase()
+        );
+        if (!profiles.length) continue;
+        if (site) {
+            const siteMatched = profiles.filter((profile) =>
+                normalizeProfileAccountType(profile.account_type || '') === site ||
+                (credentialMap.get(String(profile.id)) || []).some((cred) => !cred.store || cred.store === site)
+            );
+            if (siteMatched.length) profiles = siteMatched;
+        }
+
+        const exact = [];
+        for (const profile of profiles) {
+            let creds = credentialMap.get(String(profile.id)) || [];
+            if (site) {
+                const siteCreds = creds.filter((cred) => !cred.store || cred.store === site);
+                if (siteCreds.length) creds = siteCreds;
+            }
+            for (const cred of creds) exact.push({ profile_id: profile.id, email: cred.email });
+        }
+        const uniqueEmails = [...new Set(exact.map((item) => item.email).filter(Boolean))];
+        if (uniqueEmails.length === 1) {
+            recovered.set(String(order.id), { email: uniqueEmails[0], profile_id: exact.find((item) => item.email === uniqueEmails[0])?.profile_id || null });
+        }
+    }
+    return recovered;
+}
+
 async function decorateOrderHistoryRows(rows = []) {
     const items = (rows || []).map((row) => ({
         ...row,
@@ -1788,6 +1866,20 @@ async function decorateOrderHistoryRows(rows = []) {
         image_url: extractOrderHistoryImage(row),
         product_url: extractOrderHistoryProductUrl(row)
     }));
+
+    // Legacy bot/Astral webhook rows often contain a Profile name but no account email.
+    // Resolve that profile ONLY inside the already-known website user. This lets two
+    // historical checkouts from profiles such as "Carnival" and "red card 8032 stickydelivery"
+    // display their own login emails instead of inheriting a mailbox from another order.
+    try {
+        const exactProfileEmails = await recoverOrderHistoryEmailsFromExactProfiles(items);
+        for (const item of items) {
+            const exact = exactProfileEmails.get(String(item.id));
+            if (exact?.email) item.checkout_email = exact.email;
+        }
+    } catch (error) {
+        console.warn('Order-history exact-profile email recovery skipped:', error.message || error);
+    }
 
     // The Order Tracker may have already recovered a historical checkout mailbox from
     // the original webhook and saved it on tracked_orders.source_email. Admin/User Order
