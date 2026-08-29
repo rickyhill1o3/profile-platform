@@ -1789,6 +1789,37 @@ async function decorateOrderHistoryRows(rows = []) {
         product_url: extractOrderHistoryProductUrl(row)
     }));
 
+    // The Order Tracker may have already recovered a historical checkout mailbox from
+    // the original webhook and saved it on tracked_orders.source_email. Admin/User Order
+    // History reads from the service `orders` table, so use that recovered value whenever
+    // the original order row itself did not retain the account email.
+    const missingCheckoutEmail = items.filter((row) => !row.checkout_email && row.id);
+    if (missingCheckoutEmail.length) {
+        const sourceIds = missingCheckoutEmail.map((row) => row.id).filter(Boolean);
+        try {
+            const trackedBySource = new Map();
+            for (let i = 0; i < sourceIds.length; i += 100) {
+                const { data, error } = await supabase
+                    .from('tracked_orders')
+                    .select('source_order_id,source_email')
+                    .in('source_order_id', sourceIds.slice(i, i + 100));
+                if (error) throw error;
+                for (const tracked of data || []) {
+                    const email = extractEmail(tracked.source_email || '');
+                    if (tracked.source_order_id && email && lower(email) !== 'waiting-for-imap@local') {
+                        trackedBySource.set(String(tracked.source_order_id), lower(email));
+                    }
+                }
+            }
+            for (const item of missingCheckoutEmail) {
+                const recovered = trackedBySource.get(String(item.id));
+                if (recovered) item.checkout_email = recovered;
+            }
+        } catch (error) {
+            console.warn('Order-history tracked-email recovery skipped:', error.message || error);
+        }
+    }
+
     // Old webhook rows normally still contain their thumbnail. If one does not,
     // fill the image/link from the product catalog by SKU so historical purchases
     // remain visually useful without rewriting the old order row.

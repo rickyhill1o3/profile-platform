@@ -14,6 +14,7 @@ let backgroundAccountCursor = 0;
 const userScanJobs = new Map();
 let checkoutScanRuntime = null;
 const checkoutScanTimers = new Map();
+let historicalRepairRunning = false;
 
 function notifyCheckoutForOrderTracker(userId) {
   if (!userId || !checkoutScanRuntime) return;
@@ -1211,6 +1212,122 @@ async function scanAccount(supabase, account, adjustCredits = null, onProgress =
   } finally { try { await client.logout(); } catch (_) {} }
 }
 
+
+async function linkedTrackedOrderIds(supabase, orderIds = []) {
+  const ids = [...new Set((orderIds || []).filter(Boolean))];
+  const linked = new Set();
+  if (!ids.length) return linked;
+  for (let i = 0; i < ids.length; i += 100) {
+    const chunk = ids.slice(i, i + 100);
+    try {
+      const r = await supabase.from('tracked_order_emails').select('order_id').in('order_id', chunk);
+      if (!r.error) for (const row of r.data || []) if (row.order_id) linked.add(String(row.order_id));
+    } catch (_) {}
+    try {
+      const r = await supabase.from('email_messages').select('linked_order_id').in('linked_order_id', chunk);
+      if (!r.error) for (const row of r.data || []) if (row.linked_order_id) linked.add(String(row.linked_order_id));
+    } catch (_) {}
+  }
+  return linked;
+}
+
+async function repairHistoricalOrderEmails(supabase, userId = null, adjustCredits = null, confirmPendingAmazonCheckout = null, options = {}) {
+  const maxOrders = Math.max(1, Math.min(100, Number(options.maxOrders || 20)));
+  let q = supabase.from('tracked_orders')
+    .select('id,user_id,source_order_id,source_email,store,order_number,order_date,status')
+    .not('source_email','is',null)
+    .not('order_number','is',null)
+    .order('order_date',{ascending:false})
+    .limit(Math.max(maxOrders * 8, 100));
+  if (userId) q = q.eq('user_id', userId);
+  const { data: rows, error } = await q;
+  if (error) throw error;
+
+  const validRows = (rows || []).filter(order => {
+    const email = lower(order.source_email);
+    return email && email !== 'waiting-for-imap@local' && email.includes('@') && clean(order.order_number);
+  });
+  const linked = await linkedTrackedOrderIds(supabase, validRows.map(order => order.id));
+  const candidates = validRows.filter(order => !linked.has(String(order.id))).slice(0, maxOrders);
+  if (!candidates.length) return { checked_orders:0, matched_messages:0, repaired_orders:0, skipped:true };
+
+  const accounts = await loadScanAccounts(supabase, userId);
+  const accountMap = new Map(accounts.map(account => [`${account.user_id}:${lower(account.email)}`, account]));
+  const byMailbox = new Map();
+  for (const order of candidates) {
+    const key = `${order.user_id}:${lower(order.source_email)}`;
+    const account = accountMap.get(key);
+    if (!account) continue;
+    if (!byMailbox.has(key)) byMailbox.set(key, { account, orders:[] });
+    byMailbox.get(key).orders.push(order);
+  }
+
+  let checkedOrders = 0, matchedMessages = 0, repairedOrders = 0, mailboxFailures = 0;
+  for (const { account, orders } of byMailbox.values()) {
+    const client = new ImapFlow({
+      host:account.provider.host, port:account.provider.port, secure:account.provider.secure,
+      auth:await imapAuthForAccount(supabase,account), logger:false,
+      connectionTimeout:30000, greetingTimeout:30000, socketTimeout:120000
+    });
+    try {
+      console.log(`[ORDER REPAIR] START ${account.email} for ${orders.length} historical order(s)`);
+      await client.connect();
+      let boxes=[]; try { boxes=await client.list(); } catch (_) {}
+      let mailboxName='INBOX';
+      if (account.provider.name === 'gmail') mailboxName=boxes.find(b=>b.specialUse==='\\All')?.path || 'INBOX';
+      const lock=await client.getMailboxLock(mailboxName);
+      try {
+        const processedUids = new Set();
+        for (const order of orders) {
+          checkedOrders++;
+          const orderNumber = clean(order.order_number);
+          let uids=[];
+          try {
+            // TEXT searches the full message (headers + body) on Gmail/Outlook IMAP. It is
+            // ideal for historical repair because it does not require rewinding the mailbox UID
+            // checkpoint or downloading months of unrelated mail.
+            uids = await client.search({ text: orderNumber }, { uid:true });
+          } catch (searchError) {
+            console.warn(`[ORDER REPAIR] IMAP text search failed ${account.email} ${orderNumber}: ${searchError.message || searchError}`);
+            continue;
+          }
+          uids=(uids||[]).map(Number).filter(Boolean).sort((a,b)=>a-b).slice(-50);
+          const fresh = uids.filter(uid => !processedUids.has(uid));
+          for (const uid of fresh) processedUids.add(uid);
+          const uidRange=imapUidSet(fresh);
+          if (!uidRange) continue;
+          for await (const msg of client.fetch(uidRange,{uid:true,source:true,envelope:true},{uid:true})) {
+            try {
+              const parsed=await simpleParser(msg.source);
+              const result=await saveParsedMessage(supabase,account,parsed,msg.uid,adjustCredits,confirmPendingAmazonCheckout);
+              if (result?.saved) matchedMessages++;
+            } catch (parseError) {
+              console.warn(`[ORDER REPAIR] Parse/link failed ${account.email} uid=${msg.uid}: ${parseError.message || parseError}`);
+            }
+          }
+          const after = await linkedTrackedOrderIds(supabase,[order.id]);
+          if (after.has(String(order.id))) repairedOrders++;
+        }
+      } finally { lock.release(); }
+      console.log(`[ORDER REPAIR] COMPLETE ${account.email}`);
+    } catch (mailboxError) {
+      mailboxFailures++;
+      console.warn(`[ORDER REPAIR] FAILED ${account.email}: ${describeImapError(mailboxError)}`);
+    } finally { try { await client.logout(); } catch (_) {} }
+  }
+  return { checked_orders:checkedOrders, matched_messages:matchedMessages, repaired_orders:repairedOrders, mailbox_failures:mailboxFailures, candidates:candidates.length };
+}
+
+async function runHistoricalOrderEmailRepair(supabase, userId = null, adjustCredits = null, confirmPendingAmazonCheckout = null, options = {}) {
+  if (historicalRepairRunning) return { skipped:true, reason:'repair_already_running' };
+  historicalRepairRunning = true;
+  try {
+    return await repairHistoricalOrderEmails(supabase, userId, adjustCredits, confirmPendingAmazonCheckout, options);
+  } finally {
+    historicalRepairRunning = false;
+  }
+}
+
 async function syncRecentServiceOrdersForBackground(supabase, accounts = []) {
   try {
     const since = new Date(Date.now() - 7 * 86400000).toISOString();
@@ -2066,6 +2183,17 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
     catch (e) { res.status(500).json({ error: e.message }); }
   });
 
+  app.post('/orders/repair-historical-emails', auth, async (req, res) => {
+    if (req.role !== 'super_admin') return res.status(403).json({ error:'Super admin only.' });
+    try {
+      // This is deliberately a targeted IMAP search by recovered checkout email + retailer
+      // order number. It does NOT reset mailbox checkpoints or re-download every message.
+      const maxOrders = Math.max(1, Math.min(100, Number(req.body?.max_orders || 50)));
+      const result = await runHistoricalOrderEmailRepair(supabase, null, adjustUserCredits, confirmPendingAmazonCheckout, { maxOrders });
+      res.json({ success:true, ...result });
+    } catch (e) { res.status(500).json({ error:e.message }); }
+  });
+
   app.get('/orders/scan-status', auth, async (req, res) => {
     try {
       const discovered = await loadScanAccounts(supabase, req.user_id);
@@ -2456,6 +2584,15 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
   if (process.env.IMAP_ORDER_TRACKER_ENABLED !== 'false') {
     setTimeout(() => scanAll(supabase, null, adjustUserCredits, null, confirmPendingAmazonCheckout).catch(e => console.error('Initial IMAP order scan failed:', e.message)), 30000);
     setInterval(() => scanAll(supabase, null, adjustUserCredits, null, confirmPendingAmazonCheckout).catch(e => console.error('Scheduled IMAP order scan failed:', e.message)), SCAN_INTERVAL_MS);
+
+    // Slowly repair historical orders whose checkout email was recovered after their normal
+    // IMAP checkpoint had already moved past the old message. The repair searches only for the
+    // exact retailer order number inside the exact recovered mailbox, so it is inexpensive and
+    // does not force a full mailbox-history reset.
+    setTimeout(() => runHistoricalOrderEmailRepair(supabase, null, adjustUserCredits, confirmPendingAmazonCheckout, { maxOrders:10 })
+      .catch(e => console.error('Initial historical order-email repair failed:', e.message)), 90000);
+    setInterval(() => runHistoricalOrderEmailRepair(supabase, null, adjustUserCredits, confirmPendingAmazonCheckout, { maxOrders:10 })
+      .catch(e => console.error('Scheduled historical order-email repair failed:', e.message)), Math.max(15 * 60 * 1000, SCAN_INTERVAL_MS * 2));
   }
   if (clean(process.env.EASYPOST_API_KEY)) {
     setTimeout(() => checkEasyPostDelivered(supabase).catch(e => console.error('Initial tracking verification failed:', e.message)), 60000);
