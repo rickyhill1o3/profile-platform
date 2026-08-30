@@ -1734,11 +1734,25 @@ async function repairHistoricalOrderEmails(supabase, userId = null, adjustCredit
 
   const accounts = await loadScanAccounts(supabase, userId);
   const accountMap = new Map(accounts.map(account => [`${account.user_id}:${lower(account.email)}`, account]));
+  const profileAccountMap = new Map();
+  for (const account of accounts) {
+    if (!account.profile_id) continue;
+    const key = `${account.user_id}:${account.profile_id}`;
+    // Prefer Profile Builder IMAP/app-password rows over imported AYCD OAuth rows when both exist.
+    const existing = profileAccountMap.get(key);
+    if (!existing || (existing.imported_account_id && !account.imported_account_id)) profileAccountMap.set(key, account);
+  }
+  const resolveRepairAccount = (order) => {
+    const exact = accountMap.get(`${order.user_id}:${lower(order.source_email)}`);
+    if (exact) return exact;
+    if (order.profile_id) return profileAccountMap.get(`${order.user_id}:${order.profile_id}`) || null;
+    return null;
+  };
   const byMailbox = new Map();
   for (const order of candidates) {
-    const key = `${order.user_id}:${lower(order.source_email)}`;
-    const account = accountMap.get(key);
+    const account = resolveRepairAccount(order);
     if (!account) continue;
+    const key = `${account.user_id}:${lower(account.email)}`;
     if (!byMailbox.has(key)) byMailbox.set(key, { account, orders:[] });
     byMailbox.get(key).orders.push(order);
   }
@@ -1748,10 +1762,10 @@ async function repairHistoricalOrderEmails(supabase, userId = null, adjustCredit
   // Report orders that could not even be mapped to a connected OAuth2/IMAP mailbox. This makes
   // a bad profile/mailbox association visible instead of looking like a parser failure.
   for (const order of candidates) {
-    const key = `${order.user_id}:${lower(order.source_email)}`;
-    if (!accountMap.has(key)) details.push({
+    const account = resolveRepairAccount(order);
+    if (!account) details.push({
       tracked_order_id: order.id, order_number: clean(order.order_number), mailbox: lower(order.source_email),
-      store: lower(order.store), result: 'mailbox_not_connected', messages_found: 0, messages_processed: 0
+      store: lower(order.store), profile_id: order.profile_id || null, result: 'mailbox_not_connected', messages_found: 0, messages_processed: 0
     });
   }
   for (const { account, orders } of byMailbox.values()) {
@@ -1775,6 +1789,7 @@ async function repairHistoricalOrderEmails(supabase, userId = null, adjustCredit
           const detail = {
             tracked_order_id: order.id, order_number: orderNumber, mailbox: lower(account.email),
             store: lower(order.store), auth_method: account.auth_method || (account.imported_account_id ? 'imported' : 'app_password'),
+            mailbox_source: account.imported_account_id ? 'aycd_imported_oauth' : 'profile_builder_imap', profile_id: account.profile_id || order.profile_id || null,
             result: 'searching', messages_found: 0, messages_processed: 0, saved_messages: 0
           };
           details.push(detail);
@@ -2741,9 +2756,24 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
       }
       // Prioritize orders whose archived Target event is visibly the broken preheader-only copy.
       // These may be much older than the newest 100 orders and therefore must be named explicitly.
-      const damagedLinkedOrderIds = [...new Set(retailerEmails
+      // Build the repair set from the full Target archive, not only the newest maxMessages window.
+      // Also include canceled Target orders: a cancellation may apply only to a filler item while the
+      // main item shipped/delivered, which is exactly the case manual reconciliation must re-check live.
+      const damagedSet = new Set(retailerEmails
         .filter(email => lower(email.store) === 'target' && email.linked_order_id && archivedTargetBodyNeedsRepair(email))
-        .map(email => String(email.linked_order_id)))];
+        .map(email => String(email.linked_order_id)));
+      try {
+        const allTarget = await fetchAllSupabaseRows(() => supabase.from('email_messages')
+          .select('id,linked_order_id,store,body_text,body_html,snippet')
+          .eq('user_id', req.user_id).eq('store','target').not('linked_order_id','is',null));
+        for (const email of allTarget) if (email.linked_order_id && archivedTargetBodyNeedsRepair(email)) damagedSet.add(String(email.linked_order_id));
+      } catch (e) { console.warn('[RECONCILE FULL TARGET DAMAGE QUERY]', e.message || e); }
+      try {
+        const canceled = await fetchAllSupabaseRows(() => supabase.from('tracked_orders')
+          .select('id').eq('user_id',req.user_id).eq('store','target').eq('status','canceled'));
+        for (const order of canceled) if (order.id) damagedSet.add(String(order.id));
+      } catch (e) { console.warn('[RECONCILE CANCELED TARGET QUERY]', e.message || e); }
+      const damagedLinkedOrderIds = [...damagedSet];
       let repair = null;
       try {
         const requested = Math.max(Number(req.body?.repair_orders || 100), damagedLinkedOrderIds.length);
