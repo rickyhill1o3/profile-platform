@@ -2895,13 +2895,55 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
       const targetArchive = await supabase.from('email_messages').select(archiveColumns)
         .eq('user_id',req.user_id).eq('store','target').order('received_at',{ascending:false}).limit(maxMessages);
       if (targetArchive.error) throw targetArchive.error;
+      // IMPORTANT: do not use a PostgREST OR with ILIKE across the whole email archive here.
+      // On a large inbox that forces PostgreSQL to scan far too many rows and can hit the hosted
+      // statement_timeout in only a few seconds. Load already-classified Supreme mail normally,
+      // then inspect small date windows around the user's actual Supreme webhook checkouts. The
+      // latter recovers legacy rows whose store was saved as unknown without a table-wide ILIKE.
       const supremeArchive = await supabase.from('email_messages').select(archiveColumns)
-        .eq('user_id',req.user_id)
-        .or('store.eq.supreme,from_text.ilike.%supremenewyork.com%,subject.ilike.%online shop order%')
+        .eq('user_id',req.user_id).eq('store','supreme')
         .order('received_at',{ascending:false}).limit(maxMessages);
       if (supremeArchive.error) throw supremeArchive.error;
+
       const merged = new Map();
       for (const email of [...(targetArchive.data||[]), ...(supremeArchive.data||[])]) merged.set(String(email.id||email.message_id), email);
+
+      // Recover misclassified/unknown Supreme confirmations using the indexed
+      // (user_id, received_at) path. Build compact, merged +/- 1 day windows around Supreme
+      // checkouts instead of searching every archived message with ILIKE.
+      try {
+        const serviceOrdersForWindows = await loadServiceOrders(supabase, req.user_id);
+        const supremeTimes = serviceOrdersForWindows
+          .filter(order => normalizeStoreKey(order.site || order.metadata?.site || extractNamedPayloadValue(order.raw_payload || {}, ['site','store'])) === 'supreme')
+          .map(order => new Date(order.created_at || 0).getTime())
+          .filter(Number.isFinite)
+          .sort((a,b)=>a-b);
+        const rawWindows = supremeTimes.map(ms => ({ start: ms - 24*60*60*1000, end: ms + 24*60*60*1000 }));
+        const windows = [];
+        for (const w of rawWindows) {
+          const last = windows[windows.length-1];
+          if (last && w.start <= last.end) last.end = Math.max(last.end, w.end);
+          else windows.push({ ...w });
+        }
+        // Keep a pathological old account from turning a manual button into a huge archive scan.
+        // The direct store='supreme' query above still covers correctly-classified historical mail.
+        for (const w of windows.slice(-60)) {
+          const r = await supabase.from('email_messages').select(archiveColumns)
+            .eq('user_id',req.user_id)
+            .gte('received_at',new Date(w.start).toISOString())
+            .lte('received_at',new Date(w.end).toISOString())
+            .order('received_at',{ascending:false}).limit(1000);
+          if (r.error) { console.warn('[SUPREME WINDOW ARCHIVE]', r.error.message || r.error); continue; }
+          for (const email of r.data || []) {
+            const text = archivedRetailerReadableText(email);
+            const looksSupreme = lower(email.store)==='supreme' ||
+              /supremenewyork\.com|us\.supreme\.com/i.test(String(email.from_text||'')) ||
+              /^online shop order$/i.test(clean(email.subject||'')) ||
+              detectStore(email.from_text||'', email.subject||'', text)==='supreme';
+            if (looksSupreme) merged.set(String(email.id||email.message_id), email);
+          }
+        }
+      } catch (e) { console.warn('[SUPREME WINDOW RECOVERY]', e.message || e); }
       let checked=0,matched=0,ignored=0,failed=0;
       const retailerEmails=[...merged.values()].filter(email=>{
         const text=archivedRetailerReadableText(email);
