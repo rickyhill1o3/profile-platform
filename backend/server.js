@@ -3978,45 +3978,101 @@ function stripDiscordSpoilerValue(value = '') {
 function extractCheckoutLineItems(payload = {}) {
     const { fields: rawFields } = extractEmbedFields(payload || {});
     const itemsByIndex = new Map();
+    let globalQuantity = 1;
+
     for (const [rawName, rawValue] of Object.entries(rawFields || {})) {
-        const name = String(rawName || '').trim().toLowerCase();
+        const name = String(rawName || '').trim();
+        const lowerName = name.toLowerCase();
         const value = stripDiscordSpoilerValue(rawValue);
-        const match = name.match(/^(product|price|quantity)\s*\((\d+)\)$/i);
-        if (!match) continue;
-        const key = match[1].toLowerCase();
-        const index = Number(match[2]);
-        if (!Number.isFinite(index) || index < 1) continue;
-        const current = itemsByIndex.get(index) || { index };
-        if (key === 'product') current.product = value;
-        if (key === 'price') {
-            current.price = value;
-            const priceNumber = Number(String(value).replace(/[^0-9.-]/g, ''));
-            if (Number.isFinite(priceNumber)) current.priceNumber = priceNumber;
+
+        if (/^(quantity|qty)$/i.test(name)) {
+            const qty = Number(String(value).replace(/[^0-9.-]/g, ''));
+            if (Number.isFinite(qty) && qty > 0) globalQuantity = Math.max(1, Math.round(qty));
+            continue;
         }
-        if (key === 'quantity') {
-            current.quantity = value;
-            const qtyNumber = Number(String(value).replace(/[^0-9.-]/g, ''));
-            if (Number.isFinite(qtyNumber)) current.quantityNumber = Math.max(1, Math.round(qtyNumber));
+
+        // Existing multi-item formats: Product (1), Price (1), Quantity (1)
+        let match = lowerName.match(/^(product|price|quantity)\s*\((\d+)\)$/i);
+        if (match) {
+            const key = match[1].toLowerCase();
+            const index = Number(match[2]);
+            if (!Number.isFinite(index) || index < 1) continue;
+            const current = itemsByIndex.get(index) || { index };
+            if (key === 'product') current.product = value;
+            if (key === 'price') {
+                current.price = value;
+                const priceNumber = Number(String(value).replace(/[^0-9.-]/g, ''));
+                if (Number.isFinite(priceNumber)) current.priceNumber = priceNumber;
+            }
+            if (key === 'quantity') {
+                current.quantity = value;
+                const qtyNumber = Number(String(value).replace(/[^0-9.-]/g, ''));
+                if (Number.isFinite(qtyNumber)) current.quantityNumber = Math.max(1, Math.round(qtyNumber));
+            }
+            itemsByIndex.set(index, current);
+            continue;
         }
-        itemsByIndex.set(index, current);
+
+        // Stellar Supreme format: Product 1 - Name / Size / Price, and singular Product - Name.
+        match = lowerName.match(/^product\s*(\d+)?\s*-\s*(name|size|price|quantity)$/i);
+        if (match) {
+            const index = Number(match[1] || 1);
+            const key = match[2].toLowerCase();
+            const current = itemsByIndex.get(index) || { index };
+            if (key === 'name') current.product = value;
+            if (key === 'size') current.size = value;
+            if (key === 'price') {
+                current.price = value;
+                const priceNumber = Number(String(value).replace(/[^0-9.-]/g, ''));
+                if (Number.isFinite(priceNumber)) current.priceNumber = priceNumber;
+            }
+            if (key === 'quantity') {
+                const qtyNumber = Number(String(value).replace(/[^0-9.-]/g, ''));
+                if (Number.isFinite(qtyNumber)) current.quantityNumber = Math.max(1, Math.round(qtyNumber));
+            }
+            itemsByIndex.set(index, current);
+        }
     }
+
     return Array.from(itemsByIndex.values())
         .sort((a, b) => a.index - b.index)
-        .filter((item) => item.product || item.price || item.quantity)
+        .filter((item) => item.product && !/^n\/?a$/i.test(item.product) && Number(item.priceNumber ?? 1) !== 0)
         .map((item) => ({
             index: item.index,
-            product: item.product || '-',
+            product: item.product,
+            size: item.size || '',
             price: item.price || '-',
             priceNumber: item.priceNumber,
-            quantity: item.quantityNumber || item.quantity || 1
+            quantity: item.quantityNumber || globalQuantity || 1
         }));
+}
+
+function getBotCheckoutTime(payload = {}, order = {}) {
+    const { embed } = extractEmbedFields(payload || {});
+    const rawFooter = decodeHtmlEntities(String(embed?.footer?.text || '')).trim();
+    const explicit = decodeHtmlEntities(String(payload.checkout_time || payload.timestamp || embed?.timestamp || '')).trim();
+    const candidates = [explicit, rawFooter];
+    for (const raw of candidates) {
+        const m = String(raw || '').match(/\b(\d{1,2}:\d{2}(?::\d{2})?\s*(?:AM|PM))\b/i);
+        if (m) return m[1].replace(/\s+/g, ' ').toUpperCase();
+    }
+    const created = new Date(order?.created_at || 0);
+    if (Number.isFinite(created.getTime())) {
+        try {
+            return new Intl.DateTimeFormat('en-US', {
+                timeZone: 'America/New_York', hour: 'numeric', minute: '2-digit', second: '2-digit', hour12: true
+            }).format(created);
+        } catch (_) {}
+    }
+    return '';
 }
 
 function formatCheckoutItemsForDiscord(items = []) {
     const lines = (Array.isArray(items) ? items : []).map((item) => {
         const qty = item.quantity || 1;
         const price = item.price && item.price !== '-' ? `$${String(item.price).replace(/^\$/, '')}` : '-';
-        return `${item.index || ''}. ${item.product || '-'} — Qty ${qty} — ${price}`;
+        const size = item.size ? ` — Size ${item.size}` : '';
+        return `${item.index || ''}. ${item.product || '-'}${size} — Qty ${qty} — ${price}`;
     }).filter(Boolean);
     const text = lines.join('\n');
     return text.length > 1000 ? `${text.slice(0, 997)}...` : (text || '-');
@@ -4098,12 +4154,14 @@ async function sendDiscordWebhookToTarget({
         return Number.isFinite(price) ? sum + (price * qty) : sum;
     }, 0);
     const priceNumber = Number(normalized.price);
-    const priceValue = checkoutItems.length > 1
-        ? `$${totalPriceNumber.toFixed(2)} total`
+    const priceValue = checkoutItems.length
+        ? (checkoutItems.length > 1 ? `$${totalPriceNumber.toFixed(2)} total` : `$${totalPriceNumber.toFixed(2)}`)
         : (Number.isFinite(priceNumber) ? `$${priceNumber.toFixed(2)}` : '-');
 
-    if (checkoutItems.length > 1 && checkoutItems[0]?.product) {
-        description = `${checkoutItems[0].product} + ${checkoutItems.length - 1} more`;
+    if (checkoutItems.length && checkoutItems[0]?.product) {
+        description = checkoutItems.length > 1
+            ? `${checkoutItems[0].product} + ${checkoutItems.length - 1} more`
+            : checkoutItems[0].product;
     }
 
     const isCreditRecheckNotice = !!order.metadata?.credit_recheck_notice;
@@ -4119,6 +4177,7 @@ async function sendDiscordWebhookToTarget({
         title = `Credit Recheck • ${title}`;
     }
 
+    const botCheckoutTime = getBotCheckoutTime(payload, order);
     const embed = {
         title,
         description,
@@ -4126,7 +4185,8 @@ async function sendDiscordWebhookToTarget({
             { name: 'Site', value: String(order.site || normalized.site || '-'), inline: true },
             { name: 'Source', value: String(order.source || normalized.source || '-'), inline: true },
             { name: checkoutItems.length > 1 ? 'Total Quantity' : 'Quantity', value: String(totalQuantity), inline: true },
-            { name: checkoutItems.length > 1 ? 'Total Price' : 'Price', value: priceValue, inline: true }
+            { name: checkoutItems.length > 1 ? 'Total Price' : 'Price', value: priceValue, inline: true },
+            ...(botCheckoutTime ? [{ name: 'Checkout Time', value: botCheckoutTime, inline: true }] : [])
         ],
         footer: { text: footerText },
         timestamp: new Date().toISOString()
@@ -4146,7 +4206,7 @@ async function sendDiscordWebhookToTarget({
         });
     }
 
-    if (checkoutItems.length > 1) {
+    if (checkoutItems.length > 1 || (checkoutItems.length && String(normalized.site || order.site || '').toLowerCase().includes('supreme'))) {
         embed.fields.push({ name: 'Items', value: formatCheckoutItemsForDiscord(checkoutItems), inline: false });
     }
 
@@ -4173,7 +4233,7 @@ async function sendDiscordWebhookToTarget({
     const accountValue = decodeHtmlEntities(String(rawFields['account'] || payload.account || normalized.account_email || '')).trim();
     const offerId = decodeHtmlEntities(String(rawFields['offer id'] || payload.offer_id || '')).trim();
     const grandTotal = decodeHtmlEntities(String(rawFields['grand total'] || payload.grand_total || '')).trim();
-    const astralVersion = decodeHtmlEntities(String(embed?.footer?.text || '')).trim();
+    const astralVersion = decodeHtmlEntities(String(payload?.embeds?.[0]?.footer?.text || '')).trim();
 
     if (orderStatus) {
         embed.fields.push({ name: 'Order Status', value: orderStatus, inline: true });

@@ -1240,21 +1240,132 @@ async function reconcileTrackedOrderItems(supabase, trackedOrder, serviceOrder, 
 
 async function matchSupremeServiceOrder(supabase, account, serviceOrders, retail, eventAt, messageId) {
   const candidates = [];
-  const already = await supabase.from('tracked_orders').select('source_order_id,order_number').eq('user_id',account.user_id).eq('store','supreme');
-  const consumed = new Set((already.data||[]).filter(x=>normalizeOrderRef(x.order_number)===normalizeOrderRef(retail.order_number)).map(x=>String(x.source_order_id)));
+  const trackedResult = await supabase.from('tracked_orders')
+    .select('source_order_id,order_number,reconciliation_note,reconciliation_score')
+    .eq('user_id', account.user_id).eq('store', 'supreme');
+  const trackedBySource = new Map((trackedResult.data || []).map(row => [String(row.source_order_id || ''), row]));
+  const incomingRef = normalizeOrderRef(retail.order_number);
+
   for (const order of serviceOrders) {
     const site = normalizeStoreKey(order.site || order.metadata?.site || extractNamedPayloadValue(order.raw_payload || {}, ['site','store']));
-    if (site !== 'supreme' || consumed.has(String(order.id))) continue;
-    const score = matchScore(order, retail, eventAt, account.email);
-    if (score >= 60) candidates.push({ order, score });
+    if (site !== 'supreme') continue;
+    const tracked = trackedBySource.get(String(order.id)) || null;
+    const trackedRef = normalizeOrderRef(tracked?.order_number);
+
+    // During the new batch matcher, a row already claimed by a different retailer order is
+    // locked so a later near-identical confirmation cannot steal it. Legacy assignments do not
+    // have this marker and remain eligible to be repaired.
+    if (tracked?.reconciliation_note === 'supreme_batch_v2' && trackedRef && incomingRef && trackedRef !== incomingRef) continue;
+
+    let score = matchScore(order, retail, eventAt, account.email);
+    if (trackedRef && incomingRef && trackedRef === incomingRef) score += 25;
+    const sourceRefs = collectOrderRefs(order);
+    if (incomingRef && sourceRefs.includes(incomingRef)) score += 25;
+    if (score >= 55) candidates.push({ order, score });
   }
-  candidates.sort((a,b)=>b.score-a.score || Math.abs(new Date(a.order.created_at)-new Date(eventAt))-Math.abs(new Date(b.order.created_at)-new Date(eventAt)));
-  const winner = candidates[0];
-  if (!winner) return null;
-  // Do not auto-link an ambiguous pair of near-identical checkouts. It can be reconciled later
-  // when a shipment or another item provides stronger evidence.
-  if (candidates[1] && winner.score < 90 && Math.abs(winner.score-candidates[1].score) < 8) return null;
-  return winner;
+  candidates.sort((a,b) => b.score-a.score || Math.abs(new Date(a.order.created_at)-new Date(eventAt))-Math.abs(new Date(b.order.created_at)-new Date(eventAt)) || String(a.order.id).localeCompare(String(b.order.id)));
+  return candidates[0] || null;
+}
+
+async function rebuildSupremeBatchAssignments(supabase, userId, retailerEmails = []) {
+  const confirmationEmails = [];
+  for (const email of retailerEmails || []) {
+    const store = lower(email.store) || detectStore(email.from_text || '', email.subject || '', email.body_text || email.snippet || '');
+    if (store !== 'supreme') continue;
+    const text = email.body_text || email.snippet || '';
+    const status = detectStatus(email.subject || '', text);
+    if (status !== 'confirmed') continue;
+    const retail = parseRetailEmail('supreme', 'confirmed', email.subject || '', text);
+    if (!retail.order_number || !(retail.items || []).length) continue;
+    confirmationEmails.push({ email, retail, eventAt: new Date(email.received_at || Date.now()).toISOString() });
+  }
+  if (!confirmationEmails.length) return { confirmations:0, assigned:0, skipped:0 };
+
+  const allOrders = await loadServiceOrders(supabase, userId);
+  const supremeOrders = allOrders.filter(order => normalizeStoreKey(order.site || order.metadata?.site || extractNamedPayloadValue(order.raw_payload || {}, ['site','store'])) === 'supreme');
+  if (!supremeOrders.length) return { confirmations:confirmationEmails.length, assigned:0, skipped:confirmationEmails.length };
+
+  // Global one-to-one assignment. Retailer-confirmation checkout time + exact item set carry most
+  // of the score. Mailbox/profile identity is only a small hint because Supreme bot profile names
+  // are not guaranteed to point at the actual purchase inbox.
+  const pairs = [];
+  for (const c of confirmationEmails) {
+    const mailbox = lower(c.email.mailbox_email);
+    for (const order of supremeOrders) {
+      const score = matchScore(order, c.retail, c.eventAt, mailbox);
+      if (score >= 55) pairs.push({ c, order, score });
+    }
+  }
+  pairs.sort((a,b) => b.score-a.score
+    || Math.abs(new Date(a.order.created_at)-new Date(a.c.eventAt))-Math.abs(new Date(b.order.created_at)-new Date(b.c.eventAt))
+    || String(a.order.id).localeCompare(String(b.order.id)));
+
+  const batchOrderIds = new Set(pairs.map(pair => String(pair.order.id)));
+  const usedEmails = new Set(), usedOrders = new Set(), assignments = [];
+  for (const pair of pairs) {
+    const emailKey = String(pair.c.email.id || pair.c.email.message_id || pair.c.retail.order_number);
+    const orderKey = String(pair.order.id);
+    if (usedEmails.has(emailKey) || usedOrders.has(orderKey)) continue;
+    usedEmails.add(emailKey); usedOrders.add(orderKey); assignments.push(pair);
+  }
+
+  if (!assignments.length) return { confirmations:confirmationEmails.length, assigned:0, skipped:confirmationEmails.length };
+
+  const { data: allTrackedRows } = await supabase.from('tracked_orders').select('*').eq('user_id',userId).eq('store','supreme');
+  const trackedRows = (allTrackedRows || []).filter(row => batchOrderIds.has(String(row.source_order_id || '')));
+  const trackedBySource = new Map(trackedRows.map(row => [String(row.source_order_id || ''), row]));
+  const trackedIds = trackedRows.map(row => row.id).filter(Boolean);
+
+  // Manual Supreme reconciliation is a rebuild, not an incremental guess. Clear old Supreme
+  // mail links and item/shipment projections, then replay every archived Supreme message in time
+  // order after the confirmations have been assigned.
+  if (trackedIds.length) {
+    try {
+      const shipmentRows = await supabase.from('tracked_order_shipments').select('id').in('order_id',trackedIds);
+      const shipmentIds = (shipmentRows.data || []).map(x=>x.id).filter(Boolean);
+      if (shipmentIds.length) await supabase.from('tracked_order_shipment_items').delete().in('shipment_id',shipmentIds);
+      await supabase.from('tracked_order_shipments').delete().in('order_id',trackedIds);
+    } catch (_) {}
+    try { await supabase.from('tracked_order_items').delete().in('order_id',trackedIds); } catch (_) {}
+    try { await supabase.from('tracked_order_emails').delete().in('order_id',trackedIds); } catch (_) {}
+    try { await supabase.from('email_messages').update({linked_order_id:null,updated_at:new Date().toISOString()}).eq('user_id',userId).eq('store','supreme'); } catch (_) {}
+  }
+
+  // Move every Supreme tracked order to a temporary unique reference first so swapped legacy
+  // assignments cannot hit the unique (user, store, order_number) constraint while being fixed.
+  for (const row of trackedRows || []) {
+    const tempRef = `supreme-rematch-${String(row.source_order_id || row.id).replace(/[^a-zA-Z0-9_-]/g,'').slice(-48)}`;
+    await supabase.from('tracked_orders').update({
+      order_number: tempRef, status:'waiting_confirmation', reconciliation_status:'pending', reconciliation_note:'supreme_batch_rebuild',
+      tracking_number:null, carrier:null, last_message_id:null, updated_at:new Date().toISOString()
+    }).eq('id',row.id);
+  }
+
+  for (const pair of assignments) {
+    const tracked = trackedBySource.get(String(pair.order.id));
+    if (!tracked?.id) continue;
+    const ref = clean(pair.c.retail.order_number);
+    const sourceMetadata = { ...(pair.order.metadata || {}), purchase_id:ref, order_number:ref, supreme_batch_match_version:2,
+      supreme_retailer_checkout_at:pair.c.retail.retailer_checkout_at || null, supreme_confirmation_email_id:pair.c.email.id || null };
+    await supabase.from('tracked_orders').update({
+      order_number:ref, source_email:lower(pair.c.email.mailbox_email)||tracked.source_email,
+      status:'confirmed', order_date:pair.c.retail.retailer_checkout_at || pair.c.eventAt,
+      last_status_at:pair.c.eventAt, reconciliation_status:'matched', reconciliation_score:pair.score,
+      reconciliation_note:'supreme_batch_v2', updated_at:new Date().toISOString()
+    }).eq('id',tracked.id);
+    await supabase.from('orders').update({ external_order_id:ref, status:'confirmed', metadata:sourceMetadata }).eq('id',pair.order.id);
+  }
+
+  // Unassigned Supreme checkouts retain their webhook identity instead of the temporary reference.
+  for (const order of supremeOrders) {
+    if (!batchOrderIds.has(String(order.id)) || usedOrders.has(String(order.id))) continue;
+    const tracked = trackedBySource.get(String(order.id)); if (!tracked?.id) continue;
+    const fallback = serviceOrderNumber({ ...order, external_order_id: null }) || clean(order.id);
+    await supabase.from('tracked_orders').update({ order_number:fallback, reconciliation_note:null, updated_at:new Date().toISOString() }).eq('id',tracked.id);
+  }
+
+  return { confirmations:confirmationEmails.length, assigned:assignments.length, skipped:confirmationEmails.length-assignments.length,
+    assignments:assignments.map(x=>({ order_number:x.c.retail.order_number, source_order_id:x.order.id, mailbox:lower(x.c.email.mailbox_email), score:x.score })) };
 }
 
 async function saveParsedMessage(supabase, account, parsed, uid, adjustCredits = null, confirmPendingAmazonCheckout = null) {
@@ -1297,14 +1408,14 @@ async function saveParsedMessage(supabase, account, parsed, uid, adjustCredits =
       if (amazonPendingMatch?.serviceOrder) matchedServiceOrders = [amazonPendingMatch.serviceOrder];
     }
   } else if (store === 'supreme') {
-    // Once the confirmation has taught us the Supreme order number, shipment messages match it
-    // directly. Before that, reconcile the confirmation globally by item set + checkout time.
+    // Confirmation emails are deliberately re-scored across the whole Supreme checkout batch.
+    // Shipment emails then use the retailer order number learned from the confirmation.
     const direct = serviceOrders.find(o => collectOrderRefs(o).includes(normalizeOrderRef(primaryOrderNumber)));
-    if (direct) matchedServiceOrders = [direct];
-    else {
+    if (status === 'confirmed') {
       const winner = await matchSupremeServiceOrder(supabase, account, serviceOrders, retail, eventAt, messageId);
       if (winner?.order) matchedServiceOrders = [winner.order];
-    }
+      else if (direct) matchedServiceOrders = [direct];
+    } else if (direct) matchedServiceOrders = [direct];
   } else {
     const incomingRefs = new Set(orderNumbers.map(normalizeOrderRef).filter(Boolean));
     matchedServiceOrders = serviceOrders.filter(o => collectOrderRefs(o).some(ref => incomingRefs.has(ref)));
@@ -1362,7 +1473,7 @@ async function saveParsedMessage(supabase, account, parsed, uid, adjustCredits =
     if (error) throw error;
     if (store === 'supreme') {
       const score = matchScore(serviceOrder, retail, eventAt, account.email);
-      await supabase.from('tracked_orders').update({ reconciliation_score: score, reconciliation_status: score >= 80 ? 'matched' : 'probable', updated_at:new Date().toISOString() }).eq('id', order.id).then(()=>{}).catch(()=>{});
+      await supabase.from('tracked_orders').update({ reconciliation_score: score, reconciliation_status: score >= 80 ? 'matched' : 'probable', reconciliation_note:'supreme_batch_v2', updated_at:new Date().toISOString() }).eq('id', order.id).then(()=>{}).catch(()=>{});
     }
 
     if (archivedEmail?.id) {
@@ -1398,7 +1509,8 @@ async function saveParsedMessage(supabase, account, parsed, uid, adjustCredits =
       imap_status: effectiveStatus,
       item_level_reconciled_at: lineReconciliation ? eventAt : (serviceOrder.metadata?.item_level_reconciled_at || null),
       imap_last_message_at: eventAt,
-      imap_last_message_id: messageId
+      imap_last_message_id: messageId,
+      ...(store === 'supreme' ? { supreme_batch_match_version: 2, supreme_retailer_checkout_at: retail.retailer_checkout_at || serviceOrder.metadata?.supreme_retailer_checkout_at || null } : {})
     };
     if (status === 'confirmed') sourceMetadata.confirmed_by_email_at = eventAt;
 
@@ -2748,6 +2860,9 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
       const {data,error}=await q; if(error)throw error;
       let checked=0,matched=0,ignored=0,failed=0;
       const retailerEmails=(data||[]).filter(email=>['target','supreme'].includes(lower(email.store)||detectStore(email.from_text||'',email.subject||'',email.body_text||email.snippet||''))).reverse();
+      let supremeRebuild = null;
+      try { supremeRebuild = await rebuildSupremeBatchAssignments(supabase, req.user_id, retailerEmails); }
+      catch (e) { console.warn('[SUPREME BATCH REBUILD]', e.message || e); supremeRebuild = { error:e.message || String(e) }; }
       // The targeted repair below performs the live OAuth2/IMAP lookup first. Do not start the
       // broad background scan before it, because that could occupy the historical-repair guard
       // at the exact moment the user asks to repair a damaged order. A normal scan is queued after.
@@ -2806,7 +2921,7 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
       }
       // Now queue the ordinary catch-up scan for anything that was not part of the targeted set.
       try { startUserScanJob(supabase,req.user_id,adjustUserCredits,confirmPendingAmazonCheckout); } catch (_) {}
-      res.json({success:true,checked,matched,ignored,failed,damaged_target_orders:damagedLinkedOrderIds.length,repair,message:`Reprocessed ${checked} Target/Supreme retailer emails, then performed a direct live OAuth2/IMAP repair for ${damagedLinkedOrderIds.length} damaged Target order(s).`});
+      res.json({success:true,checked,matched,ignored,failed,supreme_rebuild:supremeRebuild,damaged_target_orders:damagedLinkedOrderIds.length,repair,message:`Rebuilt ${supremeRebuild?.assigned||0} Supreme confirmation assignment(s), reprocessed ${checked} Target/Supreme retailer emails, then performed a direct live OAuth2/IMAP repair for ${damagedLinkedOrderIds.length} damaged Target order(s).`});
     } catch(error){ res.status(500).json({error:error.message}); }
   });
 

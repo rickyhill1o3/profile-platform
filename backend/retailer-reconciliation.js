@@ -84,7 +84,7 @@ function parseSupremeItems(text,status){
     let name=s, size=null, style=null, quantity=1, price=null;
     const suffix=name.match(/\s+-\s+([A-Za-z0-9. -]{1,24})$/); if(suffix){ size=clean(suffix[1]); name=clean(name.slice(0,suffix.index)); }
     for(let j=i+1;j<=Math.min(ls.length-1,i+8);j++){
-      if(stop.test(ls[j])||(/^Pending item/.test(ls[j])))break;
+      if(stop.test(ls[j])||(/^Pending item/.test(ls[j]))||/^\.{3,}$/.test(ls[j]))break;
       let m=ls[j].match(/^Style:\s*(.+)$/i); if(m)style=clean(m[1]);
       m=ls[j].match(/^Size:\s*(.+)$/i); if(m)size=clean(m[1]);
       m=ls[j].match(/^Quantity:\s*(\d+)/i); if(m)quantity=Number(m[1]||1);
@@ -104,12 +104,40 @@ function targetCancellationScope(subject,text,status){
   if(/canceled an item|cancelled an item|canceled the item below|cancelled the item below|canceled item|cancelled item|your item has been canceled|your item has been cancelled/.test(hay)) return 'item';
   return 'unknown';
 }
+function parseSupremeCheckoutAt(text,eventAt=''){
+  const hay=String(text||'');
+  const m=hay.match(/\b([A-Z][a-z]{2})\s+(\d{1,2})\s+(\d{4})\s+at\s+(\d{1,2}):(\d{2})(?:\s*(EDT|EST))?/i);
+  if(!m)return '';
+  const months={jan:0,feb:1,mar:2,apr:3,may:4,jun:5,jul:6,aug:7,sep:8,oct:9,nov:10,dec:11};
+  const month=months[String(m[1]).slice(0,3).toLowerCase()];
+  if(month==null)return '';
+  const offset=String(m[6]||'').toUpperCase()==='EST'?5:4;
+  const utc=Date.UTC(Number(m[3]),month,Number(m[2]),Number(m[4])+offset,Number(m[5]),0);
+  return Number.isFinite(utc)?new Date(utc).toISOString():'';
+}
+function parseSupremeWebhookCheckoutAt(serviceOrder={}){
+  const payload=serviceOrder.raw_payload||{};
+  const embeds=Array.isArray(payload.embeds)?payload.embeds:[];
+  const footer=clean(embeds?.[0]?.footer?.text||'');
+  const raw=clean(payload.timestamp||embeds?.[0]?.timestamp||footer||'');
+  const time=(raw.match(/\b(\d{1,2}):(\d{2})\s*(AM|PM)\b/i)||[]);
+  if(!time)return '';
+  let hour=Number(time[1]), minute=Number(time[2]); const ap=String(time[3]).toUpperCase();
+  if(ap==='PM'&&hour<12)hour+=12; if(ap==='AM'&&hour===12)hour=0;
+  const created=new Date(serviceOrder.created_at||0); if(!Number.isFinite(created.getTime()))return '';
+  // Stellar's Supreme footer is New York local time. Use the checkout's created_at date and
+  // choose EDT/EST by testing the two offsets against the ingestion timestamp.
+  const y=created.getUTCFullYear(), mo=created.getUTCMonth(), d=created.getUTCDate();
+  const edt=new Date(Date.UTC(y,mo,d,hour+4,minute,0));
+  const est=new Date(Date.UTC(y,mo,d,hour+5,minute,0));
+  return Math.abs(edt-created)<=Math.abs(est-created)?edt.toISOString():est.toISOString();
+}
 function parseRetailEmail(store,status,subject,text){
   const orderNumber = store==='supreme'
     ? ((`${subject}\n${text}`.match(/\bOrder\s+(\d{6,20})\b/i)||[])[1]||'')
     : ((`${subject}\n${text}`.match(/\bOrder\s*#?\s*(\d{10,20})\b/i)||[])[1]||'');
   const items=store==='target'?parseTargetItems(text,status):store==='supreme'?parseSupremeItems(text,status):[];
-  return {order_number:orderNumber,items,tracking_number:extractTracking(text),cancellation_scope:store==='target'?targetCancellationScope(subject,text,status):null};
+  return {order_number:orderNumber,items,tracking_number:extractTracking(text),cancellation_scope:store==='target'?targetCancellationScope(subject,text,status):null,retailer_checkout_at:store==='supreme'?parseSupremeCheckoutAt(text):''};
 }
 
 function fieldPairs(payload={}){
@@ -152,8 +180,13 @@ function itemSetScore(expected=[],actual=[]){
 function matchScore(serviceOrder,emailData,eventAt,mailboxEmail=''){
   const expected=expectedWebhookItems(serviceOrder), actual=emailData.items||[];
   let score=itemSetScore(expected,actual);
+  const webhookCheckout=parseSupremeWebhookCheckoutAt(serviceOrder);
+  const emailCheckout=clean(emailData.retailer_checkout_at);
   const created=new Date(serviceOrder.created_at||0).getTime(), event=new Date(eventAt||0).getTime();
-  if(Number.isFinite(created)&&Number.isFinite(event)){
+  if(webhookCheckout && emailCheckout){
+    const mins=Math.abs(new Date(webhookCheckout).getTime()-new Date(emailCheckout).getTime())/60000;
+    if(mins<=0.5)score+=45; else if(mins<=1.5)score+=35; else if(mins<=3)score+=22; else if(mins<=10)score+=8; else score-=35;
+  } else if(Number.isFinite(created)&&Number.isFinite(event)){
     const mins=Math.abs(event-created)/60000; if(mins<=2)score+=20; else if(mins<=5)score+=15; else if(mins<=15)score+=8; else if(mins>60)score-=30;
   }
   const profile=norm(serviceOrder.metadata?.profile_name||serviceOrder.metadata?.profile||'');
@@ -177,4 +210,4 @@ function deriveOverallStatus(items=[]){
   if(statuses.every(s=>s==='canceled'||s==='refunded'||s==='missing'))return statuses.some(s=>s==='refunded')?'refunded':'canceled';
   return 'waiting_confirmation';
 }
-module.exports={clean,lower,money,norm,tokenScore,parseRetailEmail,expectedWebhookItems,itemSetScore,matchScore,mainItemMatch,deriveOverallStatus};
+module.exports={clean,lower,money,norm,tokenScore,parseRetailEmail,expectedWebhookItems,itemSetScore,matchScore,mainItemMatch,deriveOverallStatus,parseSupremeCheckoutAt,parseSupremeWebhookCheckoutAt};
