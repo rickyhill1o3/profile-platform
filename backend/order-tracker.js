@@ -1744,6 +1744,16 @@ async function repairHistoricalOrderEmails(supabase, userId = null, adjustCredit
   }
 
   let checkedOrders = 0, matchedMessages = 0, repairedOrders = 0, mailboxFailures = 0;
+  const details = [];
+  // Report orders that could not even be mapped to a connected OAuth2/IMAP mailbox. This makes
+  // a bad profile/mailbox association visible instead of looking like a parser failure.
+  for (const order of candidates) {
+    const key = `${order.user_id}:${lower(order.source_email)}`;
+    if (!accountMap.has(key)) details.push({
+      tracked_order_id: order.id, order_number: clean(order.order_number), mailbox: lower(order.source_email),
+      store: lower(order.store), result: 'mailbox_not_connected', messages_found: 0, messages_processed: 0
+    });
+  }
   for (const { account, orders } of byMailbox.values()) {
     const client = new ImapFlow({
       host:account.provider.host, port:account.provider.port, secure:account.provider.secure,
@@ -1762,32 +1772,59 @@ async function repairHistoricalOrderEmails(supabase, userId = null, adjustCredit
         for (const order of orders) {
           checkedOrders++;
           const orderNumber = clean(order.order_number);
+          const detail = {
+            tracked_order_id: order.id, order_number: orderNumber, mailbox: lower(account.email),
+            store: lower(order.store), auth_method: account.auth_method || (account.imported_account_id ? 'imported' : 'app_password'),
+            result: 'searching', messages_found: 0, messages_processed: 0, saved_messages: 0
+          };
+          details.push(detail);
           let uids=[];
           try {
-            // TEXT searches the full message (headers + body) on Gmail/Outlook IMAP. It is
-            // ideal for historical repair because it does not require rewinding the mailbox UID
-            // checkpoint or downloading months of unrelated mail.
+            // TEXT searches the full RFC822 message (headers + MIME body) on Gmail/Outlook.
+            // This bypasses the damaged archive copy and fetches the retailer's original message.
             uids = await client.search({ text: orderNumber }, { uid:true });
           } catch (searchError) {
+            detail.result = 'imap_search_failed';
+            detail.error = clean(searchError.message || searchError).slice(0,500);
             console.warn(`[ORDER REPAIR] IMAP text search failed ${account.email} ${orderNumber}: ${searchError.message || searchError}`);
             continue;
           }
           uids=(uids||[]).map(Number).filter(Boolean).sort((a,b)=>a-b).slice(-50);
+          detail.messages_found = uids.length;
           const fresh = uids.filter(uid => !processedUids.has(uid));
           for (const uid of fresh) processedUids.add(uid);
           const uidRange=imapUidSet(fresh);
-          if (!uidRange) continue;
+          if (!uidRange) { detail.result = uids.length ? 'already_processed_this_pass' : 'no_live_message_found'; continue; }
           for await (const msg of client.fetch(uidRange,{uid:true,source:true,envelope:true},{uid:true})) {
+            detail.messages_processed++;
             try {
               const parsed=await simpleParser(msg.source);
               const result=await saveParsedMessage(supabase,account,parsed,msg.uid,adjustCredits,confirmPendingAmazonCheckout);
-              if (result?.saved) matchedMessages++;
+              if (result?.saved) { matchedMessages++; detail.saved_messages++; }
             } catch (parseError) {
+              detail.error = clean(parseError.message || parseError).slice(0,500);
               console.warn(`[ORDER REPAIR] Parse/link failed ${account.email} uid=${msg.uid}: ${parseError.message || parseError}`);
             }
           }
           const after = await linkedTrackedOrderIds(supabase,[order.id]);
           if (after.has(String(order.id))) repairedOrders++;
+          try {
+            const ir = await supabase.from('tracked_order_items').select('product_name,role,status').eq('order_id', order.id).order('created_at');
+            if (!ir.error) {
+              detail.items = ir.data || [];
+              const main = (ir.data || []).filter(i => i.role === 'main');
+              detail.main_item_status = main.map(i => i.status).filter(Boolean).join(', ') || null;
+              const filler = (ir.data || []).filter(i => i.role === 'filler');
+              detail.filler_item_status = filler.map(i => i.status).filter(Boolean).join(', ') || null;
+            }
+            const tr = await supabase.from('tracked_orders').select('status,reconciliation_status,reconciliation_note').eq('id',order.id).maybeSingle();
+            if (!tr.error && tr.data) {
+              detail.final_order_status = tr.data.status;
+              detail.reconciliation_status = tr.data.reconciliation_status;
+              detail.reconciliation_note = tr.data.reconciliation_note || null;
+            }
+          } catch (_) {}
+          detail.result = detail.saved_messages ? 'live_mime_processed' : (detail.error ? 'message_processing_failed' : 'live_message_found_not_linked');
         }
       } finally { lock.release(); }
       console.log(`[ORDER REPAIR] COMPLETE ${account.email}`);
@@ -1796,16 +1833,22 @@ async function repairHistoricalOrderEmails(supabase, userId = null, adjustCredit
       console.warn(`[ORDER REPAIR] FAILED ${account.email}: ${describeImapError(mailboxError)}`);
     } finally { try { await client.logout(); } catch (_) {} }
   }
-  return { checked_orders:checkedOrders, matched_messages:matchedMessages, repaired_orders:repairedOrders, mailbox_failures:mailboxFailures, candidates:candidates.length, identity_corrected:identityRepair.corrected, wrong_links_removed:identityRepair.unlinked };
+  return { checked_orders:checkedOrders, matched_messages:matchedMessages, repaired_orders:repairedOrders, mailbox_failures:mailboxFailures, candidates:candidates.length, identity_corrected:identityRepair.corrected, wrong_links_removed:identityRepair.unlinked, details };
 }
 
 async function runHistoricalOrderEmailRepair(supabase, userId = null, adjustCredits = null, confirmPendingAmazonCheckout = null, options = {}) {
-  if (historicalRepairRunning) return { skipped:true, reason:'repair_already_running' };
-  historicalRepairRunning = true;
+  // Background repair remains single-flight, but a user-clicked targeted reconciliation must not
+  // be silently skipped just because the scheduled repair happens to be running. Targeted repair
+  // uses its own IMAP connections and idempotent message/order upserts, so it is safe to run in
+  // parallel and is far preferable to returning repair_already_running without checking a mailbox.
+  const allowConcurrent = options.allowConcurrent === true;
+  if (historicalRepairRunning && !allowConcurrent) return { skipped:true, reason:'repair_already_running' };
+  if (!allowConcurrent) historicalRepairRunning = true;
   try {
-    return await repairHistoricalOrderEmails(supabase, userId, adjustCredits, confirmPendingAmazonCheckout, options);
+    const result = await repairHistoricalOrderEmails(supabase, userId, adjustCredits, confirmPendingAmazonCheckout, options);
+    return { ...result, concurrent_with_background_repair: allowConcurrent && historicalRepairRunning };
   } finally {
-    historicalRepairRunning = false;
+    if (!allowConcurrent) historicalRepairRunning = false;
   }
 }
 
@@ -2672,10 +2715,9 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
       const {data,error}=await q; if(error)throw error;
       let checked=0,matched=0,ignored=0,failed=0;
       const retailerEmails=(data||[]).filter(email=>['target','supreme'].includes(detectStore(email.from_text||'',email.subject||'',email.body_text||email.snippet||''))).reverse();
-      // Also request live mailbox passes. Direct IMAP accounts scan on Render. For the super-admin
-      // AYCD setup, queue a local bridge scan too so historical Target messages can be re-fetched
-      // from their original RFC822 source and replace old preheader-only archive copies.
-      try { startUserScanJob(supabase,req.user_id,adjustUserCredits,confirmPendingAmazonCheckout); } catch (_) {}
+      // The targeted repair below performs the live OAuth2/IMAP lookup first. Do not start the
+      // broad background scan before it, because that could occupy the historical-repair guard
+      // at the exact moment the user asks to repair a damaged order. A normal scan is queued after.
       if (req.role === 'super_admin') {
         try {
           const bridge = await supabase.from('aycd_bridge_devices').select('id,pending_command').eq('user_id',req.user_id).eq('is_paired',true).order('created_at',{ascending:false}).limit(1).maybeSingle();
@@ -2706,12 +2748,17 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
       try {
         const requested = Math.max(Number(req.body?.repair_orders || 100), damagedLinkedOrderIds.length);
         repair = await runHistoricalOrderEmailRepair(supabase, req.user_id, adjustUserCredits, confirmPendingAmazonCheckout, {
-          maxOrders: Math.min(500, requested), forceLinked: true, priorityOrderIds: damagedLinkedOrderIds
+          maxOrders: Math.min(500, requested), forceLinked: true, priorityOrderIds: damagedLinkedOrderIds,
+          // A manual repair is allowed to run beside the scheduled background repair. All writes
+          // are keyed/upserted by message/order identity, so this avoids a false skip safely.
+          allowConcurrent: true
         });
       } catch (repairError) {
         console.warn('[RECONCILE TARGETED REPAIR]', repairError.message || repairError);
       }
-      res.json({success:true,checked,matched,ignored,failed,damaged_target_orders:damagedLinkedOrderIds.length,repair,message:`Reprocessed ${checked} Target/Supreme retailer emails and directly prioritized ${damagedLinkedOrderIds.length} Target order(s) whose archived bodies still contain truncated/preheader-only data.`});
+      // Now queue the ordinary catch-up scan for anything that was not part of the targeted set.
+      try { startUserScanJob(supabase,req.user_id,adjustUserCredits,confirmPendingAmazonCheckout); } catch (_) {}
+      res.json({success:true,checked,matched,ignored,failed,damaged_target_orders:damagedLinkedOrderIds.length,repair,message:`Reprocessed ${checked} Target/Supreme retailer emails, then performed a direct live OAuth2/IMAP repair for ${damagedLinkedOrderIds.length} damaged Target order(s).`});
     } catch(error){ res.status(500).json({error:error.message}); }
   });
 
