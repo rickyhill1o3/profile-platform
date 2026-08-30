@@ -243,6 +243,114 @@ async function fetchEmailArchiveWindow(supabase, userId, startIso, endIso, colum
   return fetchEmailArchiveRowsByIds(supabase, userId, ids, columns, 60);
 }
 
+
+async function loadOwnedProfileBuilderGmailAccounts(supabase, userId) {
+  // STRICT PRIVACY BOUNDARY: only mailboxes attached to profiles owned by the
+  // authenticated Order Tracker user are eligible here. Never walk owner_admin_id,
+  // downstream users, admins, or AYCD-imported accounts for Supreme reconciliation.
+  const { data: profiles, error: pe } = await supabase
+    .from('profiles')
+    .select('id,user_id,profile_name')
+    .eq('user_id', userId);
+  if (pe) throw pe;
+
+  const ownedProfiles = profiles || [];
+  const ownedProfileIds = ownedProfiles.map(p => p.id).filter(Boolean);
+  const profileMap = new Map(ownedProfiles.map(p => [String(p.id), p]));
+  const byEmail = new Map();
+  let credentialRows = 0;
+
+  const addCredential = row => {
+    if (!row?.profile_id || !profileMap.has(String(row.profile_id))) return;
+    const email = lower(row.login_email || row.email);
+    const provider = providerForEmail(email);
+    if (!email || provider?.name !== 'gmail') return;
+    const password = normalizeMailboxPassword(row.gmail_app_password || row.password, 'gmail');
+    if (!password) return;
+    // One Gmail mailbox may be reused by several of THIS user's profiles. Scan it once.
+    if (!byEmail.has(email)) {
+      byEmail.set(email, {
+        user_id: userId,
+        archive_user_id: userId,
+        profile_id: row.profile_id,
+        email,
+        password,
+        provider,
+        ingestion_source: 'profile_builder_direct_imap'
+      });
+    }
+  };
+
+  // Read both credential stores used by the Profile Editor. The profile ownership
+  // check above is authoritative, so a credential row can never escape this user.
+  for (let i = 0; i < ownedProfileIds.length; i += 75) {
+    const ids = ownedProfileIds.slice(i, i + 75);
+    try {
+      const r = await supabase.from('profile_store_credentials')
+        .select('profile_id,login_email,gmail_app_password')
+        .in('profile_id', ids);
+      if (r.error) throw r.error;
+      credentialRows += (r.data || []).length;
+      for (const row of r.data || []) addCredential(row);
+    } catch (e) {
+      console.warn('[SUPREME OWNED PROFILE CREDENTIALS]', e.message || e);
+    }
+    try {
+      const r = await supabase.from('accounts')
+        .select('profile_id,login_email,gmail_app_password')
+        .in('profile_id', ids);
+      if (r.error) throw r.error;
+      credentialRows += (r.data || []).length;
+      for (const row of r.data || []) addCredential(row);
+    } catch (e) {
+      console.warn('[SUPREME OWNED LEGACY ACCOUNTS]', e.message || e);
+    }
+  }
+
+  // A mailbox that was successfully tested in Profile Builder can also be recovered
+  // from imap_scan_accounts, but only when BOTH the scan-state user_id and profile_id
+  // resolve back to this same user's owned profile set.
+  try {
+    const r = await supabase.from('imap_scan_accounts')
+      .select('user_id,profile_id,email')
+      .eq('user_id', userId);
+    if (!r.error) {
+      for (const state of r.data || []) {
+        const email = lower(state.email);
+        if (!state.profile_id || !profileMap.has(String(state.profile_id)) || byEmail.has(email)) continue;
+        const provider = providerForEmail(email);
+        if (provider?.name !== 'gmail') continue;
+        let credential = null;
+        try {
+          const c = await supabase.from('profile_store_credentials')
+            .select('profile_id,login_email,gmail_app_password')
+            .eq('profile_id', state.profile_id)
+            .not('gmail_app_password', 'is', null)
+            .limit(1);
+          credential = c.data?.[0] || null;
+        } catch (_) {}
+        if (!credential) {
+          try {
+            const c = await supabase.from('accounts')
+              .select('profile_id,login_email,gmail_app_password')
+              .eq('profile_id', state.profile_id)
+              .not('gmail_app_password', 'is', null)
+              .limit(1);
+            credential = c.data?.[0] || null;
+          } catch (_) {}
+        }
+        addCredential(credential ? { ...credential, email } : null);
+      }
+    }
+  } catch (_) {}
+
+  return {
+    accounts: [...byEmail.values()],
+    owned_profiles: ownedProfiles.length,
+    credential_rows: credentialRows
+  };
+}
+
 async function discoverSupremeFromProfileBuilderMailboxes(supabase, userId, serviceOrders = [], adjustCredits = null, confirmPendingAmazonCheckout = null) {
   // Supreme accounts are commonly ordinary Gmail credentials saved in Profile Builder and are
   // completely independent of AYCD imports. Reconciliation therefore performs a targeted live
@@ -250,7 +358,7 @@ async function discoverSupremeFromProfileBuilderMailboxes(supabase, userId, serv
   const supremeOrders = (serviceOrders || []).filter(order =>
     normalizeStoreKey(order.site || order.metadata?.site || extractNamedPayloadValue(order.raw_payload || {}, ['site','store'])) === 'supreme'
   );
-  if (!supremeOrders.length) return { profile_mailboxes:0, mailboxes_checked:0, messages_found:0, messages_saved:0, failures:0 };
+  if (!supremeOrders.length) return { profile_mailboxes:0, owned_profiles:0, credential_rows:0, mailboxes_checked:0, messages_found:0, messages_saved:0, failures:0 };
 
   const stamps=[];
   for (const order of supremeOrders) {
@@ -259,9 +367,8 @@ async function discoverSupremeFromProfileBuilderMailboxes(supabase, userId, serv
     }
   }
   const since = new Date((stamps.length ? Math.min(...stamps) : Date.now()-180*86400000) - 2*86400000);
-  const accounts = (await loadScanAccounts(supabase, userId)).filter(a =>
-    !a.imported_account_id && a.provider?.name === 'gmail' && lower(a.email).endsWith('@gmail.com')
-  );
+  const ownedMailboxLoad = await loadOwnedProfileBuilderGmailAccounts(supabase, userId);
+  const accounts = ownedMailboxLoad.accounts;
   let mailboxesChecked=0, messagesFound=0, messagesSaved=0, failures=0;
   const worker = async account => {
     const client=new ImapFlow({host:account.provider.host,port:account.provider.port,secure:account.provider.secure,
@@ -294,7 +401,7 @@ async function discoverSupremeFromProfileBuilderMailboxes(supabase, userId, serv
   };
   // Keep Gmail connection pressure modest while still making a hundreds-profile repair practical.
   for(let i=0;i<accounts.length;i+=5) await Promise.all(accounts.slice(i,i+5).map(worker));
-  return { profile_mailboxes:accounts.length, mailboxes_checked:mailboxesChecked, messages_found:messagesFound, messages_saved:messagesSaved, failures };
+  return { profile_mailboxes:accounts.length, owned_profiles:ownedMailboxLoad.owned_profiles, credential_rows:ownedMailboxLoad.credential_rows, mailboxes_checked:mailboxesChecked, messages_found:messagesFound, messages_saved:messagesSaved, failures };
 }
 
 async function fetchSupremeArchiveCandidatesForOrders(supabase, userId, serviceOrders = [], columns = '*') {
@@ -3051,7 +3158,7 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
       // First search the Gmail/app-password mailboxes saved directly in Profile Builder. These are
       // not AYCD-imported accounts, so an archive-only reconciliation can legitimately see zero
       // Supreme rows even though the messages exist in Gmail.
-      let supremeLive = { profile_mailboxes:0, mailboxes_checked:0, messages_found:0, messages_saved:0, failures:0 };
+      let supremeLive = { profile_mailboxes:0, owned_profiles:0, credential_rows:0, mailboxes_checked:0, messages_found:0, messages_saved:0, failures:0 };
       try {
         supremeLive = await discoverSupremeFromProfileBuilderMailboxes(
           supabase, req.user_id, serviceOrdersForSupreme, adjustUserCredits, confirmPendingAmazonCheckout
