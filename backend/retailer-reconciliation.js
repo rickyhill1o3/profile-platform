@@ -97,13 +97,21 @@ function parseSupremeItems(text,status){
   }
   return items;
 }
+function targetCancellationScope(subject,text,status){
+  if(status!=='canceled') return null;
+  const hay=lower(`${subject}\n${text}`);
+  if(/sorry,? we had to cancel (?:your )?order|your order has been canceled|order\s*#?\s*\d{10,20}\s+was canceled|we wanted to let you know that order\s*#?\s*\d{10,20}\s+was canceled|you haven['’]t been charged for any items/.test(hay)) return 'full_order';
+  if(/canceled an item|cancelled an item|canceled the item below|cancelled the item below|canceled item|cancelled item|your item has been canceled|your item has been cancelled/.test(hay)) return 'item';
+  return 'unknown';
+}
 function parseRetailEmail(store,status,subject,text){
   const orderNumber = store==='supreme'
     ? ((`${subject}\n${text}`.match(/\bOrder\s+(\d{6,20})\b/i)||[])[1]||'')
     : ((`${subject}\n${text}`.match(/\bOrder\s*#?\s*(\d{10,20})\b/i)||[])[1]||'');
   const items=store==='target'?parseTargetItems(text,status):store==='supreme'?parseSupremeItems(text,status):[];
-  return {order_number:orderNumber,items,tracking_number:extractTracking(text)};
+  return {order_number:orderNumber,items,tracking_number:extractTracking(text),cancellation_scope:store==='target'?targetCancellationScope(subject,text,status):null};
 }
+
 function fieldPairs(payload={}){
   const out=[]; const embeds=Array.isArray(payload.embeds)?payload.embeds:[];
   for(const embed of embeds) for(const f of embed.fields||[]) out.push([clean(f.name),clean(f.value).replace(/^\|\||\|\|$/g,'')]);

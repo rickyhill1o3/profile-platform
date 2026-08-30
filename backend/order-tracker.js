@@ -1121,6 +1121,23 @@ async function reconcileTrackedOrderItems(supabase, trackedOrder, serviceOrder, 
     throw error;
   }
 
+  // Target uses item-level cancellations for the shipping-threshold filler, but it also sends
+  // a separate full-order cancellation when the entire checkout is killed. A full-order email
+  // often has no item rows, so apply it to every known line item explicitly.
+  if (lower(trackedOrder.store) === 'target' && status === 'canceled' && retail?.cancellation_scope === 'full_order' && existing.length) {
+    const eventMs = new Date(eventAt || 0).getTime();
+    for (const old of [...existing]) {
+      const oldMs = new Date(old.last_event_at || 0).getTime();
+      if (Number.isFinite(eventMs) && Number.isFinite(oldMs) && oldMs > eventMs) continue;
+      const r = await supabase.from('tracked_order_items').update({
+        status: 'canceled', last_event_at: eventAt, last_email_id: emailId || null,
+        updated_at: new Date().toISOString()
+      }).eq('id', old.id).select().single();
+      if (r.error) throw r.error;
+      existing = existing.map(x => x.id === old.id ? r.data : x);
+    }
+  }
+
   const matchedIds = [];
   for (const item of parsedItems) {
     let best = null, bestScore = 0;
@@ -2726,10 +2743,11 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
       // Reprocess the already-indexed retailer archive across ALL of this user's connected
       // mailboxes. This intentionally ignores the webhook's previously guessed purchase email.
       const maxMessages=Math.max(50,Math.min(5000,Number(req.body?.max_messages||2500)));
-      let q=supabase.from('email_messages').select('*').eq('user_id',req.user_id).order('received_at',{ascending:false}).limit(maxMessages);
+      const archiveColumns='id,user_id,mailbox_email,source_type,subject,from_text,to_text,cc_text,body_text,body_html,snippet,received_at,message_id,imap_uid,store,linked_order_id,email_type,order_number';
+      let q=supabase.from('email_messages').select(archiveColumns).eq('user_id',req.user_id).in('store',['target','supreme']).order('received_at',{ascending:false}).limit(maxMessages);
       const {data,error}=await q; if(error)throw error;
       let checked=0,matched=0,ignored=0,failed=0;
-      const retailerEmails=(data||[]).filter(email=>['target','supreme'].includes(detectStore(email.from_text||'',email.subject||'',email.body_text||email.snippet||''))).reverse();
+      const retailerEmails=(data||[]).filter(email=>['target','supreme'].includes(lower(email.store)||detectStore(email.from_text||'',email.subject||'',email.body_text||email.snippet||''))).reverse();
       // The targeted repair below performs the live OAuth2/IMAP lookup first. Do not start the
       // broad background scan before it, because that could occupy the historical-repair guard
       // at the exact moment the user asks to repair a damaged order. A normal scan is queued after.
@@ -2764,8 +2782,8 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
         .map(email => String(email.linked_order_id)));
       try {
         const allTarget = await fetchAllSupabaseRows(() => supabase.from('email_messages')
-          .select('id,linked_order_id,store,body_text,body_html,snippet')
-          .eq('user_id', req.user_id).eq('store','target').not('linked_order_id','is',null));
+          .select('id,linked_order_id,store,body_text,snippet')
+          .eq('user_id', req.user_id).eq('store','target').not('linked_order_id','is',null), 250);
         for (const email of allTarget) if (email.linked_order_id && archivedTargetBodyNeedsRepair(email)) damagedSet.add(String(email.linked_order_id));
       } catch (e) { console.warn('[RECONCILE FULL TARGET DAMAGE QUERY]', e.message || e); }
       try {
