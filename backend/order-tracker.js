@@ -204,6 +204,45 @@ async function fetchAllSupabaseRows(queryFactory, pageSize = 1000) {
   return out;
 }
 
+async function fetchEmailArchiveRowsByIds(supabase, userId, ids = [], columns = '*', chunkSize = 75) {
+  const out = [];
+  const uniqueIds = [...new Set((ids || []).filter(Boolean).map(String))];
+  for (let i = 0; i < uniqueIds.length; i += chunkSize) {
+    const chunk = uniqueIds.slice(i, i + chunkSize);
+    const r = await supabase.from('email_messages').select(columns)
+      .eq('user_id', userId).in('id', chunk);
+    if (r.error) throw r.error;
+    out.push(...(r.data || []));
+  }
+  return out;
+}
+
+async function fetchRecentEmailArchiveByStore(supabase, userId, store, columns, limit = 1000) {
+  // Do not ask PostgREST/Postgres to sort and return hundreds/thousands of large MIME/HTML
+  // bodies in one statement. First fetch only primary keys through the indexed user/date path,
+  // then hydrate those rows in small PK batches. This keeps each DB statement comfortably below
+  // hosted statement_timeout even when some retailer emails contain very large HTML bodies.
+  const meta = await supabase.from('email_messages').select('id,received_at')
+    .eq('user_id', userId).eq('store', store)
+    .order('received_at', { ascending:false }).limit(limit);
+  if (meta.error) throw meta.error;
+  const ids = (meta.data || []).map(x => x.id).filter(Boolean);
+  const rows = await fetchEmailArchiveRowsByIds(supabase, userId, ids, columns, 60);
+  const rank = new Map((meta.data || []).map((x,i)=>[String(x.id),i]));
+  rows.sort((a,b)=>(rank.get(String(a.id)) ?? Number.MAX_SAFE_INTEGER)-(rank.get(String(b.id)) ?? Number.MAX_SAFE_INTEGER));
+  return rows;
+}
+
+async function fetchEmailArchiveWindow(supabase, userId, startIso, endIso, columns, limit = 1000) {
+  const meta = await supabase.from('email_messages').select('id,received_at')
+    .eq('user_id', userId)
+    .gte('received_at', startIso).lte('received_at', endIso)
+    .order('received_at', { ascending:false }).limit(limit);
+  if (meta.error) throw meta.error;
+  const ids = (meta.data || []).map(x => x.id).filter(Boolean);
+  return fetchEmailArchiveRowsByIds(supabase, userId, ids, columns, 60);
+}
+
 async function buildMailboxOwnerMap(supabase) {
   const profiles = await fetchAllSupabaseRows(() => supabase.from('profiles').select('id,user_id'));
   const pmap = new Map(profiles.map(p => [String(p.id), p]));
@@ -2892,21 +2931,20 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
       const archiveColumns='id,user_id,mailbox_email,source_type,subject,from_text,to_text,cc_text,body_text,body_html,snippet,received_at,message_id,imap_uid,store,linked_order_id,email_type,order_number';
       // Do not rely on the historical `store` classification for Supreme. Older archived messages
       // may have been saved as unknown even though the sender/subject/body clearly identifies them.
-      const targetArchive = await supabase.from('email_messages').select(archiveColumns)
-        .eq('user_id',req.user_id).eq('store','target').order('received_at',{ascending:false}).limit(maxMessages);
-      if (targetArchive.error) throw targetArchive.error;
+      const targetArchiveRows = await fetchRecentEmailArchiveByStore(
+        supabase, req.user_id, 'target', archiveColumns, Math.min(maxMessages, 1500)
+      );
       // IMPORTANT: do not use a PostgREST OR with ILIKE across the whole email archive here.
       // On a large inbox that forces PostgreSQL to scan far too many rows and can hit the hosted
       // statement_timeout in only a few seconds. Load already-classified Supreme mail normally,
       // then inspect small date windows around the user's actual Supreme webhook checkouts. The
       // latter recovers legacy rows whose store was saved as unknown without a table-wide ILIKE.
-      const supremeArchive = await supabase.from('email_messages').select(archiveColumns)
-        .eq('user_id',req.user_id).eq('store','supreme')
-        .order('received_at',{ascending:false}).limit(maxMessages);
-      if (supremeArchive.error) throw supremeArchive.error;
+      const supremeArchiveRows = await fetchRecentEmailArchiveByStore(
+        supabase, req.user_id, 'supreme', archiveColumns, Math.min(maxMessages, 1500)
+      );
 
       const merged = new Map();
-      for (const email of [...(targetArchive.data||[]), ...(supremeArchive.data||[])]) merged.set(String(email.id||email.message_id), email);
+      for (const email of [...targetArchiveRows, ...supremeArchiveRows]) merged.set(String(email.id||email.message_id), email);
 
       // Recover misclassified/unknown Supreme confirmations using the indexed
       // (user_id, received_at) path. Build compact, merged +/- 1 day windows around Supreme
@@ -2928,13 +2966,16 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
         // Keep a pathological old account from turning a manual button into a huge archive scan.
         // The direct store='supreme' query above still covers correctly-classified historical mail.
         for (const w of windows.slice(-60)) {
-          const r = await supabase.from('email_messages').select(archiveColumns)
-            .eq('user_id',req.user_id)
-            .gte('received_at',new Date(w.start).toISOString())
-            .lte('received_at',new Date(w.end).toISOString())
-            .order('received_at',{ascending:false}).limit(1000);
-          if (r.error) { console.warn('[SUPREME WINDOW ARCHIVE]', r.error.message || r.error); continue; }
-          for (const email of r.data || []) {
+          let windowRows = [];
+          try {
+            windowRows = await fetchEmailArchiveWindow(
+              supabase, req.user_id, new Date(w.start).toISOString(), new Date(w.end).toISOString(), archiveColumns, 1000
+            );
+          } catch (windowError) {
+            console.warn('[SUPREME WINDOW ARCHIVE]', windowError.message || windowError);
+            continue;
+          }
+          for (const email of windowRows) {
             const text = archivedRetailerReadableText(email);
             const looksSupreme = lower(email.store)==='supreme' ||
               /supremenewyork\.com|us\.supreme\.com/i.test(String(email.from_text||'')) ||
