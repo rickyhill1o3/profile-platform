@@ -1267,23 +1267,52 @@ async function matchSupremeServiceOrder(supabase, account, serviceOrders, retail
   return candidates[0] || null;
 }
 
+function archivedRetailerReadableText(email = {}) {
+  const plain = clean(email.body_text || '');
+  // Some older archive rows contain only a tiny preheader/plain-text fragment while the complete
+  // Supreme receipt survived in body_html. Prefer the richer representation for reconciliation.
+  if (plain.length >= 180 && /Order\s+\d{6,20}|successfully submitted|Price:/i.test(plain)) return plain;
+  let html = String(email.body_html || '');
+  if (html) {
+    html = html
+      .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+      .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+      .replace(/<br\s*\/?\s*>/gi, '\n')
+      .replace(/<\/p\s*>|<\/div\s*>|<\/tr\s*>|<\/li\s*>/gi, '\n')
+      .replace(/<[^>]+>/g, ' ')
+      .replace(/&nbsp;|&#160;|&#8199;|&#847;/gi, ' ')
+      .replace(/&amp;/gi, '&').replace(/&quot;/gi, '"').replace(/&#39;|&apos;/gi, "'")
+      .replace(/=3D/gi, '=')
+      .replace(/[ \t]+/g, ' ')
+      .replace(/\n[ \t]+/g, '\n')
+      .trim();
+  }
+  if (html.length > plain.length) return html;
+  return plain || clean(email.snippet || '');
+}
+
 async function rebuildSupremeBatchAssignments(supabase, userId, retailerEmails = []) {
   const confirmationEmails = [];
+  let supremeArchiveSeen = 0, supremeConfirmedSeen = 0, supremeParsedOrders = 0, supremeParsedItems = 0;
   for (const email of retailerEmails || []) {
-    const store = lower(email.store) || detectStore(email.from_text || '', email.subject || '', email.body_text || email.snippet || '');
+    const text = archivedRetailerReadableText(email);
+    const store = lower(email.store) === 'supreme' ? 'supreme' : detectStore(email.from_text || '', email.subject || '', text);
     if (store !== 'supreme') continue;
-    const text = email.body_text || email.snippet || '';
+    supremeArchiveSeen++;
     const status = detectStatus(email.subject || '', text);
     if (status !== 'confirmed') continue;
+    supremeConfirmedSeen++;
     const retail = parseRetailEmail('supreme', 'confirmed', email.subject || '', text);
-    if (!retail.order_number || !(retail.items || []).length) continue;
+    if (!retail.order_number) continue;
+    supremeParsedOrders++;
+    supremeParsedItems += (retail.items || []).length;
     confirmationEmails.push({ email, retail, eventAt: new Date(email.received_at || Date.now()).toISOString() });
   }
-  if (!confirmationEmails.length) return { confirmations:0, assigned:0, skipped:0 };
+  if (!confirmationEmails.length) return { confirmations:0, assigned:0, skipped:0, supreme_archive_seen:supremeArchiveSeen, supreme_confirmed_seen:supremeConfirmedSeen, parsed_order_numbers:supremeParsedOrders, parsed_items:supremeParsedItems };
 
   const allOrders = await loadServiceOrders(supabase, userId);
   const supremeOrders = allOrders.filter(order => normalizeStoreKey(order.site || order.metadata?.site || extractNamedPayloadValue(order.raw_payload || {}, ['site','store'])) === 'supreme');
-  if (!supremeOrders.length) return { confirmations:confirmationEmails.length, assigned:0, skipped:confirmationEmails.length };
+  if (!supremeOrders.length) return { confirmations:confirmationEmails.length, assigned:0, skipped:confirmationEmails.length, supreme_archive_seen:supremeArchiveSeen, supreme_confirmed_seen:supremeConfirmedSeen, parsed_order_numbers:supremeParsedOrders, parsed_items:supremeParsedItems, supreme_webhook_orders:0 };
 
   // Global one-to-one assignment. Retailer-confirmation checkout time + exact item set carry most
   // of the score. Mailbox/profile identity is only a small hint because Supreme bot profile names
@@ -1293,7 +1322,12 @@ async function rebuildSupremeBatchAssignments(supabase, userId, retailerEmails =
     const mailbox = lower(c.email.mailbox_email);
     for (const order of supremeOrders) {
       const score = matchScore(order, c.retail, c.eventAt, mailbox);
-      if (score >= 55) pairs.push({ c, order, score });
+      // A readable item set remains the safest signal. For legacy Supreme archive rows whose
+      // text conversion lost the line items, an exact retailer-vs-Stellar checkout minute is
+      // still strong enough to enter the global one-to-one assignment pool.
+      const hasItems = (c.retail.items || []).length > 0;
+      const threshold = hasItems ? 55 : 40;
+      if (score >= threshold) pairs.push({ c, order, score, hasItems });
     }
   }
   pairs.sort((a,b) => b.score-a.score
@@ -1309,7 +1343,7 @@ async function rebuildSupremeBatchAssignments(supabase, userId, retailerEmails =
     usedEmails.add(emailKey); usedOrders.add(orderKey); assignments.push(pair);
   }
 
-  if (!assignments.length) return { confirmations:confirmationEmails.length, assigned:0, skipped:confirmationEmails.length };
+  if (!assignments.length) return { confirmations:confirmationEmails.length, assigned:0, skipped:confirmationEmails.length, supreme_archive_seen:supremeArchiveSeen, supreme_confirmed_seen:supremeConfirmedSeen, parsed_order_numbers:supremeParsedOrders, parsed_items:supremeParsedItems, supreme_webhook_orders:supremeOrders.length, candidate_pairs:pairs.length };
 
   const { data: allTrackedRows } = await supabase.from('tracked_orders').select('*').eq('user_id',userId).eq('store','supreme');
   const trackedRows = (allTrackedRows || []).filter(row => batchOrderIds.has(String(row.source_order_id || '')));
@@ -1364,8 +1398,8 @@ async function rebuildSupremeBatchAssignments(supabase, userId, retailerEmails =
     await supabase.from('tracked_orders').update({ order_number:fallback, reconciliation_note:null, updated_at:new Date().toISOString() }).eq('id',tracked.id);
   }
 
-  return { confirmations:confirmationEmails.length, assigned:assignments.length, skipped:confirmationEmails.length-assignments.length,
-    assignments:assignments.map(x=>({ order_number:x.c.retail.order_number, source_order_id:x.order.id, mailbox:lower(x.c.email.mailbox_email), score:x.score })) };
+  return { confirmations:confirmationEmails.length, assigned:assignments.length, skipped:confirmationEmails.length-assignments.length, supreme_archive_seen:supremeArchiveSeen, supreme_confirmed_seen:supremeConfirmedSeen, parsed_order_numbers:supremeParsedOrders, parsed_items:supremeParsedItems, supreme_webhook_orders:supremeOrders.length, candidate_pairs:pairs.length,
+    assignments:assignments.map(x=>({ order_number:x.c.retail.order_number, source_order_id:x.order.id, mailbox:lower(x.c.email.mailbox_email), score:x.score, parsed_items:(x.c.retail.items||[]).map(i=>({name:i.product_name,size:i.size,price:i.price})), retailer_checkout_at:x.c.retail.retailer_checkout_at||null, webhook_checkout_at:parseSupremeWebhookCheckoutAt(x.order)||null })) };
 }
 
 async function saveParsedMessage(supabase, account, parsed, uid, adjustCredits = null, confirmPendingAmazonCheckout = null) {
@@ -2856,10 +2890,23 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
       // mailboxes. This intentionally ignores the webhook's previously guessed purchase email.
       const maxMessages=Math.max(50,Math.min(5000,Number(req.body?.max_messages||2500)));
       const archiveColumns='id,user_id,mailbox_email,source_type,subject,from_text,to_text,cc_text,body_text,body_html,snippet,received_at,message_id,imap_uid,store,linked_order_id,email_type,order_number';
-      let q=supabase.from('email_messages').select(archiveColumns).eq('user_id',req.user_id).in('store',['target','supreme']).order('received_at',{ascending:false}).limit(maxMessages);
-      const {data,error}=await q; if(error)throw error;
+      // Do not rely on the historical `store` classification for Supreme. Older archived messages
+      // may have been saved as unknown even though the sender/subject/body clearly identifies them.
+      const targetArchive = await supabase.from('email_messages').select(archiveColumns)
+        .eq('user_id',req.user_id).eq('store','target').order('received_at',{ascending:false}).limit(maxMessages);
+      if (targetArchive.error) throw targetArchive.error;
+      const supremeArchive = await supabase.from('email_messages').select(archiveColumns)
+        .eq('user_id',req.user_id)
+        .or('store.eq.supreme,from_text.ilike.%supremenewyork.com%,subject.ilike.%online shop order%')
+        .order('received_at',{ascending:false}).limit(maxMessages);
+      if (supremeArchive.error) throw supremeArchive.error;
+      const merged = new Map();
+      for (const email of [...(targetArchive.data||[]), ...(supremeArchive.data||[])]) merged.set(String(email.id||email.message_id), email);
       let checked=0,matched=0,ignored=0,failed=0;
-      const retailerEmails=(data||[]).filter(email=>['target','supreme'].includes(lower(email.store)||detectStore(email.from_text||'',email.subject||'',email.body_text||email.snippet||''))).reverse();
+      const retailerEmails=[...merged.values()].filter(email=>{
+        const text=archivedRetailerReadableText(email);
+        return ['target','supreme'].includes(lower(email.store)||detectStore(email.from_text||'',email.subject||'',text));
+      }).sort((a,b)=>new Date(a.received_at||0)-new Date(b.received_at||0));
       let supremeRebuild = null;
       try { supremeRebuild = await rebuildSupremeBatchAssignments(supabase, req.user_id, retailerEmails); }
       catch (e) { console.warn('[SUPREME BATCH REBUILD]', e.message || e); supremeRebuild = { error:e.message || String(e) }; }
@@ -2882,7 +2929,7 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
         checked++;
         try{
           const account={ user_id:req.user_id, archive_user_id:req.user_id, profile_id:null, email:lower(email.mailbox_email), provider:providerForEmail(email.mailbox_email)||{name:'archive'}, ingestion_source:email.source_type||'archive_reconcile' };
-          const parsed={ subject:email.subject||'', from:{text:email.from_text||''}, to:{text:email.to_text||''}, cc:{text:email.cc_text||''}, text:email.body_text||email.snippet||'', html:email.body_html||null, date:new Date(email.received_at||Date.now()), messageId:email.message_id };
+          const parsed={ subject:email.subject||'', from:{text:email.from_text||''}, to:{text:email.to_text||''}, cc:{text:email.cc_text||''}, text:archivedRetailerReadableText(email), html:email.body_html||null, date:new Date(email.received_at||Date.now()), messageId:email.message_id };
           const result=await saveParsedMessage(supabase,account,parsed,email.imap_uid||0,adjustUserCredits,confirmPendingAmazonCheckout);
           if(result?.saved)matched++; else ignored++;
         }catch(e){ failed++; console.warn('[RECONCILE ARCHIVE]',email.id,e.message||e); }
