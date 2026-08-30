@@ -243,6 +243,60 @@ async function fetchEmailArchiveWindow(supabase, userId, startIso, endIso, colum
   return fetchEmailArchiveRowsByIds(supabase, userId, ids, columns, 60);
 }
 
+async function fetchSupremeArchiveCandidatesForOrders(supabase, userId, serviceOrders = [], columns = '*') {
+  // Supreme mail is easy to identify from lightweight RFC822 metadata: the sender is
+  // support@supremenewyork.com and the subjects are "online shop order" / "online shop order
+  // has been shipped".  Do NOT hydrate the first N arbitrary messages in a date window; users
+  // with hundreds of connected mailboxes can have >1,000 unrelated messages in the same day,
+  // which previously pushed the actual Supreme receipts outside the LIMIT before filtering.
+  const supremeOrders = (serviceOrders || []).filter(order =>
+    normalizeStoreKey(order.site || order.metadata?.site || extractNamedPayloadValue(order.raw_payload || {}, ['site','store'])) === 'supreme'
+  );
+  if (!supremeOrders.length) return { rows: [], metadata_scanned: 0, candidates_found: 0, windows: 0 };
+
+  const spans = [];
+  for (const order of supremeOrders) {
+    const stamps = [new Date(order.created_at || 0).getTime(), new Date(parseSupremeWebhookCheckoutAt(order) || 0).getTime()]
+      .filter(Number.isFinite).filter(ms => ms > 0);
+    if (!stamps.length) continue;
+    const anchor = Math.min(...stamps);
+    // Confirmation arrives immediately; split-shipment emails can arrive days/weeks later.
+    spans.push({ start: anchor - 2 * 24 * 60 * 60 * 1000, end: anchor + 120 * 24 * 60 * 60 * 1000 });
+  }
+  spans.sort((a,b)=>a.start-b.start);
+  const windows = [];
+  for (const span of spans) {
+    const last = windows[windows.length - 1];
+    if (last && span.start <= last.end) last.end = Math.max(last.end, span.end);
+    else windows.push({ ...span });
+  }
+
+  const candidateMeta = new Map();
+  let metadataScanned = 0;
+  for (const window of windows.slice(-80)) {
+    const rows = await fetchAllSupabaseRows(() => supabase.from('email_messages')
+      .select('id,received_at,store,subject,from_text,mailbox_email,message_id')
+      .eq('user_id', userId)
+      .gte('received_at', new Date(window.start).toISOString())
+      .lte('received_at', new Date(window.end).toISOString())
+      .order('received_at', { ascending: true }), 750);
+    metadataScanned += rows.length;
+    for (const row of rows) {
+      const sender = lower(row.from_text || '');
+      const subject = clean(row.subject || '');
+      const looksSupreme = lower(row.store) === 'supreme' ||
+        /(?:^|@|\.)supremenewyork\.com|support@supremenewyork\.com/i.test(sender) ||
+        /^online shop order(?: has been shipped)?$/i.test(subject);
+      if (looksSupreme && row.id) candidateMeta.set(String(row.id), row);
+    }
+  }
+
+  const ids = [...candidateMeta.keys()];
+  const hydrated = await fetchEmailArchiveRowsByIds(supabase, userId, ids, columns, 50);
+  hydrated.sort((a,b)=>new Date(a.received_at||0)-new Date(b.received_at||0));
+  return { rows: hydrated, metadata_scanned: metadataScanned, candidates_found: ids.length, windows: windows.length };
+}
+
 async function buildMailboxOwnerMap(supabase) {
   const profiles = await fetchAllSupabaseRows(() => supabase.from('profiles').select('id,user_id'));
   const pmap = new Map(profiles.map(p => [String(p.id), p]));
@@ -2929,62 +2983,39 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
       // mailboxes. This intentionally ignores the webhook's previously guessed purchase email.
       const maxMessages=Math.max(50,Math.min(5000,Number(req.body?.max_messages||2500)));
       const archiveColumns='id,user_id,mailbox_email,source_type,subject,from_text,to_text,cc_text,body_text,body_html,snippet,received_at,message_id,imap_uid,store,linked_order_id,email_type,order_number';
-      // Do not rely on the historical `store` classification for Supreme. Older archived messages
-      // may have been saved as unknown even though the sender/subject/body clearly identifies them.
+      // Target can still use the normal classified archive path.
       const targetArchiveRows = await fetchRecentEmailArchiveByStore(
         supabase, req.user_id, 'target', archiveColumns, Math.min(maxMessages, 1500)
       );
-      // IMPORTANT: do not use a PostgREST OR with ILIKE across the whole email archive here.
-      // On a large inbox that forces PostgreSQL to scan far too many rows and can hit the hosted
-      // statement_timeout in only a few seconds. Load already-classified Supreme mail normally,
-      // then inspect small date windows around the user's actual Supreme webhook checkouts. The
-      // latter recovers legacy rows whose store was saved as unknown without a table-wide ILIKE.
-      const supremeArchiveRows = await fetchRecentEmailArchiveByStore(
-        supabase, req.user_id, 'supreme', archiveColumns, Math.min(maxMessages, 1500)
-      );
+
+      // Supreme reconciliation must search across every connected mailbox, not the purchase email
+      // guessed from the webhook/profile. First scan only lightweight email metadata in the date
+      // span of the Supreme checkouts, identify Supreme by sender/subject, then hydrate ONLY those
+      // matching rows in small primary-key batches. This avoids both statement_timeout and the old
+      // LIMIT 1000 bug that could completely miss Supreme mail on high-volume inbox accounts.
+      const serviceOrdersForSupreme = await loadServiceOrders(supabase, req.user_id);
+      let supremeDiscovery = { rows: [], metadata_scanned: 0, candidates_found: 0, windows: 0 };
+      try {
+        supremeDiscovery = await fetchSupremeArchiveCandidatesForOrders(
+          supabase, req.user_id, serviceOrdersForSupreme, archiveColumns
+        );
+      } catch (e) {
+        console.warn('[SUPREME METADATA DISCOVERY]', e.message || e);
+      }
+
+      // Also retain already-classified Supreme rows as a fallback for very old orders outside the
+      // active checkout windows. These rows are fetched by PK batches and therefore stay cheap.
+      let supremeArchiveRows = [];
+      try {
+        supremeArchiveRows = await fetchRecentEmailArchiveByStore(
+          supabase, req.user_id, 'supreme', archiveColumns, Math.min(maxMessages, 1500)
+        );
+      } catch (e) { console.warn('[SUPREME CLASSIFIED ARCHIVE]', e.message || e); }
 
       const merged = new Map();
-      for (const email of [...targetArchiveRows, ...supremeArchiveRows]) merged.set(String(email.id||email.message_id), email);
-
-      // Recover misclassified/unknown Supreme confirmations using the indexed
-      // (user_id, received_at) path. Build compact, merged +/- 1 day windows around Supreme
-      // checkouts instead of searching every archived message with ILIKE.
-      try {
-        const serviceOrdersForWindows = await loadServiceOrders(supabase, req.user_id);
-        const supremeTimes = serviceOrdersForWindows
-          .filter(order => normalizeStoreKey(order.site || order.metadata?.site || extractNamedPayloadValue(order.raw_payload || {}, ['site','store'])) === 'supreme')
-          .map(order => new Date(order.created_at || 0).getTime())
-          .filter(Number.isFinite)
-          .sort((a,b)=>a-b);
-        const rawWindows = supremeTimes.map(ms => ({ start: ms - 24*60*60*1000, end: ms + 24*60*60*1000 }));
-        const windows = [];
-        for (const w of rawWindows) {
-          const last = windows[windows.length-1];
-          if (last && w.start <= last.end) last.end = Math.max(last.end, w.end);
-          else windows.push({ ...w });
-        }
-        // Keep a pathological old account from turning a manual button into a huge archive scan.
-        // The direct store='supreme' query above still covers correctly-classified historical mail.
-        for (const w of windows.slice(-60)) {
-          let windowRows = [];
-          try {
-            windowRows = await fetchEmailArchiveWindow(
-              supabase, req.user_id, new Date(w.start).toISOString(), new Date(w.end).toISOString(), archiveColumns, 1000
-            );
-          } catch (windowError) {
-            console.warn('[SUPREME WINDOW ARCHIVE]', windowError.message || windowError);
-            continue;
-          }
-          for (const email of windowRows) {
-            const text = archivedRetailerReadableText(email);
-            const looksSupreme = lower(email.store)==='supreme' ||
-              /supremenewyork\.com|us\.supreme\.com/i.test(String(email.from_text||'')) ||
-              /^online shop order$/i.test(clean(email.subject||'')) ||
-              detectStore(email.from_text||'', email.subject||'', text)==='supreme';
-            if (looksSupreme) merged.set(String(email.id||email.message_id), email);
-          }
-        }
-      } catch (e) { console.warn('[SUPREME WINDOW RECOVERY]', e.message || e); }
+      for (const email of [...targetArchiveRows, ...supremeArchiveRows, ...(supremeDiscovery.rows || [])]) {
+        merged.set(String(email.id||email.message_id), email);
+      }
       let checked=0,matched=0,ignored=0,failed=0;
       const retailerEmails=[...merged.values()].filter(email=>{
         const text=archivedRetailerReadableText(email);
@@ -3051,7 +3082,7 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
       }
       // Now queue the ordinary catch-up scan for anything that was not part of the targeted set.
       try { startUserScanJob(supabase,req.user_id,adjustUserCredits,confirmPendingAmazonCheckout); } catch (_) {}
-      res.json({success:true,checked,matched,ignored,failed,supreme_rebuild:supremeRebuild,damaged_target_orders:damagedLinkedOrderIds.length,repair,message:`Rebuilt ${supremeRebuild?.assigned||0} Supreme confirmation assignment(s), reprocessed ${checked} Target/Supreme retailer emails, then performed a direct live OAuth2/IMAP repair for ${damagedLinkedOrderIds.length} damaged Target order(s).`});
+      res.json({success:true,checked,matched,ignored,failed,supreme_rebuild:supremeRebuild,supreme_discovery:{metadata_scanned:supremeDiscovery?.metadata_scanned||0,candidates_found:supremeDiscovery?.candidates_found||0,windows:supremeDiscovery?.windows||0},damaged_target_orders:damagedLinkedOrderIds.length,repair,message:`Rebuilt ${supremeRebuild?.assigned||0} Supreme confirmation assignment(s), discovered ${supremeDiscovery?.candidates_found||0} Supreme email(s) across all connected mailbox archives, reprocessed ${checked} Target/Supreme retailer emails, then performed a direct live OAuth2/IMAP repair for ${damagedLinkedOrderIds.length} damaged Target order(s).`});
     } catch(error){ res.status(500).json({error:error.message}); }
   });
 

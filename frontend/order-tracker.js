@@ -74,6 +74,13 @@ ${missing.slice(0,8).map(x=>`${x.order_number||'-'} · ${x.mailbox||'-'}`).join(
 Archive matched: ${j.matched}
 Archive ignored: ${j.ignored}
 Failed: ${j.failed}
+Supreme metadata scanned: ${j.supreme_discovery?.metadata_scanned||0}
+Supreme emails discovered: ${j.supreme_discovery?.candidates_found||0}
+Supreme confirmations parsed: ${j.supreme_rebuild?.confirmations||0}
+Supreme order numbers parsed: ${j.supreme_rebuild?.parsed_order_numbers||0}
+Supreme webhook orders: ${j.supreme_rebuild?.supreme_webhook_orders||0}
+Supreme candidate pairs: ${j.supreme_rebuild?.candidate_pairs||0}
+Supreme assignments rebuilt: ${j.supreme_rebuild?.assigned||0}
 Damaged Target orders prioritized: ${j.damaged_target_orders||0}
 Live mailbox orders checked: ${r.checked_orders||0}
 Live MIME messages matched: ${r.matched_messages||0}
