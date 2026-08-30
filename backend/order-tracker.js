@@ -243,6 +243,60 @@ async function fetchEmailArchiveWindow(supabase, userId, startIso, endIso, colum
   return fetchEmailArchiveRowsByIds(supabase, userId, ids, columns, 60);
 }
 
+async function discoverSupremeFromProfileBuilderMailboxes(supabase, userId, serviceOrders = [], adjustCredits = null, confirmPendingAmazonCheckout = null) {
+  // Supreme accounts are commonly ordinary Gmail credentials saved in Profile Builder and are
+  // completely independent of AYCD imports. Reconciliation therefore performs a targeted live
+  // IMAP search against those Profile Builder mailboxes before consulting email_messages.
+  const supremeOrders = (serviceOrders || []).filter(order =>
+    normalizeStoreKey(order.site || order.metadata?.site || extractNamedPayloadValue(order.raw_payload || {}, ['site','store'])) === 'supreme'
+  );
+  if (!supremeOrders.length) return { profile_mailboxes:0, mailboxes_checked:0, messages_found:0, messages_saved:0, failures:0 };
+
+  const stamps=[];
+  for (const order of supremeOrders) {
+    for (const value of [order.created_at, parseSupremeWebhookCheckoutAt(order)]) {
+      const ms=new Date(value||0).getTime(); if(Number.isFinite(ms) && ms>0) stamps.push(ms);
+    }
+  }
+  const since = new Date((stamps.length ? Math.min(...stamps) : Date.now()-180*86400000) - 2*86400000);
+  const accounts = (await loadScanAccounts(supabase, userId)).filter(a =>
+    !a.imported_account_id && a.provider?.name === 'gmail' && lower(a.email).endsWith('@gmail.com')
+  );
+  let mailboxesChecked=0, messagesFound=0, messagesSaved=0, failures=0;
+  const worker = async account => {
+    const client=new ImapFlow({host:account.provider.host,port:account.provider.port,secure:account.provider.secure,
+      auth:await imapAuthForAccount(supabase,account),logger:false,connectionTimeout:30000,greetingTimeout:30000,socketTimeout:90000});
+    try {
+      await client.connect();
+      let boxes=[]; try{boxes=await client.list();}catch(_){}
+      const mailboxName=boxes.find(b=>b.specialUse==='\\All')?.path || 'INBOX';
+      const lock=await client.getMailboxLock(mailboxName);
+      try {
+        mailboxesChecked++;
+        let uids=[];
+        try { uids=await client.search({ since, from:'support@supremenewyork.com' },{uid:true}); }
+        catch (_) { uids=await client.search({ since, subject:'online shop order' },{uid:true}); }
+        uids=(uids||[]).map(Number).filter(Boolean).sort((a,b)=>a-b).slice(-250);
+        messagesFound += uids.length;
+        const range=imapUidSet(uids); if(!range) return;
+        for await (const msg of client.fetch(range,{uid:true,source:true,envelope:true},{uid:true})) {
+          try {
+            const parsed=await simpleParser(msg.source);
+            const sender=lower(parsed.from?.text||''); const subject=clean(parsed.subject||'');
+            if(!sender.includes('supremenewyork.com') && !/^online shop order(?: has been shipped)?$/i.test(subject)) continue;
+            const result=await saveParsedMessage(supabase,account,parsed,msg.uid,adjustCredits,confirmPendingAmazonCheckout);
+            if(result?.saved) messagesSaved++;
+          } catch(e) { console.warn('[SUPREME PROFILE IMAP MESSAGE]',account.email,msg.uid,e.message||e); }
+        }
+      } finally { lock.release(); }
+    } catch(e) { failures++; console.warn('[SUPREME PROFILE IMAP]',account.email,e.message||e); }
+    finally { try{await client.logout();}catch(_){} }
+  };
+  // Keep Gmail connection pressure modest while still making a hundreds-profile repair practical.
+  for(let i=0;i<accounts.length;i+=5) await Promise.all(accounts.slice(i,i+5).map(worker));
+  return { profile_mailboxes:accounts.length, mailboxes_checked:mailboxesChecked, messages_found:messagesFound, messages_saved:messagesSaved, failures };
+}
+
 async function fetchSupremeArchiveCandidatesForOrders(supabase, userId, serviceOrders = [], columns = '*') {
   // Supreme mail is easy to identify from lightweight RFC822 metadata: the sender is
   // support@supremenewyork.com and the subjects are "online shop order" / "online shop order
@@ -2994,6 +3048,16 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
       // matching rows in small primary-key batches. This avoids both statement_timeout and the old
       // LIMIT 1000 bug that could completely miss Supreme mail on high-volume inbox accounts.
       const serviceOrdersForSupreme = await loadServiceOrders(supabase, req.user_id);
+      // First search the Gmail/app-password mailboxes saved directly in Profile Builder. These are
+      // not AYCD-imported accounts, so an archive-only reconciliation can legitimately see zero
+      // Supreme rows even though the messages exist in Gmail.
+      let supremeLive = { profile_mailboxes:0, mailboxes_checked:0, messages_found:0, messages_saved:0, failures:0 };
+      try {
+        supremeLive = await discoverSupremeFromProfileBuilderMailboxes(
+          supabase, req.user_id, serviceOrdersForSupreme, adjustUserCredits, confirmPendingAmazonCheckout
+        );
+      } catch (e) { console.warn('[SUPREME PROFILE BUILDER DISCOVERY]', e.message || e); }
+
       let supremeDiscovery = { rows: [], metadata_scanned: 0, candidates_found: 0, windows: 0 };
       try {
         supremeDiscovery = await fetchSupremeArchiveCandidatesForOrders(
@@ -3082,7 +3146,7 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
       }
       // Now queue the ordinary catch-up scan for anything that was not part of the targeted set.
       try { startUserScanJob(supabase,req.user_id,adjustUserCredits,confirmPendingAmazonCheckout); } catch (_) {}
-      res.json({success:true,checked,matched,ignored,failed,supreme_rebuild:supremeRebuild,supreme_discovery:{metadata_scanned:supremeDiscovery?.metadata_scanned||0,candidates_found:supremeDiscovery?.candidates_found||0,windows:supremeDiscovery?.windows||0},damaged_target_orders:damagedLinkedOrderIds.length,repair,message:`Rebuilt ${supremeRebuild?.assigned||0} Supreme confirmation assignment(s), discovered ${supremeDiscovery?.candidates_found||0} Supreme email(s) across all connected mailbox archives, reprocessed ${checked} Target/Supreme retailer emails, then performed a direct live OAuth2/IMAP repair for ${damagedLinkedOrderIds.length} damaged Target order(s).`});
+      res.json({success:true,checked,matched,ignored,failed,supreme_rebuild:supremeRebuild,supreme_live:supremeLive,supreme_discovery:{metadata_scanned:supremeDiscovery?.metadata_scanned||0,candidates_found:supremeDiscovery?.candidates_found||0,windows:supremeDiscovery?.windows||0},damaged_target_orders:damagedLinkedOrderIds.length,repair,message:`Rebuilt ${supremeRebuild?.assigned||0} Supreme confirmation assignment(s), discovered ${supremeDiscovery?.candidates_found||0} Supreme email(s) across all connected mailbox archives, reprocessed ${checked} Target/Supreme retailer emails, then performed a direct live OAuth2/IMAP repair for ${damagedLinkedOrderIds.length} damaged Target order(s).`});
     } catch(error){ res.status(500).json({error:error.message}); }
   });
 
