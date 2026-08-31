@@ -19,6 +19,8 @@
     .status-legend{display:flex;gap:8px;flex-wrap:wrap;margin:14px 0 0}.status-legend span{padding:6px 10px;border-radius:999px;font-size:12px;font-weight:800;border:1px solid rgba(15,23,42,.12)}.legend-canceled{background:#fee2e2}.legend-waiting{background:#fef3c7}.legend-delivered{background:#dcfce7}.legend-shipped{background:#1e3a8a;color:#fff}.legend-confirmed{background:#e0f2fe}
     .aycd-form{display:grid;grid-template-columns:1fr 110px;gap:9px}.aycd-form label{display:grid;gap:5px;font-size:12px;font-weight:700}.aycd-form .wide{grid-column:1/-1}.aycd-buttons{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}.pair-code-box{margin:14px 0;padding:14px;border:1px dashed #94a3b8;border-radius:12px;background:#f8fafc}.pair-code-box span,.pair-code-box small{display:block;color:#64748b}.pair-code-box strong{display:block;font-size:34px;letter-spacing:.18em;margin:5px 0}.aycd-lookback{display:grid;gap:5px;font-size:12px;font-weight:700}.aycd-lookback input{max-width:150px}
     .scan-overlay{position:fixed;inset:0;z-index:9999;background:linear-gradient(135deg,#0f172a,#172554 58%,#312e81);display:grid;place-items:center;padding:24px}.scan-overlay[hidden]{display:none}.scan-box{width:min(620px,100%);background:#fff;border-radius:24px;padding:30px;box-shadow:0 30px 80px rgba(0,0,0,.34)}.scan-box h1{margin:5px 0 8px}.scan-progress{height:15px;background:#e5eaf2;border-radius:999px;overflow:hidden;margin:22px 0 10px}.scan-progress>div{height:100%;width:0;background:linear-gradient(90deg,#2563eb,#7c3aed);transition:width .35s ease}.scan-percent{font-size:34px;font-weight:900}.scan-stage{color:#475569;min-height:44px}.scan-detail{font-size:13px;color:#64748b}.scan-warning{margin-top:15px;padding:11px;border-radius:10px;background:#fff7ed;color:#9a3412;font-size:13px}
+
+    .diag-modal[hidden]{display:none}.diag-modal{position:fixed;inset:0;z-index:12000;background:rgba(15,23,42,.72);display:grid;place-items:center;padding:22px}.diag-card{width:min(1180px,96vw);height:min(820px,92vh);background:#fff;border-radius:18px;box-shadow:0 30px 90px rgba(0,0,0,.4);display:flex;flex-direction:column;overflow:hidden}.diag-head{display:flex;justify-content:space-between;gap:16px;align-items:center;padding:16px 18px;border-bottom:1px solid #e2e8f0}.diag-head h2{margin:0;font-size:20px}.diag-actions{display:flex;gap:8px;flex-wrap:wrap}.diag-log{flex:1;margin:0;padding:16px 18px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;background:#0f172a;color:#e2e8f0;font:12px/1.45 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;user-select:text}.diag-foot{padding:10px 18px;border-top:1px solid #e2e8f0;color:#64748b;font-size:12px}
     #trackerApp[hidden]{display:none}
     @media(max-width:900px){.tracker-grid{grid-template-columns:1fr}.tracker-stats{grid-template-columns:repeat(2,1fr)}.tracker-toolbar{grid-template-columns:1fr 1fr}.tracker-toolbar input{grid-column:1/-1}.order-meta{grid-template-columns:1fr 1fr}}
     @media(max-width:600px){.tracker-shell{width:min(100% - 18px,1180px);margin-top:10px}.tracker-header{display:block}.tracker-actions{margin-top:14px}.tracker-stats{grid-template-columns:1fr 1fr}.tracker-stat:last-child{grid-column:1/-1}.order-meta{grid-template-columns:1fr}.tracker-toolbar{grid-template-columns:1fr}.tracker-toolbar input{grid-column:auto}}
@@ -78,6 +80,14 @@
     </section>
     <section id="ordersList" class="order-list"></section>
   </main>
+
+  <div id="reconcileDiagModal" class="diag-modal" hidden>
+    <section class="diag-card" role="dialog" aria-modal="true" aria-labelledby="reconcileDiagTitle">
+      <div class="diag-head"><h2 id="reconcileDiagTitle">Retailer reconciliation diagnostics</h2><div class="diag-actions"><button class="btn" id="copyReconcileDiag">Copy complete log</button><button class="btn" id="downloadReconcileDiag">Download log</button><button class="btn btn-primary" id="closeReconcileDiag">Close</button></div></div>
+      <pre id="reconcileDiagLog" class="diag-log"></pre>
+      <div class="diag-foot">This window does not truncate the response. Use Ctrl+F inside the log after copying it, or download the complete text file.</div>
+    </section>
+  </div>
 <script src="order-tracker.js"></script>
 </body>
 </html>

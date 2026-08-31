@@ -64,13 +64,26 @@ $('scanAycd').onclick=async()=>{try{await api('/orders/aycd/scan-request',{metho
 $('refreshAycd').onclick=refreshAycdStatus;
 setInterval(()=>{if(!$('aycdPanel').hidden)refreshAycdStatus()},10000);
 $('printYear').onclick=async()=>{const y=$('yearFilter').value||new Date().getFullYear();const r=await fetch(`${API}/orders/tax-export?year=${y}`,{headers:{Authorization:`Bearer ${token}`}});if(!r.ok){alert('Annual receipt archive could not be opened');return}const html=await r.text();const w=window.open('','_blank');w.document.open();w.document.write(html);w.document.close()};
+
+function showReconcileDiagnostics(text){
+  const modal=$('reconcileDiagModal'), log=$('reconcileDiagLog');
+  if(!modal||!log){alert(text);return}
+  log.textContent=String(text||'');
+  modal.hidden=false;
+  log.scrollTop=0;
+}
+if($('closeReconcileDiag')) $('closeReconcileDiag').onclick=()=>{$('reconcileDiagModal').hidden=true};
+if($('reconcileDiagModal')) $('reconcileDiagModal').onclick=e=>{if(e.target===$('reconcileDiagModal')) $('reconcileDiagModal').hidden=true};
+if($('copyReconcileDiag')) $('copyReconcileDiag').onclick=async()=>{const text=$('reconcileDiagLog')?.textContent||'';try{await navigator.clipboard.writeText(text);$('copyReconcileDiag').textContent='Copied';setTimeout(()=>{$('copyReconcileDiag').textContent='Copy complete log'},1500)}catch(_){alert('Could not copy the log automatically. Select the text in the log and copy it manually.')}};
+if($('downloadReconcileDiag')) $('downloadReconcileDiag').onclick=()=>{const text=$('reconcileDiagLog')?.textContent||'';const blob=new Blob([text],{type:'text/plain;charset=utf-8'});const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download=`retailer-reconcile-${new Date().toISOString().replace(/[:.]/g,'-')}.log.txt`;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),1000)};
+
 $('reconcileRetailer').onclick=async()=>{const b=$('reconcileRetailer');const old=b.textContent;b.disabled=true;b.textContent='Reconciling…';try{const j=await api('/orders/reconcile-retailer-emails',{method:'POST',body:JSON.stringify({max_messages:2500,repair_orders:250})});const r=j.repair||{};const details=Array.isArray(r.details)?r.details:[];const priority=details.filter(x=>x.result!=='mailbox_not_connected');const detailText=priority.length?`
 
 Live repair details:
 ${priority.map(x=>{const itemBits=[];if(x.main_item_status)itemBits.push(`main=${x.main_item_status}`);if(x.filler_item_status)itemBits.push(`filler=${x.filler_item_status}`);if(x.final_order_status)itemBits.push(`final=${x.final_order_status}`);return `${x.store||'retailer'} ${x.order_number||'-'} · ${x.mailbox||'-'} · found ${x.messages_found||0}, processed ${x.messages_processed||0}, saved ${x.saved_messages||0} · ${x.result||'-'}${itemBits.length?` · ${itemBits.join(', ')}`:''}`}).join('\n')}`:'';const missing=details.filter(x=>x.result==='mailbox_not_connected');const missingText=missing.length?`
 
 Mailbox not connected (${missing.length}):
-${missing.map(x=>`${x.order_number||'-'} · ${x.mailbox||'-'}`).join('\n')}`:'';alert(`${j.message}
+${missing.map(x=>`${x.order_number||'-'} · ${x.mailbox||'-'}`).join('\n')}`:'';showReconcileDiagnostics(`${j.message}
 Archive matched: ${j.matched}
 Archive ignored: ${j.ignored}
 Failed: ${j.failed}

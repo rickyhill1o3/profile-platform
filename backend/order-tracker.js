@@ -377,10 +377,41 @@ async function discoverSupremeFromProfileBuilderMailboxes(supabase, userId, serv
   const since = new Date((stamps.length ? Math.min(...stamps) : Date.now()-365*86400000) - 2*86400000);
   debug.push(`Live Gmail Supreme search since: ${since.toISOString()}`);
   const ownedMailboxLoad = await loadOwnedProfileBuilderGmailAccounts(supabase, userId);
-  const accounts = ownedMailboxLoad.accounts;
+  let accounts = ownedMailboxLoad.accounts;
   debug.push(...(ownedMailboxLoad.debug || []));
+
+  // IMPORTANT FALLBACK: use the same proven account loader that powers the normal Order Tracker
+  // scan. This catches legacy Profile Builder rows that are valid enough for the background IMAP
+  // scanner but were missed by the narrower Supreme-specific credential query. Keep the strict
+  // privacy boundary: exact user_id only, Gmail only, a real owned profile_id, and never AYCD imports.
+  // This is especially important for older profiles whose Target Gmail app password lives in the
+  // legacy accounts table / verified imap_scan_accounts path.
+  try {
+    const normalScanAccounts = await loadScanAccounts(supabase, userId);
+    const directGmail = normalScanAccounts.filter(a =>
+      String(a.user_id || '') === String(userId) &&
+      a.profile_id &&
+      a.provider?.name === 'gmail' &&
+      a.ingestion_source !== 'aycd_import' &&
+      !a.imported_account_id
+    );
+    debug.push(`Normal Order Tracker loader returned ${normalScanAccounts.length} total mailbox account(s); ${directGmail.length} owned direct Gmail account(s) are eligible for Supreme.`);
+    const merged = new Map(accounts.map(a => [lower(a.email), a]));
+    for (const a of directGmail) {
+      const email = lower(a.email);
+      if (!email) continue;
+      if (!merged.has(email)) {
+        merged.set(email, { ...a, archive_user_id:userId, ingestion_source:'profile_builder_direct_imap' });
+        debug.push(`Fallback Gmail credential accepted from normal scanner: ${email} (profile ${a.profile_id})`);
+      }
+    }
+    accounts = [...merged.values()];
+  } catch (e) {
+    debug.push(`Normal Order Tracker Gmail fallback FAILED: ${e.message || e}`);
+  }
+
   debug.push(`Unique owned Gmail mailboxes ready to scan: ${accounts.length}`);
-  for (const a of accounts) debug.push(`Mailbox queued: ${a.email}`);
+  for (const a of accounts) debug.push(`Mailbox queued: ${a.email} (profile ${a.profile_id || '-'})`);
   let mailboxesChecked=0, messagesFound=0, messagesSaved=0, failures=0;
   const worker = async account => {
     const client=new ImapFlow({host:account.provider.host,port:account.provider.port,secure:account.provider.secure,
@@ -1245,7 +1276,7 @@ async function loadScanAccounts(supabase, onlyUserId = null) {
     const pass = normalizeMailboxPassword(c.gmail_app_password, provider?.name);
     if (!p || !email || !pass || !provider) return;
     const key = `${p.user_id}:${email}`;
-    if (!byKey.has(key)) byKey.set(key, { user_id: p.user_id, profile_id: p.id, email, password: pass, provider });
+    if (!byKey.has(key)) byKey.set(key, { user_id: p.user_id, profile_id: p.id, email, password: pass, provider, ingestion_source: 'profile_builder_direct_imap' });
   };
 
   // Current multi-store credential table. Older deployments may not have this migration installed yet.
@@ -3266,19 +3297,44 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
       // Build the repair set from the full Target archive, not only the newest maxMessages window.
       // Also include canceled Target orders: a cancellation may apply only to a filler item while the
       // main item shipped/delivered, which is exactly the case manual reconciliation must re-check live.
-      const damagedSet = new Set(retailerEmails
-        .filter(email => lower(email.store) === 'target' && email.linked_order_id && archivedTargetBodyNeedsRepair(email))
-        .map(email => String(email.linked_order_id)));
+      // Count an order as damaged only when its CURRENT linked Target archive still lacks any
+      // readable/full message body. Older broken preheader-only rows are intentionally retained for
+      // audit history, so simply seeing one bad historical row must not make the same order appear
+      // damaged forever after a later live IMAP repair saved a good MIME copy.
+      const targetRowsForDamage = [];
+      for (const email of retailerEmails) if (lower(email.store) === 'target' && email.linked_order_id) targetRowsForDamage.push(email);
       try {
         const allTarget = await fetchAllSupabaseRows(() => supabase.from('email_messages')
-          .select('id,linked_order_id,store,body_text,snippet')
+          .select('id,linked_order_id,store,body_text,body_html,snippet,subject,email_type,received_at')
           .eq('user_id', req.user_id).eq('store','target').not('linked_order_id','is',null), 250);
-        for (const email of allTarget) if (email.linked_order_id && archivedTargetBodyNeedsRepair(email)) damagedSet.add(String(email.linked_order_id));
+        targetRowsForDamage.push(...allTarget);
       } catch (e) { console.warn('[RECONCILE FULL TARGET DAMAGE QUERY]', e.message || e); }
+
+      const targetByOrder = new Map();
+      for (const email of targetRowsForDamage) {
+        const id = String(email.linked_order_id || '');
+        if (!id) continue;
+        if (!targetByOrder.has(id)) targetByOrder.set(id, []);
+        targetByOrder.get(id).push(email);
+      }
+      const damagedSet = new Set();
+      for (const [orderId, rows] of targetByOrder.entries()) {
+        const hasBroken = rows.some(archivedTargetBodyNeedsRepair);
+        const hasReadable = rows.some(row => !archivedTargetBodyNeedsRepair(row) && archivedRetailerReadableText(row).length >= 180);
+        if (hasBroken && !hasReadable) damagedSet.add(orderId);
+      }
+
+      // Do NOT blanket-prioritize every legitimately canceled Target order. Canceled rows are only
+      // repair candidates when they are still unresolved/missing retailer evidence. Once item-level
+      // reconciliation has a readable confirmation/cancellation/shipment history, it is fixed and
+      // should disappear from the damaged count on subsequent scans.
       try {
         const canceled = await fetchAllSupabaseRows(() => supabase.from('tracked_orders')
-          .select('id').eq('user_id',req.user_id).eq('store','target').eq('status','canceled'));
-        for (const order of canceled) if (order.id) damagedSet.add(String(order.id));
+          .select('id,reconciliation_status,reconciliation_note').eq('user_id',req.user_id).eq('store','target').eq('status','canceled'));
+        for (const order of canceled) {
+          const rs = lower(order.reconciliation_status || '');
+          if (order.id && ['pending','main_item_missing',''].includes(rs) && !targetByOrder.has(String(order.id))) damagedSet.add(String(order.id));
+        }
       } catch (e) { console.warn('[RECONCILE CANCELED TARGET QUERY]', e.message || e); }
       const damagedLinkedOrderIds = [...damagedSet];
       let repair = null;
