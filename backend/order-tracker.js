@@ -374,7 +374,17 @@ async function discoverSupremeFromProfileBuilderMailboxes(supabase, userId, serv
       const ms=new Date(value||0).getTime(); if(Number.isFinite(ms) && ms>0) stamps.push(ms);
     }
   }
-  const since = new Date((stamps.length ? Math.min(...stamps) : Date.now()-365*86400000) - 2*86400000);
+  // Never let malformed/legacy timestamps abort Supreme discovery before mailbox loading.
+  // Some historical service-order timestamps can parse to an out-of-range Date even though
+  // getTime() looked numeric upstream. Clamp the live-search floor to a sane epoch range and
+  // fall back to one year if anything is unusable.
+  const fallbackSinceMs = Date.now() - 365 * 86400000;
+  let sinceMs = (stamps.length ? Math.min(...stamps) : fallbackSinceMs) - 2 * 86400000;
+  const minSaneMs = Date.UTC(2000, 0, 1);
+  const maxSaneMs = Date.now() + 2 * 86400000;
+  if (!Number.isFinite(sinceMs) || sinceMs < minSaneMs || sinceMs > maxSaneMs) sinceMs = fallbackSinceMs;
+  let since = new Date(sinceMs);
+  if (!Number.isFinite(since.getTime())) since = new Date(fallbackSinceMs);
   debug.push(`Live Supreme mailbox search since: ${since.toISOString()}`);
 
   let normalScanAccounts = [];
