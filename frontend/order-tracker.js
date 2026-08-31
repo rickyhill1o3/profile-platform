@@ -64,13 +64,13 @@ $('scanAycd').onclick=async()=>{try{await api('/orders/aycd/scan-request',{metho
 $('refreshAycd').onclick=refreshAycdStatus;
 setInterval(()=>{if(!$('aycdPanel').hidden)refreshAycdStatus()},10000);
 $('printYear').onclick=async()=>{const y=$('yearFilter').value||new Date().getFullYear();const r=await fetch(`${API}/orders/tax-export?year=${y}`,{headers:{Authorization:`Bearer ${token}`}});if(!r.ok){alert('Annual receipt archive could not be opened');return}const html=await r.text();const w=window.open('','_blank');w.document.open();w.document.write(html);w.document.close()};
-$('reconcileRetailer').onclick=async()=>{const b=$('reconcileRetailer');const old=b.textContent;b.disabled=true;b.textContent='Reconciling…';try{const j=await api('/orders/reconcile-retailer-emails',{method:'POST',body:JSON.stringify({max_messages:2500,repair_orders:250})});const r=j.repair||{};const details=Array.isArray(r.details)?r.details:[];const priority=details.filter(x=>x.result!=='mailbox_not_connected').slice(0,12);const detailText=priority.length?`
+$('reconcileRetailer').onclick=async()=>{const b=$('reconcileRetailer');const old=b.textContent;b.disabled=true;b.textContent='Reconciling…';try{const j=await api('/orders/reconcile-retailer-emails',{method:'POST',body:JSON.stringify({max_messages:2500,repair_orders:250})});const r=j.repair||{};const details=Array.isArray(r.details)?r.details:[];const priority=details.filter(x=>x.result!=='mailbox_not_connected');const detailText=priority.length?`
 
 Live repair details:
 ${priority.map(x=>{const itemBits=[];if(x.main_item_status)itemBits.push(`main=${x.main_item_status}`);if(x.filler_item_status)itemBits.push(`filler=${x.filler_item_status}`);if(x.final_order_status)itemBits.push(`final=${x.final_order_status}`);return `${x.store||'retailer'} ${x.order_number||'-'} · ${x.mailbox||'-'} · found ${x.messages_found||0}, processed ${x.messages_processed||0}, saved ${x.saved_messages||0} · ${x.result||'-'}${itemBits.length?` · ${itemBits.join(', ')}`:''}`}).join('\n')}`:'';const missing=details.filter(x=>x.result==='mailbox_not_connected');const missingText=missing.length?`
 
 Mailbox not connected (${missing.length}):
-${missing.slice(0,8).map(x=>`${x.order_number||'-'} · ${x.mailbox||'-'}`).join('\n')}`:'';alert(`${j.message}
+${missing.map(x=>`${x.order_number||'-'} · ${x.mailbox||'-'}`).join('\n')}`:'';alert(`${j.message}
 Archive matched: ${j.matched}
 Archive ignored: ${j.ignored}
 Failed: ${j.failed}
@@ -90,7 +90,12 @@ Damaged Target orders prioritized: ${j.damaged_target_orders||0}
 Live mailbox orders checked: ${r.checked_orders||0}
 Live MIME messages matched: ${r.matched_messages||0}
 Orders repaired: ${r.repaired_orders||0}
-Mailbox failures: ${r.mailbox_failures||0}${r.concurrent_with_background_repair?`\nManual repair ran alongside an existing background repair.`:''}${r.skipped?`
+Mailbox failures: ${r.mailbox_failures||0}
+
+========== COMPLETE SUPREME DIAGNOSTIC LOG ==========
+${(j.supreme_debug||[]).join('\n') || 'No Supreme diagnostic lines returned.'}
+========== END SUPREME DIAGNOSTIC LOG ==========
+${r.concurrent_with_background_repair?`\nManual repair ran alongside an existing background repair.`:''}${r.skipped?`
 Repair skipped: ${r.reason||'no candidates'}`:''}${detailText}${missingText}`);await loadOrders()}catch(e){alert(e.message)}finally{b.disabled=false;b.textContent=old}};
 $('refreshOrders').onclick=loadOrders;$('statusFilter').onchange=()=>{render();loadOrders().catch(e=>showWarning(e.message));};$('yearFilter').onchange=()=>{render();loadOrders().catch(e=>showWarning(e.message));};$('searchOrders').oninput=render;
 initYears();
