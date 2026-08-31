@@ -933,44 +933,105 @@ function carrierTrackingUrl(carrier, trackingNumber) {
   return '';
 }
 
-async function checkEasyPostDelivered(supabase) {
+async function checkEasyPostDelivered(supabase, userId = null) {
   const key = clean(process.env.EASYPOST_API_KEY);
-  if (!key) return { checked: 0, delivered: 0, disabled: true };
+  if (!key) return { checked: 0, delivered_shipments: 0, delivered_orders: 0, disabled: true };
   const auth = `Basic ${Buffer.from(`${key}:`).toString('base64')}`;
-  const { data, error } = await supabase.from('tracked_orders').select('id,tracking_number,carrier,status').eq('status','shipped').not('tracking_number','is',null).limit(100);
+
+  let q = supabase.from('tracked_orders')
+    .select('id,user_id,tracking_number,carrier,status')
+    .eq('status','shipped')
+    .limit(200);
+  if (userId) q = q.eq('user_id', userId);
+  const { data: orders, error } = await q;
   if (error) throw error;
-  let checked = 0, delivered = 0;
-  for (const order of data || []) {
-    const code = clean(order.tracking_number);
-    if (!code) continue;
-    try {
-      let tracker = null;
-      const lookup = await fetch(`https://api.easypost.com/v2/trackers?tracking_code=${encodeURIComponent(code)}`, { headers: { Authorization: auth } });
-      if (lookup.ok) {
-        const payload = await lookup.json().catch(()=>({}));
-        tracker = (payload.trackers || []).find(t => clean(t.tracking_code) === code) || null;
+  if (!(orders || []).length) return { checked:0, delivered_shipments:0, delivered_orders:0, disabled:false };
+
+  const orderIds=(orders||[]).map(o=>o.id).filter(Boolean);
+  const shipmentsByOrder=new Map(orderIds.map(id=>[String(id),[]]));
+  try {
+    for(let i=0;i<orderIds.length;i+=100){
+      const r=await supabase.from('tracked_order_shipments')
+        .select('id,order_id,tracking_number,carrier,status,delivered_at')
+        .in('order_id',orderIds.slice(i,i+100));
+      if(r.error) throw r.error;
+      for(const row of r.data||[]) (shipmentsByOrder.get(String(row.order_id))||[]).push(row);
+    }
+  } catch (err) {
+    console.warn('[TRACKING] Shipment row lookup failed; falling back to order-level tracking:', err.message || err);
+  }
+
+  let checked = 0, deliveredShipments = 0, deliveredOrders = 0;
+
+  async function lookupTracker(code, carrierHint='') {
+    let tracker = null;
+    const lookup = await fetch(`https://api.easypost.com/v2/trackers?tracking_code=${encodeURIComponent(code)}`, { headers: { Authorization: auth } });
+    if (lookup.ok) {
+      const payload = await lookup.json().catch(()=>({}));
+      tracker = (payload.trackers || []).find(t => clean(t.tracking_code).toUpperCase() === code.toUpperCase()) || null;
+    }
+    if (!tracker) {
+      const body = new URLSearchParams();
+      body.set('tracker[tracking_code]', code);
+      if (carrierHint) body.set('tracker[carrier]', carrierHint);
+      const created = await fetch('https://api.easypost.com/v2/trackers', { method:'POST', headers:{ Authorization:auth, 'content-type':'application/x-www-form-urlencoded' }, body });
+      if (created.ok) tracker = await created.json().catch(()=>null);
+    }
+    return tracker;
+  }
+
+  for (const order of orders || []) {
+    const shipmentRows = shipmentsByOrder.get(String(order.id)) || [];
+    const candidates = shipmentRows.length
+      ? shipmentRows.filter(s => clean(s.tracking_number)).map(s => ({ shipment:s, code:clean(s.tracking_number), carrier:clean(s.carrier || detectCarrierFromTracking(s.tracking_number || '')) }))
+      : (clean(order.tracking_number) ? [{ shipment:null, code:clean(order.tracking_number), carrier:clean(order.carrier || detectCarrierFromTracking(order.tracking_number || '')) }] : []);
+    if (!candidates.length) continue;
+
+    for (const item of candidates) {
+      // Already-delivered package rows do not need another paid API lookup.
+      if (item.shipment && lower(item.shipment.status) === 'delivered') continue;
+      try {
+        const tracker = await lookupTracker(item.code, item.carrier);
+        checked++;
+        if (!tracker) continue;
+        const trackerStatus=lower(tracker.status);
+        const carrier=lower(tracker.carrier || item.carrier || order.carrier) || null;
+        if (item.shipment) {
+          const patch={ updated_at:new Date().toISOString() };
+          if(carrier) patch.carrier=carrier;
+          if(trackerStatus) patch.status=trackerStatus;
+          if(trackerStatus==='delivered') patch.delivered_at=tracker.est_delivery_date || tracker.updated_at || new Date().toISOString();
+          await supabase.from('tracked_order_shipments').update(patch).eq('id',item.shipment.id);
+          if(trackerStatus==='delivered') deliveredShipments++;
+        } else if (carrier && !order.carrier) {
+          await supabase.from('tracked_orders').update({carrier,updated_at:new Date().toISOString()}).eq('id',order.id);
+        }
+      } catch (err) {
+        console.warn(`[TRACKING] ${item.code}: ${err.message || err}`);
       }
-      if (!tracker) {
-        const body = new URLSearchParams();
-        body.set('tracker[tracking_code]', code);
-        const carrier = clean(order.carrier);
-        if (carrier) body.set('tracker[carrier]', carrier);
-        const created = await fetch('https://api.easypost.com/v2/trackers', { method:'POST', headers:{ Authorization:auth, 'content-type':'application/x-www-form-urlencoded' }, body });
-        if (created.ok) tracker = await created.json().catch(()=>null);
-      }
-      checked++;
-      if (tracker && lower(tracker.status) === 'delivered') {
-        await supabase.from('tracked_orders').update({ status:'delivered', last_status_at:new Date().toISOString(), carrier: lower(tracker.carrier || order.carrier) || order.carrier || null, updated_at:new Date().toISOString() }).eq('id', order.id).eq('status','shipped');
-        delivered++;
-      } else if (tracker?.carrier && !order.carrier) {
-        await supabase.from('tracked_orders').update({ carrier: lower(tracker.carrier), updated_at:new Date().toISOString() }).eq('id', order.id);
-      }
-    } catch (err) {
-      console.warn(`[TRACKING] ${code}: ${err.message || err}`);
+    }
+
+    // Re-read package statuses after this order's checks. For split Supreme shipments, the order
+    // becomes delivered only after every known package has been delivered.
+    let allDelivered=false;
+    if (shipmentRows.length) {
+      const r=await supabase.from('tracked_order_shipments').select('status').eq('order_id',order.id);
+      if(!r.error && (r.data||[]).length) allDelivered=(r.data||[]).every(x=>lower(x.status)==='delivered');
+    } else {
+      try {
+        const tracker=await lookupTracker(clean(order.tracking_number), clean(order.carrier || detectCarrierFromTracking(order.tracking_number || '')));
+        checked++;
+        allDelivered=lower(tracker?.status)==='delivered';
+      } catch(_) {}
+    }
+    if(allDelivered){
+      const now=new Date().toISOString();
+      const upd=await supabase.from('tracked_orders').update({status:'delivered',last_status_at:now,updated_at:now}).eq('id',order.id).eq('status','shipped').select('id');
+      if(!upd.error && (upd.data||[]).length) deliveredOrders++;
     }
   }
-  if (checked) console.log(`[TRACKING] EasyPost checked ${checked} shipped order(s); ${delivered} marked delivered.`);
-  return { checked, delivered };
+  if (checked) console.log(`[TRACKING] EasyPost checked ${checked} package lookup(s); ${deliveredShipments} shipment(s) and ${deliveredOrders} order(s) marked delivered.`);
+  return { checked, delivered_shipments:deliveredShipments, delivered_orders:deliveredOrders, disabled:false };
 }
 
 function extractProductSummary(subject, text, store) {
@@ -3424,6 +3485,13 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
       try { startUserScanJob(supabase,req.user_id,adjustUserCredits,confirmPendingAmazonCheckout); } catch (_) {}
       res.json({success:true,checked,matched,ignored,failed,supreme_rebuild:supremeRebuild,supreme_live:supremeLive,supreme_debug:[...(supremeLive?.debug||[]), ...serviceOrdersForSupreme.map((o,i)=>`Service order ${i+1}: id=${o.id} site=${o.site||'-'} metadata.site=${o.metadata?.site||'-'} payload site/store=${extractNamedPayloadValue(o.raw_payload||{},['site','store'])||'-'} normalized=${normalizeStoreKey(o.site || o.metadata?.site || extractNamedPayloadValue(o.raw_payload||{},['site','store']))||'-'}`)],supreme_discovery:{metadata_scanned:supremeDiscovery?.metadata_scanned||0,candidates_found:supremeDiscovery?.candidates_found||0,windows:supremeDiscovery?.windows||0},damaged_target_orders:damagedLinkedOrderIds.length,repair,message:`Rebuilt ${supremeRebuild?.assigned||0} Supreme confirmation assignment(s), discovered ${supremeDiscovery?.candidates_found||0} Supreme email(s) across all connected mailbox archives, reprocessed ${checked} Target/Supreme retailer emails, then performed a direct live OAuth2/IMAP repair for ${damagedLinkedOrderIds.length} damaged Target order(s).`});
     } catch(error){ res.status(500).json({error:error.message}); }
+  });
+
+  app.post('/orders/check-tracking', auth, async (req,res)=>{
+    try {
+      const result=await checkEasyPostDelivered(supabase, req.user_id);
+      res.json({success:true,...result});
+    } catch(e){res.status(500).json({error:e.message||String(e)});}
   });
 
   app.post('/orders/scan/start', auth, async (req, res) => {
