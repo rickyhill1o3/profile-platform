@@ -116,21 +116,37 @@ function parseSupremeCheckoutAt(text,eventAt=''){
   return Number.isFinite(utc)?new Date(utc).toISOString():'';
 }
 function parseSupremeWebhookCheckoutAt(serviceOrder={}){
-  const payload=serviceOrder.raw_payload||{};
-  const embeds=Array.isArray(payload.embeds)?payload.embeds:[];
-  const footer=clean(embeds?.[0]?.footer?.text||'');
-  const raw=clean(payload.timestamp||embeds?.[0]?.timestamp||footer||'');
-  const time=(raw.match(/\b(\d{1,2}):(\d{2})\s*(AM|PM)\b/i)||[]);
-  if(!time)return '';
-  let hour=Number(time[1]), minute=Number(time[2]); const ap=String(time[3]).toUpperCase();
-  if(ap==='PM'&&hour<12)hour+=12; if(ap==='AM'&&hour===12)hour=0;
-  const created=new Date(serviceOrder.created_at||0); if(!Number.isFinite(created.getTime()))return '';
-  // Stellar's Supreme footer is New York local time. Use the checkout's created_at date and
-  // choose EDT/EST by testing the two offsets against the ingestion timestamp.
-  const y=created.getUTCFullYear(), mo=created.getUTCMonth(), d=created.getUTCDate();
-  const edt=new Date(Date.UTC(y,mo,d,hour+4,minute,0));
-  const est=new Date(Date.UTC(y,mo,d,hour+5,minute,0));
-  return Math.abs(edt-created)<=Math.abs(est-created)?edt.toISOString():est.toISOString();
+  // This parser is used during Supreme mailbox discovery, so it MUST be total/safe: a malformed
+  // historical webhook timestamp must never be able to abort the entire mailbox scan.
+  try {
+    const payload=serviceOrder.raw_payload||{};
+    const embeds=Array.isArray(payload.embeds)?payload.embeds:[];
+    const footer=clean(embeds?.[0]?.footer?.text||'');
+    const raw=clean(payload.timestamp||embeds?.[0]?.timestamp||footer||'');
+    const time=(raw.match(/\b(\d{1,2}):(\d{2})\s*(AM|PM)\b/i)||[]);
+    if(!time)return '';
+    let hour=Number(time[1]), minute=Number(time[2]); const ap=String(time[3]).toUpperCase();
+    if(!Number.isFinite(hour)||!Number.isFinite(minute)||hour<1||hour>12||minute<0||minute>59)return '';
+    if(ap==='PM'&&hour<12)hour+=12; if(ap==='AM'&&hour===12)hour=0;
+
+    const createdMs=new Date(serviceOrder.created_at||0).getTime();
+    // Reject absurd/out-of-range historical dates before constructing Date.UTC, which can return
+    // an invalid Date even when the original Date#getTime() was technically finite.
+    const minSane=Date.UTC(2000,0,1), maxSane=Date.now()+7*86400000;
+    if(!Number.isFinite(createdMs)||createdMs<minSane||createdMs>maxSane)return '';
+    const created=new Date(createdMs);
+    const y=created.getUTCFullYear(), mo=created.getUTCMonth(), d=created.getUTCDate();
+    if(y<2000||y>2100)return '';
+
+    // Stellar's Supreme footer is New York local time. Use the checkout's created_at date and
+    // choose EDT/EST by testing the two offsets against the ingestion timestamp.
+    const edtMs=Date.UTC(y,mo,d,hour+4,minute,0);
+    const estMs=Date.UTC(y,mo,d,hour+5,minute,0);
+    if(!Number.isFinite(edtMs)||!Number.isFinite(estMs))return '';
+    const chosen=Math.abs(edtMs-createdMs)<=Math.abs(estMs-createdMs)?edtMs:estMs;
+    const out=new Date(chosen);
+    return Number.isFinite(out.getTime())?out.toISOString():'';
+  } catch (_) { return ''; }
 }
 function parseRetailEmail(store,status,subject,text){
   const orderNumber = store==='supreme'

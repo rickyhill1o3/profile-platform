@@ -370,8 +370,16 @@ async function discoverSupremeFromProfileBuilderMailboxes(supabase, userId, serv
 
   const stamps=[];
   for (const order of supremeOrders) {
-    for (const value of [order.created_at, parseSupremeWebhookCheckoutAt(order)]) {
-      const ms=new Date(value||0).getTime(); if(Number.isFinite(ms) && ms>0) stamps.push(ms);
+    let webhookCheckout='';
+    try { webhookCheckout=parseSupremeWebhookCheckoutAt(order)||''; }
+    catch (e) { debug.push(`Supreme order ${order.id||'-'}: checkout-time parser ignored error: ${e.message||e}`); }
+    for (const value of [order.created_at, webhookCheckout]) {
+      try {
+        const ms=new Date(value||0).getTime();
+        const minSane=Date.UTC(2000,0,1), maxSane=Date.now()+7*86400000;
+        if(Number.isFinite(ms) && ms>=minSane && ms<=maxSane) stamps.push(ms);
+        else if(value) debug.push(`Supreme order ${order.id||'-'}: ignored invalid timestamp value=${String(value).slice(0,120)}`);
+      } catch (e) { debug.push(`Supreme order ${order.id||'-'}: ignored timestamp conversion error: ${e.message||e}`); }
     }
   }
   // Never let malformed/legacy timestamps abort Supreme discovery before mailbox loading.
