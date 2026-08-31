@@ -357,9 +357,12 @@ async function loadOwnedProfileBuilderGmailAccounts(supabase, userId) {
 }
 
 async function discoverSupremeFromProfileBuilderMailboxes(supabase, userId, serviceOrders = [], adjustCredits = null, confirmPendingAmazonCheckout = null) {
-  // Supreme accounts are commonly ordinary Gmail credentials saved in Profile Builder and are
-  // completely independent of AYCD imports. Reconciliation therefore performs a targeted live
-  // IMAP search against those Profile Builder mailboxes before consulting email_messages.
+  // Supreme receipts live in the same Profile Builder IMAP mailboxes already used by the normal
+  // Order Tracker scanner. Use that proven loader as the PRIMARY source instead of a second,
+  // narrower credential query that can return/throw before any mailbox is scanned on legacy data.
+  // loadScanAccounts(userId) is already scoped to the authenticated user's profiles / verified
+  // scan-state rows. Imported AYCD rows are explicitly excluded below so this remains Profile
+  // Builder / direct-IMAP only and can never walk another user's mailboxes.
   const supremeOrders = (serviceOrders || []).filter(order =>
     normalizeStoreKey(order.site || order.metadata?.site || extractNamedPayloadValue(order.raw_payload || {}, ['site','store'])) === 'supreme'
   );
@@ -371,78 +374,108 @@ async function discoverSupremeFromProfileBuilderMailboxes(supabase, userId, serv
       const ms=new Date(value||0).getTime(); if(Number.isFinite(ms) && ms>0) stamps.push(ms);
     }
   }
-  // Email discovery must not depend on webhook classification. If Supreme webhook rows are
-  // currently malformed/misclassified, still scan the user's owned Gmail mailboxes so we can
-  // discover the receipts and diagnose the webhook problem independently.
   const since = new Date((stamps.length ? Math.min(...stamps) : Date.now()-365*86400000) - 2*86400000);
   debug.push(`Live Gmail Supreme search since: ${since.toISOString()}`);
-  const ownedMailboxLoad = await loadOwnedProfileBuilderGmailAccounts(supabase, userId);
-  let accounts = ownedMailboxLoad.accounts;
-  debug.push(...(ownedMailboxLoad.debug || []));
 
-  // IMPORTANT FALLBACK: use the same proven account loader that powers the normal Order Tracker
-  // scan. This catches legacy Profile Builder rows that are valid enough for the background IMAP
-  // scanner but were missed by the narrower Supreme-specific credential query. Keep the strict
-  // privacy boundary: exact user_id only, Gmail only, a real owned profile_id, and never AYCD imports.
-  // This is especially important for older profiles whose Target Gmail app password lives in the
-  // legacy accounts table / verified imap_scan_accounts path.
+  let normalScanAccounts = [];
   try {
-    const normalScanAccounts = await loadScanAccounts(supabase, userId);
-    const directGmail = normalScanAccounts.filter(a =>
-      String(a.user_id || '') === String(userId) &&
-      a.profile_id &&
-      a.provider?.name === 'gmail' &&
-      a.ingestion_source !== 'aycd_import' &&
-      !a.imported_account_id
-    );
-    debug.push(`Normal Order Tracker loader returned ${normalScanAccounts.length} total mailbox account(s); ${directGmail.length} owned direct Gmail account(s) are eligible for Supreme.`);
-    const merged = new Map(accounts.map(a => [lower(a.email), a]));
-    for (const a of directGmail) {
-      const email = lower(a.email);
-      if (!email) continue;
-      if (!merged.has(email)) {
-        merged.set(email, { ...a, archive_user_id:userId, ingestion_source:'profile_builder_direct_imap' });
-        debug.push(`Fallback Gmail credential accepted from normal scanner: ${email} (profile ${a.profile_id})`);
-      }
-    }
-    accounts = [...merged.values()];
+    normalScanAccounts = await loadScanAccounts(supabase, userId);
+    debug.push(`Normal Order Tracker loader returned ${normalScanAccounts.length} mailbox account(s) for this user.`);
   } catch (e) {
-    debug.push(`Normal Order Tracker Gmail fallback FAILED: ${e.message || e}`);
+    debug.push(`FATAL: normal Order Tracker mailbox loader failed: ${e.message || e}`);
+    return { profile_mailboxes:0, owned_profiles:0, credential_rows:0, mailboxes_checked:0, messages_found:0, messages_saved:0, failures:1, debug };
   }
 
-  debug.push(`Unique owned Gmail mailboxes ready to scan: ${accounts.length}`);
+  // Direct Profile Builder Gmail only. `loadScanAccounts` may append AYCD/imported mailboxes after
+  // direct credentials, so reject anything carrying imported_account_id or an AYCD ingestion source.
+  const merged = new Map();
+  for (const a of normalScanAccounts) {
+    const email = lower(a.email);
+    const sameUser = String(a.user_id || a.archive_user_id || '') === String(userId);
+    const isGmail = a.provider?.name === 'gmail' || providerForEmail(email)?.name === 'gmail';
+    const isImported = !!a.imported_account_id || /^aycd/i.test(String(a.ingestion_source || ''));
+    if (!sameUser || !email || !a.profile_id || !isGmail || isImported) continue;
+    if (!merged.has(email)) merged.set(email, {
+      ...a,
+      user_id:userId,
+      archive_user_id:userId,
+      provider:a.provider || providerForEmail(email),
+      ingestion_source:'profile_builder_direct_imap'
+    });
+  }
+
+  // Secondary diagnostic-only loader. It is no longer allowed to prevent the scan. If it finds
+  // an additional owned Gmail credential, merge it; if its schema query fails, record that fact.
+  let ownedProfiles = 0, credentialRows = 0;
+  try {
+    const ownedMailboxLoad = await loadOwnedProfileBuilderGmailAccounts(supabase, userId);
+    ownedProfiles = ownedMailboxLoad.owned_profiles || 0;
+    credentialRows = ownedMailboxLoad.credential_rows || 0;
+    debug.push(...(ownedMailboxLoad.debug || []));
+    for (const a of ownedMailboxLoad.accounts || []) {
+      const email = lower(a.email);
+      if (email && !merged.has(email)) merged.set(email, a);
+    }
+  } catch (e) {
+    debug.push(`Narrow Profile Builder credential loader failed (non-fatal): ${e.message || e}`);
+  }
+
+  const accounts = [...merged.values()];
+  debug.push(`Unique owned direct Gmail mailboxes ready to scan: ${accounts.length}`);
   for (const a of accounts) debug.push(`Mailbox queued: ${a.email} (profile ${a.profile_id || '-'})`);
+
   let mailboxesChecked=0, messagesFound=0, messagesSaved=0, failures=0;
   const worker = async account => {
+    let auth;
+    try {
+      auth = await imapAuthForAccount(supabase,account);
+    } catch (e) {
+      failures++; debug.push(`${account.email}: IMAP AUTH BUILD FAILURE: ${e.message || e}`); return;
+    }
     const client=new ImapFlow({host:account.provider.host,port:account.provider.port,secure:account.provider.secure,
-      auth:await imapAuthForAccount(supabase,account),logger:false,connectionTimeout:30000,greetingTimeout:30000,socketTimeout:90000});
+      auth,logger:false,connectionTimeout:30000,greetingTimeout:30000,socketTimeout:90000});
     try {
       await client.connect();
-      let boxes=[]; try{boxes=await client.list();}catch(_){}
+      let boxes=[]; try{boxes=await client.list();}catch(_){ }
+      // Gmail's All Mail can be localized or unavailable through IMAP. Prefer \All, then INBOX.
       const mailboxName=boxes.find(b=>b.specialUse==='\\All')?.path || 'INBOX';
       const lock=await client.getMailboxLock(mailboxName);
       try {
         mailboxesChecked++;
         debug.push(`Connected: ${account.email}; searching mailbox ${mailboxName}`);
-        // Supreme has used more than one sender/display form over time. Do not make the
-        // fallback conditional on the first IMAP SEARCH throwing: a successful SEARCH that
-        // returns zero rows is exactly what was causing valid Supreme mail to be missed.
-        // Search several independent metadata signals and merge the UIDs.
         const uidSet = new Set();
         const searches = [
-          { since, from:'supremenewyork.com' },
           { since, from:'support@supremenewyork.com' },
+          { since, from:'supremenewyork.com' },
           { since, subject:'online shop order' },
           { since, subject:'online shop order has been shipped' }
         ];
         for (const criteria of searches) {
           try {
-            for (const uid of await client.search(criteria,{uid:true}) || []) {
-              const n = Number(uid); if (n) uidSet.add(n);
-            }
-          } catch (_) {}
+            const hits = await client.search(criteria,{uid:true}) || [];
+            debug.push(`${account.email}: SEARCH ${JSON.stringify(criteria)} -> ${hits.length} UID(s)`);
+            for (const uid of hits) { const n=Number(uid); if(n) uidSet.add(n); }
+          } catch (e) {
+            debug.push(`${account.email}: SEARCH ${JSON.stringify(criteria)} FAILED: ${e.message || e}`);
+          }
         }
-        let uids=[...uidSet].sort((a,b)=>a-b).slice(-500);
+
+        // If Gmail accepted every metadata SEARCH but returned zero, inspect a bounded recent UID
+        // tail. This is diagnostic and catches provider SEARCH quirks without downloading the inbox.
+        if (!uidSet.size && client.mailbox?.uidNext) {
+          const endUid = Math.max(1, Number(client.mailbox.uidNext) - 1);
+          const startUid = Math.max(1, endUid - 750);
+          debug.push(`${account.email}: metadata search returned 0; inspecting recent UID tail ${startUid}:${endUid}`);
+          try {
+            for await (const msg of client.fetch(`${startUid}:${endUid}`,{uid:true,envelope:true},{uid:true})) {
+              const from = lower((msg.envelope?.from || []).map(x=>`${x.name||''} <${x.address||''}>`).join(' '));
+              const subject = clean(msg.envelope?.subject || '');
+              if (from.includes('supremenewyork.com') || /^online shop order(?: has been shipped)?$/i.test(subject)) uidSet.add(Number(msg.uid));
+            }
+          } catch (e) { debug.push(`${account.email}: recent UID metadata tail FAILED: ${e.message || e}`); }
+        }
+
+        let uids=[...uidSet].filter(Boolean).sort((a,b)=>a-b).slice(-1000);
         messagesFound += uids.length;
         debug.push(`${account.email}: Supreme metadata search matched ${uids.length} UID(s)`);
         const range=imapUidSet(uids); if(!range) return;
@@ -451,18 +484,23 @@ async function discoverSupremeFromProfileBuilderMailboxes(supabase, userId, serv
             const parsed=await simpleParser(msg.source);
             const sender=lower(parsed.from?.text||''); const subject=clean(parsed.subject||'');
             debug.push(`${account.email} UID ${msg.uid}: from=${sender || '-'} | subject=${subject || '-'}`);
-            if(!sender.includes('supremenewyork.com') && !/^online shop order(?: has been shipped)?$/i.test(subject) && !/supreme/i.test(subject)) { debug.push(`${account.email} UID ${msg.uid}: rejected by Supreme metadata filter`); continue; }
+            const isSupreme = sender.includes('supremenewyork.com') ||
+              /^online shop order(?: has been shipped)?$/i.test(subject) || /supreme/i.test(subject);
+            if(!isSupreme) { debug.push(`${account.email} UID ${msg.uid}: rejected by Supreme metadata filter`); continue; }
             const result=await saveParsedMessage(supabase,account,parsed,msg.uid,adjustCredits,confirmPendingAmazonCheckout);
-            if(result?.saved) { messagesSaved++; debug.push(`${account.email} UID ${msg.uid}: SAVED as Supreme email`); } else debug.push(`${account.email} UID ${msg.uid}: parsed but saveParsedMessage returned not-saved`);
-          } catch(e) { console.warn('[SUPREME PROFILE IMAP MESSAGE]',account.email,msg.uid,e.message||e); }
+            // saveParsedMessage can legitimately return ignored/not-saved when the same Message-ID
+            // is already archived. That still means discovery succeeded, so log it distinctly.
+            if(result?.saved) { messagesSaved++; debug.push(`${account.email} UID ${msg.uid}: SAVED as Supreme email`); }
+            else debug.push(`${account.email} UID ${msg.uid}: Supreme message parsed; archive result=${JSON.stringify(result || {})}`);
+          } catch(e) { failures++; debug.push(`${account.email} UID ${msg.uid}: MIME/PARSE FAILURE: ${e.message || e}`); }
         }
       } finally { lock.release(); }
     } catch(e) { failures++; debug.push(`${account.email}: IMAP FAILURE: ${e.message || e}`); console.warn('[SUPREME PROFILE IMAP]',account.email,e.message||e); }
     finally { try{await client.logout();}catch(_){} }
   };
-  // Keep Gmail connection pressure modest while still making a hundreds-profile repair practical.
-  for(let i=0;i<accounts.length;i+=5) await Promise.all(accounts.slice(i,i+5).map(worker));
-  return { profile_mailboxes:accounts.length, owned_profiles:ownedMailboxLoad.owned_profiles, credential_rows:ownedMailboxLoad.credential_rows, mailboxes_checked:mailboxesChecked, messages_found:messagesFound, messages_saved:messagesSaved, failures, debug };
+
+  for(let i=0;i<accounts.length;i+=4) await Promise.all(accounts.slice(i,i+4).map(worker));
+  return { profile_mailboxes:accounts.length, owned_profiles:ownedProfiles, credential_rows:credentialRows, mailboxes_checked:mailboxesChecked, messages_found:messagesFound, messages_saved:messagesSaved, failures, debug };
 }
 
 async function fetchSupremeArchiveCandidatesForOrders(supabase, userId, serviceOrders = [], columns = '*') {
@@ -1635,10 +1673,13 @@ async function rebuildSupremeBatchAssignments(supabase, userId, retailerEmails =
     supremeParsedItems += (retail.items || []).length;
     confirmationEmails.push({ email, retail, eventAt: new Date(email.received_at || Date.now()).toISOString() });
   }
-  if (!confirmationEmails.length) return { confirmations:0, assigned:0, skipped:0, supreme_archive_seen:supremeArchiveSeen, supreme_confirmed_seen:supremeConfirmedSeen, parsed_order_numbers:supremeParsedOrders, parsed_items:supremeParsedItems };
-
   const allOrders = await loadServiceOrders(supabase, userId);
   const supremeOrders = allOrders.filter(order => normalizeStoreKey(order.site || order.metadata?.site || extractNamedPayloadValue(order.raw_payload || {}, ['site','store'])) === 'supreme');
+  // Report the actual webhook/service-order count even when no Supreme email has been archived yet.
+  // Previously this function returned before loading service orders, producing the misleading
+  // `Supreme webhook orders: 0` while the diagnostic immediately below showed Supreme rows.
+  if (!confirmationEmails.length) return { confirmations:0, assigned:0, skipped:0, supreme_archive_seen:supremeArchiveSeen, supreme_confirmed_seen:supremeConfirmedSeen, parsed_order_numbers:supremeParsedOrders, parsed_items:supremeParsedItems, supreme_webhook_orders:supremeOrders.length, candidate_pairs:0 };
+
   if (!supremeOrders.length) return { confirmations:confirmationEmails.length, assigned:0, skipped:confirmationEmails.length, supreme_archive_seen:supremeArchiveSeen, supreme_confirmed_seen:supremeConfirmedSeen, parsed_order_numbers:supremeParsedOrders, parsed_items:supremeParsedItems, supreme_webhook_orders:0 };
 
   // Global one-to-one assignment. Retailer-confirmation checkout time + exact item set carry most
@@ -3236,7 +3277,10 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
         supremeLive = await discoverSupremeFromProfileBuilderMailboxes(
           supabase, req.user_id, serviceOrdersForSupreme, adjustUserCredits, confirmPendingAmazonCheckout
         );
-      } catch (e) { console.warn('[SUPREME PROFILE BUILDER DISCOVERY]', e.message || e); }
+      } catch (e) {
+        console.warn('[SUPREME PROFILE BUILDER DISCOVERY]', e.message || e);
+        supremeLive = { ...supremeLive, failures:(supremeLive.failures||0)+1, debug:[`Supreme live discovery threw before completion: ${e.message || e}`] };
+      }
 
       let supremeDiscovery = { rows: [], metadata_scanned: 0, candidates_found: 0, windows: 0 };
       try {
