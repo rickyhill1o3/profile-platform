@@ -380,17 +380,32 @@ async function discoverSupremeFromProfileBuilderMailboxes(supabase, userId, serv
       const lock=await client.getMailboxLock(mailboxName);
       try {
         mailboxesChecked++;
-        let uids=[];
-        try { uids=await client.search({ since, from:'support@supremenewyork.com' },{uid:true}); }
-        catch (_) { uids=await client.search({ since, subject:'online shop order' },{uid:true}); }
-        uids=(uids||[]).map(Number).filter(Boolean).sort((a,b)=>a-b).slice(-250);
+        // Supreme has used more than one sender/display form over time. Do not make the
+        // fallback conditional on the first IMAP SEARCH throwing: a successful SEARCH that
+        // returns zero rows is exactly what was causing valid Supreme mail to be missed.
+        // Search several independent metadata signals and merge the UIDs.
+        const uidSet = new Set();
+        const searches = [
+          { since, from:'supremenewyork.com' },
+          { since, from:'support@supremenewyork.com' },
+          { since, subject:'online shop order' },
+          { since, subject:'online shop order has been shipped' }
+        ];
+        for (const criteria of searches) {
+          try {
+            for (const uid of await client.search(criteria,{uid:true}) || []) {
+              const n = Number(uid); if (n) uidSet.add(n);
+            }
+          } catch (_) {}
+        }
+        let uids=[...uidSet].sort((a,b)=>a-b).slice(-500);
         messagesFound += uids.length;
         const range=imapUidSet(uids); if(!range) return;
         for await (const msg of client.fetch(range,{uid:true,source:true,envelope:true},{uid:true})) {
           try {
             const parsed=await simpleParser(msg.source);
             const sender=lower(parsed.from?.text||''); const subject=clean(parsed.subject||'');
-            if(!sender.includes('supremenewyork.com') && !/^online shop order(?: has been shipped)?$/i.test(subject)) continue;
+            if(!sender.includes('supremenewyork.com') && !/^online shop order(?: has been shipped)?$/i.test(subject) && !/supreme/i.test(subject)) continue;
             const result=await saveParsedMessage(supabase,account,parsed,msg.uid,adjustCredits,confirmPendingAmazonCheckout);
             if(result?.saved) messagesSaved++;
           } catch(e) { console.warn('[SUPREME PROFILE IMAP MESSAGE]',account.email,msg.uid,e.message||e); }
@@ -446,7 +461,7 @@ async function fetchSupremeArchiveCandidatesForOrders(supabase, userId, serviceO
       const sender = lower(row.from_text || '');
       const subject = clean(row.subject || '');
       const looksSupreme = lower(row.store) === 'supreme' ||
-        /(?:^|@|\.)supremenewyork\.com|support@supremenewyork\.com/i.test(sender) ||
+        /(?:^|@|\.)supremenewyork\.com\b|support@supremenewyork\.com/i.test(sender) ||
         /^online shop order(?: has been shipped)?$/i.test(subject);
       if (looksSupreme && row.id) candidateMeta.set(String(row.id), row);
     }
@@ -903,7 +918,19 @@ async function loadServiceOrders(supabase, userId) {
 
 
 function normalizeStoreKey(value) {
-  return lower(value).replace(/[^a-z0-9]/g, '');
+  const raw = lower(value);
+  const compact = raw.replace(/[^a-z0-9]/g, '');
+  // Webhook `Site` values are not consistent: Stellar Supreme uses `us.supreme.com`
+  // while our service/tracker rows use `supreme`. Canonicalize known retailer domains
+  // before any exact store comparison so reconciliation does not incorrectly conclude
+  // that there are zero Supreme webhook orders.
+  if (compact.includes('supreme')) return 'supreme';
+  if (compact.includes('target')) return 'target';
+  if (compact.includes('amazon')) return 'amazon';
+  if (compact.includes('pokemoncenter')) return 'pokemoncenter';
+  if (compact.includes('walmart')) return 'walmart';
+  if (compact.includes('samsclub') || compact === 'sams') return 'samsclub';
+  return compact;
 }
 
 function normalizePayloadKey(value) {
