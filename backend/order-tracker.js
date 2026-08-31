@@ -3,7 +3,7 @@ const { simpleParser } = require('mailparser');
 const crypto = require('crypto');
 const cheerio = require('cheerio');
 const { encrypt, decrypt } = require('./encryption');
-const { parseRetailEmail, expectedWebhookItems, matchScore, mainItemMatch, deriveOverallStatus, norm: reconcileNorm } = require('./retailer-reconciliation');
+const { parseRetailEmail, expectedWebhookItems, matchScore, mainItemMatch, deriveOverallStatus, parseSupremeWebhookCheckoutAt, norm: reconcileNorm } = require('./retailer-reconciliation');
 
 const SCAN_INTERVAL_MS = Math.max(60 * 1000, Number(process.env.IMAP_SCAN_INTERVAL_MS || 5 * 60 * 1000));
 const INITIAL_LOOKBACK_DAYS = Math.max(7, Number(process.env.IMAP_INITIAL_LOOKBACK_DAYS || 365));
@@ -356,7 +356,7 @@ async function loadOwnedProfileBuilderGmailAccounts(supabase, userId) {
   };
 }
 
-async function discoverSupremeFromProfileBuilderMailboxes(supabase, userId, serviceOrders = [], adjustCredits = null, confirmPendingAmazonCheckout = null) {
+async function discoverSupremeFromProfileBuilderMailboxes(supabase, userId, serviceOrders = [], adjustCredits = null, confirmPendingAmazonCheckout = null, options = {}) {
   // Supreme receipts live in the same Profile Builder IMAP mailboxes already used by the normal
   // Order Tracker scanner. Use that proven loader as the PRIMARY source instead of a second,
   // narrower credential query that can return/throw before any mailbox is scanned on legacy data.
@@ -375,7 +375,7 @@ async function discoverSupremeFromProfileBuilderMailboxes(supabase, userId, serv
     }
   }
   const since = new Date((stamps.length ? Math.min(...stamps) : Date.now()-365*86400000) - 2*86400000);
-  debug.push(`Live Gmail Supreme search since: ${since.toISOString()}`);
+  debug.push(`Live Supreme mailbox search since: ${since.toISOString()}`);
 
   let normalScanAccounts = [];
   try {
@@ -386,21 +386,27 @@ async function discoverSupremeFromProfileBuilderMailboxes(supabase, userId, serv
     return { profile_mailboxes:0, owned_profiles:0, credential_rows:0, mailboxes_checked:0, messages_found:0, messages_saved:0, failures:1, debug };
   }
 
-  // Direct Profile Builder Gmail only. `loadScanAccounts` may append AYCD/imported mailboxes after
-  // direct credentials, so reject anything carrying imported_account_id or an AYCD ingestion source.
+  // Search the authenticated user's COMPLETE mailbox pool rather than trusting the purchase email
+  // guessed from a Supreme webhook/profile. Regular users/admins get only the direct IMAP mailboxes
+  // they configured in Profile Builder. The super admin may additionally search the AYCD/OAuth2
+  // mailboxes imported into that same super-admin account. No mailbox owned by another website user
+  // is eligible, even when an email address or bot profile name happens to match.
+  const includeImported = !!options.includeImported;
   const merged = new Map();
   for (const a of normalScanAccounts) {
     const email = lower(a.email);
-    const sameUser = String(a.user_id || a.archive_user_id || '') === String(userId);
-    const isGmail = a.provider?.name === 'gmail' || providerForEmail(email)?.name === 'gmail';
+    const belongsToUser = String(a.user_id || '') === String(userId) || String(a.archive_user_id || '') === String(userId);
     const isImported = !!a.imported_account_id || /^aycd/i.test(String(a.ingestion_source || ''));
-    if (!sameUser || !email || !a.profile_id || !isGmail || isImported) continue;
+    const isDirectProfile = !!a.profile_id && !isImported;
+    if (!belongsToUser || !email || (!isDirectProfile && !(includeImported && isImported))) continue;
+    const provider = a.provider || providerForEmail(email);
+    if (!provider?.host) continue;
     if (!merged.has(email)) merged.set(email, {
       ...a,
       user_id:userId,
-      archive_user_id:userId,
-      provider:a.provider || providerForEmail(email),
-      ingestion_source:'profile_builder_direct_imap'
+      archive_user_id:a.archive_user_id || userId,
+      provider,
+      ingestion_source:isImported ? (a.ingestion_source || 'aycd_import') : 'profile_builder_direct_imap'
     });
   }
 
@@ -421,7 +427,9 @@ async function discoverSupremeFromProfileBuilderMailboxes(supabase, userId, serv
   }
 
   const accounts = [...merged.values()];
-  debug.push(`Unique owned direct Gmail mailboxes ready to scan: ${accounts.length}`);
+  const directCount = accounts.filter(a => !a.imported_account_id && !/^aycd/i.test(String(a.ingestion_source || ''))).length;
+  const importedCount = accounts.length - directCount;
+  debug.push(`Unique user-owned mailboxes ready to scan: ${accounts.length} (Profile Builder direct: ${directCount}, AYCD/imported: ${importedCount}, includeImported=${includeImported})`);
   for (const a of accounts) debug.push(`Mailbox queued: ${a.email} (profile ${a.profile_id || '-'})`);
 
   let mailboxesChecked=0, messagesFound=0, messagesSaved=0, failures=0;
@@ -3275,7 +3283,8 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
       let supremeLive = { profile_mailboxes:0, owned_profiles:0, credential_rows:0, mailboxes_checked:0, messages_found:0, messages_saved:0, failures:0 };
       try {
         supremeLive = await discoverSupremeFromProfileBuilderMailboxes(
-          supabase, req.user_id, serviceOrdersForSupreme, adjustUserCredits, confirmPendingAmazonCheckout
+          supabase, req.user_id, serviceOrdersForSupreme, adjustUserCredits, confirmPendingAmazonCheckout,
+          { includeImported: req.role === 'super_admin' }
         );
       } catch (e) {
         console.warn('[SUPREME PROFILE BUILDER DISCOVERY]', e.message || e);

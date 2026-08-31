@@ -87,11 +87,11 @@ ${missing.map(x=>`${x.order_number||'-'} · ${x.mailbox||'-'}`).join('\n')}`:'';
 Archive matched: ${j.matched}
 Archive ignored: ${j.ignored}
 Failed: ${j.failed}
-Supreme Profile Builder Gmail mailboxes: ${j.supreme_live?.profile_mailboxes||0}
-Supreme Gmail mailboxes checked live: ${j.supreme_live?.mailboxes_checked||0}
-Supreme live Gmail messages found: ${j.supreme_live?.messages_found||0}
-Supreme live Gmail messages saved: ${j.supreme_live?.messages_saved||0}
-Supreme live Gmail failures: ${j.supreme_live?.failures||0}
+Supreme user-owned mailboxes selected: ${j.supreme_live?.profile_mailboxes||0}
+Supreme mailboxes checked live: ${j.supreme_live?.mailboxes_checked||0}
+Supreme live messages found: ${j.supreme_live?.messages_found||0}
+Supreme live messages saved: ${j.supreme_live?.messages_saved||0}
+Supreme live mailbox failures: ${j.supreme_live?.failures||0}
 Supreme metadata scanned: ${j.supreme_discovery?.metadata_scanned||0}
 Supreme emails discovered: ${j.supreme_discovery?.candidates_found||0}
 Supreme confirmations parsed: ${j.supreme_rebuild?.confirmations||0}
