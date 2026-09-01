@@ -8626,6 +8626,95 @@ function normalizeTargetAddressPart(value = '') {
     return cleanFieldValue(value).toLowerCase().replace(/\s+/g, ' ').trim();
 }
 
+function extractTargetProfileNumber(value = '') {
+    const text = normalizeTargetProfileTrackerText(value);
+    const match = text.match(/(?:^|\b)target\s*(?:profile\s*)?(?:#\s*)?(\d{1,6})(?:\b|$)/i) || text.match(/(?:^|\s)(\d{1,6})(?:\s|$)/);
+    return match ? String(Number(match[1])) : '';
+}
+
+function normalizeTargetStreetSuffix(token = '') {
+    const map = {
+        street:'st', st:'st', str:'st',
+        lane:'ln', ln:'ln',
+        road:'rd', rd:'rd',
+        avenue:'ave', ave:'ave', av:'ave',
+        boulevard:'blvd', blvd:'blvd',
+        drive:'dr', dr:'dr',
+        court:'ct', ct:'ct',
+        circle:'cir', cir:'cir',
+        highway:'hwy', hwy:'hwy',
+        parkway:'pkwy', pkwy:'pkwy',
+        place:'pl', pl:'pl',
+        terrace:'ter', ter:'ter',
+        trail:'trl', trl:'trl',
+        way:'way'
+    };
+    return map[token] || token;
+}
+
+function targetBaseStreetParts(address = {}) {
+    let line1 = normalizeTargetAddressPart(address.address1 || '');
+    // Secondary/unit details do not define the physical street address for distribution counts.
+    line1 = line1.replace(/\s+(?:apt|apartment|unit|suite|ste|floor|fl|flat|building|bldg|room|rm|door|pmb|mailbox|#)\b.*$/i, '').trim();
+    const tokens = line1.replace(/[^a-z0-9]+/g, ' ').trim().split(/\s+/).filter(Boolean);
+    const house = tokens[0] && /^\d+[a-z]?$/.test(tokens[0]) ? tokens.shift() : '';
+    const normalizedTokens = tokens.map(normalizeTargetStreetSuffix);
+    return {
+        house,
+        street: normalizedTokens.join(' '),
+        street_compact: normalizedTokens.join('').replace(/[^a-z0-9]/g, ''),
+        city: normalizeTargetAddressPart(address.city || ''),
+        state: normalizeTargetAddressPart(address.state || ''),
+        zip: normalizeTargetAddressPart(address.zip || '').replace(/[^0-9]/g, '').slice(0, 5)
+    };
+}
+
+function targetStringSimilarity(a = '', b = '') {
+    a = String(a || ''); b = String(b || '');
+    if (a === b) return 1;
+    if (!a || !b) return 0;
+    const prev = Array.from({ length: b.length + 1 }, (_, i) => i);
+    for (let i = 1; i <= a.length; i += 1) {
+        let last = prev[0]; prev[0] = i;
+        for (let j = 1; j <= b.length; j += 1) {
+            const old = prev[j];
+            prev[j] = Math.min(prev[j] + 1, prev[j - 1] + 1, last + (a[i - 1] === b[j - 1] ? 0 : 1));
+            last = old;
+        }
+    }
+    return 1 - (prev[b.length] / Math.max(a.length, b.length));
+}
+
+function sameTargetPhysicalAddress(a = {}, b = {}) {
+    const aa = targetBaseStreetParts(a), bb = targetBaseStreetParts(b);
+    if (!aa.house || !bb.house || aa.house !== bb.house) return false;
+    if (aa.zip && bb.zip && aa.zip !== bb.zip) return false;
+    if (aa.state && bb.state && aa.state !== bb.state) return false;
+    if (aa.city && bb.city && aa.city !== bb.city) return false;
+    if (!aa.street_compact || !bb.street_compact) return false;
+    return targetStringSimilarity(aa.street_compact, bb.street_compact) >= 0.70;
+}
+
+function targetPhysicalAddressKey(address = {}) {
+    const p = targetBaseStreetParts(address);
+    return [p.house, p.street_compact, p.city, p.state, p.zip].join('|');
+}
+
+function targetPhysicalAddressLabel(address = {}) {
+    const p = targetBaseStreetParts(address);
+    const street = [p.house, p.street].filter(Boolean).join(' ');
+    const locality = [cleanFieldValue(address.city || ''), cleanFieldValue(address.state || ''), cleanFieldValue(address.zip || '')].filter(Boolean).join(', ');
+    return [street || cleanFieldValue(address.address1 || ''), locality].filter(Boolean).join(' · ');
+}
+
+function profileTargetLastModifiedMs(profile = {}) {
+    const address = profile.addresses?.[0] || {};
+    return Math.max(
+        new Date(address.updated_at || address.created_at || 0).getTime() || 0,
+        new Date(profile.updated_at || profile.created_at || 0).getTime() || 0
+    );
+}
+
 function targetAddressFingerprint(address = {}) {
     const canonical = [
         normalizeTargetAddressPart(address.address1),
@@ -8689,7 +8778,20 @@ async function syncTargetAddressVersion({ userId, profileId, address, effectiveA
         if (targetAddressHistoryTableMissing(activeError)) return { version: null, unavailable: true };
         throw activeError;
     }
-    if (active?.address_fingerprint === fingerprint) return { version: active, unavailable: false };
+    if (active?.address_fingerprint === fingerprint) {
+        const activeFromMs = new Date(active.valid_from || 0).getTime() || 0;
+        const requestedFromMs = new Date(at || 0).getTime() || 0;
+        if (requestedFromMs && (!activeFromMs || requestedFromMs < activeFromMs)) {
+            const { data: adjusted, error: adjustError } = await supabase
+                .from('target_profile_address_versions')
+                .update({ valid_from: at })
+                .eq('id', active.id)
+                .select('*')
+                .single();
+            if (!adjustError && adjusted) return { version: adjusted, unavailable: false };
+        }
+        return { version: active, unavailable: false };
+    }
     if (active?.id) {
         const { error: closeError } = await supabase
             .from('target_profile_address_versions')
@@ -8770,6 +8872,45 @@ function summarizeTargetProfileEvents(events = []) {
     return { ...summary, lastByCategory, latest };
 }
 
+function targetAddressPoolSettingKey(userId) {
+    return `target_address_pool:${userId}`;
+}
+
+app.post('/target-address-pool', auth, async (req, res) => {
+    try {
+        await ensureUserNotRevoked(req.user_id);
+        const entry = {
+            id: crypto.randomUUID(),
+            label: cleanFieldValue(req.body?.label || ''),
+            address1: cleanFieldValue(req.body?.address1 || ''),
+            address2: cleanFieldValue(req.body?.address2 || ''),
+            city: cleanFieldValue(req.body?.city || ''),
+            state: cleanFieldValue(req.body?.state || ''),
+            zip: cleanFieldValue(req.body?.zip || '')
+        };
+        if (!entry.address1) return res.status(400).json({ error: 'Address line 1 is required.' });
+        const key = targetAddressPoolSettingKey(req.user_id);
+        const current = await getAppSetting(key, []);
+        const pool = Array.isArray(current) ? current : [];
+        const existing = pool.find((item) => sameTargetPhysicalAddress(item || {}, entry));
+        if (existing) return res.json({ ok: true, item: existing, duplicate: true, items: pool });
+        pool.push(entry);
+        await setAppSetting(key, pool.slice(0, 100));
+        res.json({ ok: true, item: entry, items: pool });
+    } catch (err) { res.status(500).json({ error: err.message || String(err) }); }
+});
+
+app.delete('/target-address-pool/:id', auth, async (req, res) => {
+    try {
+        await ensureUserNotRevoked(req.user_id);
+        const key = targetAddressPoolSettingKey(req.user_id);
+        const current = await getAppSetting(key, []);
+        const pool = (Array.isArray(current) ? current : []).filter((item) => String(item?.id || '') !== String(req.params.id || ''));
+        await setAppSetting(key, pool);
+        res.json({ ok: true, items: pool });
+    } catch (err) { res.status(500).json({ error: err.message || String(err) }); }
+});
+
 // Target Profile Health is deliberately available to every authenticated role. Each request is
 // scoped to req.user_id, so users/admins/super-admins see health only for their own Target profiles.
 app.get('/target-profile-health', auth, async (req, res) => {
@@ -8781,7 +8922,7 @@ app.get('/target-profile-health', auth, async (req, res) => {
 
         const { data: profileRows, error: profileError } = await supabase
             .from('profiles')
-            .select('id,profile_name,account_type,created_at,addresses(id,email,phone,address1,address2,city,state,zip)')
+            .select('*,addresses(*)')
             .eq('user_id', req.user_id);
         if (profileError) return res.status(500).json({ error: profileError.message });
 
@@ -8796,7 +8937,11 @@ app.get('/target-profile-health', auth, async (req, res) => {
             const syncResult = await syncTargetAddressVersion({
                 userId: req.user_id,
                 profileId: profile.id,
-                address: profile.addresses?.[0] || {}
+                address: profile.addresses?.[0] || {},
+                effectiveAt: (() => {
+                    const ms = profileTargetLastModifiedMs(profile);
+                    return ms ? new Date(ms).toISOString() : (profile.created_at || new Date().toISOString());
+                })()
             }).catch((err) => {
                 console.error('Target address history sync failed:', err.message || err);
                 return { unavailable: targetAddressHistoryTableMissing(err) };
@@ -8806,24 +8951,44 @@ app.get('/target-profile-health', auth, async (req, res) => {
 
         const byEmail = new Map();
         const byName = new Map();
+        const byProfileNumber = new Map();
+        const duplicateProfileNumbers = new Set();
         for (const profile of targetProfiles) {
             const email = extractEmail(profile.addresses?.[0]?.email || '');
             if (email) byEmail.set(email, profile);
             const name = normalizeTargetProfileTrackerText(profile.profile_name || '');
             if (name && !byName.has(name)) byName.set(name, profile);
+            const number = extractTargetProfileNumber(profile.profile_name || '');
+            if (number) {
+                if (byProfileNumber.has(number)) duplicateProfileNumbers.add(number);
+                else byProfileNumber.set(number, profile);
+            }
         }
+        for (const number of duplicateProfileNumbers) byProfileNumber.delete(number);
 
         const eventsByProfile = new Map(targetProfiles.map((profile) => [String(profile.id), []]));
-        const webhookRows = await getWebhookLogEntries({ limit: 50000, type: 'checkout', site: 'target', from: since.slice(0, 10) });
+        const webhookRows = await getWebhookLogEntries({ limit: 50000, type: 'checkout', from: since.slice(0, 10) });
         let matchedEvents = 0;
+        const unmatchedResellerEvents = [];
 
         for (const row of webhookRows || []) {
             if (!row?.payload) continue;
             const parsed = classifyTargetProfileWebhook(row.payload);
             if (!parsed.category) continue;
+            const payloadSite = normalizeProfileAccountType(cleanFieldValue(buildFieldMapFromEmbeds(row.payload || {})?.fields?.site || row.payload?.site || row.site || ''));
+            if (payloadSite !== 'target') continue;
             let profile = parsed.accountEmail ? byEmail.get(parsed.accountEmail) : null;
-            if (!profile && parsed.profileName) profile = byName.get(normalizeTargetProfileTrackerText(parsed.profileName));
-            if (!profile) continue;
+            if (!profile && !parsed.accountEmail && parsed.profileName) profile = byName.get(normalizeTargetProfileTrackerText(parsed.profileName));
+            if (!profile && !parsed.accountEmail && parsed.profileName) {
+                const number = extractTargetProfileNumber(parsed.profileName);
+                if (number) profile = byProfileNumber.get(number) || null;
+            }
+            if (!profile) {
+                if (parsed.category === 'reseller') unmatchedResellerEvents.push({
+                    id: row.id, created_at: row.created_at, profile_name: parsed.profileName || '', account_email: parsed.accountEmail || '', order_id: parsed.orderId || ''
+                });
+                continue;
+            }
 
             const profileEvents = eventsByProfile.get(String(profile.id));
             profileEvents.push({
@@ -8853,6 +9018,36 @@ app.get('/target-profile-health', auth, async (req, res) => {
             if (versionsError) {
                 if (targetAddressHistoryTableMissing(versionsError)) addressHistoryAvailable = false;
                 else throw versionsError;
+            }
+
+            // Backfill recent webhook outcomes onto the current address version when the profile/address
+            // existed unchanged at the time of the webhook. This safely recovers events from before this
+            // analytics feature was deployed without guessing across a later address edit.
+            if (Array.isArray(ownVersions) && ownVersions.length) {
+                const activeVersionByProfile = new Map((ownVersions || []).filter((v) => !v.valid_to).map((v) => [String(v.profile_id), v]));
+                const profileById = new Map(targetProfiles.map((p) => [String(p.id), p]));
+                const inferredRows = [];
+                for (const [profileId, eventList] of eventsByProfile.entries()) {
+                    const version = activeVersionByProfile.get(String(profileId));
+                    const profile = profileById.get(String(profileId));
+                    if (!version || !profile) continue;
+                    const modifiedMs = profileTargetLastModifiedMs(profile);
+                    for (const event of eventList || []) {
+                        const eventMs = new Date(event.created_at || 0).getTime() || 0;
+                        if (!event.id || !eventMs || (modifiedMs && eventMs < modifiedMs)) continue;
+                        inferredRows.push({
+                            webhook_log_id: String(event.id), user_id: req.user_id, profile_id: profile.id,
+                            address_version_id: version.id, event_at: event.created_at, category: event.category,
+                            reason: event.reason || '', order_id: event.order_id || '', account_email: event.account_email || '',
+                            profile_name: profile.profile_name || ''
+                        });
+                    }
+                }
+                for (let i = 0; i < inferredRows.length; i += 250) {
+                    const batch = inferredRows.slice(i, i + 250);
+                    const { error: backfillError } = await supabase.from('target_profile_address_events').upsert(batch, { onConflict: 'webhook_log_id' });
+                    if (backfillError && !targetAddressHistoryTableMissing(backfillError)) console.warn('Target address outcome backfill failed:', backfillError.message || backfillError);
+                }
             }
 
             const { data: ownAddressEvents, error: ownEventsError } = await supabase
@@ -8948,21 +9143,26 @@ app.get('/target-profile-health', auth, async (req, res) => {
         const profiles = targetProfiles.map((profile) => {
             const events = (eventsByProfile.get(String(profile.id)) || []).sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0));
             const counts = summarizeTargetProfileEvents(events);
-            const latestSuccessMs = new Date(counts.lastByCategory.success || 0).getTime();
             const latest = counts.latest;
+            const lastResellerMs = new Date(counts.lastByCategory.reseller || 0).getTime() || 0;
+            const profileModifiedMs = profileTargetLastModifiedMs(profile);
+            const resellerNeedsAttention = Boolean(lastResellerMs && lastResellerMs >= profileModifiedMs);
             let current_status = 'no_activity';
-            if (latest?.category === 'success') current_status = 'success';
+            // Reseller warnings stay active until the profile/address is edited after that cancellation.
+            // A later success no longer hides an unresolved reseller flag.
+            if (resellerNeedsAttention) current_status = 'reseller';
+            else if (latest?.category === 'success') current_status = 'success';
             else if (latest?.category === 'reseller') current_status = 'reseller';
             else if (latest?.category === 'order_id') current_status = 'order_id';
             else if (latest?.category === 'other') current_status = 'other';
-            // A later successful checkout clears the active warning while historical counts remain visible.
-            if (latestSuccessMs && latestSuccessMs >= new Date(latest?.created_at || 0).getTime()) current_status = 'success';
 
             return {
                 profile_id: profile.id,
                 profile_name: profile.profile_name || '',
                 email: extractEmail(profile.addresses?.[0]?.email || ''),
                 current_status,
+                reseller_needs_attention: resellerNeedsAttention,
+                profile_last_modified_at: profileModifiedMs ? new Date(profileModifiedMs).toISOString() : null,
                 counts: {
                     success: counts.success,
                     reseller: counts.reseller,
@@ -8971,10 +9171,73 @@ app.get('/target-profile-health', auth, async (req, res) => {
                     total: counts.total
                 },
                 latest_event: latest || null,
-                recent_events: events.slice(0, 8),
+                recent_events: events.slice(0, 12),
+                last_reseller_event: events.find((event) => event.category === 'reseller') || null,
                 address_history: addressHistoryByProfile.get(String(profile.id)) || []
             };
         });
+
+        // Group current Target profiles by physical street address. Unit/floor/suite text is ignored for
+        // the physical-address grouping, while house number + ZIP remain strict so 190 and 194 never merge.
+        // Minor spelling differences in the street name are clustered with a conservative fuzzy match.
+        const savedAddressPoolRaw = await getAppSetting(targetAddressPoolSettingKey(req.user_id), []).catch(() => []);
+        const savedAddressPool = Array.isArray(savedAddressPoolRaw) ? savedAddressPoolRaw : [];
+        const physicalGroups = savedAddressPool.map((entry) => ({
+            group_key: targetPhysicalAddressKey(entry || {}),
+            pool_id: entry.id || '',
+            is_saved_pool: true,
+            label: entry.label || targetPhysicalAddressLabel(entry || {}),
+            sample_address: {
+                address1: cleanFieldValue(entry.address1 || ''), address2: cleanFieldValue(entry.address2 || ''),
+                city: cleanFieldValue(entry.city || ''), state: cleanFieldValue(entry.state || ''), zip: cleanFieldValue(entry.zip || '')
+            },
+            profile_ids: [], profile_names: [], emails: [], variants: new Map()
+        }));
+        for (const profile of targetProfiles) {
+            const address = profile.addresses?.[0] || {};
+            let group = physicalGroups.find((item) => sameTargetPhysicalAddress(item.sample_address, address));
+            if (!group) {
+                group = {
+                    group_key: targetPhysicalAddressKey(address),
+                    pool_id: '',
+                    is_saved_pool: false,
+                    label: targetPhysicalAddressLabel(address),
+                    sample_address: {
+                        address1: cleanFieldValue(address.address1 || ''), address2: cleanFieldValue(address.address2 || ''),
+                        city: cleanFieldValue(address.city || ''), state: cleanFieldValue(address.state || ''), zip: cleanFieldValue(address.zip || '')
+                    },
+                    profile_ids: [], profile_names: [], emails: [], variants: new Map()
+                };
+                physicalGroups.push(group);
+            }
+            group.profile_ids.push(profile.id);
+            group.profile_names.push(profile.profile_name || '');
+            group.emails.push(extractEmail(address.email || ''));
+            const variant = [cleanFieldValue(address.address1 || ''), cleanFieldValue(address.address2 || '')].filter(Boolean).join(' | ') || '(blank)';
+            group.variants.set(variant, (group.variants.get(variant) || 0) + 1);
+        }
+        physicalGroups.sort((a, b) => a.label.localeCompare(b.label));
+        const groupCount = physicalGroups.length;
+        const basePerAddress = groupCount ? Math.floor(targetProfiles.length / groupCount) : 0;
+        const remainder = groupCount ? targetProfiles.length % groupCount : 0;
+        const addressDistribution = physicalGroups.map((group, index) => {
+            const ideal = basePerAddress + (index < remainder ? 1 : 0);
+            const actual = group.profile_ids.length;
+            return {
+                group_key: group.group_key,
+                pool_id: group.pool_id || '',
+                is_saved_pool: Boolean(group.is_saved_pool),
+                label: group.label,
+                sample_address: group.sample_address,
+                actual_count: actual,
+                ideal_count: ideal,
+                delta: actual - ideal,
+                profile_ids: group.profile_ids,
+                profile_names: group.profile_names,
+                variants: [...group.variants.entries()].map(([address, count]) => ({ address, count })).sort((a,b) => b.count - a.count || a.address.localeCompare(b.address))
+            };
+        });
+        const nextUnderfilledAddress = addressDistribution.filter((row) => row.delta < 0).sort((a,b) => a.delta - b.delta || a.actual_count - b.actual_count)[0] || null;
 
         const totals = profiles.reduce((acc, profile) => {
             acc.profiles += 1;
@@ -8986,7 +9249,10 @@ app.get('/target-profile-health', auth, async (req, res) => {
         res.json({
             days, since, profiles, totals, matched_events: matchedEvents,
             address_history_available: addressHistoryAvailable,
-            global_address_patterns: globalAddressPatterns
+            global_address_patterns: globalAddressPatterns,
+            address_distribution: addressDistribution,
+            address_pool_count: savedAddressPool.length,
+            next_underfilled_address: nextUnderfilledAddress
         });
     } catch (err) {
         res.status(500).json({ error: err.message || String(err) });

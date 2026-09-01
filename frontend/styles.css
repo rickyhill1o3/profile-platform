@@ -1224,3 +1224,26 @@ h1,h2,h3,h4,p{margin:0}
 .target-address-history__item>div:first-child{display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap}.target-address-history__item>div:first-child strong{font-size:.76rem}.target-address-history__item>div:first-child span{font-size:.68rem;color:#748091}
 .target-address-history__address{margin-top:5px;font-size:.75rem;overflow-wrap:anywhere}
 .target-address-history__meta{display:flex;flex-wrap:wrap;gap:5px;margin-top:6px}.target-address-history__meta span{font-size:.67rem;border:1px solid #d7dde5;border-radius:999px;padding:2px 6px;background:#fff}
+
+/* Target physical-address distribution + sticky reseller review */
+.target-address-distribution{margin-top:12px;border-top:1px solid #e3e8ef;padding-top:11px}
+.target-address-distribution__table{min-width:880px}
+.target-address-balance-next{margin:7px 0 9px;padding:8px 10px;border:1px solid #c9d7e8;border-radius:9px;background:#f4f8fd;font-size:.78rem;color:#334155}
+.target-address-balance-next.is-balanced{border-color:#9bd4ad;background:#effbf3;color:#176334}
+.target-address-balance{display:inline-flex;border-radius:999px;padding:2px 7px;font-size:.7rem;font-weight:700;border:1px solid #cfd6df;background:#f8fafc}
+.target-address-balance.is-even{border-color:#9bd4ad;background:#effbf3;color:#176334}
+.target-address-balance.is-under{border-color:#e5bd68;background:#fff8e8;color:#8a5a07}
+.target-address-balance.is-over{border-color:#e9a2a2;background:#fff1f1;color:#9b2626}
+.target-reseller-review{display:flex;flex-direction:column;gap:2px;margin-top:8px;padding:7px 8px;border:1px solid #e89191;border-radius:8px;background:#fff7f7;color:#991b1b;font-size:.72rem}
+.target-reseller-review span{color:#7f1d1d}
+.target-checkout-history{margin-top:8px;border-top:1px solid rgba(100,116,139,.2);padding-top:7px}
+.target-checkout-history summary{cursor:pointer;font-size:.78rem;font-weight:700;color:#3e4b5b;user-select:none}
+.target-checkout-history__list{display:grid;gap:5px;margin-top:7px}
+.target-checkout-history__item{display:flex;flex-wrap:wrap;gap:4px 8px;align-items:center;border:1px solid #dce2e9;border-radius:7px;padding:6px 7px;background:#fff;font-size:.68rem}
+.target-checkout-history__item b{font-size:.7rem}
+.target-checkout-history__item span{color:#5f6b78}
+.target-checkout-history__item--reseller{border-color:#efaaaa;background:#fff5f5}
+.target-checkout-history__item--order_id{border-color:#e7c16f;background:#fffaf0}
+.target-checkout-history__item--success{border-color:#9bd4ad;background:#f3fbf5}
+.target-balance-select{display:block;margin-top:5px;padding:3px 7px;font-size:.68rem}
+.target-address-pool-remove{display:block;margin-top:5px;padding:2px 6px;font-size:.65rem}

@@ -792,7 +792,25 @@ async function loadProfiles() {
                                 <div class="target-health-summary target-health-summary--other"><span>Other errors</span><strong>${Number(totals.other || 0)}</strong></div>
                                 <div class="target-health-summary"><span>No recent activity</span><strong>${Number(totals.no_activity || 0)}</strong></div>
                             </div>
-                            <div class="subtle-text">Status is based on each profile's latest checkout attempt. Historical counts stay visible on the profile card even after a later successful checkout.</div>
+                            <div class="subtle-text">Reseller warnings stay marked until that profile/address is edited after the reseller cancellation. This keeps last night's reseller accounts visible even if a later checkout succeeds.</div>
+                            ${(() => {
+                                const groups = Array.isArray(targetProfileHealth.address_distribution) ? targetProfileHealth.address_distribution : [];
+                                if (!groups.length) return '';
+                                const next = targetProfileHealth.next_underfilled_address || null;
+                                return `<div class="target-address-distribution">
+                                    <div class="target-address-patterns__title"><strong>Physical address distribution</strong><span>Unit/floor/apt variations are grouped under the same street address; house numbers stay separate.</span><button class="btn btn-small" type="button" data-target-address-pool-add>Add physical address</button></div>
+                                    ${next ? `<div class="target-address-balance-next"><b>Most underfilled:</b> ${escapeHTML(next.label || '')} — ${Number(next.actual_count || 0)} profiles, target ${Number(next.ideal_count || 0)}</div>` : `<div class="target-address-balance-next is-balanced">Address distribution is currently balanced.</div>`}
+                                    <div class="target-address-patterns__table-wrap"><table class="target-address-patterns__table target-address-distribution__table"><thead><tr><th>Physical address</th><th>Profiles</th><th>Even target</th><th>Balance</th><th>Address variants currently used</th></tr></thead><tbody>
+                                    ${groups.map((row) => {
+                                        const delta = Number(row.delta || 0);
+                                        const balance = delta === 0 ? 'Balanced' : delta > 0 ? `${delta} over` : `${Math.abs(delta)} under`;
+                                        const variants = Array.isArray(row.variants) ? row.variants : [];
+                                        return `<tr><td><strong>${escapeHTML(row.label || 'Unknown')}</strong>${row.is_saved_pool && row.pool_id ? `<button class="btn btn-small target-address-pool-remove" type="button" data-target-address-pool-remove="${escapeHTML(row.pool_id)}">Remove</button>` : ''}</td><td>${Number(row.actual_count || 0)}</td><td>${Number(row.ideal_count || 0)}</td><td><span class="target-address-balance ${delta === 0 ? 'is-even' : delta > 0 ? 'is-over' : 'is-under'}">${escapeHTML(balance)}</span>${delta > 0 ? `<button class="btn btn-small target-balance-select" type="button" data-target-balance-select="${escapeHTML(row.group_key || '')}" data-target-balance-excess="${delta}">Select ${delta} excess</button>` : ''}</td><td>${variants.length ? variants.slice(0,4).map(v => `${escapeHTML(v.address || '')} <b>×${Number(v.count || 0)}</b>`).join('<br>') : '<span class="subtle-text">No profiles assigned yet</span>'}${variants.length > 4 ? `<br><span class="subtle-text">+${variants.length - 4} more variants</span>` : ''}</td></tr>`;
+                                    }).join('')}
+                                    </tbody></table></div>
+                                    <div class="subtle-text">The even target recalculates automatically as profiles are added or removed. For example, 103 profiles across 5 physical addresses produces targets of 21, 21, 21, 20 and 20.</div>
+                                </div>`;
+                            })()}
                             ${targetProfileHealth.address_history_available === false ? `<div class="target-address-history-warning">Address history database is not enabled yet. Run backend/sql/TARGET_ADDRESS_HISTORY_AND_OUTCOMES.sql in Supabase.</div>` : (() => {
                                 const patterns = Array.isArray(targetProfileHealth.global_address_patterns) ? targetProfileHealth.global_address_patterns.slice(0, 8) : [];
                                 if (!patterns.length) return `<div class="subtle-text target-address-pattern-empty">Address-format outcome history will populate as new Target checkout webhooks arrive.</div>`;
@@ -863,6 +881,10 @@ async function loadProfiles() {
                                 const latestReason = latest?.reason ? ` · ${escapeHTML(latest.reason)}` : "";
                                 const orderRef = latest?.order_id ? ` · Order ${escapeHTML(latest.order_id)}` : "";
                                 const addressHistory = Array.isArray(health?.address_history) ? health.address_history : [];
+                                const recentEvents = Array.isArray(health?.recent_events) ? health.recent_events : [];
+                                const lastReseller = health?.last_reseller_event || null;
+                                const resellerNotice = current === 'reseller' && lastReseller ? `<div class="target-reseller-review"><b>Reseller review needed</b><span>${escapeHTML(new Date(lastReseller.created_at).toLocaleString())}${lastReseller.order_id ? ` · Order ${escapeHTML(lastReseller.order_id)}` : ''}</span></div>` : '';
+                                const eventHistoryHtml = recentEvents.length ? `<details class="target-checkout-history"><summary>Recent checkout results (${recentEvents.length})</summary><div class="target-checkout-history__list">${recentEvents.map(event => `<div class="target-checkout-history__item target-checkout-history__item--${escapeHTML(event.category || 'other')}"><b>${escapeHTML(labels[event.category] || event.category || 'Event')}</b><span>${escapeHTML(new Date(event.created_at).toLocaleString())}</span>${event.order_id ? `<span>Order ${escapeHTML(event.order_id)}</span>` : ''}${event.reason ? `<span>${escapeHTML(event.reason)}</span>` : ''}</div>`).join('')}</div></details>` : '';
                                 const historyHtml = addressHistory.length ? `<details class="target-address-history"><summary>Address history (${addressHistory.length})</summary><div class="target-address-history__list">${addressHistory.map((version, index) => {
                                     const vc = version.counts || {};
                                     const range = version.is_current ? `Current since ${new Date(version.valid_from).toLocaleString()}` : `${new Date(version.valid_from).toLocaleString()} – ${new Date(version.valid_to).toLocaleString()}`;
@@ -881,6 +903,8 @@ async function loadProfiles() {
                                         <span class="is-order"><b>${Number(counts.order_id || 0)}</b> order ID</span>
                                         <span><b>${Number(counts.other || 0)}</b> other</span>
                                     </div>
+                                    ${resellerNotice}
+                                    ${eventHistoryHtml}
                                     ${historyHtml}
                                 </div>`;
                             })() : ""}
@@ -1038,6 +1062,51 @@ function bindProfileDashboardControls() {
     document.querySelectorAll('[data-target-health-filter]').forEach((select) => {
         select.addEventListener('change', () => {
             targetProfileHealthFilter = select.value || 'all';
+            loadProfiles();
+        });
+    });
+    document.querySelectorAll('[data-target-address-pool-add]').forEach((button) => {
+        button.addEventListener('click', async () => {
+            const address1 = prompt('Physical address line 1 (example: 194 Tabernacle Lane):');
+            if (!address1) return;
+            const city = prompt('City:') || '';
+            const state = prompt('State:') || '';
+            const zip = prompt('ZIP code:') || '';
+            const label = prompt('Optional label for this address (example: Address 1):') || '';
+            try {
+                const response = await fetch(API + '/target-address-pool', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token() },
+                    body: JSON.stringify({ address1, city, state, zip, label })
+                });
+                const data = await response.json().catch(() => ({}));
+                if (!response.ok || data.error) throw new Error(data.error || 'Could not add address.');
+                await loadProfiles();
+            } catch (error) { alert(error.message || 'Could not add address.'); }
+        });
+    });
+    document.querySelectorAll('[data-target-address-pool-remove]').forEach((button) => {
+        button.addEventListener('click', async () => {
+            const id = String(button.dataset.targetAddressPoolRemove || '');
+            if (!id || !confirm('Remove this physical address from the balancing pool? Profiles will not be changed.')) return;
+            try {
+                const response = await fetch(API + '/target-address-pool/' + encodeURIComponent(id), {
+                    method: 'DELETE', headers: { Authorization: 'Bearer ' + token() }
+                });
+                const data = await response.json().catch(() => ({}));
+                if (!response.ok || data.error) throw new Error(data.error || 'Could not remove address.');
+                await loadProfiles();
+            } catch (error) { alert(error.message || 'Could not remove address.'); }
+        });
+    });
+    document.querySelectorAll('[data-target-balance-select]').forEach((button) => {
+        button.addEventListener('click', () => {
+            const key = String(button.dataset.targetBalanceSelect || '');
+            const excess = Math.max(0, Number(button.dataset.targetBalanceExcess || 0));
+            const group = (targetProfileHealth.address_distribution || []).find((row) => String(row.group_key || '') === key);
+            if (!group || !excess) return;
+            const ids = (group.profile_ids || []).slice(-excess).map(String);
+            ids.forEach((id) => selectedProfileIds.add(id));
             loadProfiles();
         });
     });
