@@ -8652,10 +8652,21 @@ function normalizeTargetStreetSuffix(token = '') {
     return map[token] || token;
 }
 
+function normalizeTargetState(value = '') {
+    const raw = normalizeTargetAddressPart(value).replace(/[^a-z]/g, '');
+    const map = {
+        northcarolina:'nc', nc:'nc', virginia:'va', va:'va', southcarolina:'sc', sc:'sc',
+        maryland:'md', md:'md', delaware:'de', de:'de', georgia:'ga', ga:'ga', florida:'fl', fl:'fl',
+        newyork:'ny', ny:'ny', pennsylvania:'pa', pa:'pa', newjersey:'nj', nj:'nj'
+    };
+    return map[raw] || raw;
+}
+
 function targetBaseStreetParts(address = {}) {
     let line1 = normalizeTargetAddressPart(address.address1 || '');
     // Secondary/unit details do not define the physical street address for distribution counts.
-    line1 = line1.replace(/\s+(?:apt|apartment|unit|suite|ste|floor|fl|flat|building|bldg|room|rm|door|pmb|mailbox|#)\b.*$/i, '').trim();
+    // Shikari exports may place these on line 1, including PO-box text after a real street address.
+    line1 = line1.replace(/\s+(?:apt|apartment|unit|suite|ste|floor|fl|flat|building|bldg|room|rm|door|pmb|mailbox|po\s*box|p\.?o\.?\s*box|#)\b.*$/i, '').trim();
     const tokens = line1.replace(/[^a-z0-9]+/g, ' ').trim().split(/\s+/).filter(Boolean);
     const house = tokens[0] && /^\d+[a-z]?$/.test(tokens[0]) ? tokens.shift() : '';
     const normalizedTokens = tokens.map(normalizeTargetStreetSuffix);
@@ -8664,7 +8675,7 @@ function targetBaseStreetParts(address = {}) {
         street: normalizedTokens.join(' '),
         street_compact: normalizedTokens.join('').replace(/[^a-z0-9]/g, ''),
         city: normalizeTargetAddressPart(address.city || ''),
-        state: normalizeTargetAddressPart(address.state || ''),
+        state: normalizeTargetState(address.state || ''),
         zip: normalizeTargetAddressPart(address.zip || '').replace(/[^0-9]/g, '').slice(0, 5)
     };
 }
@@ -8978,8 +8989,11 @@ app.get('/target-profile-health', auth, async (req, res) => {
             const payloadSite = normalizeProfileAccountType(cleanFieldValue(buildFieldMapFromEmbeds(row.payload || {})?.fields?.site || row.payload?.site || row.site || ''));
             if (payloadSite !== 'target') continue;
             let profile = parsed.accountEmail ? byEmail.get(parsed.accountEmail) : null;
-            if (!profile && !parsed.accountEmail && parsed.profileName) profile = byName.get(normalizeTargetProfileTrackerText(parsed.profileName));
-            if (!profile && !parsed.accountEmail && parsed.profileName) {
+            // Shikari error webhooks can contain an Account email that does not exactly match the
+            // currently saved profile email (or may have been imported/edited later). Always fall
+            // back to the explicit Shikari Profile field / Target # number when email matching fails.
+            if (!profile && parsed.profileName) profile = byName.get(normalizeTargetProfileTrackerText(parsed.profileName)) || null;
+            if (!profile && parsed.profileName) {
                 const number = extractTargetProfileNumber(parsed.profileName);
                 if (number) profile = byProfileNumber.get(number) || null;
             }
