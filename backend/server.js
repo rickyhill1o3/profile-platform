@@ -8571,6 +8571,154 @@ app.get("/admin/store-run-status", auth, admin, async (req, res) => {
     }
 });
 
+
+function normalizeTargetProfileTrackerText(value = '') {
+    return cleanFieldValue(value).toLowerCase().replace(/[^a-z0-9@._+-]+/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+function classifyTargetProfileWebhook(payload = {}) {
+    const { embed, fields } = buildFieldMapFromEmbeds(payload || {});
+    const title = cleanFieldValue(embed?.title || payload?.title || '');
+    const description = cleanFieldValue(embed?.description || payload?.description || payload?.message || '');
+    const titleLower = title.toLowerCase();
+    const descriptionLower = description.toLowerCase();
+    const accountEmail = extractEmail(fields.account || fields.email || payload?.account || payload?.email || '');
+    const profileName = cleanFieldValue(fields.profile || fields['profile name'] || payload?.profile || payload?.profile_name || '');
+    const orderId = cleanFieldValue(fields['order id'] || fields.order || payload?.order_id || payload?.order_number || '');
+    const combined = `${titleLower} ${descriptionLower}`;
+
+    let category = '';
+    let reason = title || 'Checkout event';
+    if (/successful checkout|checkout success|successfully checked out/.test(combined)) {
+        category = 'success';
+        reason = 'Successful checkout';
+    } else if (/reseller/.test(combined)) {
+        category = 'reseller';
+        reason = title || 'Reseller cancellation';
+    } else if (/cancel|declin|error|fail|unable|unsuccessful/.test(combined)) {
+        // Target/Shikari cancellations usually provide an Order ID when Target accepted the order
+        // before canceling it. Keep reseller as its own higher-priority bucket; every other error
+        // that produced an Order ID belongs in the Order ID bucket. Errors without an Order ID are Other.
+        category = orderId ? 'order_id' : 'other';
+        reason = title || description || 'Other checkout error';
+    }
+
+    return { category, reason, accountEmail, profileName, orderId, title, description };
+}
+
+function summarizeTargetProfileEvents(events = []) {
+    const summary = { success: 0, reseller: 0, order_id: 0, other: 0, total: 0 };
+    const lastByCategory = {};
+    for (const event of events) {
+        if (!event?.category || !Object.prototype.hasOwnProperty.call(summary, event.category)) continue;
+        summary[event.category] += 1;
+        summary.total += 1;
+        if (!lastByCategory[event.category]) lastByCategory[event.category] = event.created_at;
+    }
+    const latest = events[0] || null;
+    return { ...summary, lastByCategory, latest };
+}
+
+// Target Profile Health is deliberately available to every authenticated role. Each request is
+// scoped to req.user_id, so users/admins/super-admins see health only for their own Target profiles.
+app.get('/target-profile-health', auth, async (req, res) => {
+    try {
+        await ensureUserNotRevoked(req.user_id);
+        const daysRaw = Number(req.query.days || 30);
+        const days = Math.min(180, Math.max(1, Number.isFinite(daysRaw) ? Math.round(daysRaw) : 30));
+        const since = new Date(Date.now() - days * 86400000).toISOString();
+
+        const { data: profileRows, error: profileError } = await supabase
+            .from('profiles')
+            .select('id,profile_name,account_type,created_at,addresses(id,email,phone,address1,address2,city,state,zip)')
+            .eq('user_id', req.user_id);
+        if (profileError) return res.status(500).json({ error: profileError.message });
+
+        const assignments = await loadProfileStoreAssignments(req.user_id);
+        const targetProfiles = (profileRows || []).filter((profile) => {
+            const stores = assignments?.get(String(profile.id)) || [normalizeProfileAccountType(profile.account_type || 'general')];
+            return stores.map(normalizeProfileAccountType).includes('target');
+        });
+
+        const byEmail = new Map();
+        const byName = new Map();
+        for (const profile of targetProfiles) {
+            const email = extractEmail(profile.addresses?.[0]?.email || '');
+            if (email) byEmail.set(email, profile);
+            const name = normalizeTargetProfileTrackerText(profile.profile_name || '');
+            if (name && !byName.has(name)) byName.set(name, profile);
+        }
+
+        const eventsByProfile = new Map(targetProfiles.map((profile) => [String(profile.id), []]));
+        const webhookRows = await getWebhookLogEntries({ limit: 50000, type: 'checkout', site: 'target', from: since.slice(0, 10) });
+        let matchedEvents = 0;
+
+        for (const row of webhookRows || []) {
+            if (!row?.payload) continue;
+            const parsed = classifyTargetProfileWebhook(row.payload);
+            if (!parsed.category) continue;
+            let profile = parsed.accountEmail ? byEmail.get(parsed.accountEmail) : null;
+            if (!profile && parsed.profileName) profile = byName.get(normalizeTargetProfileTrackerText(parsed.profileName));
+            if (!profile) continue;
+
+            const profileEvents = eventsByProfile.get(String(profile.id));
+            profileEvents.push({
+                id: row.id,
+                created_at: row.created_at,
+                category: parsed.category,
+                reason: parsed.reason,
+                order_id: parsed.orderId || '',
+                product: row.product_name || row.product || '',
+                sku: row.sku || '',
+                bot: row.bot || row.source || '',
+                account_email: parsed.accountEmail || extractEmail(profile.addresses?.[0]?.email || '')
+            });
+            matchedEvents += 1;
+        }
+
+        const profiles = targetProfiles.map((profile) => {
+            const events = (eventsByProfile.get(String(profile.id)) || []).sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0));
+            const counts = summarizeTargetProfileEvents(events);
+            const latestSuccessMs = new Date(counts.lastByCategory.success || 0).getTime();
+            const latest = counts.latest;
+            let current_status = 'no_activity';
+            if (latest?.category === 'success') current_status = 'success';
+            else if (latest?.category === 'reseller') current_status = 'reseller';
+            else if (latest?.category === 'order_id') current_status = 'order_id';
+            else if (latest?.category === 'other') current_status = 'other';
+            // A later successful checkout clears the active warning while historical counts remain visible.
+            if (latestSuccessMs && latestSuccessMs >= new Date(latest?.created_at || 0).getTime()) current_status = 'success';
+
+            return {
+                profile_id: profile.id,
+                profile_name: profile.profile_name || '',
+                email: extractEmail(profile.addresses?.[0]?.email || ''),
+                current_status,
+                counts: {
+                    success: counts.success,
+                    reseller: counts.reseller,
+                    order_id: counts.order_id,
+                    other: counts.other,
+                    total: counts.total
+                },
+                latest_event: latest || null,
+                recent_events: events.slice(0, 8)
+            };
+        });
+
+        const totals = profiles.reduce((acc, profile) => {
+            acc.profiles += 1;
+            acc[profile.current_status] = (acc[profile.current_status] || 0) + 1;
+            for (const key of ['success','reseller','order_id','other']) acc.events[key] += Number(profile.counts?.[key] || 0);
+            return acc;
+        }, { profiles: 0, success: 0, reseller: 0, order_id: 0, other: 0, no_activity: 0, events: { success: 0, reseller: 0, order_id: 0, other: 0 } });
+
+        res.json({ days, since, profiles, totals, matched_events: matchedEvents });
+    } catch (err) {
+        res.status(500).json({ error: err.message || String(err) });
+    }
+});
+
 app.get("/profiles", auth, async (req, res) => {
     try {
         const profileUser = await ensureUserNotRevoked(req.user_id);

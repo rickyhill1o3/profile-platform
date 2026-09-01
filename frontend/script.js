@@ -159,6 +159,8 @@ let profileImportBound = false;
 let raffleBuilderBound = false;
 let allDashboardProfiles = [];
 let profileGroupFilters = { all: '', general: '', walmart: '', target: '', samsclub: '', amazon: '', bandai: '', crunchyroll: '', pokemoncenter: '', raffle: '' };
+let targetProfileHealthFilter = 'all';
+let targetProfileHealthCache = { data: null, loadedAt: 0 };
 let selectedProfileIds = new Set();
 
 consumeOAuthRedirectParams();
@@ -684,6 +686,23 @@ async function loadProfiles() {
             });
         });
 
+        let targetProfileHealth = targetProfileHealthCache.data || { profiles: [], totals: {}, days: 30 };
+        if (!targetProfileHealthCache.data || (Date.now() - Number(targetProfileHealthCache.loadedAt || 0)) > 60000) {
+            try {
+                const healthResponse = await fetch(API + "/target-profile-health?days=30", {
+                    headers: { Authorization: "Bearer " + token() }
+                });
+                const healthData = await healthResponse.json();
+                if (healthResponse.ok && healthData && Array.isArray(healthData.profiles)) {
+                    targetProfileHealth = healthData;
+                    targetProfileHealthCache = { data: healthData, loadedAt: Date.now() };
+                }
+            } catch (err) {
+                console.warn("Target profile health load failed:", err);
+            }
+        }
+        const targetHealthByProfile = new Map((targetProfileHealth.profiles || []).map((item) => [String(item.profile_id), item]));
+
         const setStat = (id, value) => {
             const el = document.getElementById(id);
             if (el) el.textContent = value;
@@ -722,9 +741,21 @@ async function loadProfiles() {
         };
 
         const renderGroup = (groupKey) => {
-            const rawItems = groups[groupKey] || [];
+            const rawItems = (groups[groupKey] || []).slice();
+            if (groupKey === 'target') {
+                const priority = { reseller: 0, order_id: 1, other: 2, success: 3, no_activity: 4 };
+                rawItems.sort((a, b) => {
+                    const aStatus = targetHealthByProfile.get(String(a.id))?.current_status || 'no_activity';
+                    const bStatus = targetHealthByProfile.get(String(b.id))?.current_status || 'no_activity';
+                    const rankDiff = (priority[aStatus] ?? 9) - (priority[bStatus] ?? 9);
+                    if (rankDiff) return rankDiff;
+                    const aTime = new Date(targetHealthByProfile.get(String(a.id))?.latest_event?.created_at || 0).getTime();
+                    const bTime = new Date(targetHealthByProfile.get(String(b.id))?.latest_event?.created_at || 0).getTime();
+                    return bTime - aTime;
+                });
+            }
             const filterValue = String(profileGroupFilters[groupKey] || '').trim().toLowerCase();
-            const items = filterValue
+            let items = filterValue
                 ? rawItems.filter((p) => {
                     const address = p.addresses?.[0] || {};
                     const payment = p.payments?.[0] || {};
@@ -732,6 +763,9 @@ async function loadProfiles() {
                     return haystack.includes(filterValue);
                 })
                 : rawItems;
+            if (groupKey === 'target' && targetProfileHealthFilter !== 'all') {
+                items = items.filter((p) => (targetHealthByProfile.get(String(p.id))?.current_status || 'no_activity') === targetProfileHealthFilter);
+            }
             const selectedCount = rawItems.filter((p) => selectedProfileIds.has(String(p.id))).length;
 
             let html = `
@@ -743,8 +777,34 @@ async function loadProfiles() {
                         </div>
                         <span class="badge">${rawItems.length} saved</span>
                     </div>
+                    ${groupKey === "target" ? (() => {
+                        const totals = targetProfileHealth.totals || {};
+                        return `
+                        <div class="target-health-overview">
+                            <div class="target-health-overview__intro">
+                                <strong>Target Account Health</strong>
+                                <span>Last ${escapeHTML(String(targetProfileHealth.days || 30))} days of Target checkout webhooks. Reseller is the highest-priority account warning.</span>
+                            </div>
+                            <div class="target-health-summary-grid">
+                                <div class="target-health-summary target-health-summary--success"><span>Successful now</span><strong>${Number(totals.success || 0)}</strong></div>
+                                <div class="target-health-summary target-health-summary--reseller"><span>Reseller attention</span><strong>${Number(totals.reseller || 0)}</strong></div>
+                                <div class="target-health-summary target-health-summary--order"><span>Order ID</span><strong>${Number(totals.order_id || 0)}</strong></div>
+                                <div class="target-health-summary target-health-summary--other"><span>Other errors</span><strong>${Number(totals.other || 0)}</strong></div>
+                                <div class="target-health-summary"><span>No recent activity</span><strong>${Number(totals.no_activity || 0)}</strong></div>
+                            </div>
+                            <div class="subtle-text">Status is based on each profile's latest checkout attempt. Historical counts stay visible on the profile card even after a later successful checkout.</div>
+                        </div>`;
+                    })() : ""}
                     <div class="toolbar-row profile-group-toolbar">
                         <input class="input" type="search" placeholder="Search ${labels[groupKey].toLowerCase()}" value="${escapeHTML(profileGroupFilters[groupKey] || '')}" data-profile-search="${groupKey}" />
+                        ${groupKey === 'target' ? `<select class="input" data-target-health-filter aria-label="Filter Target account health">
+                            <option value="all" ${targetProfileHealthFilter === 'all' ? 'selected' : ''}>All health statuses</option>
+                            <option value="reseller" ${targetProfileHealthFilter === 'reseller' ? 'selected' : ''}>Reseller attention</option>
+                            <option value="order_id" ${targetProfileHealthFilter === 'order_id' ? 'selected' : ''}>Order ID</option>
+                            <option value="other" ${targetProfileHealthFilter === 'other' ? 'selected' : ''}>Other errors</option>
+                            <option value="success" ${targetProfileHealthFilter === 'success' ? 'selected' : ''}>Successful</option>
+                            <option value="no_activity" ${targetProfileHealthFilter === 'no_activity' ? 'selected' : ''}>No recent activity</option>
+                        </select>` : ''}
                         <button class="btn" type="button" data-profile-select-visible="${groupKey}">Select Visible</button>
                         <button class="btn" type="button" data-profile-edit-group="${groupKey}" ${selectedCount ? '' : 'disabled'}>Edit Selected (${selectedCount})</button>
                         <button class="btn btn-danger" type="button" data-profile-delete-group="${groupKey}" ${selectedCount ? '' : 'disabled'}>Delete Selected (${selectedCount})</button>
@@ -782,6 +842,29 @@ async function loadProfiles() {
                                     <div class="subtle-text">${escapeHTML(city)}${city && state ? ", " : ""}${escapeHTML(state || "No location set")}</div>
                                 </div>
                             </div>
+                            ${groupKey === "target" ? (() => {
+                                const health = targetHealthByProfile.get(String(p.id));
+                                const current = String(health?.current_status || "no_activity");
+                                const labels = { success: "Successful", reseller: "Reseller", order_id: "Order ID", other: "Other error", no_activity: "No recent activity" };
+                                const latest = health?.latest_event || null;
+                                const counts = health?.counts || {};
+                                const when = latest?.created_at ? new Date(latest.created_at).toLocaleString() : "No checkout webhook in the last 30 days";
+                                const latestReason = latest?.reason ? ` · ${escapeHTML(latest.reason)}` : "";
+                                const orderRef = latest?.order_id ? ` · Order ${escapeHTML(latest.order_id)}` : "";
+                                return `
+                                <div class="target-profile-health target-profile-health--${escapeHTML(current)}">
+                                    <div class="target-profile-health__top">
+                                        <span class="target-profile-health__badge">${escapeHTML(labels[current] || "No recent activity")}</span>
+                                        <span class="subtle-text">${escapeHTML(when)}${latestReason}${orderRef}</span>
+                                    </div>
+                                    <div class="target-profile-health__counts">
+                                        <span><b>${Number(counts.success || 0)}</b> success</span>
+                                        <span class="is-reseller"><b>${Number(counts.reseller || 0)}</b> reseller</span>
+                                        <span class="is-order"><b>${Number(counts.order_id || 0)}</b> order ID</span>
+                                        <span><b>${Number(counts.other || 0)}</b> other</span>
+                                    </div>
+                                </div>`;
+                            })() : ""}
                             <div class="profile-detail-list">
                                 <div><span>Email</span><strong>${escapeHTML(address.email || "-")}</strong></div>
                                 <div><span>Phone</span><strong>${escapeHTML(address.phone || "-")}</strong></div>
@@ -930,6 +1013,12 @@ function bindProfileDashboardControls() {
     document.querySelectorAll('[data-profile-search]').forEach((input) => {
         input.addEventListener('input', () => {
             profileGroupFilters[input.dataset.profileSearch] = input.value || '';
+            loadProfiles();
+        });
+    });
+    document.querySelectorAll('[data-target-health-filter]').forEach((select) => {
+        select.addEventListener('change', () => {
+            targetProfileHealthFilter = select.value || 'all';
             loadProfiles();
         });
     });
