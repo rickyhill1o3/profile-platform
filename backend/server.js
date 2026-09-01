@@ -8668,10 +8668,17 @@ function targetBaseStreetParts(address = {}) {
     // Shikari exports may place these on line 1, including PO-box text after a real street address.
     line1 = line1.replace(/\s+(?:apt|apartment|unit|suite|ste|floor|fl|flat|building|bldg|room|rm|door|pmb|mailbox|po\s*box|p\.?o\.?\s*box|#)\b.*$/i, '').trim();
     const tokens = line1.replace(/[^a-z0-9]+/g, ' ').trim().split(/\s+/).filter(Boolean);
-    const house = tokens[0] && /^\d+[a-z]?$/.test(tokens[0]) ? tokens.shift() : '';
+    const rawHouse = tokens[0] && /^\d+[a-z]?$/.test(tokens[0]) ? tokens.shift() : '';
+    // Treat a trailing letter immediately attached to the street number as an address variant/jig,
+    // not as a different physical location. Example: 121 and 121A group together; 6007 and
+    // 6007A group together. The exact raw address remains preserved in the variants/history UI.
+    const houseMatch = String(rawHouse || '').match(/^(\d+)([a-z]?)$/i);
+    const house = houseMatch ? houseMatch[1] : rawHouse;
+    const house_variant = houseMatch ? (houseMatch[2] || '') : '';
     const normalizedTokens = tokens.map(normalizeTargetStreetSuffix);
     return {
         house,
+        house_variant,
         street: normalizedTokens.join(' '),
         street_compact: normalizedTokens.join('').replace(/[^a-z0-9]/g, ''),
         city: normalizeTargetAddressPart(address.city || ''),
@@ -8978,7 +8985,12 @@ app.get('/target-profile-health', auth, async (req, res) => {
         for (const number of duplicateProfileNumbers) byProfileNumber.delete(number);
 
         const eventsByProfile = new Map(targetProfiles.map((profile) => [String(profile.id), []]));
-        const webhookRows = await getWebhookLogEntries({ limit: 50000, type: 'checkout', from: since.slice(0, 10) });
+        // Do not pre-filter by the database row's `type`. Older Shikari error deliveries and some
+        // forwarded/replayed webhook rows were stored under a non-checkout type even though the raw
+        // payload is unmistakably a Target checkout result. We classify the raw payload below, which
+        // is the authoritative source for Target health. This also recovers historical reseller rows
+        // such as explicit `Profile: Target #83` events that were visible in Discord but skipped here.
+        const webhookRows = await getWebhookLogEntries({ limit: 50000, from: since.slice(0, 10) });
         let matchedEvents = 0;
         const unmatchedResellerEvents = [];
 
@@ -8992,10 +9004,15 @@ app.get('/target-profile-health', auth, async (req, res) => {
             // Shikari error webhooks can contain an Account email that does not exactly match the
             // currently saved profile email (or may have been imported/edited later). Always fall
             // back to the explicit Shikari Profile field / Target # number when email matching fails.
-            if (!profile && parsed.profileName) profile = byName.get(normalizeTargetProfileTrackerText(parsed.profileName)) || null;
+            // Profile-name matching is intentionally independent of the Account match so either field
+            // can resolve the event.
             if (!profile && parsed.profileName) {
-                const number = extractTargetProfileNumber(parsed.profileName);
-                if (number) profile = byProfileNumber.get(number) || null;
+                const normalizedProfileName = normalizeTargetProfileTrackerText(parsed.profileName);
+                profile = byName.get(normalizedProfileName) || null;
+                if (!profile) {
+                    const number = extractTargetProfileNumber(parsed.profileName);
+                    if (number) profile = byProfileNumber.get(number) || null;
+                }
             }
             if (!profile) {
                 if (parsed.category === 'reseller') unmatchedResellerEvents.push({

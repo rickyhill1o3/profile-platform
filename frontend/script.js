@@ -798,7 +798,7 @@ async function loadProfiles() {
                                 if (!groups.length) return '';
                                 const next = targetProfileHealth.next_underfilled_address || null;
                                 return `<div class="target-address-distribution">
-                                    <div class="target-address-patterns__title"><strong>Physical address distribution</strong><span>Unit/floor/apt variations are grouped under the same street address; house numbers stay separate.</span><button class="btn btn-small" type="button" data-target-address-pool-add>Add physical address</button></div>
+                                    <div class="target-address-patterns__title"><strong>Physical address distribution</strong><span>Unit/floor/apt and trailing house-letter variations are grouped under the same physical street address; base house numbers stay separate.</span><button class="btn btn-small" type="button" data-target-address-pool-add>Add physical address</button></div>
                                     ${next ? `<div class="target-address-balance-next"><b>Most underfilled:</b> ${escapeHTML(next.label || '')} — ${Number(next.actual_count || 0)} profiles, target ${Number(next.ideal_count || 0)}</div>` : `<div class="target-address-balance-next is-balanced">Address distribution is currently balanced.</div>`}
                                     <div class="target-address-patterns__table-wrap"><table class="target-address-patterns__table target-address-distribution__table"><thead><tr><th>Physical address</th><th>Profiles</th><th>Even target</th><th>Balance</th><th>Address variants currently used</th></tr></thead><tbody>
                                     ${groups.map((row) => {
