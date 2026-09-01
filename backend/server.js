@@ -5068,6 +5068,7 @@ app.post(["/webhooks/orders", "/webhooks/orders/:token"], async (req, res) => {
         // This is what prevents missed checkouts when many bots hit the webhook URL at once.
         // Discord sending, user matching, credit recording, and parsing happen after the raw row is saved.
         let durableLogId = null;
+        let durableLogCreatedAt = null;
         try {
             const saved = await appendWebhookLogEntry({
                 type: 'checkout',
@@ -5102,6 +5103,7 @@ app.post(["/webhooks/orders", "/webhooks/orders/:token"], async (req, res) => {
                 fingerprint
             });
             durableLogId = saved?.id || null;
+            durableLogCreatedAt = saved?.created_at || null;
         } catch (intakeErr) {
             console.error('Durable checkout intake failed before processing:', intakeErr);
             await queueWebhookForReplay({
@@ -5172,6 +5174,11 @@ app.post(["/webhooks/orders", "/webhooks/orders/:token"], async (req, res) => {
                 if (isTargetMinimumBypassManualReview(payload)) finalError = 'Manual review needed: Target placed the order but filler/item changed during $35 minimum bypass.';
 
                 if (checkoutType === 'error') {
+                    if (resolvedUser?.id) {
+                        await recordTargetProfileAddressOutcome({ payload, resolvedUser, webhookLogId: logId, eventAt: durableLogCreatedAt }).catch((err) => {
+                            console.error('Target address outcome capture failed:', err.message || err);
+                        });
+                    }
                     finalDiscordResults = await sendCheckoutDiscordNotificationsForPayload(payload, resolvedUser, {
                         status: 'checkout_error'
                     }).catch((err) => {
@@ -5214,6 +5221,12 @@ app.post(["/webhooks/orders", "/webhooks/orders/:token"], async (req, res) => {
                             throw recordErr;
                         }
                     }
+                }
+
+                if (resolvedUser?.id) {
+                    await recordTargetProfileAddressOutcome({ payload, resolvedUser, webhookLogId: logId, eventAt: durableLogCreatedAt }).catch((err) => {
+                        console.error('Target address outcome capture failed:', err.message || err);
+                    });
                 }
 
                 const pendingAmazonVerification = recordedOrder?.status === 'pending_email_verification' || recordedOrder?.metadata?.email_verification_required === true;
@@ -8606,6 +8619,142 @@ function classifyTargetProfileWebhook(payload = {}) {
     return { category, reason, accountEmail, profileName, orderId, title, description };
 }
 
+
+function normalizeTargetAddressPart(value = '') {
+    return cleanFieldValue(value).toLowerCase().replace(/\s+/g, ' ').trim();
+}
+
+function targetAddressFingerprint(address = {}) {
+    const canonical = [
+        normalizeTargetAddressPart(address.address1),
+        normalizeTargetAddressPart(address.address2),
+        normalizeTargetAddressPart(address.city),
+        normalizeTargetAddressPart(address.state),
+        normalizeTargetAddressPart(address.zip)
+    ].join('|');
+    return crypto.createHash('sha256').update(canonical).digest('hex');
+}
+
+function classifyTargetAddressPattern(address = {}) {
+    const line1 = normalizeTargetAddressPart(address.address1);
+    const line2 = normalizeTargetAddressPart(address.address2);
+    const combined = `${line1} ${line2}`.trim();
+    let secondary_type = 'none';
+    if (/\b(apt|apartment)\b/.test(combined)) secondary_type = 'apartment';
+    else if (/\b(unit)\b/.test(combined)) secondary_type = 'unit';
+    else if (/\b(suite|ste)\b/.test(combined)) secondary_type = 'suite';
+    else if (/\b(floor|fl)\b/.test(combined)) secondary_type = 'floor';
+    else if (/\b(building|bldg)\b/.test(combined)) secondary_type = 'building';
+    else if (/\b(room|rm)\b/.test(combined)) secondary_type = 'room';
+    else if (line2) secondary_type = 'other_secondary';
+
+    const secondary_location = line2 ? 'line2' : (secondary_type !== 'none' ? 'line1' : 'none');
+    const pattern_key = `${secondary_location}:${secondary_type}`;
+    const locationLabel = secondary_location === 'line2' ? 'Line 2' : secondary_location === 'line1' ? 'Line 1' : 'No secondary';
+    const typeLabel = {
+        none: 'address', apartment: 'apartment', unit: 'unit', suite: 'suite', floor: 'floor',
+        building: 'building', room: 'room', other_secondary: 'other secondary'
+    }[secondary_type] || secondary_type;
+    return {
+        pattern_key,
+        pattern_label: secondary_type === 'none' ? 'Single-line / no secondary address' : `${locationLabel}: ${typeLabel}`,
+        secondary_type,
+        secondary_location,
+        has_line2: !!line2
+    };
+}
+
+function targetAddressHistoryTableMissing(error) {
+    const msg = String(error?.message || error || '');
+    return error?.code === '42P01' || /target_profile_address_(versions|events).*does not exist/i.test(msg);
+}
+
+async function syncTargetAddressVersion({ userId, profileId, address, effectiveAt = null }) {
+    if (!userId || !profileId || !address) return { version: null, unavailable: false };
+    const fingerprint = targetAddressFingerprint(address);
+    const pattern = classifyTargetAddressPattern(address);
+    const at = effectiveAt || new Date().toISOString();
+    const { data: active, error: activeError } = await supabase
+        .from('target_profile_address_versions')
+        .select('*')
+        .eq('user_id', userId)
+        .eq('profile_id', profileId)
+        .is('valid_to', null)
+        .order('valid_from', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+    if (activeError) {
+        if (targetAddressHistoryTableMissing(activeError)) return { version: null, unavailable: true };
+        throw activeError;
+    }
+    if (active?.address_fingerprint === fingerprint) return { version: active, unavailable: false };
+    if (active?.id) {
+        const { error: closeError } = await supabase
+            .from('target_profile_address_versions')
+            .update({ valid_to: at })
+            .eq('id', active.id);
+        if (closeError && !targetAddressHistoryTableMissing(closeError)) throw closeError;
+    }
+    const { data: created, error: insertError } = await supabase
+        .from('target_profile_address_versions')
+        .insert({
+            user_id: userId,
+            profile_id: profileId,
+            address_fingerprint: fingerprint,
+            address1: cleanFieldValue(address.address1 || ''),
+            address2: cleanFieldValue(address.address2 || ''),
+            city: cleanFieldValue(address.city || ''),
+            state: cleanFieldValue(address.state || ''),
+            zip: cleanFieldValue(address.zip || ''),
+            pattern_key: pattern.pattern_key,
+            pattern_label: pattern.pattern_label,
+            secondary_type: pattern.secondary_type,
+            secondary_location: pattern.secondary_location,
+            valid_from: at,
+            valid_to: null
+        })
+        .select('*')
+        .single();
+    if (insertError) {
+        if (targetAddressHistoryTableMissing(insertError)) return { version: null, unavailable: true };
+        throw insertError;
+    }
+    return { version: created, unavailable: false };
+}
+
+async function recordTargetProfileAddressOutcome({ payload, resolvedUser, webhookLogId, eventAt = null }) {
+    if (!resolvedUser?.id || !payload || !webhookLogId) return null;
+    const parsed = classifyTargetProfileWebhook(payload);
+    if (!parsed.category) return null;
+    const site = normalizeProfileAccountType(cleanFieldValue(buildFieldMapFromEmbeds(payload || {})?.fields?.site || payload?.site || ''));
+    if (site !== 'target') return null;
+
+    const profiles = await getUserProfilesWithRelations(resolvedUser.id);
+    const targetProfiles = (profiles || []).filter((profile) => profileAssignedStores(profile).map(normalizeProfileAccountType).includes('target'));
+    const profile = targetProfiles.find((item) => parsed.accountEmail && extractEmail(item.addresses?.[0]?.email || '') === parsed.accountEmail)
+        || targetProfiles.find((item) => parsed.profileName && normalizeTargetProfileTrackerText(item.profile_name || '') === normalizeTargetProfileTrackerText(parsed.profileName));
+    if (!profile) return null;
+
+    const address = profile.addresses?.[0] || {};
+    const versionResult = await syncTargetAddressVersion({ userId: resolvedUser.id, profileId: profile.id, address, effectiveAt: eventAt || new Date().toISOString() });
+    if (versionResult.unavailable || !versionResult.version?.id) return { unavailable: true };
+
+    const { error } = await supabase.from('target_profile_address_events').upsert({
+        webhook_log_id: String(webhookLogId),
+        user_id: resolvedUser.id,
+        profile_id: profile.id,
+        address_version_id: versionResult.version.id,
+        event_at: eventAt || new Date().toISOString(),
+        category: parsed.category,
+        reason: parsed.reason || '',
+        order_id: parsed.orderId || '',
+        account_email: parsed.accountEmail || extractEmail(address.email || ''),
+        profile_name: profile.profile_name || parsed.profileName || ''
+    }, { onConflict: 'webhook_log_id' });
+    if (error && !targetAddressHistoryTableMissing(error)) throw error;
+    return { profile_id: profile.id, category: parsed.category, version_id: versionResult.version.id, unavailable: !!error };
+}
+
 function summarizeTargetProfileEvents(events = []) {
     const summary = { success: 0, reseller: 0, order_id: 0, other: 0, total: 0 };
     const lastByCategory = {};
@@ -8639,6 +8788,19 @@ app.get('/target-profile-health', auth, async (req, res) => {
             const stores = assignments?.get(String(profile.id)) || [normalizeProfileAccountType(profile.account_type || 'general')];
             return stores.map(normalizeProfileAccountType).includes('target');
         });
+
+        let addressHistoryAvailable = true;
+        for (const profile of targetProfiles) {
+            const syncResult = await syncTargetAddressVersion({
+                userId: req.user_id,
+                profileId: profile.id,
+                address: profile.addresses?.[0] || {}
+            }).catch((err) => {
+                console.error('Target address history sync failed:', err.message || err);
+                return { unavailable: targetAddressHistoryTableMissing(err) };
+            });
+            if (syncResult?.unavailable) addressHistoryAvailable = false;
+        }
 
         const byEmail = new Map();
         const byName = new Map();
@@ -8676,6 +8838,111 @@ app.get('/target-profile-health', auth, async (req, res) => {
             matchedEvents += 1;
         }
 
+        const addressHistoryByProfile = new Map();
+        let globalAddressPatterns = [];
+        if (addressHistoryAvailable && targetProfiles.length) {
+            const profileIds = targetProfiles.map((profile) => profile.id);
+            const { data: ownVersions, error: versionsError } = await supabase
+                .from('target_profile_address_versions')
+                .select('*')
+                .eq('user_id', req.user_id)
+                .in('profile_id', profileIds)
+                .order('valid_from', { ascending: false });
+            if (versionsError) {
+                if (targetAddressHistoryTableMissing(versionsError)) addressHistoryAvailable = false;
+                else throw versionsError;
+            }
+
+            const { data: ownAddressEvents, error: ownEventsError } = await supabase
+                .from('target_profile_address_events')
+                .select('address_version_id,profile_id,category,event_at,reason,order_id')
+                .eq('user_id', req.user_id)
+                .gte('event_at', since)
+                .order('event_at', { ascending: false });
+            if (ownEventsError) {
+                if (targetAddressHistoryTableMissing(ownEventsError)) addressHistoryAvailable = false;
+                else throw ownEventsError;
+            }
+
+            if (addressHistoryAvailable) {
+                const eventCountsByVersion = new Map();
+                for (const event of ownAddressEvents || []) {
+                    const key = String(event.address_version_id || '');
+                    if (!key) continue;
+                    if (!eventCountsByVersion.has(key)) eventCountsByVersion.set(key, { success: 0, reseller: 0, order_id: 0, other: 0, total: 0, latest_event: null });
+                    const bucket = eventCountsByVersion.get(key);
+                    if (Object.prototype.hasOwnProperty.call(bucket, event.category)) bucket[event.category] += 1;
+                    bucket.total += 1;
+                    if (!bucket.latest_event) bucket.latest_event = event;
+                }
+                for (const version of ownVersions || []) {
+                    const key = String(version.profile_id);
+                    if (!addressHistoryByProfile.has(key)) addressHistoryByProfile.set(key, []);
+                    addressHistoryByProfile.get(key).push({
+                        id: version.id,
+                        address1: version.address1 || '',
+                        address2: version.address2 || '',
+                        city: version.city || '',
+                        state: version.state || '',
+                        zip: version.zip || '',
+                        pattern_key: version.pattern_key || '',
+                        pattern_label: version.pattern_label || '',
+                        valid_from: version.valid_from,
+                        valid_to: version.valid_to,
+                        is_current: !version.valid_to,
+                        counts: eventCountsByVersion.get(String(version.id)) || { success: 0, reseller: 0, order_id: 0, other: 0, total: 0, latest_event: null }
+                    });
+                }
+
+                // Cross-user view is intentionally aggregate-only: never expose another user's exact address,
+                // email, profile name, order id, or account data to the browser.
+                const { data: allEvents, error: allEventsError } = await supabase
+                    .from('target_profile_address_events')
+                    .select('address_version_id,category,event_at')
+                    .gte('event_at', since)
+                    .limit(100000);
+                if (allEventsError) {
+                    if (targetAddressHistoryTableMissing(allEventsError)) addressHistoryAvailable = false;
+                    else throw allEventsError;
+                }
+                if (addressHistoryAvailable) {
+                    const versionIds = [...new Set((allEvents || []).map((event) => event.address_version_id).filter(Boolean))];
+                    const versionsById = new Map();
+                    for (let i = 0; i < versionIds.length; i += 500) {
+                        const batch = versionIds.slice(i, i + 500);
+                        const { data: rows, error: batchError } = await supabase
+                            .from('target_profile_address_versions')
+                            .select('id,pattern_key,pattern_label,secondary_type,secondary_location')
+                            .in('id', batch);
+                        if (batchError) throw batchError;
+                        for (const row of rows || []) versionsById.set(String(row.id), row);
+                    }
+                    const patternMap = new Map();
+                    for (const event of allEvents || []) {
+                        const version = versionsById.get(String(event.address_version_id || ''));
+                        if (!version?.pattern_key) continue;
+                        if (!patternMap.has(version.pattern_key)) patternMap.set(version.pattern_key, {
+                            pattern_key: version.pattern_key,
+                            pattern_label: version.pattern_label || version.pattern_key,
+                            secondary_type: version.secondary_type || '',
+                            secondary_location: version.secondary_location || '',
+                            attempts: 0, success: 0, reseller: 0, order_id: 0, other: 0
+                        });
+                        const agg = patternMap.get(version.pattern_key);
+                        agg.attempts += 1;
+                        if (Object.prototype.hasOwnProperty.call(agg, event.category)) agg[event.category] += 1;
+                    }
+                    globalAddressPatterns = [...patternMap.values()]
+                        .map((row) => ({
+                            ...row,
+                            success_rate: row.attempts ? Math.round((row.success / row.attempts) * 1000) / 10 : 0,
+                            cancellation_rate: row.attempts ? Math.round(((row.reseller + row.order_id + row.other) / row.attempts) * 1000) / 10 : 0
+                        }))
+                        .sort((a, b) => b.attempts - a.attempts || a.pattern_label.localeCompare(b.pattern_label));
+                }
+            }
+        }
+
         const profiles = targetProfiles.map((profile) => {
             const events = (eventsByProfile.get(String(profile.id)) || []).sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0));
             const counts = summarizeTargetProfileEvents(events);
@@ -8702,7 +8969,8 @@ app.get('/target-profile-health', auth, async (req, res) => {
                     total: counts.total
                 },
                 latest_event: latest || null,
-                recent_events: events.slice(0, 8)
+                recent_events: events.slice(0, 8),
+                address_history: addressHistoryByProfile.get(String(profile.id)) || []
             };
         });
 
@@ -8713,7 +8981,11 @@ app.get('/target-profile-health', auth, async (req, res) => {
             return acc;
         }, { profiles: 0, success: 0, reseller: 0, order_id: 0, other: 0, no_activity: 0, events: { success: 0, reseller: 0, order_id: 0, other: 0 } });
 
-        res.json({ days, since, profiles, totals, matched_events: matchedEvents });
+        res.json({
+            days, since, profiles, totals, matched_events: matchedEvents,
+            address_history_available: addressHistoryAvailable,
+            global_address_patterns: globalAddressPatterns
+        });
     } catch (err) {
         res.status(500).json({ error: err.message || String(err) });
     }
@@ -8843,6 +9115,11 @@ app.post("/profiles/import", auth, async (req, res) => {
             try {
                 await upsertProfileRelations(createdProfile.id, payload);
                 await replaceProfileStoreAssignments(req.user_id, createdProfile.id, assignedStores);
+                if (assignedStores.map(normalizeProfileAccountType).includes('target')) {
+                    await syncTargetAddressVersion({ userId: req.user_id, profileId: createdProfile.id, address: payload }).catch((err) => {
+                        console.error('Target address version capture failed after profile import:', err.message || err);
+                    });
+                }
                 imported.push({ id: createdProfile.id, profile_name: payload.profile_name });
                 existingProfiles.push({
                     id: createdProfile.id,
@@ -9149,6 +9426,11 @@ app.post("/profiles", auth, async (req, res) => {
 
         await upsertProfileRelations(createdProfile.id, data);
         await replaceProfileStoreAssignments(req.user_id, createdProfile.id, assignedStores);
+        if (assignedStores.map(normalizeProfileAccountType).includes('target')) {
+            await syncTargetAddressVersion({ userId: req.user_id, profileId: createdProfile.id, address: data }).catch((err) => {
+                console.error('Target address version capture failed after profile create:', err.message || err);
+            });
+        }
         await markProfileSyncChanged(req.user_id, assignedStores, "profile_created");
 
         res.json({ success: true });
@@ -9219,6 +9501,11 @@ app.put("/profiles/:id", auth, async (req, res) => {
 
         await upsertProfileRelations(id, data);
         await replaceProfileStoreAssignments(req.user_id, id, assignedStores);
+        if ([...new Set([...previousStores, ...assignedStores])].map(normalizeProfileAccountType).includes('target')) {
+            await syncTargetAddressVersion({ userId: req.user_id, profileId: id, address: data }).catch((err) => {
+                console.error('Target address version capture failed after profile update:', err.message || err);
+            });
+        }
         await markProfileSyncChanged(req.user_id, [...new Set([...previousStores, ...assignedStores])], "profile_updated");
 
         res.json({ success: true });

@@ -1207,3 +1207,20 @@ h1,h2,h3,h4,p{margin:0}
 .target-profile-health--other .target-profile-health__badge { background:#52525b; color:white; }
 .target-profile-health__counts .is-reseller { border-color:#ef9a9a; color:#991b1b; }
 .target-profile-health__counts .is-order { border-color:#e5bd68; color:#92400e; }
+.target-address-history-warning{margin-top:10px;padding:9px 10px;border:1px solid #e2b85c;border-radius:9px;background:#fff8df;color:#7a5712;font-size:.82rem}
+.target-address-pattern-empty{margin-top:10px}
+.target-address-patterns{margin-top:12px;border-top:1px solid #e3e8ef;padding-top:11px}
+.target-address-patterns__title{display:flex;flex-wrap:wrap;gap:6px 12px;align-items:baseline;margin-bottom:8px}
+.target-address-patterns__title strong{font-size:.9rem}.target-address-patterns__title span{font-size:.78rem;color:#68717d}
+.target-address-patterns__table-wrap{overflow:auto;max-width:100%}
+.target-address-patterns__table{width:100%;min-width:720px;border-collapse:collapse;font-size:.76rem;background:#fff}
+.target-address-patterns__table th,.target-address-patterns__table td{padding:7px 8px;border:1px solid #e1e6ed;text-align:left;white-space:nowrap}
+.target-address-patterns__table th{background:#f5f7fa;font-weight:700;color:#44505f}
+.target-address-history{margin-top:8px;border-top:1px solid rgba(100,116,139,.2);padding-top:7px}
+.target-address-history summary{cursor:pointer;font-size:.78rem;font-weight:700;color:#3e4b5b;user-select:none}
+.target-address-history__list{display:grid;gap:7px;margin-top:8px}
+.target-address-history__item{border:1px solid #dce2e9;border-radius:8px;padding:8px;background:rgba(255,255,255,.78)}
+.target-address-history__item.is-current{border-color:#8db7df;background:#f4f9ff}
+.target-address-history__item>div:first-child{display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap}.target-address-history__item>div:first-child strong{font-size:.76rem}.target-address-history__item>div:first-child span{font-size:.68rem;color:#748091}
+.target-address-history__address{margin-top:5px;font-size:.75rem;overflow-wrap:anywhere}
+.target-address-history__meta{display:flex;flex-wrap:wrap;gap:5px;margin-top:6px}.target-address-history__meta span{font-size:.67rem;border:1px solid #d7dde5;border-radius:999px;padding:2px 6px;background:#fff}

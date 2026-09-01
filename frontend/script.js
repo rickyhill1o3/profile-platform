@@ -793,6 +793,17 @@ async function loadProfiles() {
                                 <div class="target-health-summary"><span>No recent activity</span><strong>${Number(totals.no_activity || 0)}</strong></div>
                             </div>
                             <div class="subtle-text">Status is based on each profile's latest checkout attempt. Historical counts stay visible on the profile card even after a later successful checkout.</div>
+                            ${targetProfileHealth.address_history_available === false ? `<div class="target-address-history-warning">Address history database is not enabled yet. Run backend/sql/TARGET_ADDRESS_HISTORY_AND_OUTCOMES.sql in Supabase.</div>` : (() => {
+                                const patterns = Array.isArray(targetProfileHealth.global_address_patterns) ? targetProfileHealth.global_address_patterns.slice(0, 8) : [];
+                                if (!patterns.length) return `<div class="subtle-text target-address-pattern-empty">Address-format outcome history will populate as new Target checkout webhooks arrive.</div>`;
+                                return `<div class="target-address-patterns">
+                                    <div class="target-address-patterns__title"><strong>Observed address-format outcomes — all users</strong><span>Aggregate statistics only; other users' exact addresses are never shown.</span></div>
+                                    <div class="target-address-patterns__table-wrap"><table class="target-address-patterns__table"><thead><tr><th>Format</th><th>Attempts</th><th>Success</th><th>Reseller</th><th>Order ID</th><th>Other</th><th>Cancel rate</th></tr></thead><tbody>
+                                    ${patterns.map((row) => `<tr><td>${escapeHTML(row.pattern_label || row.pattern_key || "Unknown")}</td><td>${Number(row.attempts || 0)}</td><td>${Number(row.success || 0)} (${Number(row.success_rate || 0)}%)</td><td>${Number(row.reseller || 0)}</td><td>${Number(row.order_id || 0)}</td><td>${Number(row.other || 0)}</td><td>${Number(row.cancellation_rate || 0)}%</td></tr>`).join("")}
+                                    </tbody></table></div>
+                                    <div class="subtle-text">Formats are ordered by sample size so the table reports observed history without treating a small sample as a recommendation.</div>
+                                </div>`;
+                            })()}
                         </div>`;
                     })() : ""}
                     <div class="toolbar-row profile-group-toolbar">
@@ -851,6 +862,13 @@ async function loadProfiles() {
                                 const when = latest?.created_at ? new Date(latest.created_at).toLocaleString() : "No checkout webhook in the last 30 days";
                                 const latestReason = latest?.reason ? ` · ${escapeHTML(latest.reason)}` : "";
                                 const orderRef = latest?.order_id ? ` · Order ${escapeHTML(latest.order_id)}` : "";
+                                const addressHistory = Array.isArray(health?.address_history) ? health.address_history : [];
+                                const historyHtml = addressHistory.length ? `<details class="target-address-history"><summary>Address history (${addressHistory.length})</summary><div class="target-address-history__list">${addressHistory.map((version, index) => {
+                                    const vc = version.counts || {};
+                                    const range = version.is_current ? `Current since ${new Date(version.valid_from).toLocaleString()}` : `${new Date(version.valid_from).toLocaleString()} – ${new Date(version.valid_to).toLocaleString()}`;
+                                    const line = [version.address1, version.address2, [version.city, version.state, version.zip].filter(Boolean).join(' ')].filter(Boolean).join(' · ');
+                                    return `<div class="target-address-history__item ${version.is_current ? 'is-current' : ''}"><div><strong>${version.is_current ? 'Current address' : `Address version ${addressHistory.length - index}`}</strong><span>${escapeHTML(range)}</span></div><div class="target-address-history__address">${escapeHTML(line || 'No address')}</div><div class="target-address-history__meta"><span>${escapeHTML(version.pattern_label || 'Unclassified')}</span><span>${Number(vc.success || 0)} success</span><span>${Number(vc.reseller || 0)} reseller</span><span>${Number(vc.order_id || 0)} order ID</span><span>${Number(vc.other || 0)} other</span></div></div>`;
+                                }).join('')}</div></details>` : '';
                                 return `
                                 <div class="target-profile-health target-profile-health--${escapeHTML(current)}">
                                     <div class="target-profile-health__top">
@@ -863,6 +881,7 @@ async function loadProfiles() {
                                         <span class="is-order"><b>${Number(counts.order_id || 0)}</b> order ID</span>
                                         <span><b>${Number(counts.other || 0)}</b> other</span>
                                     </div>
+                                    ${historyHtml}
                                 </div>`;
                             })() : ""}
                             <div class="profile-detail-list">
