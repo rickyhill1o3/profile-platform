@@ -534,6 +534,7 @@ async function upsertProfileRelations(profileId, payload) {
         email: payload.email,
         phone: payload.phone,
         address1: payload.address1,
+        address2: payload.address2 || "",
         city: payload.city,
         state: payload.state,
         zip: payload.zip
@@ -7737,24 +7738,25 @@ function normalizeImportedProfilePayload(entry = {}, accountType = "walmart") {
     // Refract exports use: name, shipping.address1/province/postalCode, payment.num/month/year/cvv.
     // Stellar exports use: profileName, shipping.address/state/zipcode, payment.cardNumber/cardMonth/cardYear/cardCvv.
     const email = valueFrom(entry.email, shipping.email, billing.email).toLowerCase();
-    const phone = digitsOnly(valueFrom(entry.phone, shipping.phone, billing.phone));
-    const card = digitsOnly(valueFrom(payment.num, payment.card_number, payment.cardNumber));
+    const phone = digitsOnly(valueFrom(entry.phone, entry.phone_num, shipping.phone, billing.phone));
+    const card = digitsOnly(valueFrom(payment.num, payment.card_number, payment.cardNumber, entry.cc_number));
 
     return {
         profile_name: valueFrom(entry.name, entry.profileName, entry.profile_name, email, "Imported Profile"),
         account_type: normalizeProfileAccountType(accountType || entry.account_type || entry.store || 'walmart'),
-        first_name: valueFrom(shipping.firstName, shipping.first_name, billing.firstName, billing.first_name),
-        last_name: valueFrom(shipping.lastName, shipping.last_name, billing.lastName, billing.last_name),
+        first_name: valueFrom(entry.first_name, shipping.firstName, shipping.first_name, entry.billing_first_name, billing.firstName, billing.first_name),
+        last_name: valueFrom(entry.last_name, shipping.lastName, shipping.last_name, entry.billing_last_name, billing.lastName, billing.last_name),
         email,
         phone: phone.slice(-10),
-        address1: valueFrom(shipping.address1, shipping.address_1, shipping.address, billing.address1, billing.address_1, billing.address),
-        city: valueFrom(shipping.city, billing.city),
-        state: valueFrom(shipping.province, shipping.state, billing.province, billing.state),
-        zip: valueFrom(shipping.postalCode, shipping.zip, shipping.zipcode, billing.postalCode, billing.zip, billing.zipcode),
+        address1: valueFrom(entry.shipping_street, shipping.address1, shipping.address_1, shipping.address, entry.billing_street, billing.address1, billing.address_1, billing.address),
+        address2: valueFrom(entry.shipping_street_2, shipping.address2, shipping.address_2, entry.billing_street_2, billing.address2, billing.address_2),
+        city: valueFrom(entry.shipping_city, shipping.city, entry.billing_city, billing.city),
+        state: valueFrom(entry.shipping_state, shipping.province, shipping.state, entry.billing_state, billing.province, billing.state),
+        zip: valueFrom(entry.shipping_zip_code, shipping.postalCode, shipping.zip, shipping.zipcode, entry.billing_zip_code, billing.postalCode, billing.zip, billing.zipcode),
         card,
-        exp_month: valueFrom(payment.month, payment.exp_month, payment.cardMonth).padStart(2, '0').slice(-2),
-        exp_year: normalizeYear(valueFrom(payment.year, payment.exp_year, payment.cardYear)),
-        cvv: digitsOnly(valueFrom(payment.cvv, payment.cardCvv, payment.card_cvv)),
+        exp_month: valueFrom(entry.cc_exp_month, payment.month, payment.exp_month, payment.cardMonth).padStart(2, '0').slice(-2),
+        exp_year: normalizeYear(valueFrom(entry.cc_exp_year, payment.year, payment.exp_year, payment.cardYear)),
+        cvv: digitsOnly(valueFrom(entry.cc_cvv, payment.cvv, payment.cardCvv, payment.card_cvv)),
         account_login_email: email,
         account_login_password: valueFrom(entry.password, entry.account_password, entry.login_password),
         gmail_app_password: valueFrom(entry.gmail_app_password, entry.app_password, entry.imap_password),

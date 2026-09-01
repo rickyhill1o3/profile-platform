@@ -1231,12 +1231,44 @@ function bindProfileImportControls() {
         });
     }
 
-    const normalizeImportText = (rawText) => {
+    const parseCsvProfiles = (raw) => {
+        const rows = [];
+        let row = [], field = '', quoted = false;
+        for (let i = 0; i < raw.length; i++) {
+            const ch = raw[i];
+            if (quoted) {
+                if (ch === '"' && raw[i + 1] === '"') { field += '"'; i++; }
+                else if (ch === '"') quoted = false;
+                else field += ch;
+            } else if (ch === '"') quoted = true;
+            else if (ch === ',') { row.push(field); field = ''; }
+            else if (ch === '\n') { row.push(field.replace(/\r$/, '')); rows.push(row); row = []; field = ''; }
+            else field += ch;
+        }
+        if (field.length || row.length) { row.push(field.replace(/\r$/, '')); rows.push(row); }
+        const nonEmpty = rows.filter((r) => r.some((v) => String(v || '').trim()));
+        if (nonEmpty.length < 2) throw new Error('No profiles were found in that CSV file.');
+        const headers = nonEmpty[0].map((h) => String(h || '').trim());
+        if (!headers.includes('profile_name') || !headers.includes('email')) {
+            throw new Error('That CSV is not a recognized Shikari profile export (profile_name/email columns are missing).');
+        }
+        return nonEmpty.slice(1).map((values) => {
+            const item = {};
+            headers.forEach((header, index) => { if (header) item[header] = values[index] ?? ''; });
+            item.import_source = 'shikari_csv';
+            return item;
+        });
+    };
+
+    const normalizeImportText = (rawText, fileName = '') => {
         const raw = String(rawText || '').replace(/^\uFEFF/, '').trim();
         if (!raw) throw new Error('That import file is empty.');
         if (/^<!doctype\s+html/i.test(raw) || /^<html[\s>]/i.test(raw)) {
             throw new Error('That file is an HTML page, not a profile export. Re-export the profiles and choose the profile export file directly.');
         }
+        const csvByName = /\.csv$/i.test(String(fileName || ''));
+        const csvByHeader = /^profile_name\s*,/i.test(raw);
+        if (csvByName || csvByHeader) return parseCsvProfiles(raw);
         try {
             return JSON.parse(raw);
         } catch (firstError) {
@@ -1251,7 +1283,7 @@ function bindProfileImportControls() {
                 const sliced = raw.slice(start, end + 1);
                 try { return JSON.parse(sliced); } catch {}
             }
-            throw new Error('That file could not be read as a profile export. Make sure you are uploading the actual export file, not a saved webpage.');
+            throw new Error('That file could not be read as a profile export. Upload a supported JSON export or Shikari CSV.');
         }
     };
 
@@ -1272,7 +1304,7 @@ function bindProfileImportControls() {
 
         if (!profiles.length) throw new Error('No profiles were found in that file.');
         const detected = detectImportFormat(parsed);
-        return profiles.map((profile) => ({ ...profile, import_source: detected }));
+        return profiles.map((profile) => ({ ...profile, import_source: profile.import_source || detected }));
     };
 
     const runProfileImport = async () => {
@@ -1288,7 +1320,7 @@ function bindProfileImportControls() {
         importButton.textContent = 'Importing...';
         try {
             const text = await file.text();
-            const parsed = normalizeImportText(text);
+            const parsed = normalizeImportText(text, file.name);
             const profiles = extractProfilesFromImport(parsed);
             const importSource = profiles[0]?.import_source || 'auto';
             const res = await fetch(API + '/profiles/import', {
