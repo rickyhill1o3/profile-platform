@@ -1862,6 +1862,21 @@ function archivedRetailerReadableText(email = {}) {
   return plain || clean(email.snippet || '');
 }
 
+function isSupremeConfirmationArchiveEmail(email = {}, text = '') {
+  const subject = clean(email.subject || '').toLowerCase();
+  const stored = lower(email.email_type || '');
+  const body = clean(text || '').toLowerCase();
+  if (stored === 'confirmed') return true;
+  // Supreme's confirmation subjects are not always an exact `online shop order` string; archived
+  // copies can include the retailer order number or punctuation. Shipment/cancel/refund subjects
+  // are explicitly excluded before accepting the broader confirmation pattern.
+  if (/shipped|shipment|tracking|delivered|cancel|refund/.test(subject)) return false;
+  if (/^online\s+shop\s+order(?:\s*(?:#|no\.?|number)?\s*\d{6,20})?\s*[.!-]*$/i.test(subject)) return true;
+  if (/order\s+confirmation|thanks\s+for\s+your\s+order/.test(subject)) return true;
+  if (/successfully\s+submitted|your\s+order\s+has\s+been\s+submitted/.test(body) && /\border\s+\d{6,20}\b/i.test(`${email.subject || ''}\n${text || ''}`)) return true;
+  return false;
+}
+
 async function rebuildSupremeBatchAssignments(supabase, userId, retailerEmails = []) {
   const confirmationEmails = [];
   let supremeArchiveSeen = 0, supremeConfirmedSeen = 0, supremeParsedOrders = 0, supremeParsedItems = 0;
@@ -1873,7 +1888,9 @@ async function rebuildSupremeBatchAssignments(supabase, userId, retailerEmails =
     // Prefer the archive's stored classification when available. Older Supreme rows can have a
     // stripped/plain body that no longer contains enough text for detectStatus(), even though the
     // original subject was the authoritative `online shop order` confirmation.
-    const status = lower(email.email_type) === 'confirmed' ? 'confirmed' : detectStatus(email.subject || '', text);
+    const status = isSupremeConfirmationArchiveEmail(email, text)
+      ? 'confirmed'
+      : detectStatus(email.subject || '', text);
     if (status !== 'confirmed') continue;
     supremeConfirmedSeen++;
     const retail = parseRetailEmail('supreme', 'confirmed', email.subject || '', text);
@@ -3540,6 +3557,17 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
         supabase, req.user_id, 'target', archiveColumns, targetManualLimit
       );
 
+      // Pokemon Center mail is intentionally centralized in the Shore Shack mailbox. Include its
+      // archived retailer messages in manual reconciliation so an exact P-order number can be
+      // mirrored onto the Stellar profile owner even when the receiving mailbox belongs to a
+      // different website user. Ownership still comes from the webhook Profile, never the inbox.
+      let pokemonArchiveRows = [];
+      try {
+        pokemonArchiveRows = await fetchRecentEmailArchiveByStore(
+          supabase, req.user_id, 'pokemoncenter', archiveColumns, Math.min(maxMessages, 1500)
+        );
+      } catch (e) { console.warn('[POKEMON CENTER CLASSIFIED ARCHIVE]', e.message || e); }
+
       // Supreme reconciliation must search across every connected mailbox, not the purchase email
       // guessed from the webhook/profile. First scan only lightweight email metadata in the date
       // span of the Supreme checkouts, identify Supreme by sender/subject, then hydrate ONLY those
@@ -3579,13 +3607,13 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
       } catch (e) { console.warn('[SUPREME CLASSIFIED ARCHIVE]', e.message || e); }
 
       const merged = new Map();
-      for (const email of [...targetArchiveRows, ...supremeArchiveRows, ...(supremeDiscovery.rows || [])]) {
+      for (const email of [...targetArchiveRows, ...pokemonArchiveRows, ...supremeArchiveRows, ...(supremeDiscovery.rows || [])]) {
         merged.set(String(email.id||email.message_id), email);
       }
       let checked=0,matched=0,ignored=0,failed=0;
       const retailerEmails=[...merged.values()].filter(email=>{
         const text=archivedRetailerReadableText(email);
-        return ['target','supreme'].includes(lower(email.store)||detectStore(email.from_text||'',email.subject||'',text));
+        return ['target','supreme','pokemoncenter'].includes(lower(email.store)||detectStore(email.from_text||'',email.subject||'',text));
       }).sort((a,b)=>new Date(a.received_at||0)-new Date(b.received_at||0));
       let supremeRebuild = null;
       try { supremeRebuild = await rebuildSupremeBatchAssignments(supabase, req.user_id, retailerEmails); }
@@ -3639,22 +3667,37 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
         targetByOrder.get(id).push(email);
       }
       const damagedSet = new Set();
+      const targetCandidateIds = [...targetByOrder.keys()];
+      const targetStateById = new Map();
+      for (let i = 0; i < targetCandidateIds.length; i += 100) {
+        const tr = await supabase.from('tracked_orders')
+          .select('id,status,reconciliation_status,reconciliation_note,last_status_at,updated_at')
+          .eq('user_id', req.user_id).eq('store','target').in('id', targetCandidateIds.slice(i,i+100));
+        if (!tr.error) for (const row of tr.data || []) targetStateById.set(String(row.id), row);
+      }
       for (const [orderId, rows] of targetByOrder.entries()) {
         const hasBroken = rows.some(archivedTargetBodyNeedsRepair);
         const hasReadable = rows.some(row => !archivedTargetBodyNeedsRepair(row) && archivedRetailerReadableText(row).length >= 180);
-        if (hasBroken && !hasReadable) damagedSet.add(orderId);
+        const state = targetStateById.get(String(orderId)) || {};
+        const finalStatus = lower(state.status || '');
+        const reconciliation = lower(state.reconciliation_status || '');
+        // `main_item_missing` is a valid, completed Target outcome when the filler remained or the
+        // intended item dropped out. Once a live MIME repair has produced a real final status, old
+        // preheader-only archive rows are audit history and must not keep re-queueing this order.
+        const resolved = ['confirmed','processing','shipped','delivered','canceled','refunded'].includes(finalStatus)
+          && ['matched','main_item_missing','probable'].includes(reconciliation);
+        if (hasBroken && !hasReadable && !resolved) damagedSet.add(orderId);
       }
 
-      // Do NOT blanket-prioritize every legitimately canceled Target order. Canceled rows are only
-      // repair candidates when they are still unresolved/missing retailer evidence. Once item-level
-      // reconciliation has a readable confirmation/cancellation/shipment history, it is fixed and
-      // should disappear from the damaged count on subsequent scans.
+      // Only unresolved canceled Target orders are candidates. A canceled order with item-level
+      // reconciliation already recorded as matched/main_item_missing is complete and should never
+      // be repeatedly re-fetched merely because an older damaged archive copy still exists.
       try {
         const canceled = await fetchAllSupabaseRows(() => supabase.from('tracked_orders')
           .select('id,reconciliation_status,reconciliation_note').eq('user_id',req.user_id).eq('store','target').eq('status','canceled'));
         for (const order of canceled) {
           const rs = lower(order.reconciliation_status || '');
-          if (order.id && ['pending','main_item_missing',''].includes(rs) && !targetByOrder.has(String(order.id))) damagedSet.add(String(order.id));
+          if (order.id && ['pending',''].includes(rs) && !targetByOrder.has(String(order.id))) damagedSet.add(String(order.id));
         }
       } catch (e) { console.warn('[RECONCILE CANCELED TARGET QUERY]', e.message || e); }
       const damagedLinkedOrderIds = [...damagedSet];
@@ -3672,7 +3715,7 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
       }
       // Now queue the ordinary catch-up scan for anything that was not part of the targeted set.
       try { startUserScanJob(supabase,req.user_id,adjustUserCredits,confirmPendingAmazonCheckout); } catch (_) {}
-      const result = {success:true,checked,matched,ignored,failed,supreme_rebuild:supremeRebuild,supreme_live:supremeLive,supreme_debug:[...(supremeLive?.debug||[]).slice(-120), ...serviceOrdersForSupreme.slice(0,40).map((o,i)=>`Service order ${i+1}: id=${o.id} site=${o.site||'-'} metadata.site=${o.metadata?.site||'-'} payload site/store=${extractNamedPayloadValue(o.raw_payload||{},['site','store'])||'-'} normalized=${normalizeStoreKey(o.site || o.metadata?.site || extractNamedPayloadValue(o.raw_payload||{},['site','store']))||'-'}`)],supreme_discovery:{metadata_scanned:supremeDiscovery?.metadata_scanned||0,candidates_found:supremeDiscovery?.candidates_found||0,windows:supremeDiscovery?.windows||0},damaged_target_orders:damagedLinkedOrderIds.length,repair,message:`Rebuilt ${supremeRebuild?.assigned||0} Supreme confirmation assignment(s), discovered ${supremeDiscovery?.candidates_found||0} Supreme email(s) across all connected mailbox archives, reprocessed ${checked} Target/Supreme retailer emails, then performed a direct live OAuth2/IMAP repair for ${damagedLinkedOrderIds.length} damaged Target order(s).`};
+      const result = {success:true,checked,matched,ignored,failed,pokemon_archive_messages:pokemonArchiveRows.length,supreme_rebuild:supremeRebuild,supreme_live:supremeLive,supreme_debug:[...(supremeLive?.debug||[]).slice(-120), ...serviceOrdersForSupreme.slice(0,40).map((o,i)=>`Service order ${i+1}: id=${o.id} site=${o.site||'-'} metadata.site=${o.metadata?.site||'-'} payload site/store=${extractNamedPayloadValue(o.raw_payload||{},['site','store'])||'-'} normalized=${normalizeStoreKey(o.site || o.metadata?.site || extractNamedPayloadValue(o.raw_payload||{},['site','store']))||'-'}`)],supreme_discovery:{metadata_scanned:supremeDiscovery?.metadata_scanned||0,candidates_found:supremeDiscovery?.candidates_found||0,windows:supremeDiscovery?.windows||0},damaged_target_orders:damagedLinkedOrderIds.length,repair,message:`Rebuilt ${supremeRebuild?.assigned||0} Supreme confirmation assignment(s), replayed ${pokemonArchiveRows.length} Pokemon Center archive message(s), discovered ${supremeDiscovery?.candidates_found||0} Supreme email(s), reprocessed ${checked} retailer emails, then repaired ${damagedLinkedOrderIds.length} unresolved Target order(s).`};
       Object.assign(reconcileJob, { status:'complete', finished_at:new Date().toISOString(), result, error:null });
     } catch(error){
       console.error('[RECONCILE RETAILER EMAILS]', error.message || error);

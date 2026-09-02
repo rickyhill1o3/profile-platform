@@ -107,13 +107,14 @@ Supreme live messages found: ${j.supreme_live?.messages_found||0}
 Supreme live messages saved: ${j.supreme_live?.messages_saved||0}
 Supreme live mailbox failures: ${j.supreme_live?.failures||0}
 Supreme metadata scanned: ${j.supreme_discovery?.metadata_scanned||0}
+Pokemon Center archive messages replayed: ${j.pokemon_archive_messages||0}
 Supreme emails discovered: ${j.supreme_discovery?.candidates_found||0}
 Supreme confirmations parsed: ${j.supreme_rebuild?.confirmations||0}
 Supreme order numbers parsed: ${j.supreme_rebuild?.parsed_order_numbers||0}
 Supreme webhook orders: ${j.supreme_rebuild?.supreme_webhook_orders||0}
 Supreme candidate pairs: ${j.supreme_rebuild?.candidate_pairs||0}
 Supreme assignments rebuilt: ${j.supreme_rebuild?.assigned||0}
-Damaged Target orders prioritized: ${j.damaged_target_orders||0}
+Unresolved Target orders prioritized: ${j.damaged_target_orders||0}
 Live mailbox orders checked: ${r.checked_orders||0}
 Live MIME messages matched: ${r.matched_messages||0}
 Orders repaired: ${r.repaired_orders||0}
