@@ -1814,10 +1814,16 @@ async function rebuildSupremeBatchAssignments(supabase, userId, retailerEmails =
     const store = lower(email.store) === 'supreme' ? 'supreme' : detectStore(email.from_text || '', email.subject || '', text);
     if (store !== 'supreme') continue;
     supremeArchiveSeen++;
-    const status = detectStatus(email.subject || '', text);
+    // Prefer the archive's stored classification when available. Older Supreme rows can have a
+    // stripped/plain body that no longer contains enough text for detectStatus(), even though the
+    // original subject was the authoritative `online shop order` confirmation.
+    const status = lower(email.email_type) === 'confirmed' ? 'confirmed' : detectStatus(email.subject || '', text);
     if (status !== 'confirmed') continue;
     supremeConfirmedSeen++;
     const retail = parseRetailEmail('supreme', 'confirmed', email.subject || '', text);
+    // The archive column is populated when the live MIME message is first ingested. Use it as a
+    // durable fallback if later HTML/plain-text normalization cannot rediscover `Order 123...`.
+    retail.order_number = clean(retail.order_number || email.order_number);
     if (!retail.order_number) continue;
     supremeParsedOrders++;
     supremeParsedItems += (retail.items || []).length;
@@ -1839,12 +1845,33 @@ async function rebuildSupremeBatchAssignments(supabase, userId, retailerEmails =
   for (const c of confirmationEmails) {
     const mailbox = lower(c.email.mailbox_email);
     for (const order of supremeOrders) {
-      const score = matchScore(order, c.retail, c.eventAt, mailbox);
-      // A readable item set remains the safest signal. For legacy Supreme archive rows whose
-      // text conversion lost the line items, an exact retailer-vs-Stellar checkout minute is
-      // still strong enough to enter the global one-to-one assignment pool.
+      let score = matchScore(order, c.retail, c.eventAt, mailbox);
       const hasItems = (c.retail.items || []).length > 0;
-      const threshold = hasItems ? 55 : 40;
+      const incomingRef = normalizeOrderRef(c.retail.order_number);
+      const sourceRefs = collectOrderRefs(order);
+
+      // If a historical webhook already contains the retailer order number anywhere in its raw
+      // payload/metadata, that is an exact identity match and must dominate fuzzy scoring.
+      if (incomingRef && sourceRefs.includes(incomingRef)) score += 100;
+
+      // Some Supreme confirmations survive archive ingestion with the order number and subject but
+      // without parseable line-item rows / checkout-time text. The old threshold made those rows
+      // mathematically impossible to match: matchScore() could contribute only 20-30 points while
+      // the no-item threshold was 40. For those legacy rows, use the confirmation's arrival time as
+      // a strict fallback signal. Supreme confirmations are sent immediately after checkout.
+      if (!hasItems && !clean(c.retail.retailer_checkout_at)) {
+        const createdMs = new Date(order.created_at || 0).getTime();
+        const emailMs = new Date(c.eventAt || 0).getTime();
+        if (Number.isFinite(createdMs) && Number.isFinite(emailMs)) {
+          const mins = Math.abs(emailMs - createdMs) / 60000;
+          if (mins <= 2) score += 30;
+          else if (mins <= 5) score += 22;
+          else if (mins <= 12) score += 12;
+          else if (mins > 20) continue;
+        }
+      }
+
+      const threshold = hasItems ? 55 : 32;
       if (score >= threshold) pairs.push({ c, order, score, hasItems });
     }
   }
@@ -1917,7 +1944,8 @@ async function rebuildSupremeBatchAssignments(supabase, userId, retailerEmails =
   }
 
   return { confirmations:confirmationEmails.length, assigned:assignments.length, skipped:confirmationEmails.length-assignments.length, supreme_archive_seen:supremeArchiveSeen, supreme_confirmed_seen:supremeConfirmedSeen, parsed_order_numbers:supremeParsedOrders, parsed_items:supremeParsedItems, supreme_webhook_orders:supremeOrders.length, candidate_pairs:pairs.length,
-    assignments:assignments.map(x=>({ order_number:x.c.retail.order_number, source_order_id:x.order.id, mailbox:lower(x.c.email.mailbox_email), score:x.score, parsed_items:(x.c.retail.items||[]).map(i=>({name:i.product_name,size:i.size,price:i.price})), retailer_checkout_at:x.c.retail.retailer_checkout_at||null, webhook_checkout_at:parseSupremeWebhookCheckoutAt(x.order)||null })) };
+    assignments:assignments.map(x=>({ order_number:x.c.retail.order_number, source_order_id:x.order.id, mailbox:lower(x.c.email.mailbox_email), score:x.score, parsed_items:(x.c.retail.items||[]).map(i=>({name:i.product_name,size:i.size,price:i.price})), retailer_checkout_at:x.c.retail.retailer_checkout_at||null, webhook_checkout_at:parseSupremeWebhookCheckoutAt(x.order)||null })),
+    top_candidates:pairs.slice(0,25).map(x=>({order_number:x.c.retail.order_number,source_order_id:x.order.id,mailbox:lower(x.c.email.mailbox_email),score:x.score,has_items:x.hasItems,email_at:x.c.eventAt,webhook_at:x.order.created_at||null})) };
 }
 
 async function saveParsedMessage(supabase, account, parsed, uid, adjustCredits = null, confirmPendingAmazonCheckout = null) {
