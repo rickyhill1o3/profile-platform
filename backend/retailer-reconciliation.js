@@ -149,9 +149,12 @@ function parseSupremeWebhookCheckoutAt(serviceOrder={}){
   } catch (_) { return ''; }
 }
 function parseRetailEmail(store,status,subject,text){
+  const hay = `${subject}\n${text}`;
   const orderNumber = store==='supreme'
-    ? ((`${subject}\n${text}`.match(/\bOrder\s+(\d{6,20})\b/i)||[])[1]||'')
-    : ((`${subject}\n${text}`.match(/\bOrder\s*#?\s*(\d{10,20})\b/i)||[])[1]||'');
+    ? ((hay.match(/\bOrder\s+(\d{6,20})\b/i)||[])[1]||'')
+    : store==='pokemoncenter' || store==='pokemon'
+      ? ((hay.match(/\bOrder\s+(?:Number|No\.?|#)\s*[:#-]?\s*(P\d{8,12})\b/i)||hay.match(/\b(P\d{8,12})\b/i)||[])[1]||'')
+      : ((hay.match(/\bOrder\s*#?\s*(\d{10,20})\b/i)||[])[1]||'');
   const items=store==='target'?parseTargetItems(text,status):store==='supreme'?parseSupremeItems(text,status):[];
   return {order_number:orderNumber,items,tracking_number:extractTracking(text),cancellation_scope:store==='target'?targetCancellationScope(subject,text,status):null,retailer_checkout_at:store==='supreme'?parseSupremeCheckoutAt(text):''};
 }

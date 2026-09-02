@@ -748,12 +748,17 @@ function detectStatus(subject, text) {
 
   // A retailer confirmation/summary subject is authoritative. This prevents phrases such as
   // "we will email you as soon as your order has shipped" from being mistaken for a shipment.
+  // Pokemon Center confirmation mail uses the subject "Thank you for shopping at PokemonCenter.com!".
+  // It does not contain the generic "thanks for your order" wording used by other retailers,
+  // so classify it explicitly before falling through to the generic rules.
+  if (/thank you for shopping at pokemoncenter\.com/i.test(subj)) return 'confirmed';
+
   if (/order confirmation|order confirmed|ordered:|thanks for your order|thanks for shopping with us|order received|order placed|order summary|^online shop order$/.test(subj)) return 'confirmed';
 
   if (/\bdelivered\b|delivery complete|items? (?:has|have) arrived/.test(subj) ||
       /(?:your|the|this) (?:package|order|shipment) (?:has been|was|is) delivered|delivery (?:is )?complete|items? (?:has|have) arrived from order/.test(body)) return 'delivered';
 
-  if (/\bshipped\b|has shipped|on the way/.test(subj) ||
+  if (/\bshipped\b|has shipped|on (?:the|its) way|package will arrive soon|package .*arrive soon/.test(subj) ||
       /(?:your|the|this) (?:package|order|shipment) (?:has|have) shipped|we(?:'|’)ve shipped|was shipped|tracking number\s*[:#]/.test(body)) return 'shipped';
 
   if (/processing|preparing your order|getting your order ready/.test(subj)) return 'processing';
@@ -771,7 +776,13 @@ function extractOrderNumber(store, subject, text) {
     target: [/\b(?:order(?: number| #)?\s*[:#]?\s*)([A-Z0-9-]{8,30})\b/i, /\b(\d{10,20})\b/],
     walmart: [/\b(?:order(?: number| #)?\s*[:#]?\s*)([A-Z0-9-]{8,30})\b/i, /\b(\d{7,8}-\d{6,8})\b/],
     samsclub: [/\b(?:order(?: number| #)?\s*[:#]?\s*)([A-Z0-9-]{8,30})\b/i],
-    pokemoncenter: [/\b(?:order(?: number| #)?\s*[:#]?\s*)([A-Z0-9-]{6,30})\b/i],
+    // Pokemon Center order references are always P-prefixed. Keep this strict: the old generic
+    // pattern could read "Order Details" as order number "Details" before reaching the real
+    // "Order Number: P003..." line in the receipt body.
+    pokemoncenter: [
+      /\bOrder\s+(?:Number|No\.?|#)\s*[:#-]?\s*(P\d{8,12})\b/i,
+      /\b(P\d{8,12})\b/i
+    ],
     crunchyroll: [/\b(?:order(?: number| #)?\s*[:#]?\s*)([A-Z0-9-]{6,30})\b/i],
     supreme: [/\bOrder\s+(\d{6,20})\b/i, /\border\s*#?\s*(\d{6,20})\b/i],
     booksamillion: [
@@ -1126,6 +1137,29 @@ async function findPokemonCenterServiceOrderGlobally(supabase, orderNumber) {
     return null;
   }
 
+  // Existing tracker rows are another durable exact index. Older Pokemon Center webhook rows may
+  // still have a generated external_order_id even though Order Tracker already learned/displayed
+  // the real P-number. Resolve the service order through that source_order_id before falling back
+  // to a broad recent-orders scan. This also avoids an arbitrary global 5000-row cutoff.
+  try {
+    const tracked = await supabase.from('tracked_orders')
+      .select('source_order_id,store,order_number')
+      .eq('order_number', ref)
+      .limit(10);
+    if (!tracked.error) {
+      const sourceIds = [...new Set((tracked.data || [])
+        .filter(row => ['pokemon','pokemoncenter'].includes(lower(row.store || '').replace(/[^a-z0-9]/g,'')))
+        .map(row => row.source_order_id).filter(Boolean))];
+      if (sourceIds.length === 1) {
+        const source = await supabase.from('orders').select('*').eq('id', sourceIds[0]).maybeSingle();
+        if (!source.error && source.data && normalizeStoreKey(source.data.site || source.data.metadata?.site || extractNamedPayloadValue(source.data.raw_payload || {}, ['site','store'])) === 'pokemoncenter') return source.data;
+      } else if (sourceIds.length > 1) {
+        console.warn(`[POKEMON CENTER] Refusing ambiguous tracked-order match for ${ref}: ${sourceIds.length} source orders`);
+        return null;
+      }
+    }
+  } catch (_) {}
+
   // Legacy rows may have a generated external_order_id while the real P-number survives only in
   // metadata/raw_payload. Search recent Pokemon Center orders globally as a compatibility fallback.
   const recent = await supabase.from('orders').select('*').order('created_at', { ascending:false }).limit(5000);
@@ -1162,7 +1196,7 @@ function normalizeStoreKey(value) {
   if (compact.includes('supreme')) return 'supreme';
   if (compact.includes('target')) return 'target';
   if (compact.includes('amazon')) return 'amazon';
-  if (compact.includes('pokemoncenter')) return 'pokemoncenter';
+  if (compact.includes('pokemoncenter') || compact === 'pokemon' || compact === 'pokmon' || compact === 'pokecenter' || compact === 'pc') return 'pokemoncenter';
   if (compact.includes('walmart')) return 'walmart';
   if (compact.includes('samsclub') || compact === 'sams') return 'samsclub';
   return compact;
