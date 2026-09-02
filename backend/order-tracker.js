@@ -3618,6 +3618,41 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
     res.json({ order: data });
   });
 
+  app.post('/orders/tracked/:id/mark-delivered', auth, async (req, res) => {
+    const { data: existing, error: lookupError } = await supabase
+      .from('tracked_orders')
+      .select('id,status')
+      .eq('id', req.params.id)
+      .eq('user_id', req.user_id)
+      .maybeSingle();
+    if (lookupError) return res.status(500).json({ error: lookupError.message });
+    if (!existing) return res.status(404).json({ error: 'Order not found' });
+    if (lower(existing.status) !== 'shipped') {
+      return res.status(409).json({ error: 'Only shipped orders can be manually marked delivered.' });
+    }
+
+    const now = new Date().toISOString();
+    const { data, error } = await supabase
+      .from('tracked_orders')
+      .update({ status: 'delivered', last_status_at: now, updated_at: now })
+      .eq('id', existing.id)
+      .eq('user_id', req.user_id)
+      .eq('status', 'shipped')
+      .select()
+      .single();
+    if (error) return res.status(500).json({ error: error.message });
+
+    // A manual delivery confirmation means the user is confirming the entire order arrived.
+    // Mark any known shipment rows delivered too so split-package orders do not continue to
+    // appear partially in transit after the parent order is manually completed.
+    await supabase.from('tracked_order_shipments')
+      .update({ status: 'delivered', delivered_at: now, updated_at: now })
+      .eq('order_id', existing.id)
+      .neq('status', 'delivered');
+
+    res.json({ order: data, manually_marked_delivered: true });
+  });
+
   app.delete('/orders/tracked/:id', auth, async (req, res) => {
     const { error } = await supabase.from('tracked_orders').delete().eq('id', req.params.id).eq('user_id', req.user_id);
     if (error) return res.status(500).json({ error: error.message }); res.json({ success: true });
