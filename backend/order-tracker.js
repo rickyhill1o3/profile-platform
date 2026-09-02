@@ -3645,6 +3645,12 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
         merged.set(String(email.id||email.message_id), email);
       }
       let checked=0,matched=0,ignored=0,failed=0;
+      const pokemonDebug = [];
+      const pokemonStats = {
+        archive_rows: pokemonArchiveRows.length, classified_rows: 0, with_order_number: 0,
+        confirmations: 0, shipped: 0, delivered: 0, canceled: 0, unknown_status: 0,
+        saved: 0, ignored: 0, not_platform_order: 0, no_order_number: 0, errors: 0
+      };
       const retailerEmails=[...merged.values()].filter(email=>{
         const text=archivedRetailerReadableText(email);
         return ['target','supreme','pokemoncenter'].includes(lower(email.store)||detectStore(email.from_text||'',email.subject||'',text));
@@ -3669,13 +3675,56 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
       }
       for(const email of retailerEmails){
         checked++;
+        const archivedText = archivedRetailerReadableText(email);
+        const detectedStore = lower(email.store) || detectStore(email.from_text||'', email.subject||'', archivedText);
+        const isPokemon = detectedStore === 'pokemoncenter' || detectedStore === 'pokemon';
+        let pokemonContext = null;
+        if (isPokemon) {
+          pokemonStats.classified_rows++;
+          const detectedStatus = detectStatus(email.subject||'', archivedText);
+          const nums = extractOrderNumbers('pokemoncenter', email.subject||'', archivedText);
+          const orderNo = nums[0] || '';
+          if (orderNo) pokemonStats.with_order_number++; else pokemonStats.no_order_number++;
+          if (detectedStatus === 'confirmed') pokemonStats.confirmations++;
+          else if (detectedStatus === 'shipped') pokemonStats.shipped++;
+          else if (detectedStatus === 'delivered') pokemonStats.delivered++;
+          else if (detectedStatus === 'canceled' || detectedStatus === 'refunded') pokemonStats.canceled++;
+          else pokemonStats.unknown_status++;
+          pokemonContext = { orderNo, detectedStatus, subject: clean(email.subject||'').slice(0,140), mailbox: lower(email.mailbox_email), archivedStore: lower(email.store||'') || '-', archivedType: lower(email.email_type||'') || '-', archivedOrder: clean(email.order_number||'') || '-' };
+        }
         try{
           const account={ user_id:req.user_id, archive_user_id:req.user_id, profile_id:null, email:lower(email.mailbox_email), provider:providerForEmail(email.mailbox_email)||{name:'archive'}, ingestion_source:email.source_type||'archive_reconcile' };
-          const parsed={ subject:email.subject||'', from:{text:email.from_text||''}, to:{text:email.to_text||''}, cc:{text:email.cc_text||''}, text:archivedRetailerReadableText(email), html:email.body_html||null, date:new Date(email.received_at||Date.now()), messageId:email.message_id };
+          const parsed={ subject:email.subject||'', from:{text:email.from_text||''}, to:{text:email.to_text||''}, cc:{text:email.cc_text||''}, text:archivedText, html:email.body_html||null, date:new Date(email.received_at||Date.now()), messageId:email.message_id };
           const result=await saveParsedMessage(supabase,account,parsed,email.imap_uid||0,adjustUserCredits,confirmPendingAmazonCheckout);
           if(result?.saved)matched++; else ignored++;
-        }catch(e){ failed++; console.warn('[RECONCILE ARCHIVE]',email.id,e.message||e); }
+          if (isPokemon) {
+            if (result?.saved) pokemonStats.saved++; else pokemonStats.ignored++;
+            if (result?.reason === 'not_a_platform_order') pokemonStats.not_platform_order++;
+            if (pokemonDebug.length < 220) pokemonDebug.push(
+              `Pokemon archive: order=${pokemonContext.orderNo||'-'} status=${pokemonContext.detectedStatus||'-'} result=${result?.saved?'SAVED':`IGNORED:${result?.reason||'unknown'}`} mailbox=${pokemonContext.mailbox||'-'} archived_store=${pokemonContext.archivedStore} archived_type=${pokemonContext.archivedType} archived_order=${pokemonContext.archivedOrder} subject=${JSON.stringify(pokemonContext.subject)}`
+            );
+          }
+        }catch(e){
+          failed++;
+          if (isPokemon) { pokemonStats.errors++; if (pokemonDebug.length < 220) pokemonDebug.push(`Pokemon archive ERROR: order=${pokemonContext?.orderNo||'-'} status=${pokemonContext?.detectedStatus||'-'} ${e.message||e}`); }
+          console.warn('[RECONCILE ARCHIVE]',email.id,e.message||e);
+        }
       }
+
+      // Add a compact snapshot of currently-visible Pokemon Center tracker rows. This makes the
+      // reconcile result self-diagnosing: we can compare the P-number extracted from each email
+      // with the exact order_number/source_order_id already displayed on Order Tracker.
+      try {
+        const trackerProbe = await supabase.from('tracked_orders')
+          .select('id,user_id,source_order_id,store,order_number,status,raw_subject,last_message_id')
+          .in('store',['pokemon','pokemoncenter'])
+          .order('order_date',{ascending:false}).limit(160);
+        if (trackerProbe.error) throw trackerProbe.error;
+        pokemonDebug.push(`Pokemon tracker snapshot: ${(trackerProbe.data||[]).length} row(s)`);
+        for (const row of (trackerProbe.data||[]).slice(0,120)) {
+          pokemonDebug.push(`Pokemon tracker: order=${row.order_number||'-'} store=${row.store||'-'} status=${row.status||'-'} source_order_id=${row.source_order_id||'-'} user=${row.user_id||'-'} last_message=${row.last_message_id?'yes':'no'}`);
+        }
+      } catch (e) { pokemonDebug.push(`Pokemon tracker snapshot ERROR: ${e.message||e}`); }
       // Prioritize orders whose archived Target event is visibly the broken preheader-only copy.
       // These may be much older than the newest 100 orders and therefore must be named explicitly.
       // Build the repair set from the full Target archive, not only the newest maxMessages window.
@@ -3749,7 +3798,7 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
       }
       // Now queue the ordinary catch-up scan for anything that was not part of the targeted set.
       try { startUserScanJob(supabase,req.user_id,adjustUserCredits,confirmPendingAmazonCheckout); } catch (_) {}
-      const result = {success:true,checked,matched,ignored,failed,pokemon_archive_messages:pokemonArchiveRows.length,supreme_rebuild:supremeRebuild,supreme_live:supremeLive,supreme_debug:[...(supremeLive?.debug||[]).slice(-120), ...serviceOrdersForSupreme.slice(0,40).map((o,i)=>`Service order ${i+1}: id=${o.id} site=${o.site||'-'} metadata.site=${o.metadata?.site||'-'} payload site/store=${extractNamedPayloadValue(o.raw_payload||{},['site','store'])||'-'} normalized=${normalizeStoreKey(o.site || o.metadata?.site || extractNamedPayloadValue(o.raw_payload||{},['site','store']))||'-'}`)],supreme_discovery:{metadata_scanned:supremeDiscovery?.metadata_scanned||0,candidates_found:supremeDiscovery?.candidates_found||0,windows:supremeDiscovery?.windows||0},damaged_target_orders:damagedLinkedOrderIds.length,repair,message:`Rebuilt ${supremeRebuild?.assigned||0} Supreme confirmation assignment(s), replayed ${pokemonArchiveRows.length} Pokemon Center archive message(s), discovered ${supremeDiscovery?.candidates_found||0} Supreme email(s), reprocessed ${checked} retailer emails, then repaired ${damagedLinkedOrderIds.length} unresolved Target order(s).`};
+      const result = {success:true,checked,matched,ignored,failed,pokemon_archive_messages:pokemonArchiveRows.length,pokemon_stats:pokemonStats,pokemon_debug:pokemonDebug,supreme_rebuild:supremeRebuild,supreme_live:supremeLive,supreme_debug:[...(supremeLive?.debug||[]).slice(-120), ...serviceOrdersForSupreme.slice(0,40).map((o,i)=>`Service order ${i+1}: id=${o.id} site=${o.site||'-'} metadata.site=${o.metadata?.site||'-'} payload site/store=${extractNamedPayloadValue(o.raw_payload||{},['site','store'])||'-'} normalized=${normalizeStoreKey(o.site || o.metadata?.site || extractNamedPayloadValue(o.raw_payload||{},['site','store']))||'-'}`)],supreme_discovery:{metadata_scanned:supremeDiscovery?.metadata_scanned||0,candidates_found:supremeDiscovery?.candidates_found||0,windows:supremeDiscovery?.windows||0},damaged_target_orders:damagedLinkedOrderIds.length,repair,message:`Rebuilt ${supremeRebuild?.assigned||0} Supreme confirmation assignment(s), replayed ${pokemonArchiveRows.length} Pokemon Center archive message(s), discovered ${supremeDiscovery?.candidates_found||0} Supreme email(s), reprocessed ${checked} retailer emails, then repaired ${damagedLinkedOrderIds.length} unresolved Target order(s).`};
       Object.assign(reconcileJob, { status:'complete', finished_at:new Date().toISOString(), result, error:null });
     } catch(error){
       console.error('[RECONCILE RETAILER EMAILS]', error.message || error);

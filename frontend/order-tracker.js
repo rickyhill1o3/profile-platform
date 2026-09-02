@@ -108,6 +108,16 @@ Supreme live messages saved: ${j.supreme_live?.messages_saved||0}
 Supreme live mailbox failures: ${j.supreme_live?.failures||0}
 Supreme metadata scanned: ${j.supreme_discovery?.metadata_scanned||0}
 Pokemon Center archive messages replayed: ${j.pokemon_archive_messages||0}
+Pokemon Center rows classified: ${j.pokemon_stats?.classified_rows||0}
+Pokemon Center rows with P-order number: ${j.pokemon_stats?.with_order_number||0}
+Pokemon Center confirmations detected: ${j.pokemon_stats?.confirmations||0}
+Pokemon Center shipped detected: ${j.pokemon_stats?.shipped||0}
+Pokemon Center delivered detected: ${j.pokemon_stats?.delivered||0}
+Pokemon Center rows saved/linked: ${j.pokemon_stats?.saved||0}
+Pokemon Center rows ignored: ${j.pokemon_stats?.ignored||0}
+Pokemon Center not-platform-order: ${j.pokemon_stats?.not_platform_order||0}
+Pokemon Center missing order number: ${j.pokemon_stats?.no_order_number||0}
+Pokemon Center errors: ${j.pokemon_stats?.errors||0}
 Supreme emails discovered: ${j.supreme_discovery?.candidates_found||0}
 Supreme confirmations parsed: ${j.supreme_rebuild?.confirmations||0}
 Supreme order numbers parsed: ${j.supreme_rebuild?.parsed_order_numbers||0}
@@ -119,6 +129,10 @@ Live mailbox orders checked: ${r.checked_orders||0}
 Live MIME messages matched: ${r.matched_messages||0}
 Orders repaired: ${r.repaired_orders||0}
 Mailbox failures: ${r.mailbox_failures||0}
+
+========== COMPLETE POKEMON CENTER DIAGNOSTIC LOG ==========
+${(j.pokemon_debug||[]).join('\n') || 'No Pokemon Center diagnostic lines returned.'}
+========== END POKEMON CENTER DIAGNOSTIC LOG ==========
 
 ========== COMPLETE SUPREME DIAGNOSTIC LOG ==========
 ${(j.supreme_debug||[]).join('\n') || 'No Supreme diagnostic lines returned.'}
