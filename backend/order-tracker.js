@@ -5,6 +5,19 @@ const cheerio = require('cheerio');
 const { encrypt, decrypt } = require('./encryption');
 const { parseRetailEmail, expectedWebhookItems, matchScore, mainItemMatch, deriveOverallStatus, parseSupremeWebhookCheckoutAt, norm: reconcileNorm } = require('./retailer-reconciliation');
 
+
+function createGuardedImapFlow(options = {}, label = 'IMAP') {
+  const client = new ImapFlow(options);
+  // ImapFlow can emit an `error` event after a socket reset or failed logout. Without a listener,
+  // Node treats that event as uncaught and terminates the whole Render process. Keep the failure
+  // local to the mailbox scan so reconciliation can continue with the remaining accounts.
+  client.on('error', err => {
+    const message = err?.message || String(err || 'Unknown IMAP error');
+    console.warn(`[${label}] client error: ${message}`);
+  });
+  return client;
+}
+
 const SCAN_INTERVAL_MS = Math.max(60 * 1000, Number(process.env.IMAP_SCAN_INTERVAL_MS || 5 * 60 * 1000));
 const INITIAL_LOOKBACK_DAYS = Math.max(7, Number(process.env.IMAP_INITIAL_LOOKBACK_DAYS || 365));
 const INITIAL_SCAN_START = process.env.IMAP_INITIAL_SCAN_START || '2026-01-01T00:00:00.000Z';
@@ -458,7 +471,7 @@ async function discoverSupremeFromProfileBuilderMailboxes(supabase, userId, serv
     } catch (e) {
       failures++; debug.push(`${account.email}: IMAP AUTH BUILD FAILURE: ${e.message || e}`); return;
     }
-    const client=new ImapFlow({host:account.provider.host,port:account.provider.port,secure:account.provider.secure,
+    const client=createGuardedImapFlow({host:account.provider.host,port:account.provider.port,secure:account.provider.secure,
       auth,logger:false,connectionTimeout:30000,greetingTimeout:30000,socketTimeout:90000});
     try {
       await client.connect();
@@ -2175,7 +2188,7 @@ async function scanImportedAccount(supabase, account, adjustCredits = null, onPr
     if (onProgress) onProgress({ checked:0,total:0,saved:0,skippedRecent:true });
     return { checked:0,total:0,saved:0,skipped_recent:true };
   }
-  const client = new ImapFlow({
+  const client = createGuardedImapFlow({
     host:account.provider.host,port:account.provider.port,secure:account.provider.secure,
     auth:await imapAuthForAccount(supabase,account),logger:false,
     connectionTimeout:30000,greetingTimeout:30000,socketTimeout:120000
@@ -2255,7 +2268,7 @@ async function scanAccount(supabase, account, adjustCredits = null, onProgress =
     if (onProgress) onProgress({ checked: 0, total: 0, saved: 0, skippedRecent: true });
     return { checked: 0, total: 0, saved: 0, skipped_recent: true };
   }
-  const client = new ImapFlow({
+  const client = createGuardedImapFlow({
     host: account.provider.host, port: account.provider.port, secure: account.provider.secure,
     auth: await imapAuthForAccount(supabase, account), logger: false,
     connectionTimeout: 30000, greetingTimeout: 30000, socketTimeout: 120000
@@ -2459,7 +2472,7 @@ async function repairHistoricalOrderEmails(supabase, userId = null, adjustCredit
     });
   }
   for (const { account, orders } of byMailbox.values()) {
-    const client = new ImapFlow({
+    const client = createGuardedImapFlow({
       host:account.provider.host, port:account.provider.port, secure:account.provider.secure,
       auth:await imapAuthForAccount(supabase,account), logger:false,
       connectionTimeout:30000, greetingTimeout:30000, socketTimeout:120000
@@ -2944,7 +2957,7 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
       if (error || !row) return res.status(404).json({error:error?.message || 'Imported account not found.'});
       const provider = providerFromImportedRow(row); if(!provider) return res.status(400).json({error:'No supported IMAP host is available for this row.'});
       const account = { user_id:row.matched_user_id||row.imported_by_user_id, archive_user_id:row.imported_by_user_id, profile_id:row.matched_profile_id||null, email:lower(row.email), provider, imported_account_id:row.id, auth_method:lower(row.auth_method), refresh_token_enc:row.refresh_token_enc, client_id_enc:row.client_id_enc, client_secret_enc:row.client_secret_enc, app_password_enc:row.app_password_enc, password_enc:row.password_enc, ingestion_source:'aycd_import' };
-      const client = new ImapFlow({ host:provider.host,port:provider.port,secure:provider.secure,auth:await imapAuthForAccount(supabase,account),logger:false,connectionTimeout:20000,greetingTimeout:20000,socketTimeout:30000 });
+      const client = createGuardedImapFlow({ host:provider.host,port:provider.port,secure:provider.secure,auth:await imapAuthForAccount(supabase,account),logger:false,connectionTimeout:20000,greetingTimeout:20000,socketTimeout:30000 });
       await client.connect(); const lock=await client.getMailboxLock('INBOX'); let messages=0; try{messages=Number(client.mailbox?.exists||0);}finally{lock.release();} await client.logout();
       await supabase.from('imported_mail_accounts').update({status:'connected',last_error:null,last_test_at:new Date().toISOString(),updated_at:new Date().toISOString()}).eq('id',row.id);
       res.json({success:true,email:row.email,provider:provider.name,messages});
@@ -2994,7 +3007,7 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
       return res.status(400).json({ error: 'Enter the mailbox app password before testing.' });
     }
 
-    const client = new ImapFlow({
+    const client = createGuardedImapFlow({
       host: provider.host,
       port: provider.port,
       secure: provider.secure,
