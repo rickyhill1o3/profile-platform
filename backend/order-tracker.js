@@ -27,6 +27,7 @@ const MIN_RESCAN_INTERVAL_MS = Math.max(0, Number(process.env.IMAP_MIN_RESCAN_IN
 const AMAZON_GHOST_GRACE_MS = Math.max(10 * 60 * 1000, Number(process.env.AMAZON_GHOST_GRACE_MS || 20 * 60 * 1000));
 let backgroundAccountCursor = 0;
 const userScanJobs = new Map();
+const retailerReconcileJobs = new Map();
 let checkoutScanRuntime = null;
 const checkoutScanTimers = new Map();
 let historicalRepairRunning = false;
@@ -1355,6 +1356,57 @@ async function ensureInvestmentRow(supabase, tracked, serviceOrder, active = tru
   else await supabase.from('investment_products').insert(payload);
 }
 
+
+async function syncPokemonCenterWebhookItems(supabase, trackedOrder, serviceOrder) {
+  if (!trackedOrder?.id || !serviceOrder) return null;
+  const store = lower(trackedOrder.store || serviceOrder.site || serviceOrder.metadata?.site || serviceOrder.raw_payload?.site || '').replace(/[^a-z0-9]/g, '');
+  if (!['pokemon','pokemoncenter'].includes(store)) return null;
+  const expected = expectedWebhookItems(serviceOrder);
+  if (!expected.length) return null;
+
+  const statusRaw = lower(trackedOrder.status || 'waiting_confirmation');
+  const itemStatus = ['confirmed','processing','shipped','delivered','canceled','refunded'].includes(statusRaw)
+    ? statusRaw
+    : 'waiting_confirmation';
+
+  try {
+    const existing = await supabase.from('tracked_order_items').select('id').eq('order_id', trackedOrder.id);
+    if (existing.error) throw existing.error;
+    const ids = (existing.data || []).map(row => row.id).filter(Boolean);
+    if (ids.length) {
+      const deleted = await supabase.from('tracked_order_items').delete().in('id', ids);
+      if (deleted.error) throw deleted.error;
+    }
+    const now = new Date().toISOString();
+    const rows = expected.map((item) => ({
+      order_id: trackedOrder.id,
+      retailer_order_number: trackedOrder.order_number || serviceOrderNumber(serviceOrder) || null,
+      product_name: clean(item.product_name || item.sku || 'Pokemon Center item').slice(0, 500),
+      sku: clean(item.sku) || null,
+      size: clean(item.size) || null,
+      quantity: Math.max(1, Number(item.quantity || 1) || 1),
+      price: item.price == null ? null : Number(item.price),
+      role: 'normal',
+      status: itemStatus,
+      last_event_at: trackedOrder.last_status_at || serviceOrder.created_at || now,
+      updated_at: now
+    }));
+    const inserted = await supabase.from('tracked_order_items').insert(rows).select('*');
+    if (inserted.error) throw inserted.error;
+    return inserted.data || [];
+  } catch (error) {
+    if (/tracked_order_items|relation .* does not exist|schema cache/i.test(String(error?.message || ''))) return null;
+    throw error;
+  }
+}
+
+function pokemonCenterWebhookSummary(serviceOrder = {}) {
+  const items = expectedWebhookItems(serviceOrder);
+  if (!items.length) return clean(serviceOrder.product_name || serviceOrder.sku || 'Checkout').slice(0, 500);
+  if (items.length === 1) return clean(items[0].product_name || serviceOrder.product_name || 'Checkout').slice(0, 500);
+  return `${clean(items[0].product_name || 'Item')} + ${items.length - 1} more`.slice(0, 500);
+}
+
 async function syncServiceOrders(supabase, userId, accounts = []) {
   const serviceOrders = await loadServiceOrders(supabase, userId);
   const profileMailboxIndex = await buildProfileMailboxIndex(supabase, userId);
@@ -1397,7 +1449,7 @@ async function syncServiceOrders(supabase, userId, accounts = []) {
       status: prior?.status || (['confirmed','processing','shipped','delivered','canceled','refunded'].includes(lower(source.status)) ? lower(source.status) : 'waiting_confirmation'),
       order_date: prior?.order_date || source.created_at || new Date().toISOString(),
       last_status_at: prior?.last_status_at || source.created_at || new Date().toISOString(),
-      credits_spent: Number(source.credits_charged || 0), product_summary: clean(source.product_name || source.sku || 'Checkout').slice(0,500),
+      credits_spent: Number(source.credits_charged || 0), product_summary: ['pokemon','pokemoncenter'].includes(store) ? pokemonCenterWebhookSummary(source) : clean(source.product_name || source.sku || 'Checkout').slice(0,500),
       updated_at: new Date().toISOString()
     };
     let tracked;
@@ -1414,6 +1466,10 @@ async function syncServiceOrders(supabase, userId, accounts = []) {
           tracked=linked.data || tracked;
         }
       }
+    }
+    if (tracked && ['pokemon','pokemoncenter'].includes(store)) {
+      try { await syncPokemonCenterWebhookItems(supabase, tracked, source); }
+      catch (itemError) { console.warn(`[POKEMON ITEMS] ${orderNumber}: ${itemError.message || itemError}`); }
     }
     if (tracked && exactProfileIdentity?.email && !['supreme'].includes(store) && !['matched','probable'].includes(lower(tracked.reconciliation_status))) {
       await removeMismatchedOrderEmailLinks(supabase, tracked.id, exactProfileIdentity.email);
@@ -2068,6 +2124,10 @@ async function saveParsedMessage(supabase, account, parsed, uid, adjustCredits =
     };
     const { data: order, error } = await supabase.from('tracked_orders').update(patch).eq('id', existing.id).select().single();
     if (error) throw error;
+    if (store === 'pokemoncenter') {
+      try { await syncPokemonCenterWebhookItems(supabase, order, serviceOrder); }
+      catch (itemError) { console.warn(`[POKEMON ITEMS] ${matchedOrderNumber}: ${itemError.message || itemError}`); }
+    }
     if (store === 'supreme') {
       const score = matchScore(serviceOrder, retail, eventAt, account.email);
       await supabase.from('tracked_orders').update({ reconciliation_score: score, reconciliation_status: score >= 80 ? 'matched' : 'probable', reconciliation_note:'supreme_batch_v2', updated_at:new Date().toISOString() }).eq('id', order.id).then(()=>{}).catch(()=>{});
@@ -3454,6 +3514,18 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
   });
 
   app.post('/orders/reconcile-retailer-emails', auth, async (req, res) => {
+    const reconcileKey = String(req.user_id);
+    const existingReconcile = retailerReconcileJobs.get(reconcileKey);
+    if (existingReconcile?.status === 'running') {
+      return res.status(202).json({ success:true, job:{ status:'running', started_at:existingReconcile.started_at } });
+    }
+    const reconcileJob = { status:'running', started_at:new Date().toISOString(), finished_at:null, result:null, error:null };
+    retailerReconcileJobs.set(reconcileKey, reconcileJob);
+    // Return immediately. A full reconciliation can inspect hundreds of connected mailboxes and
+    // legitimately run for several minutes; keeping the browser request open makes Render/the
+    // browser eventually close the connection and surface a misleading "Failed to fetch" even
+    // though the server is still working. The frontend polls the status endpoint below instead.
+    res.status(202).json({ success:true, job:{ status:'running', started_at:reconcileJob.started_at } });
     try {
       // Reprocess the already-indexed retailer archive across ALL of this user's connected
       // mailboxes. This intentionally ignores the webhook's previously guessed purchase email.
@@ -3600,8 +3672,18 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
       }
       // Now queue the ordinary catch-up scan for anything that was not part of the targeted set.
       try { startUserScanJob(supabase,req.user_id,adjustUserCredits,confirmPendingAmazonCheckout); } catch (_) {}
-      res.json({success:true,checked,matched,ignored,failed,supreme_rebuild:supremeRebuild,supreme_live:supremeLive,supreme_debug:[...(supremeLive?.debug||[]).slice(-120), ...serviceOrdersForSupreme.slice(0,40).map((o,i)=>`Service order ${i+1}: id=${o.id} site=${o.site||'-'} metadata.site=${o.metadata?.site||'-'} payload site/store=${extractNamedPayloadValue(o.raw_payload||{},['site','store'])||'-'} normalized=${normalizeStoreKey(o.site || o.metadata?.site || extractNamedPayloadValue(o.raw_payload||{},['site','store']))||'-'}`)],supreme_discovery:{metadata_scanned:supremeDiscovery?.metadata_scanned||0,candidates_found:supremeDiscovery?.candidates_found||0,windows:supremeDiscovery?.windows||0},damaged_target_orders:damagedLinkedOrderIds.length,repair,message:`Rebuilt ${supremeRebuild?.assigned||0} Supreme confirmation assignment(s), discovered ${supremeDiscovery?.candidates_found||0} Supreme email(s) across all connected mailbox archives, reprocessed ${checked} Target/Supreme retailer emails, then performed a direct live OAuth2/IMAP repair for ${damagedLinkedOrderIds.length} damaged Target order(s).`});
-    } catch(error){ res.status(500).json({error:error.message}); }
+      const result = {success:true,checked,matched,ignored,failed,supreme_rebuild:supremeRebuild,supreme_live:supremeLive,supreme_debug:[...(supremeLive?.debug||[]).slice(-120), ...serviceOrdersForSupreme.slice(0,40).map((o,i)=>`Service order ${i+1}: id=${o.id} site=${o.site||'-'} metadata.site=${o.metadata?.site||'-'} payload site/store=${extractNamedPayloadValue(o.raw_payload||{},['site','store'])||'-'} normalized=${normalizeStoreKey(o.site || o.metadata?.site || extractNamedPayloadValue(o.raw_payload||{},['site','store']))||'-'}`)],supreme_discovery:{metadata_scanned:supremeDiscovery?.metadata_scanned||0,candidates_found:supremeDiscovery?.candidates_found||0,windows:supremeDiscovery?.windows||0},damaged_target_orders:damagedLinkedOrderIds.length,repair,message:`Rebuilt ${supremeRebuild?.assigned||0} Supreme confirmation assignment(s), discovered ${supremeDiscovery?.candidates_found||0} Supreme email(s) across all connected mailbox archives, reprocessed ${checked} Target/Supreme retailer emails, then performed a direct live OAuth2/IMAP repair for ${damagedLinkedOrderIds.length} damaged Target order(s).`};
+      Object.assign(reconcileJob, { status:'complete', finished_at:new Date().toISOString(), result, error:null });
+    } catch(error){
+      console.error('[RECONCILE RETAILER EMAILS]', error.message || error);
+      Object.assign(reconcileJob, { status:'error', finished_at:new Date().toISOString(), error:error.message || String(error) });
+    }
+  });
+
+  app.get('/orders/reconcile-retailer-emails/status', auth, async (req, res) => {
+    const job = retailerReconcileJobs.get(String(req.user_id));
+    if (!job) return res.json({ job:{ status:'idle' } });
+    res.json({ job:{ status:job.status, started_at:job.started_at, finished_at:job.finished_at, error:job.error, result:job.status==='complete'?job.result:null } });
   });
 
   app.post('/orders/check-tracking', auth, async (req,res)=>{

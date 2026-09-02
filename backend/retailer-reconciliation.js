@@ -164,18 +164,46 @@ function fieldPairs(payload={}){
 function expectedWebhookItems(order={}){
   const payload=order.raw_payload||{}; const pairs=fieldPairs(payload); const items=[]; const byIndex=new Map();
   for(const [name,value] of pairs){
-    let m=name.match(/^Product\s*(\d+)?\s*-\s*(Name|Size|Price)$/i);
-    if(m){ const idx=Number(m[1]||1); const row=byIndex.get(idx)||{}; row[m[2].toLowerCase()]=value; byIndex.set(idx,row); }
+    // Supreme/Astral style: Product 1 - Name / Size / Price / Quantity
+    let m=name.match(/^Product\s*(\d+)?\s*-\s*(Name|Size|Price|Quantity)$/i);
+    if(m){
+      const idx=Number(m[1]||1); const row=byIndex.get(idx)||{};
+      const key=m[2].toLowerCase();
+      if(key==='name') row.name=value;
+      else if(key==='size') row.size=value;
+      else if(key==='price') row.price=value;
+      else if(key==='quantity') row.quantity=value;
+      byIndex.set(idx,row);
+      continue;
+    }
+
+    // Stellar Pokemon Center style: Product (1), Price (1), Quantity (1)
+    m=name.match(/^(Product|Price|Quantity)\s*\((\d+)\)$/i);
+    if(m){
+      const idx=Number(m[2]||1); const row=byIndex.get(idx)||{};
+      const key=m[1].toLowerCase();
+      if(key==='product') row.name=value;
+      else if(key==='price') row.price=value;
+      else if(key==='quantity') row.quantity=value;
+      byIndex.set(idx,row);
+    }
   }
   for(const [idx,row] of [...byIndex.entries()].sort((a,b)=>a[0]-b[0])){
     if(!clean(row.name) || money(row.price)===0)continue;
-    items.push({product_name:clean(row.name),size:clean(row.size)||null,price:money(row.price),quantity:1});
+    const qty=Number(String(row.quantity||'1').replace(/[^0-9.-]/g,''));
+    items.push({
+      product_name:clean(row.name),
+      size:clean(row.size)||null,
+      price:money(row.price),
+      quantity:Number.isFinite(qty)&&qty>0?Math.max(1,Math.round(qty)):1,
+      webhook_index:idx
+    });
   }
   if(!items.length){
     const product=clean(order.product_name || order.metadata?.product_name || pairs.find(([n])=>/^product$/i.test(n))?.[1] || '');
     const sku=clean(order.sku || order.metadata?.sku || pairs.find(([n])=>/^sku$/i.test(n))?.[1] || '');
     const price=money(order.metadata?.purchase_price || pairs.find(([n])=>/^(product - )?price$/i.test(n))?.[1]);
-    if(product||sku)items.push({product_name:product||sku,sku:sku||null,size:null,price,quantity:Number(order.metadata?.quantity||1)||1});
+    if(product||sku)items.push({product_name:product||sku,sku:sku||null,size:null,price,quantity:Number(order.metadata?.quantity||1)||1,webhook_index:1});
   }
   return items;
 }
