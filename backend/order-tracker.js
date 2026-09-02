@@ -3457,11 +3457,15 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
     try {
       // Reprocess the already-indexed retailer archive across ALL of this user's connected
       // mailboxes. This intentionally ignores the webhook's previously guessed purchase email.
-      const maxMessages=Math.max(50,Math.min(5000,Number(req.body?.max_messages||2500)));
+      const maxMessages=Math.max(50,Math.min(1200,Number(req.body?.max_messages||600)));
+      // Keep manual reconciliation inside Render's memory budget. Retailer MIME/HTML rows can be
+      // very large, so never hydrate thousands of Target bodies in the same request as the global
+      // Supreme mailbox scan. The normal background scanner continues catching up after this request.
+      const targetManualLimit = Math.min(maxMessages, 120);
       const archiveColumns='id,user_id,mailbox_email,source_type,subject,from_text,to_text,cc_text,body_text,body_html,snippet,received_at,message_id,imap_uid,store,linked_order_id,email_type,order_number';
       // Target can still use the normal classified archive path.
       const targetArchiveRows = await fetchRecentEmailArchiveByStore(
-        supabase, req.user_id, 'target', archiveColumns, Math.min(maxMessages, 1500)
+        supabase, req.user_id, 'target', archiveColumns, targetManualLimit
       );
 
       // Supreme reconciliation must search across every connected mailbox, not the purchase email
@@ -3549,12 +3553,11 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
       // damaged forever after a later live IMAP repair saved a good MIME copy.
       const targetRowsForDamage = [];
       for (const email of retailerEmails) if (lower(email.store) === 'target' && email.linked_order_id) targetRowsForDamage.push(email);
-      try {
-        const allTarget = await fetchAllSupabaseRows(() => supabase.from('email_messages')
-          .select('id,linked_order_id,store,body_text,body_html,snippet,subject,email_type,received_at')
-          .eq('user_id', req.user_id).eq('store','target').not('linked_order_id','is',null), 250);
-        targetRowsForDamage.push(...allTarget);
-      } catch (e) { console.warn('[RECONCILE FULL TARGET DAMAGE QUERY]', e.message || e); }
+      // Do not hydrate the complete historical Target MIME archive here. Some accounts contain
+      // hundreds of megabytes of HTML, and asking PostgREST to JSON-encode/decode that archive in
+      // one manual reconciliation can exhaust Render's Node heap. Damage detection is limited to
+      // the small Target slice already loaded above; the ordinary background repair handles older
+      // rows incrementally after this request returns.
 
       const targetByOrder = new Map();
       for (const email of targetRowsForDamage) {
@@ -3585,9 +3588,9 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
       const damagedLinkedOrderIds = [...damagedSet];
       let repair = null;
       try {
-        const requested = Math.max(Number(req.body?.repair_orders || 100), damagedLinkedOrderIds.length);
+        const requested = Math.max(Number(req.body?.repair_orders || 20), Math.min(damagedLinkedOrderIds.length, 30));
         repair = await runHistoricalOrderEmailRepair(supabase, req.user_id, adjustUserCredits, confirmPendingAmazonCheckout, {
-          maxOrders: Math.min(500, requested), forceLinked: true, priorityOrderIds: damagedLinkedOrderIds,
+          maxOrders: Math.min(30, requested), forceLinked: true, priorityOrderIds: damagedLinkedOrderIds.slice(0, 30),
           // A manual repair is allowed to run beside the scheduled background repair. All writes
           // are keyed/upserted by message/order identity, so this avoids a false skip safely.
           allowConcurrent: true
@@ -3597,7 +3600,7 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
       }
       // Now queue the ordinary catch-up scan for anything that was not part of the targeted set.
       try { startUserScanJob(supabase,req.user_id,adjustUserCredits,confirmPendingAmazonCheckout); } catch (_) {}
-      res.json({success:true,checked,matched,ignored,failed,supreme_rebuild:supremeRebuild,supreme_live:supremeLive,supreme_debug:[...(supremeLive?.debug||[]), ...serviceOrdersForSupreme.map((o,i)=>`Service order ${i+1}: id=${o.id} site=${o.site||'-'} metadata.site=${o.metadata?.site||'-'} payload site/store=${extractNamedPayloadValue(o.raw_payload||{},['site','store'])||'-'} normalized=${normalizeStoreKey(o.site || o.metadata?.site || extractNamedPayloadValue(o.raw_payload||{},['site','store']))||'-'}`)],supreme_discovery:{metadata_scanned:supremeDiscovery?.metadata_scanned||0,candidates_found:supremeDiscovery?.candidates_found||0,windows:supremeDiscovery?.windows||0},damaged_target_orders:damagedLinkedOrderIds.length,repair,message:`Rebuilt ${supremeRebuild?.assigned||0} Supreme confirmation assignment(s), discovered ${supremeDiscovery?.candidates_found||0} Supreme email(s) across all connected mailbox archives, reprocessed ${checked} Target/Supreme retailer emails, then performed a direct live OAuth2/IMAP repair for ${damagedLinkedOrderIds.length} damaged Target order(s).`});
+      res.json({success:true,checked,matched,ignored,failed,supreme_rebuild:supremeRebuild,supreme_live:supremeLive,supreme_debug:[...(supremeLive?.debug||[]).slice(-120), ...serviceOrdersForSupreme.slice(0,40).map((o,i)=>`Service order ${i+1}: id=${o.id} site=${o.site||'-'} metadata.site=${o.metadata?.site||'-'} payload site/store=${extractNamedPayloadValue(o.raw_payload||{},['site','store'])||'-'} normalized=${normalizeStoreKey(o.site || o.metadata?.site || extractNamedPayloadValue(o.raw_payload||{},['site','store']))||'-'}`)],supreme_discovery:{metadata_scanned:supremeDiscovery?.metadata_scanned||0,candidates_found:supremeDiscovery?.candidates_found||0,windows:supremeDiscovery?.windows||0},damaged_target_orders:damagedLinkedOrderIds.length,repair,message:`Rebuilt ${supremeRebuild?.assigned||0} Supreme confirmation assignment(s), discovered ${supremeDiscovery?.candidates_found||0} Supreme email(s) across all connected mailbox archives, reprocessed ${checked} Target/Supreme retailer emails, then performed a direct live OAuth2/IMAP repair for ${damagedLinkedOrderIds.length} damaged Target order(s).`});
     } catch(error){ res.status(500).json({error:error.message}); }
   });
 
