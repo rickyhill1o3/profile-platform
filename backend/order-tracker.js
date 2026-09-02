@@ -1087,6 +1087,56 @@ async function loadServiceOrders(supabase, userId) {
   return data || [];
 }
 
+async function findPokemonCenterServiceOrderGlobally(supabase, orderNumber) {
+  const ref = clean(orderNumber);
+  if (!ref) return null;
+
+  // Pokemon Center is the one retailer where confirmation mail can intentionally land in a
+  // different website user's mailbox because Stellar reuses the first queue entry's email for
+  // subsequent profile checkouts. The webhook order number remains exact, so use it globally.
+  const { data, error } = await supabase
+    .from('orders')
+    .select('*')
+    .eq('external_order_id', ref)
+    .order('created_at', { ascending: false })
+    .limit(10);
+  if (error) throw error;
+
+  const matches = (data || []).filter(order =>
+    normalizeStoreKey(order.site || order.metadata?.site || extractNamedPayloadValue(order.raw_payload || {}, ['site','store'])) === 'pokemoncenter' &&
+    collectOrderRefs(order).includes(normalizeOrderRef(ref))
+  );
+  if (matches.length === 1) return matches[0];
+  if (matches.length > 1) {
+    console.warn(`[POKEMON CENTER] Refusing ambiguous global order-number match for ${ref}: ${matches.length} service orders`);
+    return null;
+  }
+
+  // Legacy rows may have a generated external_order_id while the real P-number survives only in
+  // metadata/raw_payload. Search recent Pokemon Center orders globally as a compatibility fallback.
+  const recent = await supabase.from('orders').select('*').order('created_at', { ascending:false }).limit(5000);
+  if (recent.error) throw recent.error;
+  const legacyMatches = (recent.data || []).filter(order =>
+    normalizeStoreKey(order.site || order.metadata?.site || extractNamedPayloadValue(order.raw_payload || {}, ['site','store'])) === 'pokemoncenter' &&
+    collectOrderRefs(order).includes(normalizeOrderRef(ref))
+  );
+  return legacyMatches.length === 1 ? legacyMatches[0] : null;
+}
+
+async function mirrorPokemonCenterEmailToOrderOwner(supabase, archivedEmail, ownerUserId, trackedOrderId) {
+  if (!archivedEmail?.id || !ownerUserId) return archivedEmail;
+  if (String(archivedEmail.user_id || '') === String(ownerUserId)) return archivedEmail;
+  const copy = { ...archivedEmail, user_id: ownerUserId, linked_order_id: trackedOrderId || archivedEmail.linked_order_id || null, updated_at:new Date().toISOString() };
+  delete copy.id;
+  delete copy.created_at;
+  const { data, error } = await supabase.from('email_messages').upsert(copy, { onConflict:'user_id,message_id' }).select().single();
+  if (error) {
+    console.warn('[POKEMON CENTER] Could not mirror shared-mailbox email to checkout owner:', error.message || error);
+    return archivedEmail;
+  }
+  return data || archivedEmail;
+}
+
 
 function normalizeStoreKey(value) {
   const raw = lower(value);
@@ -1882,7 +1932,14 @@ async function saveParsedMessage(supabase, account, parsed, uid, adjustCredits =
   const bodyLinesForName = text.replace(/\r/g,'').split('\n').map(x=>x.trim()).filter(Boolean);
   if (store === 'supreme') { const di = bodyLinesForName.findIndex(x=>/^Dear\b/i.test(x)); if (di>=0) retail.customer_name = bodyLinesForName.slice(di,di+3).join(' ').replace(/^Dear\s*/i,'').replace(/,$/,'').trim(); }
   const receiptHtml = parsed.html ? sanitizeReceiptHtml(String(parsed.html).slice(0, 250000)) : `<pre>${htmlEscape(text.slice(0, 250000))}</pre>`;
-  const serviceOrders = await loadServiceOrders(supabase, account.user_id);
+  let serviceOrders = await loadServiceOrders(supabase, account.user_id);
+  let pokemonGlobalOrder = null;
+  if (store === 'pokemoncenter') {
+    pokemonGlobalOrder = await findPokemonCenterServiceOrderGlobally(supabase, primaryOrderNumber);
+    if (pokemonGlobalOrder?.id && !serviceOrders.some(order => String(order.id) === String(pokemonGlobalOrder.id))) {
+      serviceOrders = [pokemonGlobalOrder, ...serviceOrders];
+    }
+  }
 
   // Amazon confirmation emails are intentionally one-to-one with bot checkout pings. A burst
   // of 15 possible successes plus 2 actual Amazon confirmation emails must confirm exactly 2
@@ -1905,6 +1962,11 @@ async function saveParsedMessage(supabase, account, parsed, uid, adjustCredits =
       if (winner?.order) matchedServiceOrders = [winner.order];
       else if (direct) matchedServiceOrders = [direct];
     } else if (direct) matchedServiceOrders = [direct];
+  } else if (store === 'pokemoncenter') {
+    // Never assign Pokemon Center ownership from the mailbox that received the email. The exact
+    // P-order number points back to the Stellar webhook, whose Profile field already determined
+    // the website owner. This allows user 2's order update to be read from user 1's mailbox.
+    if (pokemonGlobalOrder?.id) matchedServiceOrders = [pokemonGlobalOrder];
   } else {
     const incomingRefs = new Set(orderNumbers.map(normalizeOrderRef).filter(Boolean));
     matchedServiceOrders = serviceOrders.filter(o => collectOrderRefs(o).some(ref => incomingRefs.has(ref)));
@@ -1919,9 +1981,12 @@ async function saveParsedMessage(supabase, account, parsed, uid, adjustCredits =
     const serviceRefs = collectOrderRefs(serviceOrder);
     const matchedOrderNumber = orderNumbers.find(n => serviceRefs.includes(normalizeOrderRef(n))) || primaryOrderNumber;
 
+    const orderOwnerUserId = store === 'pokemoncenter' ? serviceOrder.user_id : account.user_id;
     let { data: existing } = await supabase.from('tracked_orders').select('*').eq('source_order_id', serviceOrder.id).maybeSingle();
     if (!existing) {
-      await syncServiceOrders(supabase, account.user_id, [account]);
+      // For Pokemon Center, create/sync the tracker under the webhook profile owner, not under
+      // whichever mailbox happened to receive Pokemon Center's confirmation email.
+      await syncServiceOrders(supabase, orderOwnerUserId, store === 'pokemoncenter' ? [] : [account]);
       const lookup = await supabase.from('tracked_orders').select('*').eq('source_order_id', serviceOrder.id).maybeSingle();
       existing = lookup.data;
     }
@@ -1935,11 +2000,13 @@ async function saveParsedMessage(supabase, account, parsed, uid, adjustCredits =
 
     const preserveFinancials = store === 'amazon' && status !== 'confirmed';
     const patch = {
-      user_id: account.user_id,
+      user_id: orderOwnerUserId,
       source_order_id: serviceOrder.id,
       service_order_external_id: serviceOrder.external_order_id || null,
-      profile_id: existing?.profile_id || account.profile_id,
-      source_email: account.email,
+      profile_id: existing?.profile_id || (store === 'pokemoncenter' ? null : account.profile_id),
+      // Pokemon Center's physical receiving mailbox is not authoritative profile identity. Preserve
+      // the source/profile email captured from the webhook instead of replacing it with user 1's inbox.
+      source_email: store === 'pokemoncenter' ? (existing?.source_email || lower(serviceOrder.metadata?.checkout_account_email || '') || account.email) : account.email,
       store,
       order_number: matchedOrderNumber,
       status: shouldAdvance ? status : existing.status,
@@ -1965,26 +2032,31 @@ async function saveParsedMessage(supabase, account, parsed, uid, adjustCredits =
       await supabase.from('tracked_orders').update({ reconciliation_score: score, reconciliation_status: score >= 80 ? 'matched' : 'probable', reconciliation_note:'supreme_batch_v2', updated_at:new Date().toISOString() }).eq('id', order.id).then(()=>{}).catch(()=>{});
     }
 
-    if (archivedEmail?.id) {
+    let effectiveArchivedEmail = archivedEmail;
+    if (store === 'pokemoncenter' && archivedEmail?.id) {
+      effectiveArchivedEmail = await mirrorPokemonCenterEmailToOrderOwner(supabase, archivedEmail, orderOwnerUserId, order.id);
+    }
+    if (effectiveArchivedEmail?.id) {
       // Keep the legacy single-link populated for older UI/code, and also record the new
-      // many-to-many link so one Amazon shipment email can belong to several actual orders.
-      if (!archivedEmail.linked_order_id) {
-        await supabase.from('email_messages').update({ linked_order_id: order.id, is_order_related: true, keep_forever: true, updated_at: new Date().toISOString() }).eq('id', archivedEmail.id);
+      // many-to-many link so one shipment email can belong to the correct platform order even
+      // when Pokemon Center delivered that message to another user's mailbox.
+      if (!effectiveArchivedEmail.linked_order_id) {
+        await supabase.from('email_messages').update({ linked_order_id: order.id, is_order_related: true, keep_forever: true, updated_at: new Date().toISOString() }).eq('id', effectiveArchivedEmail.id);
       } else {
-        await supabase.from('email_messages').update({ is_order_related: true, keep_forever: true, updated_at: new Date().toISOString() }).eq('id', archivedEmail.id);
+        await supabase.from('email_messages').update({ is_order_related: true, keep_forever: true, updated_at: new Date().toISOString() }).eq('id', effectiveArchivedEmail.id);
       }
-      await linkOrderEmail(supabase, order.id, archivedEmail.id, status, eventAt);
+      await linkOrderEmail(supabase, order.id, effectiveArchivedEmail.id, status, eventAt);
     }
 
     let lineReconciliation = null;
     if (['target','supreme'].includes(store)) {
-      try { lineReconciliation = await reconcileTrackedOrderItems(supabase, order, serviceOrder, retail, status, eventAt, archivedEmail?.id || null); }
+      try { lineReconciliation = await reconcileTrackedOrderItems(supabase, order, serviceOrder, retail, status, eventAt, effectiveArchivedEmail?.id || null); }
       catch (reconcileError) { console.warn(`[ORDER-ITEMS] ${store} ${matchedOrderNumber}: ${reconcileError.message || reconcileError}`); }
     }
 
     if (index === 0) {
       await supabase.from('tracked_order_events').upsert({
-        order_id: order.id, user_id: account.user_id, status, event_at: eventAt, subject,
+        order_id: order.id, user_id: orderOwnerUserId, status, event_at: eventAt, subject,
         message_id: messageId, source_email: account.email, body_excerpt: text.slice(0, 1000)
       }, { onConflict: 'user_id,message_id', ignoreDuplicates: true });
     }
@@ -2022,7 +2094,7 @@ async function saveParsedMessage(supabase, account, parsed, uid, adjustCredits =
     await ensureInvestmentRow(supabase, order, serviceOrder, !inactive);
     if (inactive && !existing.credits_refunded && Number(serviceOrder.credits_charged || 0) > 0 && typeof adjustCredits === 'function') {
       const refund = Number(serviceOrder.credits_charged || 0);
-      await adjustCredits({ userId: account.user_id, delta: refund, reason: 'imap_order_canceled_refund', note: `Credits refunded after ${store} order ${matchedOrderNumber} was ${effectiveStatus}`, metadata: { tracked_order_id: order.id, source_order_id: serviceOrder.id, imap_status: effectiveStatus }, orderId: serviceOrder.id });
+      await adjustCredits({ userId: orderOwnerUserId, delta: refund, reason: 'imap_order_canceled_refund', note: `Credits refunded after ${store} order ${matchedOrderNumber} was ${effectiveStatus}`, metadata: { tracked_order_id: order.id, source_order_id: serviceOrder.id, imap_status: effectiveStatus }, orderId: serviceOrder.id });
       await supabase.from('tracked_orders').update({ credits_refunded: true, credits_refunded_at: new Date().toISOString() }).eq('id', order.id);
       await supabase.from('orders').update({ status: 'canceled', metadata: { ...sourceMetadata, imap_canceled_at: new Date().toISOString(), credits_refunded_by_imap: refund } }).eq('id', serviceOrder.id);
     }

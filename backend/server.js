@@ -1563,6 +1563,38 @@ async function findUserForWebhook(payload) {
         !!buildFieldMapFromEmbeds(payload || {}).fields?.account
     );
 
+    // POKEMON CENTER OWNERSHIP RULE:
+    // Stellar can reuse the FIRST queue entry's email while it checks out profiles 2/3 a few
+    // seconds later. For Pokemon Center only, the webhook Profile field is therefore the
+    // authoritative website-owner signal. The email still belongs to the checkout/profile
+    // metadata, but it must not move the order to the owner of that email address.
+    if (normalizedSite === 'pokemoncenter' && normalizedProfileName) {
+        const { data: pokemonProfiles, error: pokemonProfileError } = await supabase
+            .from('profiles')
+            .select('id, user_id, profile_name, account_type, created_at')
+            .ilike('profile_name', normalizedProfileName)
+            .order('created_at', { ascending: false });
+        if (pokemonProfileError) throw new Error(pokemonProfileError.message);
+
+        let exactPokemonProfiles = (pokemonProfiles || []).filter((profile) =>
+            normalizeProfileAccountType(profile?.account_type || '') === 'pokemoncenter'
+        );
+        if (!exactPokemonProfiles.length) exactPokemonProfiles = pokemonProfiles || [];
+        const ownerIds = [...new Set(exactPokemonProfiles.map((profile) => String(profile?.user_id || '')).filter(Boolean))];
+        if (ownerIds.length === 1) {
+            const owner = await getUserById(ownerIds[0]);
+            if (owner) return owner;
+        }
+        if (ownerIds.length > 1) {
+            console.warn('Pokemon Center webhook profile name is ambiguous across users; refusing email-based ownership fallback', {
+                profile_name: normalizedProfileName,
+                account_email: normalizedEmail || null,
+                user_ids: ownerIds
+            });
+            return null;
+        }
+    }
+
     const loadProfilesByIds = async (profileIds = []) => {
         const ids = [...new Set((profileIds || []).filter(Boolean).map(String))];
         if (!ids.length) return [];
