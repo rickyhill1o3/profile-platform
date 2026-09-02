@@ -3100,6 +3100,7 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
       ...o,
       email_counts: counts.get(o.id) || { total:0 },
       has_linked_email: Number(counts.get(o.id)?.total || 0) > 0,
+      has_confirmation_email: Number(counts.get(o.id)?.confirmed || 0) > 0 || Boolean(o.receipt_html || o.receipt_text),
       items: itemMap.get(String(o.id)) || [],
       shipments: shipmentMap.get(String(o.id)) || [],
       tracking_url: carrierTrackingUrl(o.carrier || detectCarrierFromTracking(o.tracking_number || ''), o.tracking_number || '')
