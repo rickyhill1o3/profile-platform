@@ -16,11 +16,27 @@ function tokenScore(a,b){
 }
 function extractTracking(text){
   const hay=String(text||'');
-  const m=hay.match(/(?:tracking(?: number| #)?|tracking #|track package)\s*(?:is\s*)?[:#]?\s*(1Z[A-Z0-9]{16}|[A-Z0-9]{10,30})/i)
-    || hay.match(/\b(1Z[A-Z0-9]{16})\b/i)
-    || hay.match(/(?:FedEx|USPS|UPS|United Parcel Service)[^\n]{0,80}?(\d{10,22})/i);
-  const value=m?.[1]||'';
-  return /^(?:information|available|below)$/i.test(value)?'':value;
+  const normalize=value=>{
+    const code=clean(value).replace(/[^A-Z0-9]/gi,'').toUpperCase();
+    if(!code || /^(?:INFORMATION|AVAILABLE|BELOW|NUMBER|DETAILS|STATUS|PACKAGE|TRACKING)$/i.test(code))return '';
+    if(!/\d/.test(code) || /^P\d{8,12}$/.test(code))return '';
+    if(/^1Z[A-Z0-9]{16}$/.test(code))return code;
+    if(/^\d{10,22}$/.test(code))return code;
+    return /^[A-Z0-9]{10,34}$/.test(code) && (code.match(/\d/g)||[]).length>=6 ? code : '';
+  };
+  const patterns=[
+    /tracking_numbers?=([A-Z0-9% -]{8,60})/ig,
+    /(?:tracking(?: number| #)?|tracking #)\s*(?:is\s*)?[:#-]?\s*([A-Z0-9][A-Z0-9 -]{7,40})/ig,
+    /\b(1Z[A-Z0-9]{16})\b/ig,
+    /(?:FedEx|USPS|UPS|United Parcel Service)[^\n]{0,80}?(\d{10,22})/ig
+  ];
+  for(const pattern of patterns){
+    for(const match of hay.matchAll(pattern)){
+      const value=normalize(decodeURIComponent(String(match[1]||'').replace(/%(?![0-9A-F]{2})/gi,'%25')));
+      if(value)return value;
+    }
+  }
+  return '';
 }
 function candidateItemBeforeQty(ls, qi){
   for(let j=qi-1;j>=Math.max(0,qi-8);j--){

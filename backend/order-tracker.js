@@ -993,12 +993,35 @@ function extractAmounts(text) {
 }
 
 function extractTracking(text) {
-  const m = text.match(/(?:tracking(?: number| #)?|track package)\s*[:#]?\s*([A-Z0-9]{8,30})/i);
-  return m?.[1] || null;
+  const patterns = [
+    /tracking_numbers?=([A-Z0-9% -]{8,60})/ig,
+    /(?:tracking(?: number| #)?|tracking #)\s*(?:is\s*)?[:#-]?\s*([A-Z0-9][A-Z0-9 -]{7,40})/ig,
+    /\b(1Z[A-Z0-9]{16})\b/ig,
+    /(?:FedEx|USPS|UPS|United Parcel Service)[^\n]{0,80}?(\d{10,22})/ig
+  ];
+  for (const pattern of patterns) {
+    for (const match of String(text || '').matchAll(pattern)) {
+      let raw = String(match[1] || '');
+      try { raw = decodeURIComponent(raw.replace(/%(?![0-9A-F]{2})/gi, '%25')); } catch (_) {}
+      const candidate = normalizeTrackingNumber(raw);
+      if (candidate) return candidate;
+    }
+  }
+  return null;
+}
+
+function normalizeTrackingNumber(value) {
+  const code = clean(value).replace(/[^A-Z0-9]/gi, '').toUpperCase();
+  if (!code || /^(?:INFORMATION|AVAILABLE|BELOW|NUMBER|DETAILS|STATUS|PACKAGE|TRACKING)$/i.test(code)) return '';
+  if (!/\d/.test(code) || /^P\d{8,12}$/.test(code)) return '';
+  if (/^1Z[A-Z0-9]{16}$/.test(code)) return code;
+  if (/^\d{10,22}$/.test(code)) return code;
+  return /^[A-Z0-9]{10,34}$/.test(code) && (code.match(/\d/g) || []).length >= 6 ? code : '';
 }
 
 function detectCarrierFromTracking(trackingNumber, hint = '') {
-  const code = clean(trackingNumber).replace(/\s+/g, '').toUpperCase();
+  const code = normalizeTrackingNumber(trackingNumber);
+  if (!code) return '';
   const h = lower(hint);
   if (/fedex/.test(h)) return 'fedex';
   if (/\bups\b/.test(h)) return 'ups';
@@ -1010,7 +1033,8 @@ function detectCarrierFromTracking(trackingNumber, hint = '') {
 }
 
 function carrierTrackingUrl(carrier, trackingNumber) {
-  const code = encodeURIComponent(clean(trackingNumber));
+  const normalized = normalizeTrackingNumber(trackingNumber);
+  const code = encodeURIComponent(normalized);
   if (!code) return '';
   if (carrier === 'ups') return `https://www.ups.com/track?tracknum=${code}`;
   if (carrier === 'usps') return `https://tools.usps.com/go/TrackConfirmAction?tLabels=${code}`;
@@ -1565,7 +1589,10 @@ async function syncServiceOrders(supabase, userId, accounts = []) {
       try { await syncPokemonCenterWebhookItems(supabase, tracked, source); }
       catch (itemError) { console.warn(`[POKEMON ITEMS] ${orderNumber}: ${itemError.message || itemError}`); }
     }
-    if (tracked && exactProfileIdentity?.email && !['supreme'].includes(store) && !['matched','probable'].includes(lower(tracked.reconciliation_status))) {
+    // Pokemon Center is deliberately exempt: Stellar can keep the first queue entry's email for
+    // later profile checkouts. Its P-number is authoritative, so a different receiving mailbox is
+    // evidence we must retain, not a mismatched link to delete.
+    if (tracked && exactProfileIdentity?.email && !['supreme','pokemon','pokemoncenter'].includes(store) && !['matched','probable'].includes(lower(tracked.reconciliation_status))) {
       await removeMismatchedOrderEmailLinks(supabase, tracked.id, exactProfileIdentity.email);
     }
     if (tracked && ['confirmed','processing','shipped','delivered'].includes(lower(tracked.status))) {
@@ -2207,6 +2234,8 @@ async function saveParsedMessage(supabase, account, parsed, uid, adjustCredits =
     const shouldAdvance = sameMessageReclassification || lateAmazonGhostConfirmation || statusRank(status) >= statusRank(existing.status) || ['canceled','refunded'].includes(status);
 
     const preserveFinancials = store === 'amazon' && status !== 'confirmed';
+    const parsedTracking = extractTracking(text);
+    const priorTracking = normalizeTrackingNumber(existing?.tracking_number);
     const patch = {
       user_id: orderOwnerUserId,
       source_order_id: serviceOrder.id,
@@ -2224,8 +2253,8 @@ async function saveParsedMessage(supabase, account, parsed, uid, adjustCredits =
       tax: preserveFinancials ? existing?.tax ?? null : (amounts.tax ?? existing?.tax ?? null),
       shipping: preserveFinancials ? existing?.shipping ?? null : (amounts.shipping ?? existing?.shipping ?? null),
       total: preserveFinancials ? existing?.total ?? null : (amounts.total ?? existing?.total ?? null),
-      tracking_number: extractTracking(text) || existing?.tracking_number || null,
-      carrier: detectCarrierFromTracking(extractTracking(text) || existing?.tracking_number || '', `${subject} ${text.slice(0,2000)}`) || existing?.carrier || null,
+      tracking_number: parsedTracking || priorTracking || null,
+      carrier: detectCarrierFromTracking(parsedTracking || priorTracking || '', `${subject} ${text.slice(0,2000)}`) || (priorTracking ? existing?.carrier : null) || null,
       product_summary: (status === 'confirmed' ? productSummary : existing?.product_summary || productSummary) || null,
       receipt_html: status === 'confirmed' || !existing?.receipt_html ? receiptHtml : existing.receipt_html,
       receipt_text: status === 'confirmed' || !existing?.receipt_text ? text.slice(0, 250000) : existing.receipt_text,
@@ -2540,16 +2569,16 @@ async function discoverPokemonCenterConfirmationsGlobally(
 ) {
   // Database replay cannot repair a message that an earlier UID checkpoint never archived. During
   // a multi-profile Stellar run, Pokemon Center can deliver checkout 2/3/etc. to checkout 1's
-  // mailbox, so searching only the webhook/profile mailbox is inherently incorrect. This pass
-  // searches every eligible physical mailbox once by the authoritative confirmation subject,
-  // extracts the P-number, and lets saveParsedMessage() route it to the webhook order owner.
+  // mailbox, and later shipment/delivery notices can move to yet another mailbox. Search every
+  // eligible physical mailbox for the complete lifecycle; saveParsedMessage() routes each event
+  // to the webhook order owner using only the exact P-number.
   const targetRows = (trackedRows || []).filter(row => {
     const store = normalizeStoreKey(row.store || '');
     return store === 'pokemoncenter' && /^P\d{6,}$/i.test(clean(row.order_number || ''));
   });
   const targetRefs = new Set(targetRows.map(row => normalizeOrderRef(row.order_number)).filter(Boolean));
   if (!targetRefs.size) {
-    return { mailboxes_selected:0, mailboxes_checked:0, mailbox_failures:0, messages_found:0, messages_processed:0, messages_matched:0, messages_saved:0, matched_order_numbers:[], debug:['No Pokemon Center tracked P-numbers were available for live discovery.'] };
+    return { mailboxes_selected:0, mailboxes_checked:0, mailbox_failures:0, messages_found:0, messages_processed:0, messages_matched:0, messages_saved:0, matched_order_numbers:[], mailbox_matches:[], debug:['No Pokemon Center tracked P-numbers were available for live discovery.'] };
   }
 
   const dates = targetRows
@@ -2579,15 +2608,27 @@ async function discoverPokemonCenterConfirmationsGlobally(
   let messagesMatched = 0;
   let messagesSaved = 0;
   const matchedOrderNumbers = new Set();
+  const mailboxMatches = new Map();
+  const lifecycleSubjects = [
+    'Thank you for shopping at PokemonCenter.com!',
+    'order is on its way',
+    'package will arrive soon',
+    'package has been delivered'
+  ];
 
-  for (const account of accounts) {
-    const client = createGuardedImapFlow({
-      host:account.provider.host, port:account.provider.port, secure:account.provider.secure,
-      auth:await imapAuthForAccount(supabase,account), logger:false,
-      connectionTimeout:30000, greetingTimeout:30000, socketTimeout:120000
-    }, 'POKEMON GLOBAL IMAP');
+  const worker = async account => {
+    let client = null;
     let mailboxName = 'INBOX';
     try {
+      // Credential construction belongs inside the per-mailbox boundary. Previously the first
+      // broken OAuth/app-password row threw here before the try block, aborting all ~600 inboxes
+      // and reporting a misleading zero selected/zero checked result.
+      const auth = await imapAuthForAccount(supabase, account);
+      client = createGuardedImapFlow({
+        host:account.provider.host, port:account.provider.port, secure:account.provider.secure,
+        auth, logger:false,
+        connectionTimeout:30000, greetingTimeout:30000, socketTimeout:120000
+      }, 'POKEMON GLOBAL IMAP');
       await client.connect();
       let boxes = [];
       try { boxes = await client.list(); } catch (_) {}
@@ -2598,16 +2639,33 @@ async function discoverPokemonCenterConfirmationsGlobally(
       try {
         mailboxesChecked++;
         // This intentionally ignores the normal last_seen_uid checkpoint. The entire purpose is
-        // to recover older confirmations that existed before the tracker archived them.
-        let uids = await client.search({
-          since,
-          subject:'Thank you for shopping at PokemonCenter.com!'
-        }, { uid:true });
+        // to recover older lifecycle messages that existed before the tracker archived them.
+        let uids = [];
+        try {
+          uids = await client.search({
+            since,
+            or:lifecycleSubjects.map(subject => ({ subject }))
+          }, { uid:true }) || [];
+        } catch (combinedSearchError) {
+          // Some older IMAP servers reject a multi-branch OR. Fall back to four small searches
+          // inside this mailbox rather than failing the mailbox or the global job.
+          if (debug.length < 240) debug.push(`Live mailbox ${account.email}: combined lifecycle SEARCH failed; using subject fallbacks (${combinedSearchError.message || combinedSearchError})`);
+          const uidSet = new Set();
+          for (const subject of lifecycleSubjects) {
+            try {
+              const hits = await client.search({ since, subject }, { uid:true }) || [];
+              for (const uid of hits) uidSet.add(Number(uid));
+            } catch (searchError) {
+              if (debug.length < 240) debug.push(`Live mailbox ${account.email}: subject SEARCH failed subject=${JSON.stringify(subject)} (${searchError.message || searchError})`);
+            }
+          }
+          uids = [...uidSet];
+        }
         uids = [...new Set((uids || []).map(Number).filter(Number.isFinite).filter(uid => uid > 0))]
           .sort((a,b) => a-b)
           .slice(-500);
         messagesFound += uids.length;
-        if (uids.length && debug.length < 240) debug.push(`Live mailbox ${account.email}: confirmation_candidates=${uids.length}`);
+        if (uids.length && debug.length < 240) debug.push(`Live mailbox ${account.email}: lifecycle_candidates=${uids.length}`);
 
         for (let offset = 0; offset < uids.length; offset += 50) {
           const uidRange = imapUidSet(uids.slice(offset, offset + 50));
@@ -2624,12 +2682,19 @@ async function discoverPokemonCenterConfirmationsGlobally(
               if (store !== 'pokemoncenter' || !matchedRef) continue;
               messagesMatched++;
               matchedOrderNumbers.add(matchedRef);
+              const status = detectStatus(parsed.subject || '', text);
+              mailboxMatches.set(`${matchedRef}|${status}|${lower(account.email)}`, {
+                order_number:matchedRef,
+                event_type:status,
+                receiving_mailbox:lower(account.email),
+                subject:clean(parsed.subject || '').slice(0,180)
+              });
               const result = await saveParsedMessage(
                 supabase, account, parsed, msg.uid, adjustCredits, confirmPendingAmazonCheckout
               );
               if (result?.saved) messagesSaved++;
               if (debug.length < 240) debug.push(
-                `Live Pokemon confirmation: order=${matchedRef} mailbox=${account.email} result=${result?.saved ? 'SAVED' : `IGNORED:${result?.reason || 'unknown'}`}`
+                `Live Pokemon lifecycle: order=${matchedRef} status=${status} receiving_mailbox=${account.email} result=${result?.saved ? 'SAVED' : `IGNORED:${result?.reason || 'unknown'}`}`
               );
             } catch (messageError) {
               if (debug.length < 240) debug.push(`Live Pokemon message ERROR: mailbox=${account.email} uid=${msg.uid} ${messageError.message || messageError}`);
@@ -2644,8 +2709,14 @@ async function discoverPokemonCenterConfirmationsGlobally(
       if (debug.length < 240) debug.push(`Live Pokemon mailbox ERROR: mailbox=${account.email} ${describeImapError(mailboxError, mailboxName)}`);
       console.warn(`[POKEMON GLOBAL IMAP] ${account.email}: ${describeImapError(mailboxError, mailboxName)}`);
     } finally {
-      try { await client.logout(); } catch (_) {}
+      if (client) try { await client.logout(); } catch (_) {}
     }
+  };
+
+  // Keep enough concurrency to make a website-wide repair practical without opening hundreds of
+  // IMAP sockets at once. Counters are additive and each message write is idempotent by Message-ID.
+  for (let i = 0; i < accounts.length; i += 4) {
+    await Promise.all(accounts.slice(i, i + 4).map(worker));
   }
 
   return {
@@ -2657,6 +2728,7 @@ async function discoverPokemonCenterConfirmationsGlobally(
     messages_matched:messagesMatched,
     messages_saved:messagesSaved,
     matched_order_numbers:[...matchedOrderNumbers].sort(),
+    mailbox_matches:[...mailboxMatches.values()].sort((a,b) => a.order_number.localeCompare(b.order_number) || a.event_type.localeCompare(b.event_type)),
     since:since.toISOString(),
     debug
   };
@@ -2692,7 +2764,8 @@ async function reconcileHistoricalOrderProfileIdentity(supabase, rows = []) {
   const indexes = new Map();
   let corrected = 0, unlinked = 0;
   for (const order of rows || []) {
-    if (lower(order.store) === 'supreme' || ['matched','probable'].includes(lower(order.reconciliation_status))) continue;
+    const store = normalizeStoreKey(order.store || '');
+    if (store === 'supreme' || ['matched','probable'].includes(lower(order.reconciliation_status))) continue;
     const source = sourceMap.get(String(order.source_order_id || ''));
     if (!source) continue;
     const uid = String(order.user_id || source.user_id || '');
@@ -2711,7 +2784,11 @@ async function reconcileHistoricalOrderProfileIdentity(supabase, rows = []) {
         corrected++;
       }
     }
-    unlinked += await removeMismatchedOrderEmailLinks(supabase, order.id, identity.email);
+    // Preserve cross-mailbox Pokemon Center events. Ownership still comes from the webhook
+    // profile; exact P-number links are allowed to point at any physical receiving inbox.
+    if (store !== 'pokemoncenter') {
+      unlinked += await removeMismatchedOrderEmailLinks(supabase, order.id, identity.email);
+    }
   }
   return { corrected, unlinked };
 }
@@ -3398,33 +3475,95 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
 
 
 
-  async function decorateTrackedOrdersWithEmails(userId, orders = []) {
+  async function decorateTrackedOrdersWithEmails(userId, orders = [], allowGlobalPokemonLookup = false) {
     const ids = (orders || []).map(o => o.id).filter(Boolean);
     if (!ids.length) return orders || [];
-    const counts = new Map(ids.map(id => [id, { total:0, confirmed:0, processing:0, shipped:0, delivered:0, canceled:0, refunded:0, unknown:0 }]));
-    let junctionWorked = false;
+    const emptyCounts = () => ({ total:0, confirmed:0, processing:0, shipped:0, delivered:0, canceled:0, refunded:0, unknown:0 });
+    const counts = new Map(ids.map(id => [String(id), emptyCounts()]));
+    const receivingMailboxes = new Map(ids.map(id => [String(id), new Set()]));
+    const seenMessages = new Map(ids.map(id => [String(id), new Set()]));
+    const addEmail = (orderId, email = {}, eventType = '') => {
+      const id = String(orderId || '');
+      const c = counts.get(id);
+      if (!c) return;
+      const t = lower(eventType || email.email_type || 'unknown');
+      const mailbox = lower(email.mailbox_email || '');
+      const messageKey = clean(email.message_id) || clean(email.id) || `${t}|${mailbox}|${clean(email.order_number)}`;
+      if (seenMessages.get(id).has(messageKey)) return;
+      seenMessages.get(id).add(messageKey);
+      c.total += 1;
+      c[t] = (c[t] || 0) + 1;
+      if (mailbox) receivingMailboxes.get(id).add(mailbox);
+    };
+
     try {
       const { data, error } = await supabase.from('tracked_order_emails')
-        .select('order_id,event_type,email_messages!inner(id)')
+        .select('order_id,event_type,email_messages!inner(id,message_id,mailbox_email,email_type,order_number)')
         .in('order_id', ids);
       if (!error) {
-        junctionWorked = true;
         for (const row of data || []) {
-          const c = counts.get(row.order_id); if (!c) continue;
-          const t = lower(row.event_type || 'unknown');
-          c.total += 1; c[t] = (c[t] || 0) + 1;
+          addEmail(row.order_id, row.email_messages || {}, row.event_type);
         }
       }
     } catch (_) {}
-    if (!junctionWorked) {
-      try {
-        const { data } = await supabase.from('email_messages').select('id,linked_order_id,email_type').in('linked_order_id', ids);
-        for (const row of data || []) {
-          const c = counts.get(row.linked_order_id); if (!c) continue;
-          const t = lower(row.email_type || 'unknown');
-          c.total += 1; c[t] = (c[t] || 0) + 1;
+    // Always merge legacy links. The junction table can exist yet be empty for older rows, so a
+    // successful junction query must not suppress linked_order_id records.
+    try {
+      const { data } = await supabase.from('email_messages')
+        .select('id,message_id,linked_order_id,email_type,mailbox_email,order_number')
+        .in('linked_order_id', ids);
+      for (const row of data || []) addEmail(row.linked_order_id, row, row.email_type);
+    } catch (_) {}
+
+    // Super-admins may view exact-P-number Pokemon Center mail from the complete website archive.
+    // This is also a read-time safety net for legacy receipt rows whose cross-user junction link
+    // was deleted by an older profile-identity repair.
+    if (allowGlobalPokemonLookup) {
+      const refToOrderIds = new Map();
+      const messageIdToOrderIds = new Map();
+      for (const order of orders || []) {
+        if (normalizeStoreKey(order.store || '') !== 'pokemoncenter') continue;
+        const ref = normalizeOrderRef(order.order_number);
+        if (!/^P\d{6,}$/i.test(ref)) continue;
+        if (!refToOrderIds.has(ref)) refToOrderIds.set(ref, []);
+        refToOrderIds.get(ref).push(String(order.id));
+        const messageId = clean(order.last_message_id);
+        if (messageId) {
+          if (!messageIdToOrderIds.has(messageId)) messageIdToOrderIds.set(messageId, []);
+          messageIdToOrderIds.get(messageId).push(String(order.id));
         }
-      } catch (_) {}
+      }
+      const refs = [...refToOrderIds.keys()];
+      for (let i = 0; i < refs.length; i += 75) {
+        try {
+          const result = await supabase.from('email_messages')
+            .select('id,message_id,order_number,email_type,mailbox_email,store')
+            .in('store', ['pokemon','pokemoncenter'])
+            .in('order_number', refs.slice(i, i + 75));
+          if (result.error) continue;
+          for (const email of result.data || []) {
+            for (const orderId of refToOrderIds.get(normalizeOrderRef(email.order_number)) || []) {
+              addEmail(orderId, email, email.email_type);
+            }
+          }
+        } catch (_) {}
+      }
+      // Legacy cleanup could clear both link tables after the tracker had already copied the
+      // receipt body. last_message_id is a second exact pointer to the archived physical inbox.
+      const messageIds = [...messageIdToOrderIds.keys()];
+      for (let i = 0; i < messageIds.length; i += 75) {
+        try {
+          const result = await supabase.from('email_messages')
+            .select('id,message_id,order_number,email_type,mailbox_email,store')
+            .in('message_id', messageIds.slice(i, i + 75));
+          if (result.error) continue;
+          for (const email of result.data || []) {
+            for (const orderId of messageIdToOrderIds.get(clean(email.message_id)) || []) {
+              addEmail(orderId, email, email.email_type);
+            }
+          }
+        } catch (_) {}
+      }
     }
     const itemMap = new Map(ids.map(id => [String(id), []]));
     const shipmentMap = new Map(ids.map(id => [String(id), []]));
@@ -3437,18 +3576,36 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
       for (let i=0;i<ids.length;i+=100) {
         const r=await supabase.from('tracked_order_shipments').select('*').in('order_id',ids.slice(i,i+100)).order('created_at');
         if (r.error) throw r.error;
-        for (const row of r.data||[]) (shipmentMap.get(String(row.order_id))||[]).push({ ...row, tracking_url: carrierTrackingUrl(row.carrier || detectCarrierFromTracking(row.tracking_number || ''), row.tracking_number || '') });
+        for (const row of r.data||[]) {
+          const trackingNumber = normalizeTrackingNumber(row.tracking_number);
+          if (!trackingNumber) continue;
+          (shipmentMap.get(String(row.order_id))||[]).push({
+            ...row,
+            tracking_number:trackingNumber,
+            tracking_url:carrierTrackingUrl(row.carrier || detectCarrierFromTracking(trackingNumber), trackingNumber)
+          });
+        }
       }
     } catch (_) { /* item-level migration is optional until installed */ }
-    return (orders || []).map(o => ({
-      ...o,
-      email_counts: counts.get(o.id) || { total:0 },
-      has_linked_email: Number(counts.get(o.id)?.total || 0) > 0,
-      has_confirmation_email: Number(counts.get(o.id)?.confirmed || 0) > 0 || Boolean(o.receipt_html || o.receipt_text),
-      items: itemMap.get(String(o.id)) || [],
-      shipments: shipmentMap.get(String(o.id)) || [],
-      tracking_url: carrierTrackingUrl(o.carrier || detectCarrierFromTracking(o.tracking_number || ''), o.tracking_number || '')
-    }));
+    return (orders || []).map(o => {
+      const id = String(o.id);
+      const emailCounts = counts.get(id) || emptyCounts();
+      const mailboxes = [...(receivingMailboxes.get(id) || [])].sort();
+      const expected = lower(o.source_email || '');
+      const trackingNumber = normalizeTrackingNumber(o.tracking_number);
+      return {
+        ...o,
+        tracking_number:trackingNumber || null,
+        email_counts:emailCounts,
+        has_linked_email:Number(emailCounts.total || 0) > 0,
+        has_confirmation_email:Number(emailCounts.confirmed || 0) > 0 || Boolean(o.receipt_html || o.receipt_text),
+        actual_receiving_mailboxes:mailboxes,
+        email_delivery_mismatch:Boolean(expected && mailboxes.some(mailbox => mailbox !== expected)),
+        items:itemMap.get(id) || [],
+        shipments:shipmentMap.get(id) || [],
+        tracking_url:carrierTrackingUrl(o.carrier || detectCarrierFromTracking(trackingNumber), trackingNumber)
+      };
+    });
   }
 
   app.get('/orders/bootstrap', auth, async (req, res) => {
@@ -3481,7 +3638,7 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
       if (result.error) result = await supabase.from('tracked_orders').select('*')
         .eq('user_id', req.user_id).order('order_date', { ascending:false }).limit(1000);
       if (result.error) throw result.error;
-      orders = await decorateTrackedOrdersWithEmails(req.user_id, result.data || []);
+      orders = await decorateTrackedOrdersWithEmails(req.user_id, result.data || [], req.role === 'super_admin');
     } catch (error) { warnings.push(`Tracked orders: ${error.message}`); }
 
     const summary = orders.reduce((a,o) => { a.total += Number(o.total || 0); a[o.status] = (a[o.status]||0)+1; return a; }, { total:0 });
@@ -4019,7 +4176,7 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
       }
       // Now queue the ordinary catch-up scan for anything that was not part of the targeted set.
       try { startUserScanJob(supabase,req.user_id,adjustUserCredits,confirmPendingAmazonCheckout); } catch (_) {}
-      const result = {success:true,checked,matched,ignored,failed,pokemon_archive_messages:pokemonArchiveRows.length,pokemon_live_discovery:pokemonLiveDiscovery,pokemon_stats:pokemonStats,pokemon_debug:pokemonDebug,supreme_rebuild:supremeRebuild,supreme_live:supremeLive,supreme_debug:[...(supremeLive?.debug||[]).slice(-120), ...serviceOrdersForSupreme.slice(0,40).map((o,i)=>`Service order ${i+1}: id=${o.id} site=${o.site||'-'} metadata.site=${o.metadata?.site||'-'} payload site/store=${extractNamedPayloadValue(o.raw_payload||{},['site','store'])||'-'} normalized=${normalizeStoreKey(o.site || o.metadata?.site || extractNamedPayloadValue(o.raw_payload||{},['site','store']))||'-'}`)],supreme_discovery:{metadata_scanned:supremeDiscovery?.metadata_scanned||0,candidates_found:supremeDiscovery?.candidates_found||0,windows:supremeDiscovery?.windows||0},damaged_target_orders:damagedLinkedOrderIds.length,repair,message:`Searched ${pokemonLiveDiscovery.mailboxes_checked||0} live website mailbox(es) for Pokemon Center confirmations and matched ${pokemonLiveDiscovery.messages_matched||0}; replayed ${pokemonArchiveRows.length} Pokemon Center archive message(s); rebuilt ${supremeRebuild?.assigned||0} Supreme confirmation assignment(s); then repaired ${damagedLinkedOrderIds.length} unresolved Target order(s).`};
+      const result = {success:true,checked,matched,ignored,failed,pokemon_archive_messages:pokemonArchiveRows.length,pokemon_live_discovery:pokemonLiveDiscovery,pokemon_stats:pokemonStats,pokemon_debug:pokemonDebug,supreme_rebuild:supremeRebuild,supreme_live:supremeLive,supreme_debug:[...(supremeLive?.debug||[]).slice(-120), ...serviceOrdersForSupreme.slice(0,40).map((o,i)=>`Service order ${i+1}: id=${o.id} site=${o.site||'-'} metadata.site=${o.metadata?.site||'-'} payload site/store=${extractNamedPayloadValue(o.raw_payload||{},['site','store'])||'-'} normalized=${normalizeStoreKey(o.site || o.metadata?.site || extractNamedPayloadValue(o.raw_payload||{},['site','store']))||'-'}`)],supreme_discovery:{metadata_scanned:supremeDiscovery?.metadata_scanned||0,candidates_found:supremeDiscovery?.candidates_found||0,windows:supremeDiscovery?.windows||0},damaged_target_orders:damagedLinkedOrderIds.length,repair,message:`Searched ${pokemonLiveDiscovery.mailboxes_checked||0} live website mailbox(es) for Pokemon Center confirmation/shipped/delivered events and matched ${pokemonLiveDiscovery.messages_matched||0}; replayed ${pokemonArchiveRows.length} Pokemon Center archive message(s); rebuilt ${supremeRebuild?.assigned||0} Supreme confirmation assignment(s); then repaired ${damagedLinkedOrderIds.length} unresolved Target order(s).`};
       Object.assign(reconcileJob, { status:'complete', finished_at:new Date().toISOString(), result, error:null });
     } catch(error){
       console.error('[RECONCILE RETAILER EMAILS]', error.message || error);
@@ -4131,7 +4288,7 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
       ({data,error}=await q);
     }
     if (error) return res.status(500).json({ error:error.message });
-    const orders = await decorateTrackedOrdersWithEmails(req.user_id, data || []);
+    const orders = await decorateTrackedOrdersWithEmails(req.user_id, data || [], req.role === 'super_admin');
     const summary = orders.reduce((a,o) => { a.total += Number(o.total || 0); a[o.status]=(a[o.status]||0)+1; return a; }, {total:0});
     summary.success_rate = orders.length ? Math.round(((summary.confirmed || 0)+(summary.processing || 0)+(summary.shipped || 0)+(summary.delivered || 0))/orders.length*1000)/10 : 0;
     res.json({ orders, summary, background_scanning: process.env.IMAP_ORDER_TRACKER_ENABLED !== 'false' });
@@ -4228,6 +4385,36 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
         emails = data || [];
       } catch (_) {}
     }
+
+    // A Pokemon Center message may physically belong to another website user's mailbox. For a
+    // super-admin viewing an owned tracker row, merge every archived lifecycle event with the same
+    // exact P-number, regardless of mailbox owner. This also recovers legacy cross-user links that
+    // an older profile-identity repair removed from the junction table.
+    if (req.role === 'super_admin' && normalizeStoreKey(order.store || '') === 'pokemoncenter' && /^P\d{6,}$/i.test(clean(order.order_number || ''))) {
+      try {
+        const globalResult = await supabase.from('email_messages')
+          .select('*')
+          .in('store', ['pokemon','pokemoncenter'])
+          .eq('order_number', order.order_number)
+          .order('received_at', { ascending:true });
+        let lastMessageRows = [];
+        if (clean(order.last_message_id)) {
+          const lastMessageResult = await supabase.from('email_messages')
+            .select('*')
+            .eq('message_id', order.last_message_id)
+            .order('received_at', { ascending:true });
+          if (!lastMessageResult.error) lastMessageRows = lastMessageResult.data || [];
+        }
+        if (!globalResult.error || lastMessageRows.length) {
+          const merged = new Map();
+          for (const email of [...emails, ...(globalResult.data || []), ...lastMessageRows]) {
+            const key = clean(email.message_id) || clean(email.id) || `${lower(email.email_type || email.event_type)}|${lower(email.mailbox_email)}|${email.received_at || email.event_at || ''}`;
+            if (!merged.has(key)) merged.set(key, email);
+          }
+          emails = [...merged.values()].sort((a,b) => new Date(a.received_at || a.event_at || 0) - new Date(b.received_at || b.event_at || 0));
+        }
+      } catch (_) {}
+    }
     if (type !== 'all') emails = emails.filter(e => lower(e.event_type || e.email_type) === type);
 
     // Old records created before full email-body storage may only have the confirmation body on
@@ -4236,19 +4423,20 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
       emails = [{
         subject: order.raw_subject || `${order.store} order confirmation`,
         received_at: order.order_date,
-        email_type: 'confirmed', event_type: 'confirmed', mailbox_email: order.source_email,
+        email_type: 'confirmed', event_type: 'confirmed', mailbox_email: null,
         body_html: order.receipt_html, body_text: order.receipt_text,
-        snippet: order.receipt_text
+        snippet: order.receipt_text, legacy_receipt_only:true
       }];
     }
 
     const labelMap = { confirmed:'Confirmed receipt', processing:'Processing update', shipped:'Shipping / tracking confirmation', delivered:'Delivered confirmation', canceled:'Cancellation', refunded:'Refund confirmation', all:'All order emails' };
+    const actualMailboxes = [...new Set(emails.map(e => lower(e.mailbox_email)).filter(Boolean))].sort();
     const cards = emails.map((e, i) => {
       const eventType = lower(e.event_type || e.email_type || 'unknown');
       const body = e.body_html || (e.body_text ? `<pre>${htmlEscape(e.body_text)}</pre>` : `<pre>${htmlEscape(e.snippet || 'Full body was not stored for this older message. Re-scanning this mailbox will backfill it.')}</pre>`);
-      return `<section class="email-card"><div class="email-meta"><span class="email-type email-${htmlEscape(eventType)}">${htmlEscape(labelMap[eventType] || eventType)}</span><h2>${htmlEscape(e.subject || 'Order email')}</h2><div><b>Mailbox:</b> ${htmlEscape(e.mailbox_email || order.source_email || '')}</div><div><b>Received:</b> ${htmlEscape(e.received_at || e.event_at || '')}</div></div><div class="email-body">${body}</div></section>`;
+      return `<section class="email-card"><div class="email-meta"><span class="email-type email-${htmlEscape(eventType)}">${htmlEscape(labelMap[eventType] || eventType)}</span><h2>${htmlEscape(e.subject || 'Order email')}</h2><div><b>Actually received by:</b> ${htmlEscape(e.mailbox_email || 'Not recorded (legacy saved receipt)')}</div><div><b>Received:</b> ${htmlEscape(e.received_at || e.event_at || '')}</div></div><div class="email-body">${body}</div></section>`;
     }).join('');
-    res.type('html').send(`<!doctype html><html><head><meta charset="utf-8"><title>${htmlEscape(labelMap[type])} — ${htmlEscape(order.order_number)}</title><style>body{font-family:Arial,sans-serif;max-width:980px;margin:28px auto;padding:18px;color:#111827;background:#f3f6fb}.top{position:sticky;top:0;background:#f3f6fb;padding:8px 0 14px;z-index:3}.email-card{background:white;border:1px solid #dbe3ef;border-radius:16px;padding:18px;margin:14px 0}.email-meta{border-bottom:1px solid #e5e7eb;padding-bottom:12px;margin-bottom:16px}.email-meta h2{margin:8px 0}.email-type{display:inline-block;padding:5px 9px;border-radius:999px;background:#e2e8f0;font-weight:700;font-size:12px}.email-confirmed{background:#dbeafe}.email-shipped{background:#1e3a8a;color:white}.email-delivered{background:#dcfce7}.email-canceled,.email-refunded{background:#fee2e2}.email-body{overflow-wrap:anywhere}.email-body img{max-width:100%;height:auto}pre{white-space:pre-wrap;overflow-wrap:anywhere}@media print{.top{display:none}.email-card{break-inside:avoid}}</style></head><body><div class="top"><button onclick="print()">Print / Save as PDF</button> <b>${htmlEscape(order.store.toUpperCase())} · ${htmlEscape(order.order_number)}</b> — ${htmlEscape(labelMap[type])} (${emails.length})</div>${cards || '<section class="email-card">No matching email has been linked to this order yet.</section>'}</body></html>`);
+    res.type('html').send(`<!doctype html><html><head><meta charset="utf-8"><title>${htmlEscape(labelMap[type])} — ${htmlEscape(order.order_number)}</title><style>body{font-family:Arial,sans-serif;max-width:980px;margin:28px auto;padding:18px;color:#111827;background:#f3f6fb}.top{position:sticky;top:0;background:#f3f6fb;padding:8px 0 14px;z-index:3}.identity{background:#fff7d6;border:1px solid #f4c430;border-radius:12px;padding:11px 14px;margin-top:10px;line-height:1.5}.email-card{background:white;border:1px solid #dbe3ef;border-radius:16px;padding:18px;margin:14px 0}.email-meta{border-bottom:1px solid #e5e7eb;padding-bottom:12px;margin-bottom:16px}.email-meta h2{margin:8px 0}.email-type{display:inline-block;padding:5px 9px;border-radius:999px;background:#e2e8f0;font-weight:700;font-size:12px}.email-confirmed{background:#dbeafe}.email-shipped{background:#1e3a8a;color:white}.email-delivered{background:#dcfce7}.email-canceled,.email-refunded{background:#fee2e2}.email-body{overflow-wrap:anywhere}.email-body img{max-width:100%;height:auto}pre{white-space:pre-wrap;overflow-wrap:anywhere}@media print{.top{position:static}.top button{display:none}.email-card{break-inside:avoid}}</style></head><body><div class="top"><button onclick="print()">Print / Save as PDF</button> <b>${htmlEscape(order.store.toUpperCase())} · ${htmlEscape(order.order_number)}</b> — ${htmlEscape(labelMap[type])} (${emails.length})<div class="identity"><div><b>Expected profile email (webhook owner):</b> ${htmlEscape(order.source_email || 'Not recorded')}</div><div><b>Actually received by:</b> ${htmlEscape(actualMailboxes.join(', ') || 'Not recorded yet')}</div></div></div>${cards || '<section class="email-card">No matching email has been linked to this order yet.</section>'}</body></html>`);
   });
 
   app.get('/orders/receipt/:id', auth, async (req, res) => {
