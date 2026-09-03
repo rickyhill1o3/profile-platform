@@ -223,8 +223,12 @@ async function fetchEmailArchiveRowsByIds(supabase, userId, ids = [], columns = 
   const uniqueIds = [...new Set((ids || []).filter(Boolean).map(String))];
   for (let i = 0; i < uniqueIds.length; i += chunkSize) {
     const chunk = uniqueIds.slice(i, i + chunkSize);
-    const r = await supabase.from('email_messages').select(columns)
-      .eq('user_id', userId).in('id', chunk);
+    let query = supabase.from('email_messages').select(columns).in('id', chunk);
+    // A null scope is used only by the super-admin Pokemon Center repair. Pokemon Center is the
+    // one retailer whose queue can send several users' confirmations to the first profile's inbox.
+    // Every other caller continues supplying a user id and remains user-scoped.
+    if (userId) query = query.eq('user_id', userId);
+    const r = await query;
     if (r.error) throw r.error;
     out.push(...(r.data || []));
   }
@@ -270,12 +274,17 @@ async function fetchPokemonCenterArchiveCandidates(supabase, userId, columns, tr
   for (const store of ['pokemoncenter','pokemon']) {
     let from = 0;
     while (true) {
-      const r = await supabase.from('email_messages')
+      let query = supabase.from('email_messages')
         .select('id,received_at,subject,email_type,order_number,mailbox_email,store')
-        .eq('user_id', userId).eq('store', store)
+        .eq('store', store)
         .gte('received_at', sinceIso)
         .order('received_at', { ascending:false })
         .range(from, from + pageSize - 1);
+      // Super-admin reconciliation passes null to search the complete website archive. This is
+      // intentionally Pokemon Center-only; Stellar may reuse the first queue entry's email while
+      // the exact P-number and webhook Profile still identify a different checkout owner.
+      if (userId) query = query.eq('user_id', userId);
+      const r = await query;
       if (r.error) throw r.error;
       metaRows.push(...(r.data || []));
       if (!r.data || r.data.length < pageSize) break;
@@ -3642,10 +3651,10 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
         supabase, req.user_id, 'target', archiveColumns, targetManualLimit
       );
 
-      // Pokemon Center mail is intentionally centralized in the Shore Shack mailbox. Include its
-      // archived retailer messages in manual reconciliation so an exact P-order number can be
-      // mirrored onto the Stellar profile owner even when the receiving mailbox belongs to a
-      // different website user. Ownership still comes from the webhook Profile, never the inbox.
+      // Pokemon Center mail can land in any website user's mailbox because Stellar may keep the
+      // first checkout's email across a multi-profile queue. Super-admin reconciliation therefore
+      // searches the complete website Pokemon Center archive. Exact P-number -> webhook order is
+      // still the only ownership rule; the receiving inbox can never move or charge an order.
       let pokemonArchiveRows = [];
       let pokemonArchiveDiscovery = { rows:[], metadata_scanned:0, candidates_found:0, since:null };
       try {
@@ -3654,8 +3663,9 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
           .in('store',['pokemon','pokemoncenter'])
           .order('order_date',{ascending:false}).limit(2000);
         if (pokemonTrackerMeta.error) throw pokemonTrackerMeta.error;
+        const pokemonArchiveUserScope = req.role === 'super_admin' ? null : req.user_id;
         pokemonArchiveDiscovery = await fetchPokemonCenterArchiveCandidates(
-          supabase, req.user_id, archiveColumns, pokemonTrackerMeta.data || []
+          supabase, pokemonArchiveUserScope, archiveColumns, pokemonTrackerMeta.data || []
         );
         pokemonArchiveRows = pokemonArchiveDiscovery.rows || [];
       } catch (e) { console.warn('[POKEMON CENTER CLASSIFIED ARCHIVE]', e.message || e); }
@@ -3756,7 +3766,12 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
           pokemonContext = { orderNo, detectedStatus, subject: clean(email.subject||'').slice(0,140), mailbox: lower(email.mailbox_email), archivedStore: lower(email.store||'') || '-', archivedType: lower(email.email_type||'') || '-', archivedOrder: clean(email.order_number||'') || '-' };
         }
         try{
-          const account={ user_id:req.user_id, archive_user_id:req.user_id, profile_id:null, email:lower(email.mailbox_email), provider:providerForEmail(email.mailbox_email)||{name:'archive'}, ingestion_source:email.source_type||'archive_reconcile' };
+          // Preserve the archive row's actual receiving user while parsing. saveParsedMessage()
+          // globally resolves Pokemon Center ownership from the exact P-number, then mirrors the
+          // message to that webhook/profile owner. Using req.user_id here would hide the original
+          // cross-user delivery and could create a duplicate under the clicking admin instead.
+          const archiveOwnerUserId = email.user_id || req.user_id;
+          const account={ user_id:archiveOwnerUserId, archive_user_id:archiveOwnerUserId, profile_id:null, email:lower(email.mailbox_email), provider:providerForEmail(email.mailbox_email)||{name:'archive'}, ingestion_source:email.source_type||'archive_reconcile' };
           const parsed={ subject:email.subject||'', from:{text:email.from_text||''}, to:{text:email.to_text||''}, cc:{text:email.cc_text||''}, text:archivedText, html:email.body_html||null, date:new Date(email.received_at||Date.now()), messageId:email.message_id };
           const result=await saveParsedMessage(supabase,account,parsed,email.imap_uid||0,adjustUserCredits,confirmPendingAmazonCheckout);
           if(result?.saved)matched++; else ignored++;
