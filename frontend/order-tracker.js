@@ -14,7 +14,7 @@ function setProgress(percent,stage,detail=''){const p=Math.max(0,Math.min(100,Nu
 function showWarning(text){$('scanWarning').hidden=!text;$('scanWarning').textContent=text||''}
 function renderAccounts(accounts=[]){const el=$('scanAccounts');el.innerHTML=accounts.length?accounts.map(a=>`<div class="mail-account"><div class="mail-ok">✓ ${esc(a.email)}</div><div>${esc(a.provider||'IMAP')} · ${a.last_success_at?'Last scan '+new Date(a.last_success_at).toLocaleString():'Ready for first scan'}</div>${a.scanned_through_at?`<div class="subtle-text">Scanned through ${new Date(a.scanned_through_at).toLocaleString()}</div>`:''}${a.last_error?`<div class="mail-error">${esc(a.last_error)}</div>`:''}</div>`).join(''):'<p class="subtle-text">No supported IMAP/app password was found in saved profiles.</p>'}
 function applyOrders(orders=[],summary={}){allOrders=orders;render();$('countAll').textContent=allOrders.length;$('countActive').textContent=(summary.confirmed||0)+(summary.processing||0);$('countSuccess').textContent=(summary.shipped||0)+(summary.delivered||0);$('countCanceled').textContent=(summary.canceled||0)+(summary.refunded||0);$('successRate').textContent=`${Number(summary.success_rate||0).toFixed(1)}%`}
-async function bootstrap(){const j=await api('/orders/bootstrap');renderAccounts(j.accounts||[]);applyOrders(j.orders||[],j.summary||{});$('scanMessage').textContent=`${j.connected_count||0} connected mailbox${Number(j.connected_count||0)===1?'':'es'}. Scans continue from the last saved IMAP UID, so previously checked messages are not searched again.`;if(Array.isArray(j.warnings)&&j.warnings.length)showWarning(`Some optional data could not be refreshed: ${j.warnings.join(' | ')}`);if(j.is_super_admin){$('aycdPanel').hidden=false;refreshAycdStatus()}return j}
+async function bootstrap(){const j=await api('/orders/bootstrap');renderAccounts(j.accounts||[]);applyOrders(j.orders||[],j.summary||{});$('scanMessage').textContent=`${j.connected_count||0} connected mailbox${Number(j.connected_count||0)===1?'':'es'}. Scans continue from the last saved IMAP UID, so previously checked messages are not searched again.`;if(Array.isArray(j.warnings)&&j.warnings.length)showWarning(`Some optional data could not be refreshed: ${j.warnings.join(' | ')}`);if(j.is_super_admin){$('aycdPanel').hidden=false;$('oneTimePokemonPanel').hidden=false;refreshAycdStatus()}return j}
 async function loadOrders(){const qs=new URLSearchParams();if($('statusFilter').value)qs.set('status',$('statusFilter').value);if($('yearFilter').value)qs.set('year',$('yearFilter').value);const j=await api('/orders/tracked?'+qs);applyOrders(j.orders||[],j.summary||{})}
 function isPokemonCenterOrder(o){const store=String(o.store||'').toLowerCase().replace(/[^a-z0-9]/g,'');return store==='pokemon'||store==='pokemoncenter'}
 function hasPokemonConfirmationEmail(o){const c=o.email_counts||{};return Boolean(o.has_confirmation_email)||Number(c.confirmed||0)>0}
@@ -79,6 +79,40 @@ $('pairAycd').onclick=async()=>{try{const j=await api('/orders/aycd/pair/start',
 $('scanAycd').onclick=async()=>{try{await api('/orders/aycd/scan-request',{method:'POST',body:JSON.stringify({lookbackDays:Number($('aycdLookback').value||240)})});$('aycdMessage').textContent='AYCD scan requested. The laptop helper will begin within a few seconds.';await refreshAycdStatus()}catch(e){$('aycdMessage').textContent=e.message}};
 $('refreshAycd').onclick=refreshAycdStatus;
 setInterval(()=>{if(!$('aycdPanel').hidden)refreshAycdStatus()},10000);
+if($('runOneTimePokemonRecovery')) $('runOneTimePokemonRecovery').onclick=async()=>{
+  const button=$('runOneTimePokemonRecovery');
+  const email=String($('oneTimePokemonEmail').value||'').trim();
+  let appPassword=String($('oneTimePokemonPassword').value||'');
+  const orderNumbers=String($('oneTimePokemonOrders').value||'').trim();
+  const result=$('oneTimePokemonResult');
+  if(!email||!appPassword||!orderNumbers){result.textContent='Enter the mailbox email, app password, and at least one P-order number.';return}
+  button.disabled=true;
+  button.textContent='Searching one mailbox…';
+  result.textContent='Connecting securely and searching only for the requested P-order numbers…';
+  // Clear the visible password immediately. The request payload is never written to localStorage.
+  $('oneTimePokemonPassword').value='';
+  try{
+    const j=await api('/orders/pokemon-center/one-time-mailbox-recovery',{
+      method:'POST',
+      body:JSON.stringify({email,app_password:appPassword,order_numbers:orderNumbers})
+    });
+    const events=Array.isArray(j.matched_events)?j.matched_events:[];
+    const lines=[j.message||'One-time recovery finished.'];
+    if(events.length)lines.push(...events.map(item=>`${item.order_number} · ${item.event_type} · ${item.receiving_mailbox} · ${item.result}`));
+    if(Array.isArray(j.not_found)&&j.not_found.length)lines.push(`Not found in this mailbox: ${j.not_found.join(', ')}`);
+    if(Array.isArray(j.missing_platform_orders)&&j.missing_platform_orders.length)lines.push(`Not recognized as website Pokemon Center orders: ${j.missing_platform_orders.join(', ')}`);
+    lines.push('Credential saved: No');
+    result.textContent=lines.join('\n');
+    await loadOrders();
+  }catch(e){
+    result.textContent=e.message||'One-time mailbox recovery failed.';
+  }finally{
+    appPassword='';
+    $('oneTimePokemonPassword').value='';
+    button.disabled=false;
+    button.textContent='Recover these order emails';
+  }
+};
 $('printYear').onclick=async()=>{const y=$('yearFilter').value||new Date().getFullYear();const r=await fetch(`${API}/orders/tax-export?year=${y}`,{headers:{Authorization:`Bearer ${token}`}});if(!r.ok){alert('Annual receipt archive could not be opened');return}const html=await r.text();const w=window.open('','_blank');w.document.open();w.document.write(html);w.document.close()};
 
 function showReconcileDiagnostics(text){
@@ -115,6 +149,13 @@ Pokemon Center archive messages replayed: ${j.pokemon_archive_messages||0}
 Pokemon Center live mailboxes selected: ${j.pokemon_live_discovery?.mailboxes_selected||0}
 Pokemon Center live mailboxes checked: ${j.pokemon_live_discovery?.mailboxes_checked||0}
 Pokemon Center live mailbox failures: ${j.pokemon_live_discovery?.mailbox_failures||0}
+Pokemon Center global loader scope: ${j.pokemon_live_discovery?.loader_diagnostics?.scope||'-'}
+Website profiles loaded across all pages: ${j.pokemon_live_discovery?.loader_diagnostics?.profiles_loaded??'-'}
+Verified mailbox states loaded across all pages: ${j.pokemon_live_discovery?.loader_diagnostics?.verified_states_loaded??'-'}
+Current credential rows loaded: ${j.pokemon_live_discovery?.loader_diagnostics?.current_credential_rows??'-'}
+Legacy credential rows loaded: ${j.pokemon_live_discovery?.loader_diagnostics?.legacy_credential_rows??'-'}
+Usable direct mailbox credentials: ${j.pokemon_live_discovery?.loader_diagnostics?.usable_direct_mailboxes??'-'}
+Imported mailbox credentials loaded: ${j.pokemon_live_discovery?.loader_diagnostics?.imported_mailboxes_loaded??'-'}
 Pokemon Center live lifecycle candidates: ${j.pokemon_live_discovery?.messages_found||0}
 Pokemon Center live exact P-number matches: ${j.pokemon_live_discovery?.messages_matched||0}
 Pokemon Center live messages saved/linked: ${j.pokemon_live_discovery?.messages_saved||0}
@@ -122,6 +163,10 @@ Pokemon Center P-numbers recovered from raw email source: ${j.pokemon_live_disco
 Pokemon Center live matched P-numbers: ${(j.pokemon_live_discovery?.matched_order_numbers||[]).join(', ')||'-'}
 Pokemon Center actual receiving mailbox matches:
 ${(j.pokemon_live_discovery?.mailbox_matches||[]).map(x=>`${x.order_number||'-'} · ${x.event_type||'-'} · ${x.receiving_mailbox||'-'}`).join('\n')||'-'}
+Pokemon Center mailbox connection failures:
+${(j.pokemon_live_discovery?.mailbox_failure_details||[]).map(x=>`${x.email||'-'} · ${x.error||'connection failed'}`).join('\n')||'-'}
+Pokemon Center selected physical mailboxes (search this list to verify a specific account was included):
+${(j.pokemon_live_discovery?.selected_mailboxes||[]).join('\n')||'-'}
 Pokemon Center metadata scanned: ${j.pokemon_stats?.metadata_scanned||0}
 Pokemon Center order-email candidates found: ${j.pokemon_stats?.candidates_found||0}
 Pokemon Center archive scan since: ${j.pokemon_stats?.archive_since||'-'}

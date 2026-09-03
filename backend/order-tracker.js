@@ -747,15 +747,23 @@ async function imapAuthForAccount(supabase, account) {
 }
 
 async function loadImportedScanAccounts(supabase, onlyUserId = null) {
-  let q = supabase.from('imported_mail_accounts').select('*').eq('is_enabled', true).eq('is_placeholder', false);
-  if (onlyUserId) q = q.or(`imported_by_user_id.eq.${onlyUserId},matched_user_id.eq.${onlyUserId}`);
-  const { data, error } = await q.order('last_scan_at', { ascending: true, nullsFirst: true });
-  if (error) {
+  let data = [];
+  try {
+    // The website-wide Pokemon Center repair can include more imported mailboxes than
+    // PostgREST's single-response row limit. Page deterministically so a mailbox owned by a
+    // later-created website user cannot silently disappear from the global search.
+    data = await fetchAllSupabaseRows(() => {
+      let q = supabase.from('imported_mail_accounts').select('*')
+        .eq('is_enabled', true).eq('is_placeholder', false);
+      if (onlyUserId) q = q.or(`imported_by_user_id.eq.${onlyUserId},matched_user_id.eq.${onlyUserId}`);
+      return q.order('id', { ascending: true });
+    }, 500);
+  } catch (error) {
     if (/imported_mail_accounts|relation .* does not exist|schema cache/i.test(String(error.message || ''))) return [];
     throw error;
   }
   const out = [];
-  for (const row of data || []) {
+  for (const row of data) {
     const provider = providerFromImportedRow(row);
     if (!provider) continue;
     const effectiveUserId = row.matched_user_id || row.imported_by_user_id;
@@ -1701,42 +1709,57 @@ async function syncServiceOrders(supabase, userId, accounts = []) {
 }
 
 async function loadScanAccounts(supabase, onlyUserId = null) {
-  let profileQuery = supabase.from('profiles').select('id,user_id,profile_name');
-  if (onlyUserId) profileQuery = profileQuery.eq('user_id', onlyUserId);
-  const { data: profiles, error: pe } = await profileQuery;
-  if (pe) throw pe;
+  // Never use a one-shot profiles query here. Supabase/PostgREST caps a response page (normally
+  // at 1,000 rows), and the global Pokemon Center recovery must include profiles belonging to
+  // EVERY website user. A profile outside that first page previously meant its mailbox credential
+  // was never loaded even though reconciliation still reported hundreds of selected mailboxes.
+  const profiles = await fetchAllSupabaseRows(() => {
+    let q = supabase.from('profiles').select('id,user_id,profile_name');
+    if (onlyUserId) q = q.eq('user_id', onlyUserId);
+    return q.order('id', { ascending: true });
+  }, 500);
 
   // Verified mailbox rows are also treated as a durable link between Order Tracker and a profile.
   // This prevents a successfully tested mailbox from disappearing from the tracker when one of the
   // optional credential tables is unavailable or a legacy profile row is shaped differently.
   let verifiedStates = [];
   try {
-    let stateQuery = supabase.from('imap_scan_accounts').select('*');
-    if (onlyUserId) stateQuery = stateQuery.eq('user_id', onlyUserId);
-    const stateResult = await stateQuery;
-    if (!stateResult.error) verifiedStates = stateResult.data || [];
+    verifiedStates = await fetchAllSupabaseRows(() => {
+      let q = supabase.from('imap_scan_accounts').select('*');
+      if (onlyUserId) q = q.eq('user_id', onlyUserId);
+      return q.order('user_id', { ascending: true }).order('email', { ascending: true });
+    }, 500);
   } catch (_) {}
 
   const ids = [...new Set([
-    ...(profiles || []).map(p => p.id),
+    ...profiles.map(p => p.id),
     ...verifiedStates.map(row => row.profile_id).filter(Boolean)
   ])];
 
-  const pmap = new Map((profiles || []).map(p => [String(p.id), p]));
+  const pmap = new Map(profiles.map(p => [String(p.id), p]));
   for (const state of verifiedStates) {
     if (state.profile_id && !pmap.has(String(state.profile_id))) {
       pmap.set(String(state.profile_id), { id: state.profile_id, user_id: state.user_id });
     }
   }
   const byKey = new Map();
+  let currentCredentialRows = 0;
+  let legacyCredentialRows = 0;
+  let usableDirectCredentials = 0;
+  let skippedUnknownProfiles = 0;
+  let skippedMissingMailboxAccess = 0;
   const addCredential = (c = {}) => {
     const p = pmap.get(String(c.profile_id));
     const email = lower(c.login_email);
     const provider = providerForEmail(email);
     const pass = normalizeMailboxPassword(c.gmail_app_password, provider?.name);
-    if (!p || !email || !pass || !provider) return;
+    if (!p) { skippedUnknownProfiles++; return; }
+    if (!email || !pass || !provider) { skippedMissingMailboxAccess++; return; }
     const key = `${p.user_id}:${email}`;
-    if (!byKey.has(key)) byKey.set(key, { user_id: p.user_id, profile_id: p.id, email, password: pass, provider, ingestion_source: 'profile_builder_direct_imap' });
+    if (!byKey.has(key)) {
+      usableDirectCredentials++;
+      byKey.set(key, { user_id: p.user_id, profile_id: p.id, email, password: pass, provider, ingestion_source: 'profile_builder_direct_imap' });
+    }
   };
 
   // Current multi-store credential table. Older deployments may not have this migration installed yet.
@@ -1749,6 +1772,7 @@ async function loadScanAccounts(supabase, onlyUserId = null) {
         .select('*')
         .in('profile_id', ids.slice(i, i + 75));
       if (ce) throw ce;
+      currentCredentialRows += (creds || []).length;
       for (const c of creds || []) addCredential(c);
     }
   } catch (err) {
@@ -1764,6 +1788,7 @@ async function loadScanAccounts(supabase, onlyUserId = null) {
         .select('profile_id,login_email,gmail_app_password')
         .in('profile_id', ids.slice(i, i + 75));
       if (ae) throw ae;
+      legacyCredentialRows += (accounts || []).length;
       for (const account of accounts || []) addCredential(account);
     }
   } catch (err) {
@@ -1815,7 +1840,26 @@ async function loadScanAccounts(supabase, onlyUserId = null) {
     const key = `${account.user_id}:${account.email}`;
     if (!byKey.has(key)) byKey.set(key, account);
   }
-  return [...byKey.values()];
+  const accounts = [...byKey.values()];
+  // Arrays may carry non-index metadata without changing any existing caller that iterates them.
+  // Global Pokemon diagnostics use this to prove whether the complete cross-user mailbox source
+  // was loaded, instead of presenting a mailbox count with no indication that a first-page cap hit.
+  Object.defineProperty(accounts, 'loaderDiagnostics', {
+    enumerable: false,
+    value: {
+      scope: onlyUserId ? 'single_user' : 'all_website_users',
+      profiles_loaded: profiles.length,
+      verified_states_loaded: verifiedStates.length,
+      current_credential_rows: currentCredentialRows,
+      legacy_credential_rows: legacyCredentialRows,
+      usable_direct_mailboxes: usableDirectCredentials,
+      imported_mailboxes_loaded: imported.length,
+      skipped_unknown_profiles: skippedUnknownProfiles,
+      skipped_missing_mailbox_access: skippedMissingMailboxAccess,
+      account_candidates: accounts.length
+    }
+  });
+  return accounts;
 }
 
 async function upsertScanState(supabase, account, patch) {
@@ -2255,8 +2299,13 @@ async function saveParsedMessage(supabase, account, parsed, uid, adjustCredits =
   const orderNumbers = extractOrderNumbers(store, subject, orderNumberSearchText);
   // The original RFC822 source sometimes contains the Pokemon P-number even when a malformed or
   // truncated text/html alternative does not. Live discovery may supply that exact fallback.
+  // When it does, make that explicitly requested/matched P-number authoritative even if another
+  // P-like reference appears earlier in the raw MIME source.
   const discoveredPokemonRef = clean(parsed._pokemonCenterOrderNumber || '');
-  if (store === 'pokemoncenter' && /^P\d{8,12}$/i.test(discoveredPokemonRef) && !orderNumbers.some(value => normalizeOrderRef(value) === normalizeOrderRef(discoveredPokemonRef))) {
+  if (store === 'pokemoncenter' && /^P\d{8,12}$/i.test(discoveredPokemonRef)) {
+    const normalizedDiscoveredRef = normalizeOrderRef(discoveredPokemonRef);
+    const existingIndex = orderNumbers.findIndex(value => normalizeOrderRef(value) === normalizedDiscoveredRef);
+    if (existingIndex >= 0) orderNumbers.splice(existingIndex, 1);
     orderNumbers.unshift(discoveredPokemonRef.toUpperCase());
   }
   const primaryOrderNumber = orderNumbers[0] || '';
@@ -2710,8 +2759,10 @@ async function discoverPokemonCenterConfirmationsGlobally(
     if (!prior || (prior.imported_account_id && !account.imported_account_id)) accountByEmail.set(key, account);
   }
   const accounts = [...accountByEmail.values()];
+  const loaderDiagnostics = loadedAccounts.loaderDiagnostics || {};
   const debug = [
-    `Live Pokemon Center discovery: target_orders=${targetRefs.size} physical_mailboxes=${accounts.length} since=${since.toISOString()}`
+    `Live Pokemon Center discovery: target_orders=${targetRefs.size} physical_mailboxes=${accounts.length} since=${since.toISOString()}`,
+    `Global mailbox loader: scope=${loaderDiagnostics.scope || (onlyUserId ? 'single_user' : 'all_website_users')} profiles=${loaderDiagnostics.profiles_loaded ?? '-'} verified_states=${loaderDiagnostics.verified_states_loaded ?? '-'} current_credentials=${loaderDiagnostics.current_credential_rows ?? '-'} legacy_credentials=${loaderDiagnostics.legacy_credential_rows ?? '-'} usable_direct_mailboxes=${loaderDiagnostics.usable_direct_mailboxes ?? '-'} imported_mailboxes=${loaderDiagnostics.imported_mailboxes_loaded ?? '-'} account_candidates=${loaderDiagnostics.account_candidates ?? loadedAccounts.length} skipped_unknown_profiles=${loaderDiagnostics.skipped_unknown_profiles ?? '-'} skipped_missing_access=${loaderDiagnostics.skipped_missing_mailbox_access ?? '-'}`
   ];
   let mailboxesChecked = 0;
   let mailboxFailures = 0;
@@ -2722,6 +2773,7 @@ async function discoverPokemonCenterConfirmationsGlobally(
   let rawSourceOrderNumbersRecovered = 0;
   const matchedOrderNumbers = new Set();
   const mailboxMatches = new Map();
+  const mailboxFailuresDetail = [];
   const lifecycleSubjects = [
     'Thank you for shopping at PokemonCenter.com!',
     'order is on its way',
@@ -2829,8 +2881,10 @@ async function discoverPokemonCenterConfirmationsGlobally(
       }
     } catch (mailboxError) {
       mailboxFailures++;
-      if (debug.length < 240) debug.push(`Live Pokemon mailbox ERROR: mailbox=${account.email} ${describeImapError(mailboxError, mailboxName)}`);
-      console.warn(`[POKEMON GLOBAL IMAP] ${account.email}: ${describeImapError(mailboxError, mailboxName)}`);
+      const errorText = describeImapError(mailboxError, mailboxName);
+      mailboxFailuresDetail.push({ email:lower(account.email), error:errorText.slice(0,500) });
+      if (debug.length < 240) debug.push(`Live Pokemon mailbox ERROR: mailbox=${account.email} ${errorText}`);
+      console.warn(`[POKEMON GLOBAL IMAP] ${account.email}: ${errorText}`);
     } finally {
       if (client) try { await client.logout(); } catch (_) {}
     }
@@ -2846,6 +2900,9 @@ async function discoverPokemonCenterConfirmationsGlobally(
     mailboxes_selected:accounts.length,
     mailboxes_checked:mailboxesChecked,
     mailbox_failures:mailboxFailures,
+    mailbox_failure_details:mailboxFailuresDetail.sort((a,b) => a.email.localeCompare(b.email)),
+    selected_mailboxes:accounts.map(account => lower(account.email)).filter(Boolean).sort(),
+    loader_diagnostics:loaderDiagnostics,
     messages_found:messagesFound,
     messages_processed:messagesProcessed,
     messages_matched:messagesMatched,
@@ -2855,6 +2912,138 @@ async function discoverPokemonCenterConfirmationsGlobally(
     mailbox_matches:[...mailboxMatches.values()].sort((a,b) => a.order_number.localeCompare(b.order_number) || a.event_type.localeCompare(b.event_type)),
     since:since.toISOString(),
     debug
+  };
+}
+
+
+function requestedPokemonCenterOrderNumbers(value) {
+  const raw = Array.isArray(value) ? value.join(' ') : String(value || '');
+  return [...new Set([...raw.matchAll(/\bP\d{8,12}\b/gi)].map(match => match[0].toUpperCase()))];
+}
+
+async function recoverPokemonCenterFromOneTimeMailbox(
+  supabase,
+  archiveUserId,
+  mailboxEmail,
+  mailboxPassword,
+  requestedOrderNumbers,
+  adjustCredits = null,
+  confirmPendingAmazonCheckout = null
+) {
+  const email = lower(mailboxEmail);
+  const provider = providerForEmail(email);
+  const password = normalizeMailboxPassword(mailboxPassword, provider?.name);
+  const orderNumbers = requestedPokemonCenterOrderNumbers(requestedOrderNumbers);
+  if (!email || !email.includes('@') || !provider) throw new Error('Enter a supported Gmail, Outlook, Hotmail, or Yahoo mailbox address.');
+  if (!password) throw new Error('Enter the mailbox app password.');
+  if (!orderNumbers.length) throw new Error('Enter at least one Pokemon Center P-order number.');
+  if (orderNumbers.length > 10) throw new Error('A one-time recovery can search at most 10 Pokemon Center orders.');
+
+  // Refuse arbitrary inbox scraping. Each requested P-number must already resolve to an exact
+  // Pokemon Center webhook/service order on this platform before the mailbox can be searched.
+  const platformOrderNumbers = [];
+  const missingPlatformOrders = [];
+  for (const orderNumber of orderNumbers) {
+    const source = await findPokemonCenterServiceOrderGlobally(supabase, orderNumber);
+    if (source?.id) platformOrderNumbers.push(orderNumber);
+    else missingPlatformOrders.push(orderNumber);
+  }
+  if (!platformOrderNumbers.length) throw new Error('None of those P-order numbers belongs to a Pokemon Center checkout recorded by this website.');
+  const platformRefs = new Set(platformOrderNumbers.map(normalizeOrderRef));
+
+  // This account object exists only for this function call. It is deliberately never passed to
+  // loadScanAccounts(), upsertScanState(), imported_mail_accounts, or a profile credential table.
+  const account = {
+    user_id: archiveUserId,
+    archive_user_id: archiveUserId,
+    profile_id: null,
+    email,
+    password,
+    provider,
+    ingestion_source: 'pokemon_one_time_imap'
+  };
+  const client = createGuardedImapFlow({
+    host:provider.host, port:provider.port, secure:provider.secure,
+    auth:{ user:email, pass:password }, logger:false,
+    connectionTimeout:30000, greetingTimeout:30000, socketTimeout:120000
+  }, 'POKEMON ONE-TIME IMAP');
+  let mailboxName = 'INBOX';
+  let messagesFound = 0;
+  let messagesProcessed = 0;
+  let messagesSaved = 0;
+  const matched = new Map();
+  try {
+    await client.connect();
+    let boxes = [];
+    try { boxes = await client.list(); } catch (_) {}
+    mailboxName = boxes.find(box => box.specialUse === '\\All')?.path
+      || boxes.find(box => lower(box.path) === 'inbox')?.path
+      || 'INBOX';
+    const lock = await client.getMailboxLock(mailboxName);
+    try {
+      const uidSet = new Set();
+      for (const orderNumber of platformOrderNumbers) {
+        const uids = await client.search({ text:orderNumber }, { uid:true }) || [];
+        for (const uid of uids) if (Number(uid) > 0) uidSet.add(Number(uid));
+      }
+      const uids = [...uidSet].sort((a,b) => a-b).slice(-100);
+      messagesFound = uids.length;
+      for (let offset = 0; offset < uids.length; offset += 25) {
+        const uidRange = imapUidSet(uids.slice(offset, offset + 25));
+        if (!uidRange) continue;
+        for await (const msg of client.fetch(uidRange, { uid:true, source:true, envelope:true }, { uid:true })) {
+          messagesProcessed++;
+          const parsed = await simpleParser(msg.source);
+          const text = readableEmailText(parsed);
+          const rawSource = Buffer.isBuffer(msg.source) ? msg.source.toString('utf8') : String(msg.source || '');
+          const refs = [...new Set([
+            ...extractOrderNumbers('pokemoncenter', parsed.subject || '', `${text}\n${String(parsed.html || '')}`),
+            ...[...rawSource.matchAll(/\b(P\d{8,12})\b/gi)].map(value => value[1])
+          ].map(normalizeOrderRef).filter(Boolean))];
+          const matchedRef = refs.find(ref => platformRefs.has(ref));
+          const store = detectStore(parsed.from?.text || '', parsed.subject || '', text);
+          if (store !== 'pokemoncenter' || !matchedRef) continue;
+          parsed._pokemonCenterOrderNumber = matchedRef;
+          const result = await saveParsedMessage(
+            supabase, account, parsed, msg.uid, adjustCredits, confirmPendingAmazonCheckout
+          );
+          if (result?.saved) messagesSaved++;
+          const status = detectStatus(parsed.subject || '', text);
+          matched.set(`${matchedRef}|${status}`, {
+            order_number:matchedRef,
+            event_type:status,
+            subject:clean(parsed.subject || '').slice(0,180),
+            receiving_mailbox:email,
+            saved:!!result?.saved,
+            result:result?.saved ? 'linked' : (result?.reason || 'already_archived')
+          });
+        }
+      }
+    } finally {
+      lock.release();
+    }
+  } catch (error) {
+    throw new Error(`One-time mailbox search failed: ${describeImapError(error, mailboxName)}`);
+  } finally {
+    try { await client.logout(); } catch (_) {}
+  }
+
+  const matchedEvents = [...matched.values()].sort((a,b) =>
+    a.order_number.localeCompare(b.order_number) || a.event_type.localeCompare(b.event_type)
+  );
+  const matchedOrderNumbers = [...new Set(matchedEvents.map(item => item.order_number))].sort();
+  return {
+    mailbox:email,
+    requested_order_numbers:orderNumbers,
+    platform_order_numbers:platformOrderNumbers,
+    missing_platform_orders:missingPlatformOrders,
+    messages_found:messagesFound,
+    messages_processed:messagesProcessed,
+    messages_saved:messagesSaved,
+    matched_order_numbers:matchedOrderNumbers,
+    not_found:platformOrderNumbers.filter(orderNumber => !matchedOrderNumbers.includes(orderNumber)),
+    matched_events:matchedEvents,
+    credential_saved:false
   };
 }
 
@@ -4055,6 +4244,30 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
     if (req.role !== 'super_admin') return res.status(403).json({ error: 'Only the super admin can use AYCD Unified Inbox.' });
     try { res.json({ success: true, ...(await ingestAycdMessages(req.user_id, req.body?.messages || [])) }); }
     catch (error) { res.status(500).json({ error: error.message }); }
+  });
+
+  app.post('/orders/pokemon-center/one-time-mailbox-recovery', auth, async (req, res) => {
+    if (req.role !== 'super_admin') return res.status(403).json({ error:'Only the super admin can run a one-time mailbox recovery.' });
+    try {
+      const result = await recoverPokemonCenterFromOneTimeMailbox(
+        supabase,
+        req.user_id,
+        req.body?.email,
+        req.body?.app_password,
+        req.body?.order_numbers,
+        adjustUserCredits,
+        confirmPendingAmazonCheckout
+      );
+      res.json({
+        success:true,
+        ...result,
+        message:result.matched_order_numbers.length
+          ? `Recovered Pokemon Center email evidence for ${result.matched_order_numbers.join(', ')} from ${result.mailbox}. The one-time mailbox credential was not saved.`
+          : `No requested Pokemon Center order email was found in ${result.mailbox}. The one-time mailbox credential was not saved.`
+      });
+    } catch (error) {
+      res.status(400).json({ error:error.message || String(error) });
+    }
   });
 
   app.post('/orders/reconcile-retailer-emails', auth, async (req, res) => {
