@@ -2531,6 +2531,138 @@ async function scanAccount(supabase, account, adjustCredits = null, onProgress =
 }
 
 
+async function discoverPokemonCenterConfirmationsGlobally(
+  supabase,
+  onlyUserId,
+  trackedRows = [],
+  adjustCredits = null,
+  confirmPendingAmazonCheckout = null
+) {
+  // Database replay cannot repair a message that an earlier UID checkpoint never archived. During
+  // a multi-profile Stellar run, Pokemon Center can deliver checkout 2/3/etc. to checkout 1's
+  // mailbox, so searching only the webhook/profile mailbox is inherently incorrect. This pass
+  // searches every eligible physical mailbox once by the authoritative confirmation subject,
+  // extracts the P-number, and lets saveParsedMessage() route it to the webhook order owner.
+  const targetRows = (trackedRows || []).filter(row => {
+    const store = normalizeStoreKey(row.store || '');
+    return store === 'pokemoncenter' && /^P\d{6,}$/i.test(clean(row.order_number || ''));
+  });
+  const targetRefs = new Set(targetRows.map(row => normalizeOrderRef(row.order_number)).filter(Boolean));
+  if (!targetRefs.size) {
+    return { mailboxes_selected:0, mailboxes_checked:0, mailbox_failures:0, messages_found:0, messages_processed:0, messages_matched:0, messages_saved:0, matched_order_numbers:[], debug:['No Pokemon Center tracked P-numbers were available for live discovery.'] };
+  }
+
+  const dates = targetRows
+    .map(row => new Date(row.order_date || row.created_at || 0).getTime())
+    .filter(ms => Number.isFinite(ms) && ms > 0);
+  const earliest = dates.length ? Math.min(...dates) : Date.now() - INITIAL_LOOKBACK_DAYS * 86400000;
+  const since = new Date(Math.max(0, earliest - 14 * 86400000));
+  const loadedAccounts = await loadScanAccounts(supabase, onlyUserId);
+
+  // One physical inbox only needs one search even if several profiles or website users reference
+  // it. Prefer a direct Profile Builder credential over an imported copy when both are available.
+  const accountByEmail = new Map();
+  for (const account of loadedAccounts || []) {
+    const key = lower(account.email);
+    if (!key) continue;
+    const prior = accountByEmail.get(key);
+    if (!prior || (prior.imported_account_id && !account.imported_account_id)) accountByEmail.set(key, account);
+  }
+  const accounts = [...accountByEmail.values()];
+  const debug = [
+    `Live Pokemon Center discovery: target_orders=${targetRefs.size} physical_mailboxes=${accounts.length} since=${since.toISOString()}`
+  ];
+  let mailboxesChecked = 0;
+  let mailboxFailures = 0;
+  let messagesFound = 0;
+  let messagesProcessed = 0;
+  let messagesMatched = 0;
+  let messagesSaved = 0;
+  const matchedOrderNumbers = new Set();
+
+  for (const account of accounts) {
+    const client = createGuardedImapFlow({
+      host:account.provider.host, port:account.provider.port, secure:account.provider.secure,
+      auth:await imapAuthForAccount(supabase,account), logger:false,
+      connectionTimeout:30000, greetingTimeout:30000, socketTimeout:120000
+    }, 'POKEMON GLOBAL IMAP');
+    let mailboxName = 'INBOX';
+    try {
+      await client.connect();
+      let boxes = [];
+      try { boxes = await client.list(); } catch (_) {}
+      mailboxName = boxes.find(box => box.specialUse === '\\All')?.path
+        || boxes.find(box => lower(box.path) === 'inbox')?.path
+        || 'INBOX';
+      const lock = await client.getMailboxLock(mailboxName);
+      try {
+        mailboxesChecked++;
+        // This intentionally ignores the normal last_seen_uid checkpoint. The entire purpose is
+        // to recover older confirmations that existed before the tracker archived them.
+        let uids = await client.search({
+          since,
+          subject:'Thank you for shopping at PokemonCenter.com!'
+        }, { uid:true });
+        uids = [...new Set((uids || []).map(Number).filter(Number.isFinite).filter(uid => uid > 0))]
+          .sort((a,b) => a-b)
+          .slice(-500);
+        messagesFound += uids.length;
+        if (uids.length && debug.length < 240) debug.push(`Live mailbox ${account.email}: confirmation_candidates=${uids.length}`);
+
+        for (let offset = 0; offset < uids.length; offset += 50) {
+          const uidRange = imapUidSet(uids.slice(offset, offset + 50));
+          if (!uidRange) continue;
+          for await (const msg of client.fetch(uidRange, { uid:true, source:true, envelope:true }, { uid:true })) {
+            messagesProcessed++;
+            try {
+              const parsed = await simpleParser(msg.source);
+              const text = readableEmailText(parsed);
+              const store = detectStore(parsed.from?.text || '', parsed.subject || '', text);
+              const refs = extractOrderNumbers('pokemoncenter', parsed.subject || '', text)
+                .map(normalizeOrderRef).filter(Boolean);
+              const matchedRef = refs.find(ref => targetRefs.has(ref));
+              if (store !== 'pokemoncenter' || !matchedRef) continue;
+              messagesMatched++;
+              matchedOrderNumbers.add(matchedRef);
+              const result = await saveParsedMessage(
+                supabase, account, parsed, msg.uid, adjustCredits, confirmPendingAmazonCheckout
+              );
+              if (result?.saved) messagesSaved++;
+              if (debug.length < 240) debug.push(
+                `Live Pokemon confirmation: order=${matchedRef} mailbox=${account.email} result=${result?.saved ? 'SAVED' : `IGNORED:${result?.reason || 'unknown'}`}`
+              );
+            } catch (messageError) {
+              if (debug.length < 240) debug.push(`Live Pokemon message ERROR: mailbox=${account.email} uid=${msg.uid} ${messageError.message || messageError}`);
+            }
+          }
+        }
+      } finally {
+        lock.release();
+      }
+    } catch (mailboxError) {
+      mailboxFailures++;
+      if (debug.length < 240) debug.push(`Live Pokemon mailbox ERROR: mailbox=${account.email} ${describeImapError(mailboxError, mailboxName)}`);
+      console.warn(`[POKEMON GLOBAL IMAP] ${account.email}: ${describeImapError(mailboxError, mailboxName)}`);
+    } finally {
+      try { await client.logout(); } catch (_) {}
+    }
+  }
+
+  return {
+    mailboxes_selected:accounts.length,
+    mailboxes_checked:mailboxesChecked,
+    mailbox_failures:mailboxFailures,
+    messages_found:messagesFound,
+    messages_processed:messagesProcessed,
+    messages_matched:messagesMatched,
+    messages_saved:messagesSaved,
+    matched_order_numbers:[...matchedOrderNumbers].sort(),
+    since:since.toISOString(),
+    debug
+  };
+}
+
+
 async function linkedTrackedOrderIds(supabase, orderIds = []) {
   const ids = [...new Set((orderIds || []).filter(Boolean))];
   const linked = new Set();
@@ -3657,6 +3789,7 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
       // still the only ownership rule; the receiving inbox can never move or charge an order.
       let pokemonArchiveRows = [];
       let pokemonArchiveDiscovery = { rows:[], metadata_scanned:0, candidates_found:0, since:null };
+      let pokemonLiveDiscovery = { mailboxes_selected:0, mailboxes_checked:0, mailbox_failures:0, messages_found:0, messages_processed:0, messages_matched:0, messages_saved:0, matched_order_numbers:[], debug:[] };
       try {
         const pokemonTrackerMeta = await supabase.from('tracked_orders')
           .select('id,user_id,source_order_id,store,order_number,status,order_date,created_at')
@@ -3664,6 +3797,15 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
           .order('order_date',{ascending:false}).limit(2000);
         if (pokemonTrackerMeta.error) throw pokemonTrackerMeta.error;
         const pokemonArchiveUserScope = req.role === 'super_admin' ? null : req.user_id;
+        // Search the live mailboxes first. Any historical confirmation recovered here is archived
+        // immediately, so the database replay directly below can see and link it in this same job.
+        pokemonLiveDiscovery = await discoverPokemonCenterConfirmationsGlobally(
+          supabase,
+          pokemonArchiveUserScope,
+          pokemonTrackerMeta.data || [],
+          adjustUserCredits,
+          confirmPendingAmazonCheckout
+        );
         pokemonArchiveDiscovery = await fetchPokemonCenterArchiveCandidates(
           supabase, pokemonArchiveUserScope, archiveColumns, pokemonTrackerMeta.data || []
         );
@@ -3745,6 +3887,7 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
           }
         } catch (_) {}
       }
+      pokemonDebug.push(...(pokemonLiveDiscovery.debug || []));
       pokemonDebug.push(`Pokemon discovery: metadata_scanned=${pokemonStats.metadata_scanned} order_email_candidates=${pokemonStats.candidates_found} hydrated=${pokemonStats.archive_rows} since=${pokemonStats.archive_since||'-'}`);
       for(const email of retailerEmails){
         checked++;
@@ -3876,7 +4019,7 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
       }
       // Now queue the ordinary catch-up scan for anything that was not part of the targeted set.
       try { startUserScanJob(supabase,req.user_id,adjustUserCredits,confirmPendingAmazonCheckout); } catch (_) {}
-      const result = {success:true,checked,matched,ignored,failed,pokemon_archive_messages:pokemonArchiveRows.length,pokemon_stats:pokemonStats,pokemon_debug:pokemonDebug,supreme_rebuild:supremeRebuild,supreme_live:supremeLive,supreme_debug:[...(supremeLive?.debug||[]).slice(-120), ...serviceOrdersForSupreme.slice(0,40).map((o,i)=>`Service order ${i+1}: id=${o.id} site=${o.site||'-'} metadata.site=${o.metadata?.site||'-'} payload site/store=${extractNamedPayloadValue(o.raw_payload||{},['site','store'])||'-'} normalized=${normalizeStoreKey(o.site || o.metadata?.site || extractNamedPayloadValue(o.raw_payload||{},['site','store']))||'-'}`)],supreme_discovery:{metadata_scanned:supremeDiscovery?.metadata_scanned||0,candidates_found:supremeDiscovery?.candidates_found||0,windows:supremeDiscovery?.windows||0},damaged_target_orders:damagedLinkedOrderIds.length,repair,message:`Rebuilt ${supremeRebuild?.assigned||0} Supreme confirmation assignment(s), replayed ${pokemonArchiveRows.length} Pokemon Center archive message(s), discovered ${supremeDiscovery?.candidates_found||0} Supreme email(s), reprocessed ${checked} retailer emails, then repaired ${damagedLinkedOrderIds.length} unresolved Target order(s).`};
+      const result = {success:true,checked,matched,ignored,failed,pokemon_archive_messages:pokemonArchiveRows.length,pokemon_live_discovery:pokemonLiveDiscovery,pokemon_stats:pokemonStats,pokemon_debug:pokemonDebug,supreme_rebuild:supremeRebuild,supreme_live:supremeLive,supreme_debug:[...(supremeLive?.debug||[]).slice(-120), ...serviceOrdersForSupreme.slice(0,40).map((o,i)=>`Service order ${i+1}: id=${o.id} site=${o.site||'-'} metadata.site=${o.metadata?.site||'-'} payload site/store=${extractNamedPayloadValue(o.raw_payload||{},['site','store'])||'-'} normalized=${normalizeStoreKey(o.site || o.metadata?.site || extractNamedPayloadValue(o.raw_payload||{},['site','store']))||'-'}`)],supreme_discovery:{metadata_scanned:supremeDiscovery?.metadata_scanned||0,candidates_found:supremeDiscovery?.candidates_found||0,windows:supremeDiscovery?.windows||0},damaged_target_orders:damagedLinkedOrderIds.length,repair,message:`Searched ${pokemonLiveDiscovery.mailboxes_checked||0} live website mailbox(es) for Pokemon Center confirmations and matched ${pokemonLiveDiscovery.messages_matched||0}; replayed ${pokemonArchiveRows.length} Pokemon Center archive message(s); rebuilt ${supremeRebuild?.assigned||0} Supreme confirmation assignment(s); then repaired ${damagedLinkedOrderIds.length} unresolved Target order(s).`};
       Object.assign(reconcileJob, { status:'complete', finished_at:new Date().toISOString(), result, error:null });
     } catch(error){
       console.error('[RECONCILE RETAILER EMAILS]', error.message || error);
