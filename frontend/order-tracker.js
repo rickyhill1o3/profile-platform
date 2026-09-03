@@ -108,6 +108,9 @@ Supreme live messages saved: ${j.supreme_live?.messages_saved||0}
 Supreme live mailbox failures: ${j.supreme_live?.failures||0}
 Supreme metadata scanned: ${j.supreme_discovery?.metadata_scanned||0}
 Pokemon Center archive messages replayed: ${j.pokemon_archive_messages||0}
+Pokemon Center metadata scanned: ${j.pokemon_stats?.metadata_scanned||0}
+Pokemon Center order-email candidates found: ${j.pokemon_stats?.candidates_found||0}
+Pokemon Center archive scan since: ${j.pokemon_stats?.archive_since||'-'}
 Pokemon Center rows classified: ${j.pokemon_stats?.classified_rows||0}
 Pokemon Center rows with P-order number: ${j.pokemon_stats?.with_order_number||0}
 Pokemon Center confirmations detected: ${j.pokemon_stats?.confirmations||0}

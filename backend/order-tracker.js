@@ -247,6 +247,57 @@ async function fetchRecentEmailArchiveByStore(supabase, userId, store, columns, 
   return rows;
 }
 
+
+function isPokemonCenterOrderEmailMetadata(row = {}) {
+  const subject = clean(row.subject || '');
+  const type = lower(row.email_type || '');
+  const orderNo = clean(row.order_number || '');
+  if (/^P\d{6,}$/i.test(orderNo)) return true;
+  if (['confirmed','shipped','delivered','canceled','refunded'].includes(type)) return true;
+  return /thank you for shopping at pokemoncenter\.com|pokemon center order is on its way|package will arrive soon|package has been delivered|pokemon center.*(?:cancel|refund)|(?:cancel|refund).*pokemon center/i.test(subject);
+}
+
+async function fetchPokemonCenterArchiveCandidates(supabase, userId, columns, trackedRows = []) {
+  // Pokemon Center mailboxes can contain a huge amount of marketing mail. A newest-N query is
+  // therefore unsafe: legitimate July confirmations can fall outside the first 1,000 rows even
+  // though the tracked P-orders are still visible. Scan lightweight metadata for the full tracked
+  // order date span, keep only order lifecycle subjects/order numbers, then hydrate those rows.
+  const dates = (trackedRows || []).map(r => new Date(r.order_date || r.created_at || 0).getTime()).filter(Number.isFinite).filter(ms => ms > 0);
+  const earliest = dates.length ? Math.min(...dates) : Date.now() - 180 * 86400000;
+  const sinceIso = new Date(Math.max(0, earliest - 14 * 86400000)).toISOString();
+  const metaRows = [];
+  const pageSize = 1000;
+  for (const store of ['pokemoncenter','pokemon']) {
+    let from = 0;
+    while (true) {
+      const r = await supabase.from('email_messages')
+        .select('id,received_at,subject,email_type,order_number,mailbox_email,store')
+        .eq('user_id', userId).eq('store', store)
+        .gte('received_at', sinceIso)
+        .order('received_at', { ascending:false })
+        .range(from, from + pageSize - 1);
+      if (r.error) throw r.error;
+      metaRows.push(...(r.data || []));
+      if (!r.data || r.data.length < pageSize) break;
+      from += pageSize;
+      // Safety valve: metadata is tiny, but do not allow a malformed archive to create an
+      // unbounded interactive job. 25k rows is far beyond the expected Pokemon Center volume.
+      if (from >= 25000) break;
+    }
+  }
+  const seen = new Set();
+  const relevantMeta = metaRows.filter(row => {
+    if (!row?.id || seen.has(String(row.id))) return false;
+    seen.add(String(row.id));
+    return isPokemonCenterOrderEmailMetadata(row);
+  });
+  const ids = relevantMeta.map(x => x.id);
+  const rows = await fetchEmailArchiveRowsByIds(supabase, userId, ids, columns, 50);
+  const rank = new Map(relevantMeta.map((x,i)=>[String(x.id),i]));
+  rows.sort((a,b)=>(rank.get(String(a.id)) ?? Number.MAX_SAFE_INTEGER)-(rank.get(String(b.id)) ?? Number.MAX_SAFE_INTEGER));
+  return { rows, metadata_scanned: metaRows.length, candidates_found: relevantMeta.length, since: sinceIso };
+}
+
 async function fetchEmailArchiveWindow(supabase, userId, startIso, endIso, columns, limit = 1000) {
   const meta = await supabase.from('email_messages').select('id,received_at')
     .eq('user_id', userId)
@@ -3596,10 +3647,17 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
       // mirrored onto the Stellar profile owner even when the receiving mailbox belongs to a
       // different website user. Ownership still comes from the webhook Profile, never the inbox.
       let pokemonArchiveRows = [];
+      let pokemonArchiveDiscovery = { rows:[], metadata_scanned:0, candidates_found:0, since:null };
       try {
-        pokemonArchiveRows = await fetchRecentEmailArchiveByStore(
-          supabase, req.user_id, 'pokemoncenter', archiveColumns, Math.min(maxMessages, 1500)
+        const pokemonTrackerMeta = await supabase.from('tracked_orders')
+          .select('id,user_id,source_order_id,store,order_number,status,order_date,created_at')
+          .in('store',['pokemon','pokemoncenter'])
+          .order('order_date',{ascending:false}).limit(2000);
+        if (pokemonTrackerMeta.error) throw pokemonTrackerMeta.error;
+        pokemonArchiveDiscovery = await fetchPokemonCenterArchiveCandidates(
+          supabase, req.user_id, archiveColumns, pokemonTrackerMeta.data || []
         );
+        pokemonArchiveRows = pokemonArchiveDiscovery.rows || [];
       } catch (e) { console.warn('[POKEMON CENTER CLASSIFIED ARCHIVE]', e.message || e); }
 
       // Supreme reconciliation must search across every connected mailbox, not the purchase email
@@ -3647,7 +3705,11 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
       let checked=0,matched=0,ignored=0,failed=0;
       const pokemonDebug = [];
       const pokemonStats = {
-        archive_rows: pokemonArchiveRows.length, classified_rows: 0, with_order_number: 0,
+        archive_rows: pokemonArchiveRows.length,
+        metadata_scanned: pokemonArchiveDiscovery.metadata_scanned || 0,
+        candidates_found: pokemonArchiveDiscovery.candidates_found || 0,
+        archive_since: pokemonArchiveDiscovery.since || null,
+        classified_rows: 0, with_order_number: 0,
         confirmations: 0, shipped: 0, delivered: 0, canceled: 0, unknown_status: 0,
         saved: 0, ignored: 0, not_platform_order: 0, no_order_number: 0, errors: 0
       };
@@ -3673,6 +3735,7 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
           }
         } catch (_) {}
       }
+      pokemonDebug.push(`Pokemon discovery: metadata_scanned=${pokemonStats.metadata_scanned} order_email_candidates=${pokemonStats.candidates_found} hydrated=${pokemonStats.archive_rows} since=${pokemonStats.archive_since||'-'}`);
       for(const email of retailerEmails){
         checked++;
         const archivedText = archivedRetailerReadableText(email);
