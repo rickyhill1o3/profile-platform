@@ -257,8 +257,8 @@ function isPokemonCenterOrderEmailMetadata(row = {}) {
   const type = lower(row.email_type || '');
   const orderNo = clean(row.order_number || '');
   if (/^P\d{6,}$/i.test(orderNo)) return true;
-  if (['confirmed','shipped','delivered','canceled','refunded'].includes(type)) return true;
-  return /thank you for shopping at pokemoncenter\.com|pokemon center order is on its way|package will arrive soon|package has been delivered|pokemon center.*(?:cancel|refund)|(?:cancel|refund).*pokemon center/i.test(subject);
+  if (['confirmed','processing','shipped','delivered','canceled','refunded'].includes(type)) return true;
+  return /thank you for shopping at pokemoncenter\.com|pokemon center order is on its way|package will arrive soon|package has been delivered|running a little behind|pokemon center.*(?:cancel|refund)|(?:cancel|refund).*pokemon center/i.test(subject);
 }
 
 async function fetchPokemonCenterArchiveCandidates(supabase, userId, columns, trackedRows = []) {
@@ -821,12 +821,23 @@ function detectStatus(subject, text) {
   if (/\bshipped\b|has shipped|on (?:the|its) way|package will arrive soon|package .*arrive soon/.test(subj) ||
       /(?:your|the|this) (?:package|order|shipment) (?:has|have) shipped|we(?:'|’)ve shipped|was shipped|tracking number\s*[:#]/.test(body)) return 'shipped';
 
-  if (/processing|preparing your order|getting your order ready/.test(subj)) return 'processing';
+  if (/processing|preparing your order|getting your order ready|running a little behind|order (?:is )?delayed/.test(subj)) return 'processing';
 
   if (/order confirmation|thanks for your order|thanks for shopping with us|here(?:'|’)s your order|we(?:'|’)ve got your order|order placed/.test(body)) return 'confirmed';
 
-  if (/we(?:'|’)re processing your order|preparing your order|getting your order ready/.test(body)) return 'processing';
+  if (/we(?:'|’)re processing your order|preparing your order|getting your order ready|running a little behind|order (?:is )?delayed/.test(body)) return 'processing';
   return 'unknown';
+}
+
+function hasLegacyConfirmationReceipt(order = {}) {
+  if (!order.receipt_html && !order.receipt_text) return false;
+  if (/thank you for shopping at pokemoncenter\.com/i.test(clean(order.raw_subject || ''))) return true;
+  const receiptText = clean(order.receipt_text || '') || htmlToReadableEmailText(order.receipt_html || '');
+  // Older rows can have a later shipment subject in raw_subject even though receipt_* still holds
+  // the genuine confirmation. These phrases are specific to Pokemon Center's confirmation body
+  // and avoid the future-tense "once your order has shipped" misclassification.
+  if (/review your order confirmation details|thank you for placing an order with us/i.test(receiptText)) return true;
+  return detectStatus('', receiptText) === 'confirmed';
 }
 
 function extractOrderNumber(store, subject, text) {
@@ -979,7 +990,9 @@ async function matchPendingAmazonOrder(supabase, account, parsed, orderNumber, a
 function extractAmounts(text) {
   const find = (labels) => {
     for (const label of labels) {
-      const re = new RegExp(`${label}\\s*[:]?\\s*\\$?([0-9,]+(?:\\.[0-9]{2})?)`, 'i');
+      // Keep the fallback label "total" from matching the tail of "subtotal". A shipment
+      // summary can contain merchandise subtotal but no tax-inclusive order total.
+      const re = new RegExp(`(?:^|\\b)${label}\\b\\s*[:]?\\s*\\$?([0-9,]+(?:\\.[0-9]{2})?)`, 'i');
       const m = text.match(re); if (m) return money(m[1]);
     }
     return null;
@@ -1267,6 +1280,88 @@ async function mirrorPokemonCenterEmailToOrderOwner(supabase, archivedEmail, own
     return archivedEmail;
   }
   return data || archivedEmail;
+}
+
+async function enforcePokemonCenterExactEmailOwnership(supabase, archivedEmail, trackedOrderId, orderNumber) {
+  // A historical parser could attach a Pokemon Center confirmation to the website user who owned
+  // the physical inbox. Exact P-number ownership is stronger: the webhook/service order owns the
+  // tracker row, while mailbox_email merely records where Pokemon Center delivered the message.
+  if (!archivedEmail?.id || !trackedOrderId || !/^P\d{8,12}$/i.test(clean(orderNumber || ''))) return archivedEmail;
+  const messageId = clean(archivedEmail.message_id || '');
+  const emailRows = [];
+  try {
+    if (messageId) {
+      const siblings = await supabase.from('email_messages')
+        .select('id,linked_order_id,user_id,message_id,order_number')
+        .eq('message_id', messageId);
+      if (!siblings.error) emailRows.push(...(siblings.data || []));
+    }
+  } catch (_) {}
+  if (!emailRows.some(row => String(row.id) === String(archivedEmail.id))) emailRows.push(archivedEmail);
+  const emailIds = [...new Set(emailRows.map(row => row.id).filter(Boolean))];
+  const wrongOrderIds = new Set(emailRows.map(row => row.linked_order_id).filter(id => id && String(id) !== String(trackedOrderId)).map(String));
+
+  if (emailIds.length) {
+    try {
+      const links = await supabase.from('tracked_order_emails').select('id,order_id,email_id').in('email_id', emailIds);
+      if (!links.error) {
+        const staleLinks = (links.data || []).filter(link => String(link.order_id || '') !== String(trackedOrderId));
+        for (const link of staleLinks) if (link.order_id) wrongOrderIds.add(String(link.order_id));
+        const staleIds = staleLinks.map(link => link.id).filter(Boolean);
+        if (staleIds.length) await supabase.from('tracked_order_emails').delete().in('id', staleIds);
+      }
+    } catch (_) {}
+    try {
+      await supabase.from('email_messages').update({
+        linked_order_id:trackedOrderId,
+        order_number:clean(orderNumber).toUpperCase(),
+        store:'pokemoncenter',
+        is_order_related:true,
+        keep_forever:true,
+        updated_at:new Date().toISOString()
+      }).in('id', emailIds);
+    } catch (_) {}
+  }
+
+  // Event rows are also used as a display fallback. Remove the historical wrong-user event or the
+  // old account would continue showing this confirmation even after its email junction was fixed.
+  if (messageId) {
+    try {
+      const events = await supabase.from('tracked_order_events').select('id,order_id').eq('message_id', messageId);
+      if (!events.error) {
+        const staleEvents = (events.data || []).filter(event => String(event.order_id || '') !== String(trackedOrderId));
+        for (const event of staleEvents) if (event.order_id) wrongOrderIds.add(String(event.order_id));
+        const staleIds = staleEvents.map(event => event.id).filter(Boolean);
+        if (staleIds.length) await supabase.from('tracked_order_events').delete().in('id', staleIds);
+      }
+    } catch (_) {}
+  }
+
+  // Clear a copied receipt from an unrelated order only when its stored body contains this exact
+  // P-number. Do not touch a row merely because it once shared a mailbox or event link.
+  for (const wrongOrderId of wrongOrderIds) {
+    try {
+      const result = await supabase.from('tracked_orders')
+        .select('id,store,order_number,status,receipt_html,receipt_text,last_message_id')
+        .eq('id', wrongOrderId).maybeSingle();
+      const wrong = result.data;
+      if (result.error || !wrong || normalizeStoreKey(wrong.store || '') !== 'pokemoncenter') continue;
+      if (normalizeOrderRef(wrong.order_number) === normalizeOrderRef(orderNumber)) continue;
+      const receiptRefs = extractOrderNumbers('pokemoncenter', '', `${clean(wrong.receipt_text)}\n${String(wrong.receipt_html || '')}`)
+        .map(normalizeOrderRef);
+      if (!receiptRefs.includes(normalizeOrderRef(orderNumber))) continue;
+      const patch = {
+        receipt_html:null, receipt_text:null,
+        subtotal:null, tax:null, shipping:null, total:null,
+        updated_at:new Date().toISOString()
+      };
+      if (lower(wrong.status) === 'confirmed') patch.status = 'waiting_confirmation';
+      if (messageId && clean(wrong.last_message_id) === messageId) patch.last_message_id = null;
+      await supabase.from('tracked_orders').update(patch).eq('id', wrongOrderId);
+    } catch (_) {}
+  }
+
+  return { ...archivedEmail, linked_order_id:trackedOrderId, order_number:clean(orderNumber).toUpperCase(), store:'pokemoncenter' };
 }
 
 
@@ -2153,9 +2248,19 @@ async function saveParsedMessage(supabase, account, parsed, uid, adjustCredits =
     return { ignored: true, email_id: archivedEmail?.id || null };
   }
 
-  const orderNumbers = extractOrderNumbers(store, subject, text);
+  // Pokemon Center sometimes places the P-number only inside an HTML tracking/order URL. The
+  // rendered text intentionally drops href attributes, so include decoded HTML for this one
+  // retailer while keeping the rest of the parser on readable text.
+  const orderNumberSearchText = store === 'pokemoncenter' ? `${text}\n${String(parsed.html || '')}` : text;
+  const orderNumbers = extractOrderNumbers(store, subject, orderNumberSearchText);
+  // The original RFC822 source sometimes contains the Pokemon P-number even when a malformed or
+  // truncated text/html alternative does not. Live discovery may supply that exact fallback.
+  const discoveredPokemonRef = clean(parsed._pokemonCenterOrderNumber || '');
+  if (store === 'pokemoncenter' && /^P\d{8,12}$/i.test(discoveredPokemonRef) && !orderNumbers.some(value => normalizeOrderRef(value) === normalizeOrderRef(discoveredPokemonRef))) {
+    orderNumbers.unshift(discoveredPokemonRef.toUpperCase());
+  }
   const primaryOrderNumber = orderNumbers[0] || '';
-  const archivedEmail = await archiveEmailMetadata(supabase, account, parsed, uid, { store, status, orderNumber: primaryOrderNumber || null });
+  let archivedEmail = await archiveEmailMetadata(supabase, account, parsed, uid, { store, status, orderNumber: primaryOrderNumber || null });
   if (!primaryOrderNumber) return { ignored: true, email_id: archivedEmail?.id || null };
 
   const messageId = clean(parsed.messageId) || `${account.email}:${uid}`;
@@ -2233,7 +2338,8 @@ async function saveParsedMessage(supabase, account, parsed, uid, adjustCredits =
     const lateAmazonGhostConfirmation = store === 'amazon' && status === 'confirmed' && existing.status === 'canceled' && !!serviceOrder.metadata?.ghost_suspected_at;
     const shouldAdvance = sameMessageReclassification || lateAmazonGhostConfirmation || statusRank(status) >= statusRank(existing.status) || ['canceled','refunded'].includes(status);
 
-    const preserveFinancials = store === 'amazon' && status !== 'confirmed';
+    const preserveFinancials = ['amazon','pokemoncenter'].includes(store) && status !== 'confirmed';
+    const existingConfirmationReceipt = hasLegacyConfirmationReceipt(existing || {});
     const parsedTracking = extractTracking(text);
     const priorTracking = normalizeTrackingNumber(existing?.tracking_number);
     const patch = {
@@ -2256,9 +2362,14 @@ async function saveParsedMessage(supabase, account, parsed, uid, adjustCredits =
       tracking_number: parsedTracking || priorTracking || null,
       carrier: detectCarrierFromTracking(parsedTracking || priorTracking || '', `${subject} ${text.slice(0,2000)}`) || (priorTracking ? existing?.carrier : null) || null,
       product_summary: (status === 'confirmed' ? productSummary : existing?.product_summary || productSummary) || null,
-      receipt_html: status === 'confirmed' || !existing?.receipt_html ? receiptHtml : existing.receipt_html,
-      receipt_text: status === 'confirmed' || !existing?.receipt_text ? text.slice(0, 250000) : existing.receipt_text,
-      raw_subject: subject,
+      // receipt_* is tax/confirmation evidence. Older code filled it with the first shipping or
+      // delivery message when no confirmation had been found, which made a $0 delivered order
+      // incorrectly expose that delivery body as "View confirmed receipt".
+      receipt_html: status === 'confirmed' ? receiptHtml : (existingConfirmationReceipt ? existing?.receipt_html : null),
+      receipt_text: status === 'confirmed' ? text.slice(0, 250000) : (existingConfirmationReceipt ? existing?.receipt_text : null),
+      // Preserve the confirmation subject after later lifecycle updates so legacy receipt rows
+      // remain classifiable even when the most recent event was shipped/delivered.
+      raw_subject: status === 'confirmed' || !existing?.raw_subject ? subject : existing.raw_subject,
       last_message_id: messageId,
       updated_at: new Date().toISOString()
     };
@@ -2275,6 +2386,7 @@ async function saveParsedMessage(supabase, account, parsed, uid, adjustCredits =
 
     let effectiveArchivedEmail = archivedEmail;
     if (store === 'pokemoncenter' && archivedEmail?.id) {
+      archivedEmail = await enforcePokemonCenterExactEmailOwnership(supabase, archivedEmail, order.id, matchedOrderNumber);
       effectiveArchivedEmail = await mirrorPokemonCenterEmailToOrderOwner(supabase, archivedEmail, orderOwnerUserId, order.id);
     }
     if (effectiveArchivedEmail?.id) {
@@ -2578,7 +2690,7 @@ async function discoverPokemonCenterConfirmationsGlobally(
   });
   const targetRefs = new Set(targetRows.map(row => normalizeOrderRef(row.order_number)).filter(Boolean));
   if (!targetRefs.size) {
-    return { mailboxes_selected:0, mailboxes_checked:0, mailbox_failures:0, messages_found:0, messages_processed:0, messages_matched:0, messages_saved:0, matched_order_numbers:[], mailbox_matches:[], debug:['No Pokemon Center tracked P-numbers were available for live discovery.'] };
+    return { mailboxes_selected:0, mailboxes_checked:0, mailbox_failures:0, messages_found:0, messages_processed:0, messages_matched:0, messages_saved:0, raw_source_order_numbers_recovered:0, matched_order_numbers:[], mailbox_matches:[], debug:['No Pokemon Center tracked P-numbers were available for live discovery.'] };
   }
 
   const dates = targetRows
@@ -2607,13 +2719,15 @@ async function discoverPokemonCenterConfirmationsGlobally(
   let messagesProcessed = 0;
   let messagesMatched = 0;
   let messagesSaved = 0;
+  let rawSourceOrderNumbersRecovered = 0;
   const matchedOrderNumbers = new Set();
   const mailboxMatches = new Map();
   const lifecycleSubjects = [
     'Thank you for shopping at PokemonCenter.com!',
     'order is on its way',
     'package will arrive soon',
-    'package has been delivered'
+    'package has been delivered',
+    'running a little behind'
   ];
 
   const worker = async account => {
@@ -2676,10 +2790,19 @@ async function discoverPokemonCenterConfirmationsGlobally(
               const parsed = await simpleParser(msg.source);
               const text = readableEmailText(parsed);
               const store = detectStore(parsed.from?.text || '', parsed.subject || '', text);
-              const refs = extractOrderNumbers('pokemoncenter', parsed.subject || '', text)
+              const rawSource = Buffer.isBuffer(msg.source) ? msg.source.toString('utf8') : String(msg.source || '');
+              const parsedRefs = extractOrderNumbers('pokemoncenter', parsed.subject || '', `${text}\n${String(parsed.html || '')}`)
                 .map(normalizeOrderRef).filter(Boolean);
+              const rawRefs = [...rawSource.matchAll(/\b(P\d{8,12})\b/gi)]
+                .map(match => normalizeOrderRef(match[1])).filter(Boolean);
+              const refs = [...new Set([...parsedRefs, ...rawRefs])];
               const matchedRef = refs.find(ref => targetRefs.has(ref));
               if (store !== 'pokemoncenter' || !matchedRef) continue;
+              if (!parsedRefs.includes(matchedRef) && rawRefs.includes(matchedRef)) {
+                rawSourceOrderNumbersRecovered++;
+                if (debug.length < 240) debug.push(`Live Pokemon raw-source P-number recovered: order=${matchedRef} receiving_mailbox=${account.email} uid=${msg.uid}`);
+              }
+              parsed._pokemonCenterOrderNumber = matchedRef;
               messagesMatched++;
               matchedOrderNumbers.add(matchedRef);
               const status = detectStatus(parsed.subject || '', text);
@@ -2727,6 +2850,7 @@ async function discoverPokemonCenterConfirmationsGlobally(
     messages_processed:messagesProcessed,
     messages_matched:messagesMatched,
     messages_saved:messagesSaved,
+    raw_source_order_numbers_recovered:rawSourceOrderNumbersRecovered,
     matched_order_numbers:[...matchedOrderNumbers].sort(),
     mailbox_matches:[...mailboxMatches.values()].sort((a,b) => a.order_number.localeCompare(b.order_number) || a.event_type.localeCompare(b.event_type)),
     since:since.toISOString(),
@@ -3515,6 +3639,26 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
       for (const row of data || []) addEmail(row.linked_order_id, row, row.email_type);
     } catch (_) {}
 
+    // saveParsedMessage records a durable order event even when the optional Email Center row or
+    // junction link cannot be created. Those events include the physical receiving mailbox and
+    // Message-ID, so they are the authoritative fallback for "Actually received by" and buttons.
+    try {
+      for (let i = 0; i < ids.length; i += 100) {
+        const result = await supabase.from('tracked_order_events')
+          .select('id,order_id,status,event_at,subject,message_id,source_email')
+          .in('order_id', ids.slice(i, i + 100));
+        if (result.error) continue;
+        for (const event of result.data || []) {
+          addEmail(event.order_id, {
+            id:`event:${event.id}`,
+            message_id:event.message_id,
+            mailbox_email:event.source_email,
+            email_type:event.status
+          }, event.status);
+        }
+      }
+    } catch (_) {}
+
     // Super-admins may view exact-P-number Pokemon Center mail from the complete website archive.
     // This is also a read-time safety net for legacy receipt rows whose cross-user junction link
     // was deleted by an older profile-identity repair.
@@ -3598,7 +3742,7 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
         tracking_number:trackingNumber || null,
         email_counts:emailCounts,
         has_linked_email:Number(emailCounts.total || 0) > 0,
-        has_confirmation_email:Number(emailCounts.confirmed || 0) > 0 || Boolean(o.receipt_html || o.receipt_text),
+        has_confirmation_email:Number(emailCounts.confirmed || 0) > 0 || hasLegacyConfirmationReceipt(o),
         actual_receiving_mailboxes:mailboxes,
         email_delivery_mismatch:Boolean(expected && mailboxes.some(mailbox => mailbox !== expected)),
         items:itemMap.get(id) || [],
@@ -3946,7 +4090,7 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
       // still the only ownership rule; the receiving inbox can never move or charge an order.
       let pokemonArchiveRows = [];
       let pokemonArchiveDiscovery = { rows:[], metadata_scanned:0, candidates_found:0, since:null };
-      let pokemonLiveDiscovery = { mailboxes_selected:0, mailboxes_checked:0, mailbox_failures:0, messages_found:0, messages_processed:0, messages_matched:0, messages_saved:0, matched_order_numbers:[], debug:[] };
+      let pokemonLiveDiscovery = { mailboxes_selected:0, mailboxes_checked:0, mailbox_failures:0, messages_found:0, messages_processed:0, messages_matched:0, messages_saved:0, raw_source_order_numbers_recovered:0, matched_order_numbers:[], debug:[] };
       try {
         const pokemonTrackerMeta = await supabase.from('tracked_orders')
           .select('id,user_id,source_order_id,store,order_number,status,order_date,created_at')
@@ -4019,7 +4163,7 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
         candidates_found: pokemonArchiveDiscovery.candidates_found || 0,
         archive_since: pokemonArchiveDiscovery.since || null,
         classified_rows: 0, with_order_number: 0,
-        confirmations: 0, shipped: 0, delivered: 0, canceled: 0, unknown_status: 0,
+        confirmations: 0, processing: 0, shipped: 0, delivered: 0, canceled: 0, unknown_status: 0,
         saved: 0, ignored: 0, not_platform_order: 0, no_order_number: 0, errors: 0
       };
       const retailerEmails=[...merged.values()].filter(email=>{
@@ -4055,10 +4199,11 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
         if (isPokemon) {
           pokemonStats.classified_rows++;
           const detectedStatus = detectStatus(email.subject||'', archivedText);
-          const nums = extractOrderNumbers('pokemoncenter', email.subject||'', archivedText);
+          const nums = extractOrderNumbers('pokemoncenter', email.subject||'', `${archivedText}\n${String(email.body_html || '')}`);
           const orderNo = nums[0] || '';
           if (orderNo) pokemonStats.with_order_number++; else pokemonStats.no_order_number++;
           if (detectedStatus === 'confirmed') pokemonStats.confirmations++;
+          else if (detectedStatus === 'processing') pokemonStats.processing++;
           else if (detectedStatus === 'shipped') pokemonStats.shipped++;
           else if (detectedStatus === 'delivered') pokemonStats.delivered++;
           else if (detectedStatus === 'canceled' || detectedStatus === 'refunded') pokemonStats.canceled++;
@@ -4073,6 +4218,7 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
           const archiveOwnerUserId = email.user_id || req.user_id;
           const account={ user_id:archiveOwnerUserId, archive_user_id:archiveOwnerUserId, profile_id:null, email:lower(email.mailbox_email), provider:providerForEmail(email.mailbox_email)||{name:'archive'}, ingestion_source:email.source_type||'archive_reconcile' };
           const parsed={ subject:email.subject||'', from:{text:email.from_text||''}, to:{text:email.to_text||''}, cc:{text:email.cc_text||''}, text:archivedText, html:email.body_html||null, date:new Date(email.received_at||Date.now()), messageId:email.message_id };
+          if (isPokemon && /^P\d{8,12}$/i.test(clean(email.order_number || ''))) parsed._pokemonCenterOrderNumber = clean(email.order_number).toUpperCase();
           const result=await saveParsedMessage(supabase,account,parsed,email.imap_uid||0,adjustUserCredits,confirmPendingAmazonCheckout);
           if(result?.saved)matched++; else ignored++;
           if (isPokemon) {
@@ -4379,12 +4525,17 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
           .filter(e => e.id);
       }
     } catch (_) {}
-    if (!emails.length) {
-      try {
-        const { data } = await supabase.from('email_messages').select('*').eq('linked_order_id', order.id).order('received_at', { ascending:true });
-        emails = data || [];
-      } catch (_) {}
-    }
+    // Merge legacy links even when one junction row exists; otherwise a partial junction can hide
+    // the rest of an order's confirmation/shipping/delivery timeline.
+    try {
+      const { data } = await supabase.from('email_messages').select('*').eq('linked_order_id', order.id).order('received_at', { ascending:true });
+      const merged = new Map();
+      for (const email of [...emails, ...(data || [])]) {
+        const key = clean(email.message_id) || clean(email.id) || `${lower(email.email_type || email.event_type)}|${lower(email.mailbox_email)}|${email.received_at || email.event_at || ''}`;
+        if (!merged.has(key)) merged.set(key, email);
+      }
+      emails = [...merged.values()];
+    } catch (_) {}
 
     // A Pokemon Center message may physically belong to another website user's mailbox. For a
     // super-admin viewing an owned tracker row, merge every archived lifecycle event with the same
@@ -4415,11 +4566,58 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
         }
       } catch (_) {}
     }
+
+    // tracked_order_events is written for every successfully matched message and retains the
+    // physical mailbox even when Email Center storage/linking failed. Merge it last, enriching an
+    // archived message when possible and synthesizing a viewable timeline card otherwise.
+    try {
+      const eventResult = await supabase.from('tracked_order_events')
+        .select('id,status,event_at,subject,message_id,source_email,body_excerpt')
+        .eq('order_id', order.id)
+        .order('event_at', { ascending:true });
+      if (!eventResult.error) {
+        const merged = new Map();
+        for (const email of emails) {
+          const key = clean(email.message_id) || clean(email.id) || `${lower(email.email_type || email.event_type)}|${lower(email.mailbox_email)}|${email.received_at || email.event_at || ''}`;
+          merged.set(key, email);
+        }
+        for (const event of eventResult.data || []) {
+          const key = clean(event.message_id) || `event:${event.id}`;
+          const prior = merged.get(key);
+          if (prior) {
+            merged.set(key, {
+              ...prior,
+              event_type:prior.event_type || event.status,
+              event_at:prior.event_at || event.event_at,
+              mailbox_email:prior.mailbox_email || event.source_email,
+              subject:prior.subject || event.subject
+            });
+            continue;
+          }
+          const confirmationBodyAvailable = lower(event.status) === 'confirmed' && hasLegacyConfirmationReceipt(order);
+          merged.set(key, {
+            id:`event:${event.id}`,
+            message_id:event.message_id,
+            email_type:event.status || 'unknown',
+            event_type:event.status || 'unknown',
+            received_at:event.event_at,
+            event_at:event.event_at,
+            subject:event.subject || `${order.store} order update`,
+            mailbox_email:lower(event.source_email),
+            body_html:confirmationBodyAvailable ? order.receipt_html : null,
+            body_text:confirmationBodyAvailable ? order.receipt_text : event.body_excerpt,
+            snippet:event.body_excerpt,
+            source_type:'tracked_order_event'
+          });
+        }
+        emails = [...merged.values()].sort((a,b) => new Date(a.received_at || a.event_at || 0) - new Date(b.received_at || b.event_at || 0));
+      }
+    } catch (_) {}
     if (type !== 'all') emails = emails.filter(e => lower(e.event_type || e.email_type) === type);
 
     // Old records created before full email-body storage may only have the confirmation body on
     // tracked_orders. Keep that available rather than showing an empty page.
-    if (!emails.length && (type === 'all' || type === 'confirmed') && (order.receipt_html || order.receipt_text)) {
+    if (!emails.length && (type === 'all' || type === 'confirmed') && hasLegacyConfirmationReceipt(order)) {
       emails = [{
         subject: order.raw_subject || `${order.store} order confirmation`,
         received_at: order.order_date,
@@ -4442,6 +4640,7 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
   app.get('/orders/receipt/:id', auth, async (req, res) => {
     const { data, error } = await supabase.from('tracked_orders').select('*').eq('id', req.params.id).eq('user_id', req.user_id).maybeSingle();
     if (error || !data) return res.status(404).send('Receipt not found');
+    if (normalizeStoreKey(data.store || '') === 'pokemoncenter' && !hasLegacyConfirmationReceipt(data)) return res.status(404).send('No confirmation receipt is linked to this order yet.');
     res.type('html').send(`<!doctype html><html><head><meta charset="utf-8"><title>Receipt ${htmlEscape(data.order_number)}</title><style>body{font-family:Arial,sans-serif;max-width:900px;margin:32px auto;padding:20px}.head{border-bottom:2px solid #111;padding-bottom:12px;margin-bottom:20px}.meta{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.receipt{margin-top:24px;border-top:1px solid #ccc;padding-top:18px}@media print{button{display:none}}</style></head><body><button onclick="print()">Print receipt</button><div class="head"><h1>${htmlEscape(data.store)} receipt</h1><div class="meta"><div><b>Order:</b> ${htmlEscape(data.order_number)}</div><div><b>Status:</b> ${htmlEscape(data.status)}</div><div><b>Date:</b> ${htmlEscape(data.order_date || '')}</div><div><b>Total:</b> $${Number(data.total || 0).toFixed(2)}</div></div></div><div class="receipt">${data.receipt_html || `<pre>${htmlEscape(data.receipt_text || 'No email receipt body stored.')}</pre>`}</div></body></html>`);
   });
 
@@ -4453,7 +4652,7 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
     if (error) return res.status(500).send(error.message);
     const rows = data || [];
     const total = rows.reduce((s,o)=>s+Number(o.total||0)+Number(o.credits_spent||0),0);
-    res.type('html').send(`<!doctype html><html><head><meta charset="utf-8"><title>${year} Order Receipts</title><style>body{font-family:Arial,sans-serif;margin:28px}table{width:100%;border-collapse:collapse}th,td{padding:8px;border-bottom:1px solid #ddd;text-align:left}.receipt{page-break-before:always}.no-print{margin-bottom:16px}@media print{.no-print{display:none}}</style></head><body><div class="no-print"><button onclick="print()">Print / Save as PDF</button></div><h1>${year} Successful Order Receipt Archive</h1><p>${rows.length} orders • Combined purchase + credits: $${total.toFixed(2)}</p><table><thead><tr><th>Date</th><th>Store</th><th>Order</th><th>Status</th><th>Purchase</th><th>Credits</th></tr></thead><tbody>${rows.map(o=>`<tr><td>${htmlEscape((o.order_date||'').slice(0,10))}</td><td>${htmlEscape(o.store)}</td><td>${htmlEscape(o.order_number)}</td><td>${htmlEscape(o.status)}</td><td>$${Number(o.total||0).toFixed(2)}</td><td>$${Number(o.credits_spent||0).toFixed(2)}</td></tr>`).join('')}</tbody></table>${rows.map(o=>`<section class="receipt"><h2>${htmlEscape(o.store)} — ${htmlEscape(o.order_number)}</h2>${o.receipt_html || `<pre>${htmlEscape(o.receipt_text || '')}</pre>`}</section>`).join('')}</body></html>`);
+    res.type('html').send(`<!doctype html><html><head><meta charset="utf-8"><title>${year} Order Receipts</title><style>body{font-family:Arial,sans-serif;margin:28px}table{width:100%;border-collapse:collapse}th,td{padding:8px;border-bottom:1px solid #ddd;text-align:left}.receipt{page-break-before:always}.no-print{margin-bottom:16px}.missing{padding:12px;background:#fff7d6;border:1px solid #f4c430}@media print{.no-print{display:none}}</style></head><body><div class="no-print"><button onclick="print()">Print / Save as PDF</button></div><h1>${year} Successful Order Receipt Archive</h1><p>${rows.length} orders • Combined purchase + credits: $${total.toFixed(2)}</p><table><thead><tr><th>Date</th><th>Store</th><th>Order</th><th>Status</th><th>Purchase</th><th>Credits</th></tr></thead><tbody>${rows.map(o=>`<tr><td>${htmlEscape((o.order_date||'').slice(0,10))}</td><td>${htmlEscape(o.store)}</td><td>${htmlEscape(o.order_number)}</td><td>${htmlEscape(o.status)}</td><td>$${Number(o.total||0).toFixed(2)}</td><td>$${Number(o.credits_spent||0).toFixed(2)}</td></tr>`).join('')}</tbody></table>${rows.map(o=>{const validReceipt=normalizeStoreKey(o.store||'')!=='pokemoncenter'||hasLegacyConfirmationReceipt(o);return `<section class="receipt"><h2>${htmlEscape(o.store)} — ${htmlEscape(o.order_number)}</h2>${validReceipt ? (o.receipt_html || `<pre>${htmlEscape(o.receipt_text || '')}</pre>`) : '<p class="missing">No confirmation receipt is linked to this order yet. Shipping or delivery emails are not used as tax receipts.</p>'}</section>`}).join('')}</body></html>`);
   });
 
   // Super-admin Email Center: lightweight AYCD/direct-IMAP metadata, manual linking, and retention cleanup.
