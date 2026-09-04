@@ -27,6 +27,7 @@ function loadOrderTrackerTestHooks() {
       if (id === 'mailparser') return { simpleParser:async () => ({}) };
       if (id === 'cheerio') return { load:() => { throw new Error('Unexpected HTML parse'); } };
       if (id === './encryption') return { encrypt:value => value, decrypt:value => value };
+      if (id === './discord-history-import') return { registerDiscordHistoryImport:() => {} };
       if (id === './retailer-reconciliation') {
         return {
           parseRetailEmail:() => ({}), expectedWebhookItems:() => [], matchScore:() => 0,

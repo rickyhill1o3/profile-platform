@@ -4,6 +4,7 @@ const crypto = require('crypto');
 const cheerio = require('cheerio');
 const { encrypt, decrypt } = require('./encryption');
 const { parseRetailEmail, expectedWebhookItems, matchScore, mainItemMatch, deriveOverallStatus, parseSupremeWebhookCheckoutAt, norm: reconcileNorm } = require('./retailer-reconciliation');
+const { registerDiscordHistoryImport } = require('./discord-history-import');
 
 
 function createGuardedImapFlow(options = {}, label = 'IMAP') {
@@ -798,6 +799,9 @@ function detectStore(from, subject, text) {
   if (/crunchyroll/.test(hay)) return 'crunchyroll';
   if (/supremenewyork\.com|us\.supreme\.com|\bsupreme\b/.test(hay)) return 'supreme';
   if (/books\s*-?\s*a\s*-?\s*million|booksamillion(?:\.com)?|\bbam!?(?:\s|$)/i.test(hay)) return 'booksamillion';
+  if (/boxlunch(?:\.com)?|box lunch/.test(hay)) return 'boxlunch';
+  if (/hazbinhotel\.com|hazbin hotel(?: official)? store/.test(hay)) return 'shopifyhazbinhotel';
+  if (/store\.taylorswift\.com|taylorswift\.com|taylor swift(?: official)? store/.test(hay)) return 'shopifytaylorswift';
   return '';
 }
 
@@ -864,6 +868,19 @@ function extractOrderNumber(store, subject, text) {
     ],
     crunchyroll: [/\b(?:order(?: number| #)?\s*[:#]?\s*)([A-Z0-9-]{6,30})\b/i],
     supreme: [/\bOrder\s+(\d{6,20})\b/i, /\border\s*#?\s*(\d{6,20})\b/i],
+    boxlunch: [
+      /\b(?:order(?: number| no\.?| id| #)?\s*[:#-]?\s*)(DL[A-Z0-9-]{5,30})\b/i,
+      /\b(DL[A-Z0-9-]{5,30})\b/i,
+      /\b(?:order(?: number| no\.?| id| #)?\s*[:#-]?\s*)([A-Z0-9-]{6,30})\b/i
+    ],
+    shopifyhazbinhotel: [
+      /\b(?:order(?: number| no\.?| id| #)?\s*[:#-]?\s*)#?([A-Z0-9-]{4,30})\b/i,
+      /\border\s+#([A-Z0-9-]{4,30})\b/i
+    ],
+    shopifytaylorswift: [
+      /\b(?:order(?: number| no\.?| id| #)?\s*[:#-]?\s*)#?([A-Z0-9-]{4,30})\b/i,
+      /\border\s+#([A-Z0-9-]{4,30})\b/i
+    ],
     booksamillion: [
       /\b(?:order\s*(?:number|no\.?|#)?\s*[:#-]?\s*)(\d{8,20})\b/i,
       /\b(?:delivery\s+orders?\s*)?(?:order\s*)?#\s*[:#-]?\s*(\d{8,20})\b/i,
@@ -1214,7 +1231,22 @@ function serviceOrderNumber(order = {}) {
 async function loadServiceOrders(supabase, userId) {
   const { data, error } = await supabase.from('orders').select('*').eq('user_id', userId).order('created_at', { ascending: false }).limit(2000);
   if (error) throw error;
-  return data || [];
+  const merged = new Map((data || []).map(order => [String(order.id), order]));
+
+  // The ordinary window stays bounded for fast live scans, but pre-website Discord imports can be
+  // older than thousands of newer checkouts. Merge every historical Discord row so exact retailer
+  // IDs and Supreme batch matching continue to work no matter how large the current order history is.
+  let offset = 0;
+  while (true) {
+    const historical = await supabase.from('orders').select('*')
+      .eq('user_id', userId).eq('source', 'discord_history')
+      .order('created_at', { ascending:false }).range(offset, offset + 499);
+    if (historical.error) throw historical.error;
+    for (const order of historical.data || []) merged.set(String(order.id), order);
+    if ((historical.data || []).length < 500) break;
+    offset += 500;
+  }
+  return [...merged.values()].sort((a, b) => new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime());
 }
 
 async function findPokemonCenterServiceOrderGlobally(supabase, orderNumber) {
@@ -1386,6 +1418,9 @@ function normalizeStoreKey(value) {
   if (compact.includes('pokemoncenter') || compact === 'pokemon' || compact === 'pokmon' || compact === 'pokecenter' || compact === 'pc') return 'pokemoncenter';
   if (compact.includes('walmart')) return 'walmart';
   if (compact.includes('samsclub') || compact === 'sams') return 'samsclub';
+  if (compact.includes('boxlunch')) return 'boxlunch';
+  if (compact.includes('hazbinhotel')) return 'shopifyhazbinhotel';
+  if (compact.includes('taylorswift')) return 'shopifytaylorswift';
   return compact;
 }
 
@@ -1628,12 +1663,15 @@ function pokemonCenterWebhookSummary(serviceOrder = {}) {
   return `${clean(items[0].product_name || 'Item')} + ${items.length - 1} more`.slice(0, 500);
 }
 
-async function syncServiceOrders(supabase, userId, accounts = []) {
-  const serviceOrders = await loadServiceOrders(supabase, userId);
+async function syncServiceOrders(supabase, userId, accounts = [], options = {}) {
+  // Historical Discord imports can be much older than the normal 2,000-row service-order window.
+  // When explicit rows are supplied, sync exactly those rows so an old checkout cannot be skipped
+  // merely because the super-admin has accumulated thousands of newer website orders.
+  const serviceOrders = Array.isArray(options.serviceOrders) ? options.serviceOrders : await loadServiceOrders(supabase, userId);
   const profileMailboxIndex = await buildProfileMailboxIndex(supabase, userId);
   const defaultEmail = accounts[0]?.email || 'waiting-for-imap@local';
   for (const source of serviceOrders) {
-    const store = lower(source.site || source.metadata?.site || source.raw_payload?.site || 'unknown').replace(/[^a-z0-9]/g, '');
+    const store = normalizeStoreKey(source.site || source.metadata?.site || source.raw_payload?.site || 'unknown') || 'unknown';
     const orderNumber = serviceOrderNumber(source);
     if (!orderNumber) continue;
     const { data: prior } = await supabase.from('tracked_orders').select('*').eq('source_order_id', source.id).maybeSingle();
@@ -1646,6 +1684,7 @@ async function syncServiceOrders(supabase, userId, accounts = []) {
       source.metadata?.email ||
       source.email || ''
     );
+    const isDiscordHistory = lower(source.source) === 'discord_history' || source.metadata?.discord_history_import === true;
     // Historical webhook payloads can contain several addresses (website user, bot
     // account, notification address). Prefer the address that is actually one of
     // this user's configured retailer mailboxes. This repairs old rows that were
@@ -1653,7 +1692,12 @@ async function syncServiceOrders(supabase, userId, accounts = []) {
     const exactProfileIdentity = resolveExactProfileMailbox(source, profileMailboxIndex);
     const matchingAccount = accounts.find(account => sourceEmails.has(lower(account.email)))
       || accounts.find(account => lower(account.email) === metadataEmail);
-    const orderEmail = lower(exactProfileIdentity?.email || matchingAccount?.email || metadataEmail || [...sourceEmails][0] || '');
+    // The Account/Email captured in an old Discord checkout is historical evidence. A profile may
+    // have been renamed or changed to a new retailer login since then, so never replace that old
+    // checkout mailbox with the profile's current credential during import.
+    const orderEmail = lower(isDiscordHistory && metadataEmail
+      ? metadataEmail
+      : (exactProfileIdentity?.email || matchingAccount?.email || metadataEmail || [...sourceEmails][0] || ''));
     const priorEmail = lower(prior?.source_email || '');
     const priorIsPlaceholder = !priorEmail || priorEmail === 'waiting-for-imap@local';
     // An exact profile-name match inside THIS website user is authoritative for legacy
@@ -1661,7 +1705,9 @@ async function syncServiceOrders(supabase, userId, accounts = []) {
     // profiles such as "Carnival" and "red card 8032 stickydelivery" even when the old
     // checkout webhook only stored the profile name.
     const retailerReconciled = ['matched','probable'].includes(lower(prior?.reconciliation_status));
-    const resolvedEmail = lower(retailerReconciled && !priorIsPlaceholder ? priorEmail : (exactProfileIdentity?.email || orderEmail || (priorIsPlaceholder ? defaultEmail : priorEmail)));
+    const resolvedEmail = lower(retailerReconciled && !priorIsPlaceholder
+      ? priorEmail
+      : (isDiscordHistory && orderEmail ? orderEmail : (exactProfileIdentity?.email || orderEmail || (priorIsPlaceholder ? defaultEmail : priorEmail))));
     const payload = {
       user_id: userId, source_order_id: source.id, service_order_external_id: source.external_order_id || null,
       profile_id: exactProfileIdentity?.profile_id || matchingAccount?.profile_id || prior?.profile_id || accounts[0]?.profile_id || null,
@@ -1695,7 +1741,7 @@ async function syncServiceOrders(supabase, userId, accounts = []) {
     // Pokemon Center is deliberately exempt: Stellar can keep the first queue entry's email for
     // later profile checkouts. Its P-number is authoritative, so a different receiving mailbox is
     // evidence we must retain, not a mismatched link to delete.
-    if (tracked && exactProfileIdentity?.email && !['supreme','pokemon','pokemoncenter'].includes(store) && !['matched','probable'].includes(lower(tracked.reconciliation_status))) {
+    if (tracked && !isDiscordHistory && exactProfileIdentity?.email && !['supreme','pokemon','pokemoncenter'].includes(store) && !['matched','probable'].includes(lower(tracked.reconciliation_status))) {
       await removeMismatchedOrderEmailLinks(supabase, tracked.id, exactProfileIdentity.email);
     }
     if (tracked && ['confirmed','processing','shipped','delivered'].includes(lower(tracked.status))) {
@@ -3585,6 +3631,56 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
         .catch(err => console.error('[ORDER TRACKER] Follow-up checkout scan failed:', err.message || err));
     }, Math.max(MIN_RESCAN_INTERVAL_MS + 5000, 150000));
   };
+
+  registerDiscordHistoryImport({
+    app,
+    supabase,
+    auth,
+    finalizeImportedOrders: async (userId, serviceOrders = []) => {
+      if (!serviceOrders.length) return { tracker_orders:0, email_repair_queued:0 };
+      const accounts = await loadScanAccounts(supabase, userId);
+      await syncServiceOrders(supabase, userId, accounts, { serviceOrders });
+
+      const tracked = [];
+      const sourceIds = serviceOrders.map(order => order.id).filter(Boolean);
+      for (let i = 0; i < sourceIds.length; i += 100) {
+        const result = await supabase.from('tracked_orders')
+          .select('id,source_order_id,source_email,order_number')
+          .in('source_order_id', sourceIds.slice(i, i + 100));
+        if (result.error) throw result.error;
+        tracked.push(...(result.data || []));
+      }
+
+      const searchableSourceIds = new Set(serviceOrders
+        .filter(order => order.metadata?.has_retailer_order_number === true)
+        .map(order => String(order.id)));
+      const repairIds = tracked.filter(order =>
+        searchableSourceIds.has(String(order.source_order_id)) &&
+        lower(order.source_email).includes('@') &&
+        lower(order.source_email) !== 'waiting-for-imap@local' &&
+        clean(order.order_number)
+      ).map(order => String(order.id));
+
+      // Exact historical IMAP searches can take a while. Finish the import immediately and repair
+      // confirmation/shipping/delivery evidence in bounded background batches. Every batch is
+      // idempotent, so a Render restart can be followed by the normal Reconcile button safely.
+      if (repairIds.length) setImmediate(async () => {
+        for (let i = 0; i < repairIds.length; i += 100) {
+          try {
+            await runHistoricalOrderEmailRepair(supabase, userId, adjustUserCredits, confirmPendingAmazonCheckout, {
+              maxOrders:100,
+              priorityOrderIds:repairIds.slice(i, i + 100),
+              allowConcurrent:true
+            });
+          } catch (error) {
+            console.error('[DISCORD HISTORY] Exact historical email repair failed:', error.message || error);
+          }
+        }
+      });
+
+      return { tracker_orders:tracked.length, email_repair_queued:repairIds.length };
+    }
+  });
 
   app.post('/admin/email-center/import-aycd-accounts', auth, async (req, res) => {
     if (req.role !== 'super_admin') return res.status(403).json({ error: 'Super admin only.' });

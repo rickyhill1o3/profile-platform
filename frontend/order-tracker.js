@@ -3,6 +3,8 @@ const token=localStorage.getItem('token');
 if(!token) location.href='login.html';
 const headers={'Authorization':`Bearer ${token}`,'Content-Type':'application/json'};
 let allOrders=[];
+let discordHistoryJobId='';
+let discordHistoryPreview=null;
 const $=id=>document.getElementById(id);
 function logout(){localStorage.removeItem('token');location.href='login.html'}
 function money(n){return `$${Number(n||0).toFixed(2)}`}
@@ -14,7 +16,7 @@ function setProgress(percent,stage,detail=''){const p=Math.max(0,Math.min(100,Nu
 function showWarning(text){$('scanWarning').hidden=!text;$('scanWarning').textContent=text||''}
 function renderAccounts(accounts=[]){const el=$('scanAccounts');el.innerHTML=accounts.length?accounts.map(a=>`<div class="mail-account"><div class="mail-ok">✓ ${esc(a.email)}</div><div>${esc(a.provider||'IMAP')} · ${a.last_success_at?'Last scan '+new Date(a.last_success_at).toLocaleString():'Ready for first scan'}</div>${a.scanned_through_at?`<div class="subtle-text">Scanned through ${new Date(a.scanned_through_at).toLocaleString()}</div>`:''}${a.last_error?`<div class="mail-error">${esc(a.last_error)}</div>`:''}</div>`).join(''):'<p class="subtle-text">No supported IMAP/app password was found in saved profiles.</p>'}
 function applyOrders(orders=[],summary={}){allOrders=orders;render();$('countAll').textContent=allOrders.length;$('countActive').textContent=(summary.confirmed||0)+(summary.processing||0);$('countSuccess').textContent=(summary.shipped||0)+(summary.delivered||0);$('countCanceled').textContent=(summary.canceled||0)+(summary.refunded||0);$('successRate').textContent=`${Number(summary.success_rate||0).toFixed(1)}%`}
-async function bootstrap(){const j=await api('/orders/bootstrap');renderAccounts(j.accounts||[]);applyOrders(j.orders||[],j.summary||{});$('scanMessage').textContent=`${j.connected_count||0} connected mailbox${Number(j.connected_count||0)===1?'':'es'}. Scans continue from the last saved IMAP UID, so previously checked messages are not searched again.`;if(Array.isArray(j.warnings)&&j.warnings.length)showWarning(`Some optional data could not be refreshed: ${j.warnings.join(' | ')}`);if(j.is_super_admin){$('aycdPanel').hidden=false;$('oneTimePokemonPanel').hidden=false;refreshAycdStatus()}return j}
+async function bootstrap(){const j=await api('/orders/bootstrap');renderAccounts(j.accounts||[]);applyOrders(j.orders||[],j.summary||{});$('scanMessage').textContent=`${j.connected_count||0} connected mailbox${Number(j.connected_count||0)===1?'':'es'}. Scans continue from the last saved IMAP UID, so previously checked messages are not searched again.`;if(Array.isArray(j.warnings)&&j.warnings.length)showWarning(`Some optional data could not be refreshed: ${j.warnings.join(' | ')}`);if(j.is_super_admin){$('aycdPanel').hidden=false;$('oneTimePokemonPanel').hidden=false;$('discordHistoryPanel').hidden=false;refreshAycdStatus();loadDiscordHistoryConfig()}return j}
 async function loadOrders(){const qs=new URLSearchParams();if($('statusFilter').value)qs.set('status',$('statusFilter').value);if($('yearFilter').value)qs.set('year',$('yearFilter').value);const j=await api('/orders/tracked?'+qs);applyOrders(j.orders||[],j.summary||{})}
 function isPokemonCenterOrder(o){const store=String(o.store||'').toLowerCase().replace(/[^a-z0-9]/g,'');return store==='pokemon'||store==='pokemoncenter'}
 function hasPokemonConfirmationEmail(o){const c=o.email_counts||{};return Boolean(o.has_confirmation_email)||Number(c.confirmed||0)>0}
@@ -113,6 +115,106 @@ if($('runOneTimePokemonRecovery')) $('runOneTimePokemonRecovery').onclick=async(
     button.textContent='Recover these order emails';
   }
 };
+
+function setDiscordHistoryStatus(text,{error=false,progress=null}={}){
+  const status=$('discordHistoryStatus');
+  if(status){status.textContent=String(text||'');status.className=`discord-history-status${error?' error':''}`}
+  if(progress!=null&&$('discordHistoryProgressBar'))$('discordHistoryProgressBar').style.width=`${Math.max(0,Math.min(100,Number(progress)||0))}%`;
+}
+
+async function loadDiscordHistoryConfig(){
+  try{
+    const config=await api('/orders/discord-history/config');
+    if(Array.isArray(config.saved_channels)&&config.saved_channels.length&&!String($('discordHistoryChannels').value||'').trim())$('discordHistoryChannels').value=config.saved_channels.join('\n');
+    const invite=$('discordHistoryInvite');
+    if(config.invite_url){invite.href=config.invite_url;invite.hidden=false}else invite.hidden=true;
+    if(!config.token_configured){
+      $('previewDiscordHistory').disabled=true;
+      setDiscordHistoryStatus('Add DISCORD_HISTORY_BOT_TOKEN (or reuse DISCORD_BOT_TOKEN) in Render before previewing Discord history.',{error:true,progress:0});
+    }else{
+      $('previewDiscordHistory').disabled=false;
+      setDiscordHistoryStatus('Ready. Paste both checkout channel IDs and run Preview. No order is created during preview.',{progress:0});
+    }
+  }catch(error){setDiscordHistoryStatus(error.message||'Could not load Discord importer status.',{error:true,progress:0})}
+}
+
+function renderDiscordHistoryPreview(result={}){
+  discordHistoryPreview=result;
+  const reports=Array.isArray(result.channels)?result.channels:[];
+  const channelLines=reports.map(report=>{
+    const channel=report.channel||{};
+    return `${channel.guild_name||'Discord'} / #${channel.name||channel.id||'-'}: ${Number(report.messages_scanned||0).toLocaleString()} scanned, ${Number(report.checkout_matches||0).toLocaleString()} supported checkouts${report.truncated?' (channel limit reached)':''}`;
+  });
+  const warnings=[];
+  if(result.message_content_warning)warnings.push('Discord returned empty webhook embeds. Enable Message Content Intent, then preview again.');
+  if(result.truncated)warnings.push('At least one channel reached the safety scan limit. Imported messages remain duplicate-safe, so you can raise DISCORD_HISTORY_MAX_MESSAGES_PER_CHANNEL and preview again if older orders are missing.');
+  if(Number(result.missing_retailer_order_number||0)>0)warnings.push(`${result.missing_retailer_order_number} checkout(s) do not expose a retailer order ID; they will use a stable Discord reference until email reconciliation can replace it.`);
+  $('discordHistorySummary').textContent=[
+    `Hard cutoff: ${result.cutoff_label||'April 18, 2026 at 2:07 PM Eastern'}`,
+    `Messages scanned: ${Number(result.messages_scanned||0).toLocaleString()}`,
+    `Supported checkout embeds: ${Number(result.supported_checkouts||0).toLocaleString()}`,
+    `New orders ready to import: ${Number(result.importable||0).toLocaleString()}`,
+    `Existing/duplicate orders that will be skipped: ${Number(result.duplicates||0).toLocaleString()}`,
+    ...channelLines,
+    ...warnings.map(warning=>`Warning: ${warning}`)
+  ].join('\n');
+  const entries=Array.isArray(result.entries)?result.entries:[];
+  $('discordHistoryRows').innerHTML=entries.length?entries.map(entry=>`<tr class="${entry.action==='import'?'':'skip-row'}"><td>${esc(new Date(entry.checkout_at).toLocaleString())}</td><td>${esc(entry.guild_name||'Discord')} / #${esc(entry.channel_name||'-')}</td><td>${esc(entry.store)}</td><td>${esc(entry.retailer_order_number||entry.order_number)}${entry.retailer_order_number?'':' (Discord reference)'}</td><td>${esc(entry.checkout_account_email||'Not in embed')}</td><td>${esc(entry.product_name||'-')} · Qty ${esc(entry.quantity||1)}</td><td>${entry.action==='import'?'Import':`Skip · ${esc(entry.duplicate_reason||'already exists')}`}</td></tr>`).join(''):'<tr><td colspan="7">No supported successful-checkout embeds were found before the cutoff.</td></tr>';
+  $('discordHistoryResults').hidden=false;
+  $('importDiscordHistory').disabled=Number(result.importable||0)<1;
+}
+
+async function pollDiscordHistoryJob(jobId,readyStates){
+  const wanted=new Set(readyStates);
+  const started=Date.now();
+  while(true){
+    await new Promise(resolve=>setTimeout(resolve,1500));
+    const response=await api(`/orders/discord-history/status?job_id=${encodeURIComponent(jobId)}`);
+    const job=response.job||{};
+    if(job.status==='idle')throw new Error('The Discord history job was lost after the server restarted. Run Preview again.');
+    if(job.status==='error')throw new Error(job.error||'Discord history job failed.');
+    const runningProgress=job.phase==='importing'||job.phase==='building_order_tracker'?90:Math.min(82,12+Math.log10(Number(job.messages_scanned||0)+1)*18);
+    setDiscordHistoryStatus(job.progress_message||'Working…',{progress:runningProgress});
+    if(job.result&&job.status==='preview_ready')renderDiscordHistoryPreview(job.result);
+    if(wanted.has(job.status))return job;
+    if(Date.now()-started>90*60*1000)throw new Error('Discord history is still running after 90 minutes. Refresh and check the Render logs before retrying.');
+  }
+}
+
+if($('previewDiscordHistory'))$('previewDiscordHistory').onclick=async()=>{
+  const button=$('previewDiscordHistory');
+  const channels=String($('discordHistoryChannels').value||'').split(/[\s,]+/).map(value=>value.trim()).filter(Boolean);
+  if(!channels.length){setDiscordHistoryStatus('Paste at least one Discord checkout channel ID.',{error:true,progress:0});return}
+  button.disabled=true;$('importDiscordHistory').disabled=true;$('discordHistoryResults').hidden=true;discordHistoryPreview=null;discordHistoryJobId='';
+  try{
+    setDiscordHistoryStatus('Starting read-only Discord history preview…',{progress:5});
+    const response=await api('/orders/discord-history/preview',{method:'POST',body:JSON.stringify({channels})});
+    discordHistoryJobId=response.job?.id||'';
+    if(!discordHistoryJobId)throw new Error('The server did not return a Discord preview job ID.');
+    const job=await pollDiscordHistoryJob(discordHistoryJobId,['preview_ready']);
+    renderDiscordHistoryPreview(job.result||{});
+    setDiscordHistoryStatus(job.progress_message||'Preview ready. Review the duplicate report, then import.',{progress:85});
+  }catch(error){setDiscordHistoryStatus(error.message||'Discord preview failed.',{error:true,progress:0})}
+  finally{button.disabled=false}
+};
+
+if($('importDiscordHistory'))$('importDiscordHistory').onclick=async()=>{
+  const count=Number(discordHistoryPreview?.importable||0);
+  if(!discordHistoryJobId||count<1)return;
+  if(!confirm(`Import ${count} pre-website Discord order${count===1?'':'s'} into your super-admin Order Tracker? Existing orders will be checked again and skipped.`))return;
+  const button=$('importDiscordHistory');button.disabled=true;$('previewDiscordHistory').disabled=true;
+  try{
+    setDiscordHistoryStatus('Importing approved historical orders…',{progress:88});
+    await api('/orders/discord-history/import',{method:'POST',body:JSON.stringify({job_id:discordHistoryJobId})});
+    const job=await pollDiscordHistoryJob(discordHistoryJobId,['complete']);
+    const result=job.import_result||{};
+    setDiscordHistoryStatus(`Import complete. Added ${result.imported_orders||0} order(s), created ${result.tracker_orders||0} tracker record(s), skipped ${result.duplicate_orders_skipped||0} duplicate(s), and queued ${result.email_repair_queued||0} exact historical email search(es). No credits were charged.${Number(result.failed_orders||0)?` ${result.failed_orders} order(s) failed; check Render logs.`:''}`,{progress:100});
+    $('importDiscordHistory').disabled=true;
+    await loadOrders();
+  }catch(error){setDiscordHistoryStatus(error.message||'Discord import failed.',{error:true,progress:0});button.disabled=false}
+  finally{$('previewDiscordHistory').disabled=false}
+};
+
 $('printYear').onclick=async()=>{const y=$('yearFilter').value||new Date().getFullYear();const r=await fetch(`${API}/orders/tax-export?year=${y}`,{headers:{Authorization:`Bearer ${token}`}});if(!r.ok){alert('Annual receipt archive could not be opened');return}const html=await r.text();const w=window.open('','_blank');w.document.open();w.document.write(html);w.document.close()};
 
 function showReconcileDiagnostics(text){
