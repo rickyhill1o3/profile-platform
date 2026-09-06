@@ -3,7 +3,7 @@ const { simpleParser } = require('mailparser');
 const crypto = require('crypto');
 const cheerio = require('cheerio');
 const { encrypt, decrypt } = require('./encryption');
-const { parseRetailEmail, expectedWebhookItems, matchScore, mainItemMatch, deriveOverallStatus, parseSupremeWebhookCheckoutAt, norm: reconcileNorm } = require('./retailer-reconciliation');
+const { parseRetailEmail, expectedWebhookItems, matchScore, mainItemMatch, targetSingleLineDeliveryAlias, deriveOverallStatus, parseSupremeWebhookCheckoutAt, norm: reconcileNorm } = require('./retailer-reconciliation');
 const { registerDiscordHistoryImport } = require('./discord-history-import');
 
 
@@ -261,6 +261,51 @@ async function fetchRecentEmailArchiveByStore(supabase, userId, store, columns, 
   const rank = new Map((meta.data || []).map((x,i)=>[String(x.id),i]));
   rows.sort((a,b)=>(rank.get(String(a.id)) ?? Number.MAX_SAFE_INTEGER)-(rank.get(String(b.id)) ?? Number.MAX_SAFE_INTEGER));
   return rows;
+}
+
+async function fetchTargetDeliveredArchiveForStuckOrders(supabase, userId, columns, limit = 250) {
+  // A Target delivery can already be linked while the order card remains confirmed/shipped when
+  // Target substituted an internal fulfillment title. Fetch those exact linked delivery messages
+  // independently of the newest-N archive window so manual reconciliation can repair old orders.
+  const stuck = await fetchAllSupabaseRows(() => supabase.from('tracked_orders')
+    .select('id')
+    .eq('user_id', userId)
+    .eq('store', 'target')
+    .in('status', ['waiting_confirmation','confirmed','processing','shipped'])
+    .order('order_date', { ascending:false }), 500);
+  const orderIds = (stuck || []).map(row => row.id).filter(Boolean).slice(0, 1000);
+  if (!orderIds.length) return [];
+
+  const emailIds = new Set();
+  const messageIds = new Set();
+  for (let i = 0; i < orderIds.length; i += 100) {
+    const chunk = orderIds.slice(i, i + 100);
+    try {
+      const links = await supabase.from('tracked_order_emails').select('email_id')
+        .in('order_id', chunk).eq('event_type', 'delivered');
+      if (!links.error) for (const row of links.data || []) if (row.email_id) emailIds.add(String(row.email_id));
+    } catch (_) {}
+    try {
+      const events = await supabase.from('tracked_order_events').select('message_id')
+        .eq('user_id', userId).in('order_id', chunk).eq('status', 'delivered');
+      if (!events.error) for (const row of events.data || []) if (row.message_id) messageIds.add(String(row.message_id));
+    } catch (_) {}
+  }
+
+  const merged = new Map();
+  const byId = await fetchEmailArchiveRowsByIds(supabase, userId, [...emailIds].slice(0, limit), columns, 50);
+  for (const row of byId) merged.set(String(row.id || row.message_id), row);
+  const messageList = [...messageIds].slice(0, limit);
+  for (let i = 0; i < messageList.length; i += 50) {
+    const result = await supabase.from('email_messages').select(columns)
+      .eq('user_id', userId).in('message_id', messageList.slice(i, i + 50));
+    if (result.error) throw result.error;
+    for (const row of result.data || []) merged.set(String(row.id || row.message_id), row);
+  }
+  return [...merged.values()].filter(row => {
+    if (lower(row.store) !== 'target') return false;
+    return lower(row.email_type) === 'delivered' || detectStatus(row.subject || '', archivedRetailerReadableText(row)) === 'delivered';
+  }).slice(0, limit);
 }
 
 
@@ -2074,23 +2119,31 @@ async function reconcileTrackedOrderItems(supabase, trackedOrder, serviceOrder, 
     }
   }
 
+  const singleLineDeliveryAlias = lower(trackedOrder.store) === 'target' && status === 'delivered'
+    ? targetSingleLineDeliveryAlias(expected, parsedItems, existing)
+    : null;
   const matchedIds = [];
   for (const item of parsedItems) {
-    let best = null, bestScore = 0;
-    for (const old of existing) {
-      const score = Math.max(
-        mainItemMatch([{ product_name: old.product_name, sku: old.sku }], item) ? 1 : 0,
-        reconcileNorm(old.product_name) === reconcileNorm(item.product_name) ? 1 : 0
-      );
-      const sizeCompatible = !old.size || !item.size || reconcileNorm(old.size) === reconcileNorm(item.size);
-      if (score > bestScore && sizeCompatible) { best = old; bestScore = score; }
+    const forcedAliasMatch = singleLineDeliveryAlias && parsedItems.length === 1;
+    let best = forcedAliasMatch ? singleLineDeliveryAlias.main : null, bestScore = forcedAliasMatch ? 1 : 0;
+    if (!forcedAliasMatch) {
+      for (const old of existing) {
+        const score = Math.max(
+          mainItemMatch([{ product_name: old.product_name, sku: old.sku }], item) ? 1 : 0,
+          reconcileNorm(old.product_name) === reconcileNorm(item.product_name) ? 1 : 0
+        );
+        const sizeCompatible = !old.size || !item.size || reconcileNorm(old.size) === reconcileNorm(item.size);
+        if (score > bestScore && sizeCompatible) { best = old; bestScore = score; }
+      }
     }
-    const isMain = expected.some(e => mainItemMatch([e], item) && (!e.size || !item.size || reconcileNorm(e.size) === reconcileNorm(item.size)));
+    const isMain = forcedAliasMatch || expected.some(e => mainItemMatch([e], item) && (!e.size || !item.size || reconcileNorm(e.size) === reconcileNorm(item.size)));
     const role = isMain ? 'main' : (lower(trackedOrder.store) === 'target' ? 'filler' : 'normal');
     const itemStatus = lower(item.status || status || 'confirmed');
     const payload = {
       retailer_order_number: trackedOrder.order_number,
-      product_name: clean(item.product_name).slice(0,500),
+      // Keep the readable confirmation/webhook title when Target's delivery system replaces it
+      // with an internal abbreviation such as "Pokemon A0000 Trading Cards".
+      product_name: clean(forcedAliasMatch ? best.product_name : item.product_name).slice(0,500),
       sku: clean(item.sku) || best?.sku || null,
       size: clean(item.size) || best?.size || null,
       style: clean(item.style) || best?.style || null,
@@ -4568,6 +4621,12 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
       const targetArchiveRows = await fetchRecentEmailArchiveByStore(
         supabase, req.user_id, 'target', archiveColumns, targetManualLimit
       );
+      let targetDeliveredReplayRows = [];
+      try {
+        targetDeliveredReplayRows = await fetchTargetDeliveredArchiveForStuckOrders(
+          supabase, req.user_id, archiveColumns, 250
+        );
+      } catch (e) { console.warn('[TARGET DELIVERED ALIAS REPLAY]', e.message || e); }
 
       // Pokemon Center mail can land in any website user's mailbox because Stellar may keep the
       // first checkout's email across a multi-profile queue. Super-admin reconciliation therefore
@@ -4637,7 +4696,7 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
       } catch (e) { console.warn('[SUPREME CLASSIFIED ARCHIVE]', e.message || e); }
 
       const merged = new Map();
-      for (const email of [...targetArchiveRows, ...pokemonArchiveRows, ...supremeArchiveRows, ...(supremeDiscovery.rows || [])]) {
+      for (const email of [...targetArchiveRows, ...targetDeliveredReplayRows, ...pokemonArchiveRows, ...supremeArchiveRows, ...(supremeDiscovery.rows || [])]) {
         merged.set(String(email.id||email.message_id), email);
       }
       let checked=0,matched=0,ignored=0,failed=0;
@@ -4815,7 +4874,7 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
       }
       // Now queue the ordinary catch-up scan for anything that was not part of the targeted set.
       try { startUserScanJob(supabase,req.user_id,adjustUserCredits,confirmPendingAmazonCheckout); } catch (_) {}
-      const result = {success:true,checked,matched,ignored,failed,pokemon_archive_messages:pokemonArchiveRows.length,pokemon_live_discovery:pokemonLiveDiscovery,pokemon_stats:pokemonStats,pokemon_debug:pokemonDebug,supreme_rebuild:supremeRebuild,supreme_live:supremeLive,supreme_debug:[...(supremeLive?.debug||[]).slice(-120), ...serviceOrdersForSupreme.slice(0,40).map((o,i)=>`Service order ${i+1}: id=${o.id} site=${o.site||'-'} metadata.site=${o.metadata?.site||'-'} payload site/store=${extractNamedPayloadValue(o.raw_payload||{},['site','store'])||'-'} normalized=${normalizeStoreKey(o.site || o.metadata?.site || extractNamedPayloadValue(o.raw_payload||{},['site','store']))||'-'}`)],supreme_discovery:{metadata_scanned:supremeDiscovery?.metadata_scanned||0,candidates_found:supremeDiscovery?.candidates_found||0,windows:supremeDiscovery?.windows||0},damaged_target_orders:damagedLinkedOrderIds.length,unresolved_target_orders:unresolvedTargetOrders.length,target_priority_orders:targetPriorityOrderIds.length,repair,message:`Searched ${pokemonLiveDiscovery.mailboxes_checked||0} live website mailbox(es) for Pokemon Center confirmation/shipped/delivered events and matched ${pokemonLiveDiscovery.messages_matched||0}; replayed ${pokemonArchiveRows.length} Pokemon Center archive message(s); rebuilt ${supremeRebuild?.assigned||0} Supreme confirmation assignment(s); then prioritized ${targetPriorityOrderIds.length} Target order(s) missing confirmation evidence for live mailbox repair.`};
+      const result = {success:true,checked,matched,ignored,failed,target_delivered_alias_replay_messages:targetDeliveredReplayRows.length,pokemon_archive_messages:pokemonArchiveRows.length,pokemon_live_discovery:pokemonLiveDiscovery,pokemon_stats:pokemonStats,pokemon_debug:pokemonDebug,supreme_rebuild:supremeRebuild,supreme_live:supremeLive,supreme_debug:[...(supremeLive?.debug||[]).slice(-120), ...serviceOrdersForSupreme.slice(0,40).map((o,i)=>`Service order ${i+1}: id=${o.id} site=${o.site||'-'} metadata.site=${o.metadata?.site||'-'} payload site/store=${extractNamedPayloadValue(o.raw_payload||{},['site','store'])||'-'} normalized=${normalizeStoreKey(o.site || o.metadata?.site || extractNamedPayloadValue(o.raw_payload||{},['site','store']))||'-'}`)],supreme_discovery:{metadata_scanned:supremeDiscovery?.metadata_scanned||0,candidates_found:supremeDiscovery?.candidates_found||0,windows:supremeDiscovery?.windows||0},damaged_target_orders:damagedLinkedOrderIds.length,unresolved_target_orders:unresolvedTargetOrders.length,target_priority_orders:targetPriorityOrderIds.length,repair,message:`Replayed ${targetDeliveredReplayRows.length} linked Target delivery message(s) for title-alias repair; searched ${pokemonLiveDiscovery.mailboxes_checked||0} live website mailbox(es) for Pokemon Center confirmation/shipped/delivered events and matched ${pokemonLiveDiscovery.messages_matched||0}; replayed ${pokemonArchiveRows.length} Pokemon Center archive message(s); rebuilt ${supremeRebuild?.assigned||0} Supreme confirmation assignment(s); then prioritized ${targetPriorityOrderIds.length} Target order(s) missing confirmation evidence for live mailbox repair.`};
       Object.assign(reconcileJob, { status:'complete', finished_at:new Date().toISOString(), result, error:null });
     } catch(error){
       console.error('[RECONCILE RETAILER EMAILS]', error.message || error);

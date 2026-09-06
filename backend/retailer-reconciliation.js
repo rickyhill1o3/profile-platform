@@ -55,7 +55,7 @@ function parseTargetItems(text,status){
     const i=ls.findIndex(x=>/canceled item/i.test(x)); if(i>=0)start=i+1;
     const e=ls.findIndex((x,idx)=>idx>start && /would these work instead|perfect pairings|shop now/i.test(x)); if(e>=0)end=e;
   } else if(status==='delivered'){
-    const i=ls.findIndex(x=>/^item delivered$/i.test(x)); if(i>=0)start=i+1;
+    const i=ls.findIndex(x=>/^items? delivered$/i.test(x)); if(i>=0)start=i+1;
     const e=ls.findIndex((x,idx)=>idx>start && /rate & review|returning something|perfect pairings/i.test(x)); if(e>=0)end=e;
   } else if(status==='shipped'){
     const i=ls.findIndex(x=>/track status/i.test(x)); if(i>=0)start=i+1;
@@ -79,7 +79,7 @@ function parseTargetItems(text,status){
   if(!items.length && ['shipped','delivered'].includes(status)){
     for(const s of ls){
       if(s.length<6||s.length>220)continue;
-      if(/^(shipping|delivers to|united parcel|tracking|track status|item delivered|delivered on|qty|looking for|scan for|vcd|order details)/i.test(s))continue;
+      if(/^(shipping|delivers to|united parcel|tracking|track status|items? delivered|delivered on|qty|looking for|scan for|vcd|order details)/i.test(s))continue;
       if(/\$|\d{5,}/.test(s))continue;
       items.push({product_name:s,quantity:1,price:null,size:null,style:null,status}); break;
     }
@@ -267,6 +267,27 @@ function mainItemMatch(expected,item){
   const best=expected.reduce((m,e)=>Math.max(m,tokenScore(e.product_name||e.sku,item.product_name||item.sku)),0);
   return best>=.58;
 }
+function targetSingleLineDeliveryAlias(expected=[],actual=[],existing=[]){
+  if(expected.length!==1||actual.length!==1)return null;
+  const main=existing.filter(item=>item.role==='main');
+  if(main.length!==1)return null;
+  const expectedQty=Math.max(1,Number(expected[0].quantity||main[0].quantity||1));
+  const actualQty=Math.max(1,Number(actual[0].quantity||1));
+  const mainQty=Math.max(1,Number(main[0].quantity||expectedQty));
+  if(actualQty!==expectedQty&&actualQty!==mainQty)return null;
+
+  // On the first pass the confirmation-created main row is the only known line. On a replay, an
+  // older build may already have inserted one price-less "filler" row from Target's shortened
+  // fulfillment title. Accept only that narrow duplicate shape; a real paid filler remains separate.
+  const others=existing.filter(item=>String(item.id||'')!==String(main[0].id||''));
+  if(!others.length)return {main:main[0],alias_rows:[]};
+  if(others.length!==1)return null;
+  const alias=others[0];
+  if(alias.role!=='filler'||lower(alias.status)!=='delivered'||alias.price!=null)return null;
+  if(Math.max(1,Number(alias.quantity||1))!==actualQty)return null;
+  if(norm(alias.product_name)!==norm(actual[0].product_name))return null;
+  return {main:main[0],alias_rows:[alias]};
+}
 function deriveOverallStatus(items=[]){
   const main=items.filter(i=>i.role==='main');
   if(!main.length)return 'waiting_confirmation';
@@ -277,4 +298,4 @@ function deriveOverallStatus(items=[]){
   if(statuses.every(s=>s==='canceled'||s==='refunded'||s==='missing'))return statuses.some(s=>s==='refunded')?'refunded':'canceled';
   return 'waiting_confirmation';
 }
-module.exports={clean,lower,money,norm,tokenScore,parseRetailEmail,expectedWebhookItems,itemSetScore,matchScore,mainItemMatch,deriveOverallStatus,parseSupremeCheckoutAt,parseSupremeWebhookCheckoutAt};
+module.exports={clean,lower,money,norm,tokenScore,parseRetailEmail,expectedWebhookItems,itemSetScore,matchScore,mainItemMatch,targetSingleLineDeliveryAlias,deriveOverallStatus,parseSupremeCheckoutAt,parseSupremeWebhookCheckoutAt};
