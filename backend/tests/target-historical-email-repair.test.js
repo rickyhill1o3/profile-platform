@@ -7,7 +7,7 @@ function loadTestHooks() {
   const filename = path.join(__dirname, '..', 'order-tracker.js');
   const source = fs.readFileSync(filename, 'utf8').replace(
     /module\.exports = \{ registerOrderTracker, scanAll, notifyCheckoutForOrderTracker \};\s*$/,
-    'module.exports = { __test: { detectStatus, extractOrderNumbers, extractAmounts, targetOrdersMissingConfirmation } };'
+    'module.exports = { __test: { detectStatus, extractOrderNumbers, extractAmounts, targetOrdersMissingConfirmation, rawMessageContainsOrderNumber, resolveExactProfileMailbox, resolveHistoricalDiscordMailboxIdentity } };'
   );
   const module = { exports:{} };
   const sandbox = {
@@ -60,7 +60,7 @@ function fakeSupabase(database) {
 }
 
 (async () => {
-  const { detectStatus, extractOrderNumbers, extractAmounts, targetOrdersMissingConfirmation } = loadTestHooks();
+  const { detectStatus, extractOrderNumbers, extractAmounts, targetOrdersMissingConfirmation, rawMessageContainsOrderNumber, resolveExactProfileMailbox, resolveHistoricalDiscordMailboxIdentity } = loadTestHooks();
 
   assert.strictEqual(detectStatus("Thanks for shopping with us! Here's your order #102003237489716.", ''), 'confirmed');
   assert.strictEqual(detectStatus('Get ready for something special! An item from order #102003237489716 is about to ship.', ''), 'shipped');
@@ -74,6 +74,48 @@ function fakeSupabase(database) {
   );
   assert.strictEqual(extractAmounts('Order total $24.53').total, 24.53);
   assert.strictEqual(extractAmounts('Total $53.35').total, 53.35);
+  assert.strictEqual(rawMessageContainsOrderNumber(
+    '102003259010776',
+    { subject:"Thanks for shopping with us! Here's your order #:102003259010776." },
+    Buffer.from('unrelated body')
+  ), true);
+  assert.strictEqual(rawMessageContainsOrderNumber(
+    '102003259010776',
+    { subject:'Target order update' },
+    Buffer.from('Content-Type: text/html\r\n\r\nOrder #102003259010776')
+  ), true);
+  assert.strictEqual(rawMessageContainsOrderNumber(
+    '102003259010776',
+    { subject:"You've successfully canceled items from your order ending in 0776." },
+    Buffer.from('Your cancellation is complete.')
+  ), false);
+
+  const discordSource = {
+    user_id:'admin', source:'discord_history', site:'target',
+    metadata:{
+      discord_history_import:true,
+      profile_name:'Ricky Chase',
+      checkout_account_email:'rickyhill1o5@hotmail.com'
+    }
+  };
+  const identityIndex = {
+    profiles:[
+      { id:'bina-profile', user_id:'admin', profile_name:'Ricky Chase', account_type:'target' },
+      { id:'ricky-profile', user_id:'admin', profile_name:'Ricky Current', account_type:'target' }
+    ],
+    credentials:new Map([
+      ['bina-profile', [{ email:'bina.enid0794@hotmail.com', store:'target' }]],
+      ['ricky-profile', [{ email:'rickyhill1o5@hotmail.com', store:'target' }]]
+    ])
+  };
+  assert.strictEqual(resolveExactProfileMailbox(discordSource, identityIndex).email, 'bina.enid0794@hotmail.com');
+  assert.deepStrictEqual(
+    JSON.parse(JSON.stringify(resolveHistoricalDiscordMailboxIdentity(discordSource, identityIndex))),
+    {
+      email:'rickyhill1o5@hotmail.com', profile_id:'ricky-profile',
+      profile_name:'Ricky Current', evidence:'discord_checkout_account'
+    }
+  );
 
   const database = {
     tracked_orders:[

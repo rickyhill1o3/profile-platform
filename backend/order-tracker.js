@@ -26,6 +26,7 @@ const MAX_MESSAGES_PER_SCAN = Math.max(25, Number(process.env.IMAP_MAX_MESSAGES_
 const MAX_ACCOUNTS_PER_CYCLE = Math.max(1, Number(process.env.IMAP_MAX_ACCOUNTS_PER_CYCLE || 50));
 const MIN_RESCAN_INTERVAL_MS = Math.max(0, Number(process.env.IMAP_MIN_RESCAN_INTERVAL_MS || 2 * 60 * 1000));
 const AMAZON_GHOST_GRACE_MS = Math.max(10 * 60 * 1000, Number(process.env.AMAZON_GHOST_GRACE_MS || 20 * 60 * 1000));
+const ORDER_REPAIR_FALLBACK_MAX_MESSAGES = Math.max(50, Math.min(5000, Number(process.env.ORDER_REPAIR_FALLBACK_MAX_MESSAGES || 1000)));
 let backgroundAccountCursor = 0;
 const userScanJobs = new Map();
 const retailerReconcileJobs = new Map();
@@ -49,6 +50,14 @@ function notifyCheckoutForOrderTracker(userId) {
 
 function clean(v) { return String(v || '').trim(); }
 function lower(v) { return clean(v).toLowerCase(); }
+function rawMessageContainsOrderNumber(orderNumber, envelope = {}, source = null) {
+  const needle = lower(orderNumber);
+  if (!needle) return false;
+  const subject = lower(envelope?.subject || '');
+  if (subject.includes(needle)) return true;
+  const raw = Buffer.isBuffer(source) ? source.toString('utf8') : String(source || '');
+  return raw.toLowerCase().includes(needle);
+}
 function normalizeMailboxPassword(v, providerName = '') {
   const value = clean(v);
   // Google displays 16-character app passwords in four groups. IMAP expects the same password without spaces.
@@ -1538,6 +1547,34 @@ function resolveExactProfileMailbox(source = {}, index = {}) {
   return exact || null;
 }
 
+function historicalDiscordCheckoutEmail(source = {}) {
+  const isDiscordHistory = lower(source.source) === 'discord_history' || source.metadata?.discord_history_import === true;
+  if (!isDiscordHistory) return '';
+  const email = lower(source.metadata?.checkout_account_email || source.metadata?.account_email || '');
+  return email.includes('@') ? email : '';
+}
+
+function resolveHistoricalDiscordMailboxIdentity(source = {}, index = {}) {
+  const email = historicalDiscordCheckoutEmail(source);
+  if (!email) return null;
+  const userId = String(source.user_id || '');
+  const store = normalizeStoreKey(source.site || source.metadata?.site || extractNamedPayloadValue(source.raw_payload || {}, ['site','store']));
+  const matches = [];
+  for (const profile of index.profiles || []) {
+    if (String(profile.user_id || '') !== userId) continue;
+    const credentials = index.credentials?.get(String(profile.id)) || [];
+    if (!credentials.some(credential => credential.email === email && (!store || !credential.store || credential.store === store))) continue;
+    matches.push(profile);
+  }
+  const profileIds = [...new Set(matches.map(profile => String(profile.id || '')).filter(Boolean))];
+  return {
+    email,
+    profile_id: profileIds.length === 1 ? profileIds[0] : null,
+    profile_name: profileIds.length === 1 ? matches.find(profile => String(profile.id) === profileIds[0])?.profile_name || null : null,
+    evidence: 'discord_checkout_account'
+  };
+}
+
 async function removeMismatchedOrderEmailLinks(supabase, trackedOrderId, authoritativeEmail) {
   const orderId = clean(trackedOrderId);
   const email = lower(authoritativeEmail);
@@ -1711,13 +1748,14 @@ async function syncServiceOrders(supabase, userId, accounts = [], options = {}) 
     // this user's configured retailer mailboxes. This repairs old rows that were
     // previously labeled waiting-for-imap@local.
     const exactProfileIdentity = resolveExactProfileMailbox(source, profileMailboxIndex);
+    const discordMailboxIdentity = resolveHistoricalDiscordMailboxIdentity(source, profileMailboxIndex);
     const matchingAccount = accounts.find(account => sourceEmails.has(lower(account.email)))
       || accounts.find(account => lower(account.email) === metadataEmail);
     // The Account/Email captured in an old Discord checkout is historical evidence. A profile may
     // have been renamed or changed to a new retailer login since then, so never replace that old
     // checkout mailbox with the profile's current credential during import.
-    const orderEmail = lower(isDiscordHistory && metadataEmail
-      ? metadataEmail
+    const orderEmail = lower(discordMailboxIdentity?.email
+      ? discordMailboxIdentity.email
       : (exactProfileIdentity?.email || matchingAccount?.email || metadataEmail || [...sourceEmails][0] || ''));
     const priorEmail = lower(prior?.source_email || '');
     const priorIsPlaceholder = !priorEmail || priorEmail === 'waiting-for-imap@local';
@@ -1726,12 +1764,12 @@ async function syncServiceOrders(supabase, userId, accounts = [], options = {}) 
     // profiles such as "Carnival" and "red card 8032 stickydelivery" even when the old
     // checkout webhook only stored the profile name.
     const retailerReconciled = ['matched','probable'].includes(lower(prior?.reconciliation_status));
-    const resolvedEmail = lower(retailerReconciled && !priorIsPlaceholder
+    const resolvedEmail = lower(discordMailboxIdentity?.email || (retailerReconciled && !priorIsPlaceholder
       ? priorEmail
-      : (isDiscordHistory && orderEmail ? orderEmail : (exactProfileIdentity?.email || orderEmail || (priorIsPlaceholder ? defaultEmail : priorEmail))));
+      : (isDiscordHistory && orderEmail ? orderEmail : (exactProfileIdentity?.email || orderEmail || (priorIsPlaceholder ? defaultEmail : priorEmail)))));
     const payload = {
       user_id: userId, source_order_id: source.id, service_order_external_id: source.external_order_id || null,
-      profile_id: exactProfileIdentity?.profile_id || matchingAccount?.profile_id || prior?.profile_id || accounts[0]?.profile_id || null,
+      profile_id: discordMailboxIdentity?.profile_id || (isDiscordHistory ? matchingAccount?.profile_id : exactProfileIdentity?.profile_id) || matchingAccount?.profile_id || prior?.profile_id || accounts[0]?.profile_id || null,
       source_email: resolvedEmail,
       store, order_number: prior?.order_number || orderNumber,
       status: prior?.status || (['confirmed','processing','shipped','delivered','canceled','refunded'].includes(lower(source.status)) ? lower(source.status) : 'waiting_confirmation'),
@@ -3168,20 +3206,27 @@ async function reconcileHistoricalOrderProfileIdentity(supabase, rows = []) {
   if (!sourceIds.length) return { corrected: 0, unlinked: 0 };
   const sourceMap = new Map();
   for (let i = 0; i < sourceIds.length; i += 100) {
-    const r = await supabase.from('orders').select('id,user_id,site,metadata,raw_payload').in('id', sourceIds.slice(i, i + 100));
+    const r = await supabase.from('orders').select('id,user_id,site,source,metadata,raw_payload').in('id', sourceIds.slice(i, i + 100));
     if (!r.error) for (const source of r.data || []) sourceMap.set(String(source.id), source);
   }
   const indexes = new Map();
   let corrected = 0, unlinked = 0;
   for (const order of rows || []) {
     const store = normalizeStoreKey(order.store || '');
-    if (store === 'supreme' || ['matched','probable'].includes(lower(order.reconciliation_status))) continue;
+    if (store === 'supreme') continue;
     const source = sourceMap.get(String(order.source_order_id || ''));
     if (!source) continue;
+    // Keep an established retailer match for ordinary webhooks, but still repair historical
+    // Discord rows because their captured Account field is stronger than a prior profile-name guess.
+    if (['matched','probable'].includes(lower(order.reconciliation_status)) && !historicalDiscordCheckoutEmail(source)) continue;
     const uid = String(order.user_id || source.user_id || '');
     if (!uid) continue;
     if (!indexes.has(uid)) indexes.set(uid, await buildProfileMailboxIndex(supabase, uid));
-    const identity = resolveExactProfileMailbox(source, indexes.get(uid));
+    // A historical Discord embed's Account field is direct checkout evidence. Profile names are
+    // not unique and can later be renamed, so they must never replace that captured email. This
+    // also repairs rows that an older identity pass incorrectly moved to another profile mailbox.
+    const discordIdentity = resolveHistoricalDiscordMailboxIdentity(source, indexes.get(uid));
+    const identity = discordIdentity || resolveExactProfileMailbox(source, indexes.get(uid));
     if (!identity?.email) continue;
     const currentEmail = lower(order.source_email);
     const currentProfileId = String(order.profile_id || '');
@@ -3344,19 +3389,64 @@ async function repairHistoricalOrderEmails(supabase, userId = null, adjustCredit
           details.push(detail);
           const uidSet = new Set();
           const searchErrors = [];
+          let exactSearchSucceeded = false;
           // Search both the complete message and the subject. Target puts the full order number in
           // lifecycle subjects, while some Outlook servers do not return the same hits for TEXT.
           for (const criteria of [{ text:orderNumber }, { subject:orderNumber }]) {
             try {
               const hits = await client.search(criteria, { uid:true });
+              exactSearchSucceeded = true;
               for (const uid of hits || []) if (Number(uid)) uidSet.add(Number(uid));
             } catch (searchError) {
               searchErrors.push(clean(searchError.message || searchError).slice(0,500));
             }
           }
-          if (!uidSet.size && searchErrors.length === 2) {
+          detail.search_method = uidSet.size ? 'imap_order_number' : 'imap_order_number_no_match';
+
+          // Outlook/Hotmail web search can find an older message even when the IMAP server returns
+          // zero hits for both TEXT and SUBJECT. When that happens, inspect a tightly bounded date
+          // window around the tracked order and match the full order number in the raw MIME locally.
+          // This does not scan the whole mailbox and it never accepts a partial "ending in 0776"
+          // value as evidence for a different order.
+          let fallbackSearchError = '';
+          if (!uidSet.size) {
+            const orderAt = new Date(order.order_date || '');
+            if (Number.isFinite(orderAt.getTime())) {
+              const since = new Date(orderAt.getTime() - 24 * 60 * 60 * 1000);
+              const before = new Date(orderAt.getTime() + 2 * 24 * 60 * 60 * 1000);
+              detail.fallback_since = since.toISOString();
+              detail.fallback_before = before.toISOString();
+              detail.fallback_candidates = 0;
+              detail.fallback_candidates_scanned = 0;
+              try {
+                const dateHits = await client.search({ since, before }, { uid:true });
+                const dateUids = [...new Set((dateHits || []).map(Number).filter(Number.isFinite).filter(uid => uid > 0))]
+                  .sort((a,b) => a-b)
+                  .slice(-ORDER_REPAIR_FALLBACK_MAX_MESSAGES);
+                detail.fallback_candidates = dateUids.length;
+                for (let offset = 0; offset < dateUids.length; offset += 50) {
+                  const fallbackUidRange = imapUidSet(dateUids.slice(offset, offset + 50));
+                  if (!fallbackUidRange) continue;
+                  for await (const candidate of client.fetch(fallbackUidRange, { uid:true, source:true, envelope:true }, { uid:true })) {
+                    detail.fallback_candidates_scanned++;
+                    if (rawMessageContainsOrderNumber(orderNumber, candidate.envelope, candidate.source)) {
+                      uidSet.add(Number(candidate.uid));
+                    }
+                  }
+                }
+                detail.search_method = uidSet.size ? 'local_date_window' : 'local_date_window_no_match';
+              } catch (fallbackError) {
+                fallbackSearchError = clean(fallbackError.message || fallbackError).slice(0,500);
+                detail.fallback_error = fallbackSearchError;
+              }
+            } else {
+              detail.fallback_skipped = 'invalid_order_date';
+            }
+          }
+
+          if (!uidSet.size && !exactSearchSucceeded && fallbackSearchError) {
             detail.result = 'imap_search_failed';
-            detail.error = searchErrors.join(' | ').slice(0,500);
+            detail.error = [...searchErrors, fallbackSearchError].filter(Boolean).join(' | ').slice(0,500);
             console.warn(`[ORDER REPAIR] IMAP searches failed ${account.email} ${orderNumber}: ${detail.error}`);
             continue;
           }
