@@ -32,6 +32,8 @@ const retailerReconcileJobs = new Map();
 let checkoutScanRuntime = null;
 const checkoutScanTimers = new Map();
 let historicalRepairRunning = false;
+let historicalRepairCandidateCursor = 0;
+const orderEmailRepairJobs = new Map();
 
 function notifyCheckoutForOrderTracker(userId) {
   if (!userId || !checkoutScanRuntime) return;
@@ -830,8 +832,8 @@ function detectStatus(subject, text) {
   if (/\bdelivered\b|delivery complete|items? (?:has|have) arrived/.test(subj) ||
       /(?:your|the|this) (?:package|order|shipment) (?:has been|was|is) delivered|delivery (?:is )?complete|items? (?:has|have) arrived from order/.test(body)) return 'delivered';
 
-  if (/\bshipped\b|has shipped|on (?:the|its) way|package will arrive soon|package .*arrive soon/.test(subj) ||
-      /(?:your|the|this) (?:package|order|shipment) (?:has|have) shipped|we(?:'|’)ve shipped|was shipped|tracking number\s*[:#]/.test(body)) return 'shipped';
+  if (/\bshipped\b|has shipped|on (?:the|its) way|package will arrive soon|package .*arrive soon|about to ship|getting ready to ship|arrives today|out for delivery/.test(subj) ||
+      /(?:your|the|this) (?:package|order|shipment) (?:has|have) shipped|we(?:'|’)ve shipped|was shipped|tracking number\s*[:#]|about to ship|getting ready to ship|shipping label has been created|arrives today|out for delivery/.test(body)) return 'shipped';
 
   if (/processing|preparing your order|getting your order ready|running a little behind|order (?:is )?delayed/.test(subj)) return 'processing';
 
@@ -3112,6 +3114,36 @@ async function linkedTrackedOrderIds(supabase, orderIds = []) {
   return linked;
 }
 
+async function targetOrdersMissingConfirmation(supabase, userId = null, limit = 100) {
+  const rows = await fetchAllSupabaseRows(() => {
+    let query = supabase.from('tracked_orders')
+      .select('id,user_id,source_order_id,profile_id,source_email,store,order_number,order_date,status,total,reconciliation_status')
+      .eq('store','target')
+      .not('order_number','is',null)
+      .order('order_date',{ascending:false});
+    if (userId) query = query.eq('user_id', userId);
+    return query;
+  }, 500);
+  if (!rows.length) return [];
+
+  const confirmed = new Set();
+  const ids = rows.map(row => row.id).filter(Boolean);
+  for (let i = 0; i < ids.length; i += 100) {
+    const result = await supabase.from('tracked_order_emails')
+      .select('order_id')
+      .eq('event_type','confirmed')
+      .in('order_id', ids.slice(i, i + 100));
+    if (!result.error) for (const row of result.data || []) if (row.order_id) confirmed.add(String(row.order_id));
+  }
+
+  const max = Math.max(1, Math.min(500, Number(limit || 100)));
+  return rows.filter(order => {
+    const missingConfirmation = !confirmed.has(String(order.id));
+    const waitingOrZero = lower(order.status) === 'waiting_confirmation' || Number(order.total || 0) <= 0;
+    return missingConfirmation && waitingOrZero;
+  }).slice(0, max);
+}
+
 async function reconcileHistoricalOrderProfileIdentity(supabase, rows = []) {
   const sourceIds = [...new Set((rows || []).map(r => r.source_order_id).filter(Boolean))];
   if (!sourceIds.length) return { corrected: 0, unlinked: 0 };
@@ -3168,6 +3200,34 @@ async function repairHistoricalOrderEmails(supabase, userId = null, adjustCredit
     const pr = await pq;
     if (pr.error) throw pr.error;
     for (const row of pr.data || []) rowsById.set(String(row.id), row);
+  }
+
+  // Rotate through the oldest unresolved rows as well as the newest orders below. Without this
+  // window, scheduled repair always revisits recent website checkouts and historical Discord
+  // imports from January/February can remain outside the candidate limit forever.
+  if (!priorityIds.length) {
+    const windowSize = Math.max(maxOrders * 8, 100);
+    const loadHistoricalWindow = async (start) => {
+      let historicalQuery = supabase.from('tracked_orders')
+        .select('id,user_id,source_order_id,profile_id,source_email,store,order_number,order_date,status,reconciliation_status')
+        .eq('status','waiting_confirmation')
+        .not('order_number','is',null)
+        .order('order_date',{ascending:true})
+        .range(start, start + windowSize - 1);
+      if (userId) historicalQuery = historicalQuery.eq('user_id', userId);
+      return historicalQuery;
+    };
+    let historical = await loadHistoricalWindow(historicalRepairCandidateCursor);
+    if (historical.error) throw historical.error;
+    if (!(historical.data || []).length && historicalRepairCandidateCursor > 0) {
+      historicalRepairCandidateCursor = 0;
+      historical = await loadHistoricalWindow(0);
+      if (historical.error) throw historical.error;
+    }
+    for (const row of historical.data || []) rowsById.set(String(row.id), row);
+    historicalRepairCandidateCursor = (historical.data || []).length < windowSize
+      ? 0
+      : historicalRepairCandidateCursor + windowSize;
   }
 
   let q = supabase.from('tracked_orders')
@@ -3263,18 +3323,25 @@ async function repairHistoricalOrderEmails(supabase, userId = null, adjustCredit
             result: 'searching', messages_found: 0, messages_processed: 0, saved_messages: 0
           };
           details.push(detail);
-          let uids=[];
-          try {
-            // TEXT searches the full RFC822 message (headers + MIME body) on Gmail/Outlook.
-            // This bypasses the damaged archive copy and fetches the retailer's original message.
-            uids = await client.search({ text: orderNumber }, { uid:true });
-          } catch (searchError) {
+          const uidSet = new Set();
+          const searchErrors = [];
+          // Search both the complete message and the subject. Target puts the full order number in
+          // lifecycle subjects, while some Outlook servers do not return the same hits for TEXT.
+          for (const criteria of [{ text:orderNumber }, { subject:orderNumber }]) {
+            try {
+              const hits = await client.search(criteria, { uid:true });
+              for (const uid of hits || []) if (Number(uid)) uidSet.add(Number(uid));
+            } catch (searchError) {
+              searchErrors.push(clean(searchError.message || searchError).slice(0,500));
+            }
+          }
+          if (!uidSet.size && searchErrors.length === 2) {
             detail.result = 'imap_search_failed';
-            detail.error = clean(searchError.message || searchError).slice(0,500);
-            console.warn(`[ORDER REPAIR] IMAP text search failed ${account.email} ${orderNumber}: ${searchError.message || searchError}`);
+            detail.error = searchErrors.join(' | ').slice(0,500);
+            console.warn(`[ORDER REPAIR] IMAP searches failed ${account.email} ${orderNumber}: ${detail.error}`);
             continue;
           }
-          uids=(uids||[]).map(Number).filter(Boolean).sort((a,b)=>a-b).slice(-50);
+          let uids=[...uidSet].sort((a,b)=>a-b).slice(-50);
           detail.messages_found = uids.length;
           const fresh = uids.filter(uid => !processedUids.has(uid));
           for (const uid of fresh) processedUids.add(uid);
@@ -4617,11 +4684,19 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
         }
       } catch (e) { console.warn('[RECONCILE CANCELED TARGET QUERY]', e.message || e); }
       const damagedLinkedOrderIds = [...damagedSet];
+      let unresolvedTargetOrders = [];
+      try {
+        unresolvedTargetOrders = await targetOrdersMissingConfirmation(supabase, req.user_id, 250);
+      } catch (e) { console.warn('[RECONCILE TARGET CONFIRMATION QUERY]', e.message || e); }
+      const targetPriorityOrderIds = [...new Set([
+        ...unresolvedTargetOrders.map(order => String(order.id)),
+        ...damagedLinkedOrderIds.map(String)
+      ])].slice(0, 100);
       let repair = null;
       try {
-        const requested = Math.max(Number(req.body?.repair_orders || 20), Math.min(damagedLinkedOrderIds.length, 30));
+        const requested = Math.max(Number(req.body?.repair_orders || 20), targetPriorityOrderIds.length);
         repair = await runHistoricalOrderEmailRepair(supabase, req.user_id, adjustUserCredits, confirmPendingAmazonCheckout, {
-          maxOrders: Math.min(30, requested), forceLinked: true, priorityOrderIds: damagedLinkedOrderIds.slice(0, 30),
+          maxOrders: Math.min(100, requested), forceLinked: true, priorityOrderIds: targetPriorityOrderIds,
           // A manual repair is allowed to run beside the scheduled background repair. All writes
           // are keyed/upserted by message/order identity, so this avoids a false skip safely.
           allowConcurrent: true
@@ -4631,7 +4706,7 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
       }
       // Now queue the ordinary catch-up scan for anything that was not part of the targeted set.
       try { startUserScanJob(supabase,req.user_id,adjustUserCredits,confirmPendingAmazonCheckout); } catch (_) {}
-      const result = {success:true,checked,matched,ignored,failed,pokemon_archive_messages:pokemonArchiveRows.length,pokemon_live_discovery:pokemonLiveDiscovery,pokemon_stats:pokemonStats,pokemon_debug:pokemonDebug,supreme_rebuild:supremeRebuild,supreme_live:supremeLive,supreme_debug:[...(supremeLive?.debug||[]).slice(-120), ...serviceOrdersForSupreme.slice(0,40).map((o,i)=>`Service order ${i+1}: id=${o.id} site=${o.site||'-'} metadata.site=${o.metadata?.site||'-'} payload site/store=${extractNamedPayloadValue(o.raw_payload||{},['site','store'])||'-'} normalized=${normalizeStoreKey(o.site || o.metadata?.site || extractNamedPayloadValue(o.raw_payload||{},['site','store']))||'-'}`)],supreme_discovery:{metadata_scanned:supremeDiscovery?.metadata_scanned||0,candidates_found:supremeDiscovery?.candidates_found||0,windows:supremeDiscovery?.windows||0},damaged_target_orders:damagedLinkedOrderIds.length,repair,message:`Searched ${pokemonLiveDiscovery.mailboxes_checked||0} live website mailbox(es) for Pokemon Center confirmation/shipped/delivered events and matched ${pokemonLiveDiscovery.messages_matched||0}; replayed ${pokemonArchiveRows.length} Pokemon Center archive message(s); rebuilt ${supremeRebuild?.assigned||0} Supreme confirmation assignment(s); then repaired ${damagedLinkedOrderIds.length} unresolved Target order(s).`};
+      const result = {success:true,checked,matched,ignored,failed,pokemon_archive_messages:pokemonArchiveRows.length,pokemon_live_discovery:pokemonLiveDiscovery,pokemon_stats:pokemonStats,pokemon_debug:pokemonDebug,supreme_rebuild:supremeRebuild,supreme_live:supremeLive,supreme_debug:[...(supremeLive?.debug||[]).slice(-120), ...serviceOrdersForSupreme.slice(0,40).map((o,i)=>`Service order ${i+1}: id=${o.id} site=${o.site||'-'} metadata.site=${o.metadata?.site||'-'} payload site/store=${extractNamedPayloadValue(o.raw_payload||{},['site','store'])||'-'} normalized=${normalizeStoreKey(o.site || o.metadata?.site || extractNamedPayloadValue(o.raw_payload||{},['site','store']))||'-'}`)],supreme_discovery:{metadata_scanned:supremeDiscovery?.metadata_scanned||0,candidates_found:supremeDiscovery?.candidates_found||0,windows:supremeDiscovery?.windows||0},damaged_target_orders:damagedLinkedOrderIds.length,unresolved_target_orders:unresolvedTargetOrders.length,target_priority_orders:targetPriorityOrderIds.length,repair,message:`Searched ${pokemonLiveDiscovery.mailboxes_checked||0} live website mailbox(es) for Pokemon Center confirmation/shipped/delivered events and matched ${pokemonLiveDiscovery.messages_matched||0}; replayed ${pokemonArchiveRows.length} Pokemon Center archive message(s); rebuilt ${supremeRebuild?.assigned||0} Supreme confirmation assignment(s); then prioritized ${targetPriorityOrderIds.length} Target order(s) missing confirmation evidence for live mailbox repair.`};
       Object.assign(reconcileJob, { status:'complete', finished_at:new Date().toISOString(), result, error:null });
     } catch(error){
       console.error('[RECONCILE RETAILER EMAILS]', error.message || error);
@@ -4747,6 +4822,73 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
     const summary = orders.reduce((a,o) => { a.total += Number(o.total || 0); a[o.status]=(a[o.status]||0)+1; return a; }, {total:0});
     summary.success_rate = orders.length ? Math.round(((summary.confirmed || 0)+(summary.processing || 0)+(summary.shipped || 0)+(summary.delivered || 0))/orders.length*1000)/10 : 0;
     res.json({ orders, summary, background_scanning: process.env.IMAP_ORDER_TRACKER_ENABLED !== 'false' });
+  });
+
+  app.post('/orders/tracked/:id/find-emails', auth, async (req, res) => {
+    const orderResult = await supabase.from('tracked_orders')
+      .select('id,user_id,source_email,store,order_number')
+      .eq('id', req.params.id)
+      .eq('user_id', req.user_id)
+      .maybeSingle();
+    if (orderResult.error) return res.status(500).json({ error:orderResult.error.message });
+    const order = orderResult.data;
+    if (!order) return res.status(404).json({ error:'Order not found.' });
+    if (!clean(order.order_number)) return res.status(400).json({ error:'This order does not have a retailer order number to search.' });
+    if (!lower(order.source_email).includes('@')) return res.status(400).json({ error:'This order is not connected to a profile mailbox.' });
+
+    const key = `${req.user_id}:${order.id}`;
+    const existing = orderEmailRepairJobs.get(key);
+    if (existing?.status === 'running') {
+      return res.status(202).json({ success:true, job_id:existing.id, status:existing.status });
+    }
+
+    const job = {
+      id:crypto.randomUUID(), user_id:String(req.user_id), order_id:String(order.id),
+      status:'running', started_at:new Date().toISOString(), finished_at:null, result:null, error:null
+    };
+    orderEmailRepairJobs.set(key, job);
+    res.status(202).json({ success:true, job_id:job.id, status:job.status });
+
+    setImmediate(async () => {
+      try {
+        const repair = await runHistoricalOrderEmailRepair(
+          supabase, req.user_id, adjustUserCredits, confirmPendingAmazonCheckout,
+          { maxOrders:1, forceLinked:true, priorityOrderIds:[order.id], allowConcurrent:true }
+        );
+        let confirmationLinked = false;
+        const junction = await supabase.from('tracked_order_emails')
+          .select('order_id')
+          .eq('order_id', order.id)
+          .eq('event_type','confirmed')
+          .limit(1);
+        if (!junction.error && (junction.data || []).length) confirmationLinked = true;
+        if (!confirmationLinked) {
+          const legacy = await supabase.from('email_messages')
+            .select('id')
+            .eq('linked_order_id', order.id)
+            .eq('email_type','confirmed')
+            .limit(1);
+          if (!legacy.error && (legacy.data || []).length) confirmationLinked = true;
+        }
+        Object.assign(job, {
+          status:'complete', finished_at:new Date().toISOString(),
+          result:{ ...repair, confirmation_linked:confirmationLinked }, error:null
+        });
+      } catch (error) {
+        Object.assign(job, { status:'error', finished_at:new Date().toISOString(), error:error.message || String(error) });
+      }
+    });
+  });
+
+  app.get('/orders/tracked/:id/find-emails/status', auth, async (req, res) => {
+    const job = orderEmailRepairJobs.get(`${req.user_id}:${req.params.id}`);
+    if (!job || (req.query.job_id && String(req.query.job_id) !== String(job.id))) {
+      return res.json({ job:{ status:'idle' } });
+    }
+    res.json({ job:{
+      id:job.id, status:job.status, started_at:job.started_at, finished_at:job.finished_at,
+      error:job.error, result:job.status === 'complete' ? job.result : null
+    } });
   });
 
 

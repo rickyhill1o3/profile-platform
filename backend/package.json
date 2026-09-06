@@ -5,7 +5,7 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "test": "node tests/order-tracker-global-mailbox-pagination.test.js && node tests/discord-history-import.test.js"
+    "test": "node tests/order-tracker-global-mailbox-pagination.test.js && node tests/discord-history-import.test.js && node tests/target-historical-email-repair.test.js"
   },
   "keywords": [],
   "author": "",

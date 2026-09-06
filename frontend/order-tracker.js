@@ -22,7 +22,7 @@ function isPokemonCenterOrder(o){const store=String(o.store||'').toLowerCase().r
 function hasPokemonConfirmationEmail(o){const c=o.email_counts||{};return Boolean(o.has_confirmation_email)||Number(c.confirmed||0)>0}
 function displayOrderStatus(o){const s=String(o.status||'waiting_confirmation').toLowerCase();if(isPokemonCenterOrder(o)&&['confirmed','processing','waiting_confirmation'].includes(s)&&!hasPokemonConfirmationEmail(o))return 'waiting_confirmation';return s}
 function statusCardClass(o){const s=displayOrderStatus(o);if(s==='canceled'||s==='refunded')return 'order-canceled';if(s==='delivered')return 'order-delivered';if(s==='shipped')return 'order-shipped';if(s==='confirmed'||s==='processing')return 'order-confirmed';return 'order-waiting'}
-function emailButtons(o){const c=o.email_counts||{};const buttons=[];const hasConfirmation=hasPokemonConfirmationEmail(o)||(!isPokemonCenterOrder(o)&&Boolean(o.receipt_html||o.receipt_text));const total=Math.max(Number(c.total||0),hasConfirmation?1:0);if(hasConfirmation)buttons.push(`<button class="btn" onclick="openOrderEmails('${o.id}','confirmed')">View confirmed receipt</button>`);if(Number(c.shipped||0)>0)buttons.push(`<button class="btn" onclick="openOrderEmails('${o.id}','shipped')">View tracking confirmation</button>`);if(Number(c.delivered||0)>0)buttons.push(`<button class="btn" onclick="openOrderEmails('${o.id}','delivered')">View delivered confirmation</button>`);if(Number(c.canceled||0)>0)buttons.push(`<button class="btn" onclick="openOrderEmails('${o.id}','canceled')">View cancellation</button>`);else if(Number(c.refunded||0)>0)buttons.push(`<button class="btn" onclick="openOrderEmails('${o.id}','refunded')">View refund confirmation</button>`);if(total>0)buttons.push(`<button class="btn" onclick="openOrderEmails('${o.id}','all')">View all order emails (${total})</button>`);if(!buttons.length)buttons.push(`<button class="btn" onclick="openOrderEmails('${o.id}','all')">Find order emails</button>`);return buttons.join('')}
+function emailButtons(o){const c=o.email_counts||{};const buttons=[];const hasConfirmation=hasPokemonConfirmationEmail(o)||(!isPokemonCenterOrder(o)&&Boolean(o.receipt_html||o.receipt_text));const total=Math.max(Number(c.total||0),hasConfirmation?1:0);if(hasConfirmation)buttons.push(`<button class="btn" onclick="openOrderEmails('${o.id}','confirmed')">View confirmed receipt</button>`);if(Number(c.shipped||0)>0)buttons.push(`<button class="btn" onclick="openOrderEmails('${o.id}','shipped')">View tracking confirmation</button>`);if(Number(c.delivered||0)>0)buttons.push(`<button class="btn" onclick="openOrderEmails('${o.id}','delivered')">View delivered confirmation</button>`);if(Number(c.canceled||0)>0)buttons.push(`<button class="btn" onclick="openOrderEmails('${o.id}','canceled')">View cancellation</button>`);else if(Number(c.refunded||0)>0)buttons.push(`<button class="btn" onclick="openOrderEmails('${o.id}','refunded')">View refund confirmation</button>`);if(total>0)buttons.push(`<button class="btn" onclick="openOrderEmails('${o.id}','all')">View all order emails (${total})</button>`);if(!hasConfirmation)buttons.push(`<button class="btn" onclick="findOrderEmails('${o.id}',this)">Find confirmation email</button>`);return buttons.join('')}
 
 function renderItems(o){
   const items=Array.isArray(o.items)?o.items:[]; if(!items.length)return '';
@@ -43,6 +43,38 @@ function renderEmailIdentity(o){
 }
 function render(){const q=$('searchOrders').value.toLowerCase();const selectedStatus=$('statusFilter').value;const selectedYear=$('yearFilter').value;const rows=allOrders.filter(o=>{const shownStatus=displayOrderStatus(o);const matchesSearch=`${o.store} ${o.order_number} ${o.product_summary} ${o.source_email||''} ${(o.actual_receiving_mailboxes||[]).join(' ')} ${(o.items||[]).map(i=>i.product_name).join(' ')}`.toLowerCase().includes(q);const matchesStatus=!selectedStatus||shownStatus===selectedStatus;const matchesYear=!selectedYear||String(new Date(o.order_date||0).getFullYear())===selectedYear;return matchesSearch&&matchesStatus&&matchesYear});$('ordersList').innerHTML=rows.length?rows.map(o=>{const shownStatus=displayOrderStatus(o);const missingPokemonConfirmation=isPokemonCenterOrder(o)&&['waiting_confirmation','confirmed','processing'].includes(String(o.status||'').toLowerCase())&&!hasPokemonConfirmationEmail(o);return `<article class="order-card ${statusCardClass(o)}"><div class="order-head"><div><span class="status-pill status-${esc(shownStatus)}">${esc(shownStatus)}</span>${missingPokemonConfirmation?'<span class="email-missing-pill">No confirmation email linked</span>':(!o.has_linked_email&&!['shipped','delivered'].includes(String(o.status||''))?'<span class="email-missing-pill">No retailer email linked</span>':'')}<h3>${esc(o.store).toUpperCase()} · ${esc(o.order_number)}</h3><p>${esc(o.product_summary||'Product details will improve as receipt emails are parsed.')}</p>${renderEmailIdentity(o)}</div><strong>${esc(orderHeadlineValue(o))}</strong></div>${renderReconciliation(o)}${renderItems(o)}${renderShipments(o)}<div class="order-meta"><div><small>Order date</small><br><b>${o.order_date?new Date(o.order_date).toLocaleDateString():'—'}</b></div><div><small>Tracking</small><br><b>${esc((o.shipments||[]).length?`${o.shipments.length} package${o.shipments.length===1?'':'s'}`:(o.tracking_number||'—'))}</b>${!((o.shipments||[]).length)&&o.tracking_url?`<br><a class="tracking-link" href="${esc(o.tracking_url)}" target="_blank" rel="noopener">Track package</a>`:''}</div><div><small>${(['canceled','refunded'].includes(String(o.status||'').toLowerCase())&&o.credits_refunded)?'Credits refunded':'Credits spent'}</small><br><b>${(['canceled','refunded'].includes(String(o.status||'').toLowerCase())&&o.credits_refunded)?`Refunded ${money(o.credits_spent)}`:money(o.credits_spent)}</b></div><div><small>Last update</small><br><b>${o.last_status_at?new Date(o.last_status_at).toLocaleString():'—'}</b></div></div><div class="order-actions">${emailButtons(o)}${String(o.status||'').toLowerCase()==='shipped'?`<button class="btn" onclick="markDelivered('${o.id}')">Mark as delivered</button>`:''}<button class="btn" onclick="editOrder('${o.id}')">Edit</button><button class="btn btn-danger" onclick="deleteOrder('${o.id}')">Delete</button></div></article>`}).join(''):'<section class="tracker-panel"><p>No tracked orders match this view yet.</p></section>'}
 async function openOrderEmails(id,type='all'){const r=await fetch(`${API}/orders/emails/${id}?type=${encodeURIComponent(type)}`,{headers:{Authorization:`Bearer ${token}`}});if(!r.ok){alert('Order emails could not be opened');return}const html=await r.text();const w=window.open('','_blank');w.document.open();w.document.write(html);w.document.close()}
+async function findOrderEmails(id,button){
+  const original=button?.textContent||'Find order emails';
+  if(button){button.disabled=true;button.textContent='Searching mailbox…'}
+  try{
+    const start=await api(`/orders/tracked/${id}/find-emails`,{method:'POST',body:'{}'});
+    const started=Date.now();
+    while(true){
+      await new Promise(resolve=>setTimeout(resolve,1500));
+      const status=await api(`/orders/tracked/${id}/find-emails/status?job_id=${encodeURIComponent(start.job_id||'')}`);
+      const job=status?.job||{};
+      if(job.status==='complete'){
+        await loadOrders();
+        const result=job.result||{};
+        if(result.confirmation_linked){alert('The confirmation email was found and linked to this order.');return}
+        const detail=(result.details||[]).find(item=>String(item.tracked_order_id)===String(id))||(result.details||[])[0]||{};
+        const messages={
+          mailbox_not_connected:'The profile mailbox is no longer connected. Reconnect its IMAP/app password, then try again.',
+          no_live_message_found:'The connected mailbox was searched by order number, but no matching live message was returned.',
+          imap_search_failed:'The mailbox connected, but its IMAP search failed. Check the diagnostic log and mailbox credentials.',
+          live_message_found_not_linked:'A matching message was fetched, but it did not parse/link as a retailer email. Download the EML for parser review.',
+          message_processing_failed:'A matching message was found, but parsing or saving it failed. Check the server log for this order number.'
+        };
+        alert(messages[detail.result]||`Mailbox search completed, but no confirmation was linked (${detail.result||'no matching result'}).`);
+        return;
+      }
+      if(job.status==='error')throw new Error(job.error||'Mailbox search failed');
+      if(job.status==='idle')throw new Error('The mailbox search job was lost after the server restarted. Please try again.');
+      if(Date.now()-started>10*60*1000)throw new Error('The mailbox search is still running. Refresh the page in a few minutes to see any linked email.');
+    }
+  }catch(error){alert(error.message||'Could not search this order mailbox')}
+  finally{if(button?.isConnected){button.disabled=false;button.textContent=original}}
+}
 async function openReceipt(id){return openOrderEmails(id,'confirmed')}
 async function editOrder(id){const o=allOrders.find(x=>x.id===id);const status=prompt('Status: waiting_confirmation, confirmed, processing, shipped, delivered, canceled, refunded',o.status);if(!status)return;const credits=prompt('Credits spent for this order',o.credits_spent||0);await api('/orders/tracked/'+id,{method:'PATCH',body:JSON.stringify({status,credits_spent:Number(credits||0)})});loadOrders()}
 async function markDelivered(id){
@@ -289,7 +321,7 @@ Supreme order numbers parsed: ${j.supreme_rebuild?.parsed_order_numbers||0}
 Supreme webhook orders: ${j.supreme_rebuild?.supreme_webhook_orders||0}
 Supreme candidate pairs: ${j.supreme_rebuild?.candidate_pairs||0}
 Supreme assignments rebuilt: ${j.supreme_rebuild?.assigned||0}
-Unresolved Target orders prioritized: ${j.damaged_target_orders||0}
+Target orders missing confirmation prioritized: ${j.target_priority_orders||j.damaged_target_orders||0}
 Live mailbox orders checked: ${r.checked_orders||0}
 Live MIME messages matched: ${r.matched_messages||0}
 Orders repaired: ${r.repaired_orders||0}
