@@ -7,7 +7,7 @@ function loadOrderTrackerTestHooks() {
   const filename = path.join(__dirname, '..', 'order-tracker.js');
   const source = fs.readFileSync(filename, 'utf8').replace(
     /module\.exports = \{ registerOrderTracker, scanAll, notifyCheckoutForOrderTracker \};\s*$/,
-    'module.exports = { __test: { loadScanAccounts, requestedPokemonCenterOrderNumbers } };'
+    'module.exports = { __test: { loadScanAccounts, requestedPokemonCenterOrderNumbers, isOrderTrackerDeleted, loadServiceOrders } };'
   );
   const module = { exports:{} };
   const sandbox = {
@@ -71,7 +71,7 @@ function fakeSupabase(database) {
 }
 
 (async () => {
-  const { loadScanAccounts, requestedPokemonCenterOrderNumbers } = loadOrderTrackerTestHooks();
+  const { loadScanAccounts, requestedPokemonCenterOrderNumbers, isOrderTrackerDeleted, loadServiceOrders } = loadOrderTrackerTestHooks();
   const profiles = Array.from({ length:1205 }, (_, index) => ({
     id:`profile-${String(index).padStart(4, '0')}`,
     user_id:`user-${index}`,
@@ -103,6 +103,20 @@ function fakeSupabase(database) {
     ['P0037328999', 'P0037327064'],
     'one-time recovery must normalize and deduplicate exact P-order numbers'
   );
+
+  assert.strictEqual(isOrderTrackerDeleted({ metadata:{ order_tracker_deleted:true } }), true);
+  assert.strictEqual(isOrderTrackerDeleted({ metadata:{ order_tracker_deleted_at:'2026-09-06T22:00:00.000Z' } }), true);
+  assert.strictEqual(isOrderTrackerDeleted({ metadata:{} }), false);
+
+  const orderDatabase = {
+    orders:[
+      { id:'keep-live', user_id:'owner', source:'webhook', created_at:'2026-04-01T00:00:00.000Z', metadata:{} },
+      { id:'keep-history', user_id:'owner', source:'discord_history', created_at:'2026-03-26T00:00:00.000Z', metadata:{ discord_history_import:true } },
+      { id:'deleted-test', user_id:'owner', source:'discord_history', created_at:'2026-03-25T00:00:00.000Z', metadata:{ discord_history_import:true, order_tracker_deleted:true, order_tracker_deleted_at:'2026-09-06T22:00:00.000Z' } }
+    ]
+  };
+  const serviceOrders = await loadServiceOrders(fakeSupabase(orderDatabase), 'owner');
+  assert.deepStrictEqual(Array.from(serviceOrders, order => order.id).sort(), ['keep-history','keep-live']);
 
   console.log('order-tracker global mailbox pagination tests passed');
 })().catch(error => {

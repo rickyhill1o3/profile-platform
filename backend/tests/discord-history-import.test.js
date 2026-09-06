@@ -1,5 +1,5 @@
 const assert = require('assert');
-const { __test } = require('../discord-history-import');
+const { registerDiscordHistoryImport, __test } = require('../discord-history-import');
 
 function message(id, timestamp, embed) {
   return {
@@ -111,5 +111,24 @@ assert.strictEqual(insert.credits_charged, 0);
 assert.strictEqual(insert.source, 'discord_history');
 assert.strictEqual(insert.created_at, '2026-03-30T17:36:00.000Z');
 assert.strictEqual(insert.metadata.checkout_account_email, 'ricky@example.com');
+
+const priorEnabled = process.env.DISCORD_HISTORY_IMPORT_ENABLED;
+const originalSetInterval = global.setInterval;
+let backgroundIntervals = 0;
+delete process.env.DISCORD_HISTORY_IMPORT_ENABLED;
+global.setInterval = () => { backgroundIntervals++; return { unref() {} }; };
+try {
+  registerDiscordHistoryImport({
+    app:{ get() {}, post() {} },
+    supabase:{},
+    auth:(_req, _res, next) => next(),
+    finalizeImportedOrders:async () => ({})
+  });
+} finally {
+  global.setInterval = originalSetInterval;
+  if (priorEnabled == null) delete process.env.DISCORD_HISTORY_IMPORT_ENABLED;
+  else process.env.DISCORD_HISTORY_IMPORT_ENABLED = priorEnabled;
+}
+assert.strictEqual(backgroundIntervals, 0, 'disabled history importer must not start a background timer');
 
 console.log('Discord historical checkout parser and cutoff tests passed.');

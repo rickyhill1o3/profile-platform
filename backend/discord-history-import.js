@@ -415,6 +415,9 @@ async function insertOrdersWithFallback(supabase, rows) {
 function configKey(userId) { return `discord_history_import:${userId}`; }
 
 function registerDiscordHistoryImport({ app, supabase, auth, finalizeImportedOrders }) {
+  // This importer is a one-time recovery tool. Keep it off after the historical import unless
+  // the owner deliberately opts back in for another manual preview/import session.
+  const enabled = lower(process.env.DISCORD_HISTORY_IMPORT_ENABLED || '') === 'true';
   const token = clean(process.env.DISCORD_HISTORY_BOT_TOKEN || process.env.DISCORD_BOT_TOKEN, 500);
   const clientId = clean(process.env.DISCORD_HISTORY_BOT_CLIENT_ID || process.env.DISCORD_BOT_CLIENT_ID || process.env.DISCORD_CLIENT_ID, 100);
   const inviteUrl = clientId ? `https://discord.com/oauth2/authorize?client_id=${encodeURIComponent(clientId)}&scope=bot&permissions=66560` : null;
@@ -427,7 +430,7 @@ function registerDiscordHistoryImport({ app, supabase, auth, finalizeImportedOrd
       if (!result.error) saved = result.data?.value_json || null;
     } catch (_) {}
     return res.json({
-      configured:Boolean(token && clientId), token_configured:Boolean(token), client_id_configured:Boolean(clientId),
+      enabled, configured:Boolean(enabled && token && clientId), token_configured:Boolean(token), client_id_configured:Boolean(clientId),
       invite_url:inviteUrl, required_permissions:['View Channel','Read Message History'],
       message_content_intent_required:true, latest_allowed_cutoff:LATEST_ALLOWED_CUTOFF,
       latest_allowed_cutoff_label:'April 18, 2026 at 2:07 PM Eastern', saved_channels:channelIdsFromInput(saved?.channels || [])
@@ -436,6 +439,7 @@ function registerDiscordHistoryImport({ app, supabase, auth, finalizeImportedOrd
 
   app.post('/orders/discord-history/preview', auth, async (req, res) => {
     if (req.role !== 'super_admin') return res.status(403).json({ error:'Super admin only.' });
+    if (!enabled) return res.status(410).json({ error:'Discord historical importing is disabled. Existing imported orders remain saved, but this server will not read Discord history again.' });
     if (!token) return res.status(503).json({ error:'Add DISCORD_HISTORY_BOT_TOKEN (or DISCORD_BOT_TOKEN) to Render first.' });
     const channelIds = channelIdsFromInput(req.body?.channels);
     if (!channelIds.length) return res.status(400).json({ error:'Enter at least one Discord checkout channel ID.' });
@@ -513,6 +517,7 @@ function registerDiscordHistoryImport({ app, supabase, auth, finalizeImportedOrd
 
   app.get('/orders/discord-history/status', auth, async (req, res) => {
     if (req.role !== 'super_admin') return res.status(403).json({ error:'Super admin only.' });
+    if (!enabled) return res.json({ job:{ status:'disabled' } });
     const job = previewJobs.get(clean(req.query?.job_id, 100));
     if (!job || String(job.user_id) !== String(req.user_id)) return res.json({ job:{ status:'idle' } });
     return res.json({ job:jobView(job) });
@@ -520,6 +525,7 @@ function registerDiscordHistoryImport({ app, supabase, auth, finalizeImportedOrd
 
   app.post('/orders/discord-history/import', auth, async (req, res) => {
     if (req.role !== 'super_admin') return res.status(403).json({ error:'Super admin only.' });
+    if (!enabled) return res.status(410).json({ error:'Discord historical importing is disabled.' });
     const job = previewJobs.get(clean(req.body?.job_id, 100));
     if (!job || String(job.user_id) !== String(req.user_id)) return res.status(404).json({ error:'That preview expired or the server restarted. Run Preview again.' });
     if (new Date(job.expires_at).getTime() < Date.now()) return res.status(410).json({ error:'That preview expired. Run Preview again before importing.' });
@@ -561,10 +567,12 @@ function registerDiscordHistoryImport({ app, supabase, auth, finalizeImportedOrd
     });
   });
 
-  setInterval(() => {
-    const now = Date.now();
-    for (const [id, job] of previewJobs.entries()) if (new Date(job.expires_at).getTime() + PREVIEW_TTL_MS < now) previewJobs.delete(id);
-  }, 15 * 60 * 1000).unref?.();
+  if (enabled) {
+    setInterval(() => {
+      const now = Date.now();
+      for (const [id, job] of previewJobs.entries()) if (new Date(job.expires_at).getTime() + PREVIEW_TTL_MS < now) previewJobs.delete(id);
+    }, 15 * 60 * 1000).unref?.();
+  }
 }
 
 module.exports = {

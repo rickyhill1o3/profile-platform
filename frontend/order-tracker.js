@@ -86,7 +86,7 @@ async function markDelivered(id){
     await loadOrders();
   }catch(e){alert(e.message||'Could not mark this order delivered')}
 }
-async function deleteOrder(id){if(!confirm('Delete this tracked order and its stored receipt?'))return;await api('/orders/tracked/'+id,{method:'DELETE'});loadOrders()}
+async function deleteOrder(id){if(!confirm('Permanently remove this order from Order Tracker? It will not be recreated by the background Discord/webhook sync.'))return;try{await api('/orders/tracked/'+id,{method:'DELETE'});await loadOrders()}catch(error){alert(error.message||'The order could not be permanently deleted')}}
 async function runAutomaticScan(){
   // Order Tracker is now a fast read-only view. Render scans mailboxes in the background and
   // checkout webhooks trigger priority scans, so opening this page must not wait on IMAP.
@@ -157,6 +157,10 @@ function setDiscordHistoryStatus(text,{error=false,progress=null}={}){
 async function loadDiscordHistoryConfig(){
   try{
     const config=await api('/orders/discord-history/config');
+    if(config.enabled===false){
+      $('discordHistoryPanel').hidden=true;
+      return;
+    }
     if(Array.isArray(config.saved_channels)&&config.saved_channels.length&&!String($('discordHistoryChannels').value||'').trim())$('discordHistoryChannels').value=config.saved_channels.join('\n');
     const invite=$('discordHistoryInvite');
     if(config.invite_url){invite.href=config.invite_url;invite.hidden=false}else invite.hidden=true;

@@ -1230,6 +1230,13 @@ function serviceOrderNumber(order = {}) {
   return refs[0] || clean(order.external_order_id || order.id);
 }
 
+function isOrderTrackerDeleted(order = {}) {
+  const metadata = order?.metadata && typeof order.metadata === 'object' && !Array.isArray(order.metadata)
+    ? order.metadata
+    : {};
+  return metadata.order_tracker_deleted === true || Boolean(clean(metadata.order_tracker_deleted_at));
+}
+
 async function loadServiceOrders(supabase, userId) {
   const { data, error } = await supabase.from('orders').select('*').eq('user_id', userId).order('created_at', { ascending: false }).limit(2000);
   if (error) throw error;
@@ -1248,7 +1255,9 @@ async function loadServiceOrders(supabase, userId) {
     if ((historical.data || []).length < 500) break;
     offset += 500;
   }
-  return [...merged.values()].sort((a, b) => new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime());
+  return [...merged.values()]
+    .filter(order => !isOrderTrackerDeleted(order))
+    .sort((a, b) => new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime());
 }
 
 async function findPokemonCenterServiceOrderGlobally(supabase, orderNumber) {
@@ -1267,6 +1276,7 @@ async function findPokemonCenterServiceOrderGlobally(supabase, orderNumber) {
   if (error) throw error;
 
   const matches = (data || []).filter(order =>
+    !isOrderTrackerDeleted(order) &&
     normalizeStoreKey(order.site || order.metadata?.site || extractNamedPayloadValue(order.raw_payload || {}, ['site','store'])) === 'pokemoncenter' &&
     collectOrderRefs(order).includes(normalizeOrderRef(ref))
   );
@@ -1291,7 +1301,7 @@ async function findPokemonCenterServiceOrderGlobally(supabase, orderNumber) {
         .map(row => row.source_order_id).filter(Boolean))];
       if (sourceIds.length === 1) {
         const source = await supabase.from('orders').select('*').eq('id', sourceIds[0]).maybeSingle();
-        if (!source.error && source.data && normalizeStoreKey(source.data.site || source.data.metadata?.site || extractNamedPayloadValue(source.data.raw_payload || {}, ['site','store'])) === 'pokemoncenter') return source.data;
+        if (!source.error && source.data && !isOrderTrackerDeleted(source.data) && normalizeStoreKey(source.data.site || source.data.metadata?.site || extractNamedPayloadValue(source.data.raw_payload || {}, ['site','store'])) === 'pokemoncenter') return source.data;
       } else if (sourceIds.length > 1) {
         console.warn(`[POKEMON CENTER] Refusing ambiguous tracked-order match for ${ref}: ${sourceIds.length} source orders`);
         return null;
@@ -1304,6 +1314,7 @@ async function findPokemonCenterServiceOrderGlobally(supabase, orderNumber) {
   const recent = await supabase.from('orders').select('*').order('created_at', { ascending:false }).limit(5000);
   if (recent.error) throw recent.error;
   const legacyMatches = (recent.data || []).filter(order =>
+    !isOrderTrackerDeleted(order) &&
     normalizeStoreKey(order.site || order.metadata?.site || extractNamedPayloadValue(order.raw_payload || {}, ['site','store'])) === 'pokemoncenter' &&
     collectOrderRefs(order).includes(normalizeOrderRef(ref))
   );
@@ -1669,7 +1680,8 @@ async function syncServiceOrders(supabase, userId, accounts = [], options = {}) 
   // Historical Discord imports can be much older than the normal 2,000-row service-order window.
   // When explicit rows are supplied, sync exactly those rows so an old checkout cannot be skipped
   // merely because the super-admin has accumulated thousands of newer website orders.
-  const serviceOrders = Array.isArray(options.serviceOrders) ? options.serviceOrders : await loadServiceOrders(supabase, userId);
+  const serviceOrders = (Array.isArray(options.serviceOrders) ? options.serviceOrders : await loadServiceOrders(supabase, userId))
+    .filter(source => !isOrderTrackerDeleted(source));
   const profileMailboxIndex = await buildProfileMailboxIndex(supabase, userId);
   const defaultEmail = accounts[0]?.email || 'waiting-for-imap@local';
   for (const source of serviceOrders) {
@@ -1677,6 +1689,13 @@ async function syncServiceOrders(supabase, userId, accounts = [], options = {}) 
     const orderNumber = serviceOrderNumber(source);
     if (!orderNumber) continue;
     const { data: prior } = await supabase.from('tracked_orders').select('*').eq('source_order_id', source.id).maybeSingle();
+    // A delete can happen while a background sync is already holding an older in-memory copy of
+    // the source order. Before recreating a missing tracker row, re-read the durable source marker
+    // so that race cannot resurrect a permanently deleted card.
+    if (!prior?.id) {
+      const current = await supabase.from('orders').select('metadata').eq('id', source.id).eq('user_id', userId).maybeSingle();
+      if (!current.error && current.data && isOrderTrackerDeleted(current.data)) continue;
+    }
     const sourceEmails = findEmailValues(source.raw_payload || {});
     const metadataEmail = lower(
       source.metadata?.checkout_account_email ||
@@ -4954,8 +4973,52 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
   });
 
   app.delete('/orders/tracked/:id', auth, async (req, res) => {
-    const { error } = await supabase.from('tracked_orders').delete().eq('id', req.params.id).eq('user_id', req.user_id);
-    if (error) return res.status(500).json({ error: error.message }); res.json({ success: true });
+    const trackedResult = await supabase.from('tracked_orders')
+      .select('id,user_id,source_order_id,store,order_number')
+      .eq('id', req.params.id)
+      .eq('user_id', req.user_id)
+      .maybeSingle();
+    if (trackedResult.error) return res.status(500).json({ error:trackedResult.error.message });
+    const tracked = trackedResult.data;
+    if (!tracked) return res.status(404).json({ error:'Order not found.' });
+
+    let sourceSuppressed = false;
+    if (tracked.source_order_id) {
+      const sourceResult = await supabase.from('orders')
+        .select('id,user_id,metadata')
+        .eq('id', tracked.source_order_id)
+        .eq('user_id', req.user_id)
+        .maybeSingle();
+      if (sourceResult.error) return res.status(500).json({ error:sourceResult.error.message });
+      if (sourceResult.data?.id) {
+        const currentMetadata = sourceResult.data.metadata && typeof sourceResult.data.metadata === 'object' && !Array.isArray(sourceResult.data.metadata)
+          ? sourceResult.data.metadata
+          : {};
+        const deletedAt = new Date().toISOString();
+        const metadata = {
+          ...currentMetadata,
+          order_tracker_deleted:true,
+          order_tracker_deleted_at:deletedAt,
+          order_tracker_deleted_by:req.user_id,
+          order_tracker_deleted_number:tracked.order_number || null,
+          order_tracker_deleted_store:tracked.store || null
+        };
+        const sourceUpdate = await supabase.from('orders')
+          .update({ metadata })
+          .eq('id', sourceResult.data.id)
+          .eq('user_id', req.user_id);
+        if (sourceUpdate.error) return res.status(500).json({ error:`Could not permanently suppress this source order: ${sourceUpdate.error.message}` });
+        sourceSuppressed = true;
+      }
+    }
+
+    const { error } = await supabase.from('tracked_orders')
+      .delete()
+      .eq('id', tracked.id)
+      .eq('user_id', req.user_id);
+    if (error) return res.status(500).json({ error:error.message });
+    orderEmailRepairJobs.delete(`${req.user_id}:${tracked.id}`);
+    res.json({ success:true, permanent:true, source_suppressed:sourceSuppressed });
   });
 
 
