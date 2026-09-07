@@ -387,6 +387,74 @@ async function fetchLinkedRetailerArchiveForOrders(supabase, userId, orderIds = 
   }).slice(0, limit);
 }
 
+function walmartArchiveRowMatchesTrackedOrder(row = {}, order = {}) {
+  if (normalizeStoreKey(order.store || '') !== 'walmart') return false;
+  if (lower(row.mailbox_email) !== lower(order.source_email)) return false;
+  const expected = normalizeOrderRef(order.order_number);
+  if (!/^\d{15}$/.test(expected)) return false;
+  if (normalizeOrderRef(row.order_number) === expected) return true;
+  const source = `${row.body_text || ''}\n${row.body_html || ''}\n${row.snippet || ''}`;
+  return rawMessageContainsOrderNumber(order.order_number, { subject:row.subject || '' }, source, 'walmart');
+}
+
+async function fetchWalmartArchiveCandidatesForOrders(supabase, userId, trackedRows = [], columns = '*', limit = 1500) {
+  // Historical Discord orders are created after the original mailbox scan. Their Walmart email
+  // may therefore already exist in email_messages but have no tracked_order_emails row yet. A
+  // newest-N archive replay cannot recover that case, so locate candidates by the exact Walmart
+  // reference and expected receiving mailbox across the complete relevant date span.
+  const targets = (trackedRows || []).filter(order =>
+    normalizeStoreKey(order.store || '') === 'walmart' &&
+    lower(order.source_email).includes('@') &&
+    /^\d{15}$/.test(normalizeOrderRef(order.order_number))
+  );
+  if (!targets.length) return { rows:[], metadata_scanned:0, candidates_found:0 };
+
+  const targetRefs = new Set(targets.map(order => normalizeOrderRef(order.order_number)));
+  const targetMailboxes = new Set(targets.map(order => lower(order.source_email)));
+  const dates = targets.map(order => new Date(order.order_date || 0).getTime()).filter(Number.isFinite).filter(ms => ms > 0);
+  const sinceIso = new Date(Math.max(0, (dates.length ? Math.min(...dates) : Date.now() - 365 * 86400000) - 7 * 86400000)).toISOString();
+  const metadata = new Map();
+  const metadataColumns = 'id,received_at,subject,from_text,email_type,order_number,mailbox_email,store';
+
+  // Exact stored-order-number lookup is cheap and remains valid even when fulfillment happened
+  // months after checkout. Query both compact and display-dash forms used by Walmart.
+  const storedVariants = [...new Set(targets.flatMap(order => walmartOrderNumberVariants(order.order_number)))];
+  for (let i = 0; i < storedVariants.length; i += 75) {
+    const result = await supabase.from('email_messages').select(metadataColumns)
+      .eq('user_id', userId).in('order_number', storedVariants.slice(i, i + 75));
+    if (result.error) throw result.error;
+    for (const row of result.data || []) if (row.id) metadata.set(String(row.id), row);
+  }
+
+  // Older archive rows can have store=walmart but no stored order_number because they were parsed
+  // before Walmart's 7+8 dash format was supported. Page lightweight metadata, then hydrate only
+  // plausible lifecycle mail in the expected mailboxes and verify the full 15-digit reference.
+  let from = 0;
+  const pageSize = 1000;
+  while (from < 25000) {
+    const result = await supabase.from('email_messages').select(metadataColumns)
+      .eq('user_id', userId).eq('store', 'walmart').gte('received_at', sinceIso)
+      .order('received_at', { ascending:false }).range(from, from + pageSize - 1);
+    if (result.error) throw result.error;
+    for (const row of result.data || []) if (row.id) metadata.set(String(row.id), row);
+    if (!result.data || result.data.length < pageSize) break;
+    from += pageSize;
+  }
+
+  const plausible = [...metadata.values()].filter(row => {
+    if (!targetMailboxes.has(lower(row.mailbox_email))) return false;
+    if (targetRefs.has(normalizeOrderRef(row.order_number))) return true;
+    const status = lower(row.email_type || detectStatus(row.subject || '', ''));
+    return ['confirmed','processing','shipped','delivered','canceled','refunded'].includes(status) ||
+      /order|delivery|shipped|arrived|cancel|refund/i.test(clean(row.subject));
+  }).slice(0, Math.max(1, Math.min(3000, Number(limit || 1500))));
+
+  const hydrated = await fetchEmailArchiveRowsByIds(supabase, userId, plausible.map(row => row.id), columns, 50);
+  const exact = hydrated.filter(row => targets.some(order => walmartArchiveRowMatchesTrackedOrder(row, order)));
+  exact.sort((a,b) => new Date(a.received_at || 0) - new Date(b.received_at || 0));
+  return { rows:exact, metadata_scanned:metadata.size, candidates_found:exact.length, since:sinceIso };
+}
+
 
 function isPokemonCenterOrderEmailMetadata(row = {}) {
   const subject = clean(row.subject || '');
@@ -2756,6 +2824,43 @@ function imapUidSet(values = []) {
     .join(',');
 }
 
+function historicalRepairMailboxNames(account = {}, boxes = []) {
+  const flagsFor = box => {
+    if (box?.flags instanceof Set) return [...box.flags].map(String);
+    if (Array.isArray(box?.flags)) return box.flags.map(String);
+    if (box?.flags && typeof box.flags !== 'string' && typeof box.flags[Symbol.iterator] === 'function') return [...box.flags].map(String);
+    return clean(box?.flags).split(/\s+/).filter(Boolean);
+  };
+  const selectable = box => clean(box?.path) && box.selectable !== false &&
+    !flagsFor(box).some(flag => lower(flag) === '\\noselect');
+  const usable = (boxes || []).filter(selectable);
+
+  // Gmail's All Mail contains Inbox, archived, and labeled messages once. Searching every Gmail
+  // label would fetch duplicates with label-local UIDs, so retain the proven All Mail behavior.
+  if (lower(account.provider?.name) === 'gmail') {
+    const all = usable.find(box => clean(box.specialUse) === '\\All')?.path;
+    return [all || 'INBOX'];
+  }
+
+  const names = [];
+  const add = value => {
+    const name = clean(value);
+    if (name && !names.some(existing => lower(existing) === lower(name))) names.push(name);
+  };
+  add(usable.find(box => lower(box.path) === 'inbox')?.path || 'INBOX');
+  for (const use of ['\\Archive','\\All','\\Junk']) {
+    for (const box of usable) if (clean(box.specialUse) === use) add(box.path);
+  }
+  for (const box of usable) {
+    const specialUse = clean(box.specialUse);
+    // Sent and Drafts can contain copies authored by the mailbox owner rather than receipts that
+    // were actually received. Trash is included because a user can still see an old order there.
+    if (['\\Sent','\\Drafts'].includes(specialUse)) continue;
+    add(box.path);
+  }
+  return names.slice(0, 120);
+}
+
 function describeImapError(err, mailboxName = '') {
   const parts = [];
   if (mailboxName) parts.push(`folder=${mailboxName}`);
@@ -3485,6 +3590,60 @@ async function repairHistoricalOrderEmails(supabase, userId = null, adjustCredit
   ].slice(0, maxOrders);
   if (!candidates.length) return { checked_orders:0, matched_messages:0, repaired_orders:0, identity_corrected:identityRepair.corrected, wrong_links_removed:identityRepair.unlinked, skipped:true };
 
+  let checkedOrders = 0, matchedMessages = 0, repairedOrders = 0, mailboxFailures = 0;
+  const repairedOrderIds = new Set();
+  const archiveReplayByOrder = new Map();
+  let walmartArchiveDiscovery = { rows:[], metadata_scanned:0, candidates_found:0 };
+
+  // Replay exact historical Walmart messages from the durable archive before requiring a live
+  // mailbox connection. This is essential for Discord imports: the email was often archived
+  // months before the corresponding tracked order existed, so it could not have been linked then.
+  const walmartCandidates = candidates.filter(order => normalizeStoreKey(order.store || '') === 'walmart');
+  if (walmartCandidates.length && userId) {
+    const archiveColumns = 'id,user_id,mailbox_email,source_type,subject,from_text,to_text,cc_text,body_text,body_html,snippet,received_at,message_id,imap_uid,store,linked_order_id,email_type,order_number';
+    try {
+      walmartArchiveDiscovery = await fetchWalmartArchiveCandidatesForOrders(
+        supabase, userId, walmartCandidates, archiveColumns, Math.max(300, walmartCandidates.length * 12)
+      );
+      for (const email of walmartArchiveDiscovery.rows || []) {
+        const target = walmartCandidates.find(order => walmartArchiveRowMatchesTrackedOrder(email, order));
+        if (!target) continue;
+        const replay = archiveReplayByOrder.get(String(target.id)) || { found:0, processed:0, saved:0, errors:[] };
+        replay.found++;
+        try {
+          const archivedText = archivedRetailerReadableText(email);
+          const account = {
+            user_id:target.user_id,
+            archive_user_id:email.user_id || target.user_id,
+            profile_id:target.profile_id || null,
+            email:lower(email.mailbox_email || target.source_email),
+            provider:providerForEmail(email.mailbox_email || target.source_email) || { name:'archive' },
+            ingestion_source:email.source_type || 'walmart_targeted_archive_replay'
+          };
+          const parsed = {
+            subject:email.subject || '', from:{ text:email.from_text || '' }, to:{ text:email.to_text || '' },
+            cc:{ text:email.cc_text || '' }, text:archivedText, html:email.body_html || null,
+            date:new Date(email.received_at || Date.now()), messageId:email.message_id
+          };
+          const result = await saveParsedMessage(supabase, account, parsed, email.imap_uid || 0, adjustCredits, confirmPendingAmazonCheckout);
+          replay.processed++;
+          if (result?.saved) {
+            replay.saved++;
+            matchedMessages++;
+            repairedOrderIds.add(String(target.id));
+          }
+        } catch (error) {
+          replay.errors.push(clean(error.message || error).slice(0,500));
+          console.warn(`[WALMART ARCHIVE REPLAY] ${target.order_number}: ${error.message || error}`);
+        }
+        archiveReplayByOrder.set(String(target.id), replay);
+      }
+    } catch (error) {
+      walmartArchiveDiscovery.error = clean(error.message || error).slice(0,500);
+      console.warn('[WALMART TARGETED ARCHIVE DISCOVERY]', error.message || error);
+    }
+  }
+
   const accounts = await loadScanAccounts(supabase, userId);
   const accountMap = new Map(accounts.map(account => [`${account.user_id}:${lower(account.email)}`, account]));
   const profileAccountMap = new Map();
@@ -3510,153 +3669,186 @@ async function repairHistoricalOrderEmails(supabase, userId = null, adjustCredit
     byMailbox.get(key).orders.push(order);
   }
 
-  let checkedOrders = 0, matchedMessages = 0, repairedOrders = 0, mailboxFailures = 0;
   const details = [];
   // Report orders that could not even be mapped to a connected OAuth2/IMAP mailbox. This makes
   // a bad profile/mailbox association visible instead of looking like a parser failure.
   for (const order of candidates) {
     const account = resolveRepairAccount(order);
-    if (!account) details.push({
-      tracked_order_id: order.id, order_number: clean(order.order_number), mailbox: lower(order.source_email),
-      store: lower(order.store), profile_id: order.profile_id || null, result: 'mailbox_not_connected', messages_found: 0, messages_processed: 0
-    });
+    if (!account) {
+      checkedOrders++;
+      const replay = archiveReplayByOrder.get(String(order.id));
+      details.push({
+        tracked_order_id: order.id, order_number: clean(order.order_number), mailbox: lower(order.source_email),
+        store: lower(order.store), profile_id: order.profile_id || null,
+        result: replay?.saved ? 'archive_mime_processed' : 'mailbox_not_connected',
+        messages_found: replay?.found || 0, messages_processed: replay?.processed || 0,
+        saved_messages: replay?.saved || 0, archive_errors:replay?.errors || []
+      });
+    }
   }
   for (const { account, orders } of byMailbox.values()) {
-    const client = createGuardedImapFlow({
-      host:account.provider.host, port:account.provider.port, secure:account.provider.secure,
-      auth:await imapAuthForAccount(supabase,account), logger:false,
-      connectionTimeout:30000, greetingTimeout:30000, socketTimeout:120000
-    });
+    let client = null;
     try {
+      client = createGuardedImapFlow({
+        host:account.provider.host, port:account.provider.port, secure:account.provider.secure,
+        auth:await imapAuthForAccount(supabase,account), logger:false,
+        connectionTimeout:30000, greetingTimeout:30000, socketTimeout:120000
+      });
       console.log(`[ORDER REPAIR] START ${account.email} for ${orders.length} historical order(s)`);
       await client.connect();
       let boxes=[]; try { boxes=await client.list(); } catch (_) {}
-      let mailboxName='INBOX';
-      if (account.provider.name === 'gmail') mailboxName=boxes.find(b=>b.specialUse==='\\All')?.path || 'INBOX';
-      const lock=await client.getMailboxLock(mailboxName);
-      try {
-        const processedUids = new Set();
-        for (const order of orders) {
-          checkedOrders++;
-          const orderNumber = clean(order.order_number);
-          const detail = {
-            tracked_order_id: order.id, order_number: orderNumber, mailbox: lower(account.email),
-            store: lower(order.store), auth_method: account.auth_method || (account.imported_account_id ? 'imported' : 'app_password'),
-            mailbox_source: account.imported_account_id ? 'aycd_imported_oauth' : 'profile_builder_imap', profile_id: account.profile_id || order.profile_id || null,
-            result: 'searching', messages_found: 0, messages_processed: 0, saved_messages: 0
-          };
-          details.push(detail);
-          const uidSet = new Set();
-          const searchErrors = [];
-          let exactSearchSucceeded = false;
-          // Search both the complete message and the subject. Historical Discord Walmart IDs omit
-          // Walmart's display dash, so query both 200014970438121 and 2000149-70438121 forms.
-          const searchValues = orderNumberSearchVariants(order.store, orderNumber);
-          const searchCriteria = [];
-          for (const value of searchValues) searchCriteria.push({ text:value }, { subject:value });
-          for (const criteria of searchCriteria) {
-            try {
-              const hits = await client.search(criteria, { uid:true });
-              exactSearchSucceeded = true;
-              for (const uid of hits || []) if (Number(uid)) uidSet.add(Number(uid));
-            } catch (searchError) {
-              searchErrors.push(clean(searchError.message || searchError).slice(0,500));
-            }
-          }
-          detail.search_method = uidSet.size ? 'imap_order_number' : 'imap_order_number_no_match';
+      const mailboxNames = historicalRepairMailboxNames(account, boxes);
+      const processedMessageKeys = new Set();
+      for (const order of orders) {
+        checkedOrders++;
+        const orderNumber = clean(order.order_number);
+        const replay = archiveReplayByOrder.get(String(order.id));
+        const detail = {
+          tracked_order_id: order.id, order_number: orderNumber, mailbox: lower(account.email),
+          store: lower(order.store), auth_method: account.auth_method || (account.imported_account_id ? 'imported' : 'app_password'),
+          mailbox_source: account.imported_account_id ? 'aycd_imported_oauth' : 'profile_builder_imap', profile_id: account.profile_id || order.profile_id || null,
+          result: 'searching', messages_found: replay?.found || 0, messages_processed: replay?.processed || 0,
+          saved_messages: replay?.saved || 0, archive_messages_found:replay?.found || 0,
+          archive_messages_saved:replay?.saved || 0, folders_available:mailboxNames.length,
+          folders_searched:[], folder_search_methods:[], folder_errors:[], fallback_candidates:0,
+          fallback_candidates_scanned:0
+        };
+        details.push(detail);
+        let liveMessagesFound = 0;
+        let liveMessagesSaved = 0;
+        let folderSucceeded = false;
 
-          // Outlook/Hotmail web search can find an older message even when the IMAP server returns
-          // zero hits for both TEXT and SUBJECT. When that happens, inspect a tightly bounded date
-          // window around the tracked order and match the full order number in the raw MIME locally.
-          // This does not scan the whole mailbox and it never accepts a partial "ending in 0776"
-          // value as evidence for a different order.
-          let fallbackSearchError = '';
-          if (!uidSet.size) {
-            const orderAt = new Date(order.order_date || '');
-            if (Number.isFinite(orderAt.getTime())) {
-              const since = new Date(orderAt.getTime() - 24 * 60 * 60 * 1000);
-              const before = new Date(orderAt.getTime() + 2 * 24 * 60 * 60 * 1000);
-              detail.fallback_since = since.toISOString();
-              detail.fallback_before = before.toISOString();
-              detail.fallback_candidates = 0;
-              detail.fallback_candidates_scanned = 0;
+        // Outlook has no Gmail-style All Mail folder. Search Inbox, Archive, Junk, Trash, and
+        // selectable custom folders because historical receipts are commonly moved into folders
+        // such as "2026 purchases" while Outlook web search still finds them account-wide.
+        for (const mailboxName of mailboxNames) {
+          let lock = null;
+          try {
+            lock = await client.getMailboxLock(mailboxName);
+            folderSucceeded = true;
+            detail.folders_searched.push(mailboxName);
+            const uidSet = new Set();
+            const searchErrors = [];
+            let exactSearchSucceeded = false;
+            const searchValues = orderNumberSearchVariants(order.store, orderNumber);
+            const searchCriteria = [];
+            for (const value of searchValues) searchCriteria.push({ text:value }, { subject:value });
+            for (const criteria of searchCriteria) {
               try {
-                const dateHits = await client.search({ since, before }, { uid:true });
-                const dateUids = [...new Set((dateHits || []).map(Number).filter(Number.isFinite).filter(uid => uid > 0))]
-                  .sort((a,b) => a-b)
-                  .slice(-ORDER_REPAIR_FALLBACK_MAX_MESSAGES);
-                detail.fallback_candidates = dateUids.length;
-                for (let offset = 0; offset < dateUids.length; offset += 50) {
-                  const fallbackUidRange = imapUidSet(dateUids.slice(offset, offset + 50));
-                  if (!fallbackUidRange) continue;
-                  for await (const candidate of client.fetch(fallbackUidRange, { uid:true, source:true, envelope:true }, { uid:true })) {
-                    detail.fallback_candidates_scanned++;
-                    if (rawMessageContainsOrderNumber(orderNumber, candidate.envelope, candidate.source, order.store)) {
-                      uidSet.add(Number(candidate.uid));
+                const hits = await client.search(criteria, { uid:true });
+                exactSearchSucceeded = true;
+                for (const uid of hits || []) if (Number(uid)) uidSet.add(Number(uid));
+              } catch (searchError) {
+                searchErrors.push(clean(searchError.message || searchError).slice(0,500));
+              }
+            }
+            let method = uidSet.size ? 'imap_order_number' : 'imap_order_number_no_match';
+            let fallbackSearchError = '';
+            if (!uidSet.size) {
+              const orderAt = new Date(order.order_date || '');
+              if (Number.isFinite(orderAt.getTime())) {
+                const since = new Date(orderAt.getTime() - 24 * 60 * 60 * 1000);
+                const before = new Date(orderAt.getTime() + 2 * 24 * 60 * 60 * 1000);
+                detail.fallback_since = since.toISOString();
+                detail.fallback_before = before.toISOString();
+                try {
+                  const dateHits = await client.search({ since, before }, { uid:true });
+                  const dateUids = [...new Set((dateHits || []).map(Number).filter(Number.isFinite).filter(uid => uid > 0))]
+                    .sort((a,b) => a-b).slice(-ORDER_REPAIR_FALLBACK_MAX_MESSAGES);
+                  detail.fallback_candidates += dateUids.length;
+                  for (let offset = 0; offset < dateUids.length; offset += 50) {
+                    const fallbackUidRange = imapUidSet(dateUids.slice(offset, offset + 50));
+                    if (!fallbackUidRange) continue;
+                    for await (const candidate of client.fetch(fallbackUidRange, { uid:true, source:true, envelope:true }, { uid:true })) {
+                      detail.fallback_candidates_scanned++;
+                      if (rawMessageContainsOrderNumber(orderNumber, candidate.envelope, candidate.source, order.store)) uidSet.add(Number(candidate.uid));
                     }
                   }
+                  method = uidSet.size ? 'local_date_window' : 'local_date_window_no_match';
+                } catch (fallbackError) {
+                  fallbackSearchError = clean(fallbackError.message || fallbackError).slice(0,500);
                 }
-                detail.search_method = uidSet.size ? 'local_date_window' : 'local_date_window_no_match';
-              } catch (fallbackError) {
-                fallbackSearchError = clean(fallbackError.message || fallbackError).slice(0,500);
-                detail.fallback_error = fallbackSearchError;
               }
-            } else {
-              detail.fallback_skipped = 'invalid_order_date';
             }
-          }
+            detail.folder_search_methods.push({ folder:mailboxName, method, hits:uidSet.size });
+            if (!uidSet.size && !exactSearchSucceeded && fallbackSearchError) {
+              detail.folder_errors.push({ folder:mailboxName, error:[...searchErrors, fallbackSearchError].filter(Boolean).join(' | ').slice(0,500) });
+              continue;
+            }
 
-          if (!uidSet.size && !exactSearchSucceeded && fallbackSearchError) {
-            detail.result = 'imap_search_failed';
-            detail.error = [...searchErrors, fallbackSearchError].filter(Boolean).join(' | ').slice(0,500);
-            console.warn(`[ORDER REPAIR] IMAP searches failed ${account.email} ${orderNumber}: ${detail.error}`);
-            continue;
+            const uids = [...uidSet].sort((a,b)=>a-b).slice(-50);
+            liveMessagesFound += uids.length;
+            const fresh = uids.filter(uid => !processedMessageKeys.has(`${lower(mailboxName)}:${uid}`));
+            for (const uid of fresh) processedMessageKeys.add(`${lower(mailboxName)}:${uid}`);
+            const uidRange = imapUidSet(fresh);
+            if (!uidRange) continue;
+            for await (const msg of client.fetch(uidRange,{uid:true,source:true,envelope:true},{uid:true})) {
+              detail.messages_processed++;
+              try {
+                const parsed = await simpleParser(msg.source);
+                const result = await saveParsedMessage(supabase,account,parsed,msg.uid,adjustCredits,confirmPendingAmazonCheckout);
+                if (result?.saved) { matchedMessages++; detail.saved_messages++; liveMessagesSaved++; }
+              } catch (parseError) {
+                detail.error = clean(parseError.message || parseError).slice(0,500);
+                console.warn(`[ORDER REPAIR] Parse/link failed ${account.email} folder=${mailboxName} uid=${msg.uid}: ${parseError.message || parseError}`);
+              }
+            }
+          } catch (folderError) {
+            detail.folder_errors.push({ folder:mailboxName, error:clean(folderError.message || folderError).slice(0,500) });
+            console.warn(`[ORDER REPAIR] Folder search failed ${account.email} ${mailboxName}: ${folderError.message || folderError}`);
+          } finally {
+            if (lock) lock.release();
           }
-          let uids=[...uidSet].sort((a,b)=>a-b).slice(-50);
-          detail.messages_found = uids.length;
-          const fresh = uids.filter(uid => !processedUids.has(uid));
-          for (const uid of fresh) processedUids.add(uid);
-          const uidRange=imapUidSet(fresh);
-          if (!uidRange) { detail.result = uids.length ? 'already_processed_this_pass' : 'no_live_message_found'; continue; }
-          for await (const msg of client.fetch(uidRange,{uid:true,source:true,envelope:true},{uid:true})) {
-            detail.messages_processed++;
-            try {
-              const parsed=await simpleParser(msg.source);
-              const result=await saveParsedMessage(supabase,account,parsed,msg.uid,adjustCredits,confirmPendingAmazonCheckout);
-              if (result?.saved) { matchedMessages++; detail.saved_messages++; }
-            } catch (parseError) {
-              detail.error = clean(parseError.message || parseError).slice(0,500);
-              console.warn(`[ORDER REPAIR] Parse/link failed ${account.email} uid=${msg.uid}: ${parseError.message || parseError}`);
-            }
-          }
-          const after = await linkedTrackedOrderIds(supabase,[order.id]);
-          if (after.has(String(order.id))) repairedOrders++;
-          try {
-            const ir = await supabase.from('tracked_order_items').select('product_name,role,status').eq('order_id', order.id).order('created_at');
-            if (!ir.error) {
-              detail.items = ir.data || [];
-              const main = (ir.data || []).filter(i => i.role === 'main');
-              detail.main_item_status = main.map(i => i.status).filter(Boolean).join(', ') || null;
-              const filler = (ir.data || []).filter(i => i.role === 'filler');
-              detail.filler_item_status = filler.map(i => i.status).filter(Boolean).join(', ') || null;
-            }
-            const tr = await supabase.from('tracked_orders').select('status,reconciliation_status,reconciliation_note').eq('id',order.id).maybeSingle();
-            if (!tr.error && tr.data) {
-              detail.final_order_status = tr.data.status;
-              detail.reconciliation_status = tr.data.reconciliation_status;
-              detail.reconciliation_note = tr.data.reconciliation_note || null;
-            }
-          } catch (_) {}
-          detail.result = detail.saved_messages ? 'live_mime_processed' : (detail.error ? 'message_processing_failed' : 'live_message_found_not_linked');
         }
-      } finally { lock.release(); }
+
+        detail.live_messages_found = liveMessagesFound;
+        detail.live_messages_saved = liveMessagesSaved;
+        detail.messages_found += liveMessagesFound;
+        const after = await linkedTrackedOrderIds(supabase,[order.id]);
+        if (after.has(String(order.id))) repairedOrderIds.add(String(order.id));
+        try {
+          const ir = await supabase.from('tracked_order_items').select('product_name,role,status').eq('order_id', order.id).order('created_at');
+          if (!ir.error) {
+            detail.items = ir.data || [];
+            const main = (ir.data || []).filter(i => i.role === 'main');
+            detail.main_item_status = main.map(i => i.status).filter(Boolean).join(', ') || null;
+            const filler = (ir.data || []).filter(i => i.role === 'filler');
+            detail.filler_item_status = filler.map(i => i.status).filter(Boolean).join(', ') || null;
+          }
+          const tr = await supabase.from('tracked_orders').select('status,reconciliation_status,reconciliation_note').eq('id',order.id).maybeSingle();
+          if (!tr.error && tr.data) {
+            detail.final_order_status = tr.data.status;
+            detail.reconciliation_status = tr.data.reconciliation_status;
+            detail.reconciliation_note = tr.data.reconciliation_note || null;
+          }
+        } catch (_) {}
+        if (liveMessagesSaved) detail.result = 'live_mime_processed';
+        else if (replay?.saved) detail.result = 'archive_mime_processed';
+        else if (detail.error) detail.result = 'message_processing_failed';
+        else if (liveMessagesFound) detail.result = 'live_message_found_not_linked';
+        else if (!folderSucceeded || (detail.folder_errors.length && detail.folders_searched.length === detail.folder_errors.length)) detail.result = 'imap_search_failed';
+        else detail.result = 'no_live_message_found';
+      }
       console.log(`[ORDER REPAIR] COMPLETE ${account.email}`);
     } catch (mailboxError) {
       mailboxFailures++;
       console.warn(`[ORDER REPAIR] FAILED ${account.email}: ${describeImapError(mailboxError)}`);
-    } finally { try { await client.logout(); } catch (_) {} }
+      for (const order of orders) {
+        if (details.some(detail => String(detail.tracked_order_id) === String(order.id))) continue;
+        checkedOrders++;
+        const replay = archiveReplayByOrder.get(String(order.id));
+        details.push({
+          tracked_order_id:order.id, order_number:clean(order.order_number), mailbox:lower(account.email),
+          store:lower(order.store), profile_id:account.profile_id || order.profile_id || null,
+          result:replay?.saved ? 'archive_mime_processed' : 'mailbox_connection_failed',
+          messages_found:replay?.found || 0, messages_processed:replay?.processed || 0,
+          saved_messages:replay?.saved || 0, error:describeImapError(mailboxError)
+        });
+      }
+    } finally { if (client) { try { await client.logout(); } catch (_) {} } }
   }
-  return { checked_orders:checkedOrders, matched_messages:matchedMessages, repaired_orders:repairedOrders, mailbox_failures:mailboxFailures, candidates:candidates.length, identity_corrected:identityRepair.corrected, wrong_links_removed:identityRepair.unlinked, details };
+  repairedOrders = repairedOrderIds.size;
+  return { checked_orders:checkedOrders, matched_messages:matchedMessages, repaired_orders:repairedOrders, mailbox_failures:mailboxFailures, candidates:candidates.length, identity_corrected:identityRepair.corrected, wrong_links_removed:identityRepair.unlinked, walmart_archive_metadata_scanned:walmartArchiveDiscovery.metadata_scanned || 0, walmart_archive_candidates:walmartArchiveDiscovery.candidates_found || 0, walmart_archive_error:walmartArchiveDiscovery.error || null, details };
 }
 
 async function runHistoricalOrderEmailRepair(supabase, userId = null, adjustCredits = null, confirmPendingAmazonCheckout = null, options = {}) {
@@ -5013,7 +5205,7 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
       }
       // Now queue the ordinary catch-up scan for anything that was not part of the targeted set.
       try { startUserScanJob(supabase,req.user_id,adjustUserCredits,confirmPendingAmazonCheckout); } catch (_) {}
-      const result = {success:true,checked,matched,ignored,failed,walmart_problem_orders:walmartProblemOrders.length,walmart_archive_messages:walmartArchiveRows.length,walmart_linked_replay_messages:walmartLinkedReplayRows.length,target_delivered_alias_replay_messages:targetDeliveredReplayRows.length,pokemon_archive_messages:pokemonArchiveRows.length,pokemon_live_discovery:pokemonLiveDiscovery,pokemon_stats:pokemonStats,pokemon_debug:pokemonDebug,supreme_rebuild:supremeRebuild,supreme_live:supremeLive,supreme_debug:[...(supremeLive?.debug||[]).slice(-120), ...serviceOrdersForSupreme.slice(0,40).map((o,i)=>`Service order ${i+1}: id=${o.id} site=${o.site||'-'} metadata.site=${o.metadata?.site||'-'} payload site/store=${extractNamedPayloadValue(o.raw_payload||{},['site','store'])||'-'} normalized=${normalizeStoreKey(o.site || o.metadata?.site || extractNamedPayloadValue(o.raw_payload||{},['site','store']))||'-'}`)],supreme_discovery:{metadata_scanned:supremeDiscovery?.metadata_scanned||0,candidates_found:supremeDiscovery?.candidates_found||0,windows:supremeDiscovery?.windows||0},damaged_target_orders:damagedLinkedOrderIds.length,unresolved_target_orders:unresolvedTargetOrders.length,target_priority_orders:targetPriorityOrderIds.length,retailer_priority_orders:retailerPriorityOrderIds.length,repair,message:`Replayed ${walmartLinkedReplayRows.length} linked Walmart message(s) and prioritized ${walmartProblemOrders.length} Walmart order(s) for dash-aware live mailbox repair; replayed ${targetDeliveredReplayRows.length} linked Target delivery message(s); searched ${pokemonLiveDiscovery.mailboxes_checked||0} live website mailbox(es) for Pokemon Center events and matched ${pokemonLiveDiscovery.messages_matched||0}; replayed ${pokemonArchiveRows.length} Pokemon Center archive message(s); rebuilt ${supremeRebuild?.assigned||0} Supreme confirmation assignment(s); then included ${targetPriorityOrderIds.length} Target order(s) in the live repair queue.`};
+      const result = {success:true,checked,matched,ignored,failed,walmart_problem_orders:walmartProblemOrders.length,walmart_archive_messages:walmartArchiveRows.length,walmart_linked_replay_messages:walmartLinkedReplayRows.length,walmart_targeted_archive_messages:repair?.walmart_archive_candidates||0,target_delivered_alias_replay_messages:targetDeliveredReplayRows.length,pokemon_archive_messages:pokemonArchiveRows.length,pokemon_live_discovery:pokemonLiveDiscovery,pokemon_stats:pokemonStats,pokemon_debug:pokemonDebug,supreme_rebuild:supremeRebuild,supreme_live:supremeLive,supreme_debug:[...(supremeLive?.debug||[]).slice(-120), ...serviceOrdersForSupreme.slice(0,40).map((o,i)=>`Service order ${i+1}: id=${o.id} site=${o.site||'-'} metadata.site=${o.metadata?.site||'-'} payload site/store=${extractNamedPayloadValue(o.raw_payload||{},['site','store'])||'-'} normalized=${normalizeStoreKey(o.site || o.metadata?.site || extractNamedPayloadValue(o.raw_payload||{},['site','store']))||'-'}`)],supreme_discovery:{metadata_scanned:supremeDiscovery?.metadata_scanned||0,candidates_found:supremeDiscovery?.candidates_found||0,windows:supremeDiscovery?.windows||0},damaged_target_orders:damagedLinkedOrderIds.length,unresolved_target_orders:unresolvedTargetOrders.length,target_priority_orders:targetPriorityOrderIds.length,retailer_priority_orders:retailerPriorityOrderIds.length,repair,message:`Replayed ${walmartLinkedReplayRows.length} already-linked Walmart message(s), recovered ${repair?.walmart_archive_candidates||0} exact previously-unlinked Walmart archive message(s), and searched all selectable folders for ${walmartProblemOrders.length} Walmart order(s); replayed ${targetDeliveredReplayRows.length} linked Target delivery message(s); searched ${pokemonLiveDiscovery.mailboxes_checked||0} live website mailbox(es) for Pokemon Center events and matched ${pokemonLiveDiscovery.messages_matched||0}; replayed ${pokemonArchiveRows.length} Pokemon Center archive message(s); rebuilt ${supremeRebuild?.assigned||0} Supreme confirmation assignment(s); then included ${targetPriorityOrderIds.length} Target order(s) in the live repair queue.`};
       Object.assign(reconcileJob, { status:'complete', finished_at:new Date().toISOString(), result, error:null });
     } catch(error){
       console.error('[RECONCILE RETAILER EMAILS]', error.message || error);

@@ -7,7 +7,7 @@ function loadTestHooks() {
   const filename = path.join(__dirname, '..', 'order-tracker.js');
   const source = fs.readFileSync(filename, 'utf8').replace(
     /module\.exports = \{ registerOrderTracker, scanAll, notifyCheckoutForOrderTracker \};\s*$/,
-    'module.exports = { __test: { detectStatus, extractOrderNumbers, extractAmounts, walmartOrderNumberVariants, orderNumberSearchVariants, rawMessageContainsOrderNumber, walmartOrdersNeedingRepair } };'
+    'module.exports = { __test: { detectStatus, extractOrderNumbers, extractAmounts, walmartOrderNumberVariants, orderNumberSearchVariants, rawMessageContainsOrderNumber, walmartArchiveRowMatchesTrackedOrder, fetchWalmartArchiveCandidatesForOrders, historicalRepairMailboxNames, walmartOrdersNeedingRepair } };'
   );
   const module = { exports:{} };
   const sandbox = {
@@ -40,15 +40,19 @@ class Query {
     this.filters = [];
     this.rangeStart = 0;
     this.rangeEnd = null;
+    this.limitCount = null;
   }
   select() { return this; }
   eq(column, value) { this.filters.push(row => String(row[column]) === String(value)); return this; }
+  in(column, values) { const wanted = new Set((values || []).map(String)); this.filters.push(row => wanted.has(String(row[column]))); return this; }
+  gte(column, value) { this.filters.push(row => String(row[column] || '') >= String(value)); return this; }
   not(column, operator) { if (operator === 'is') this.filters.push(row => row[column] != null); return this; }
   order() { return this; }
+  limit(value) { this.limitCount = Number(value); return this; }
   range(start, end) { this.rangeStart = start; this.rangeEnd = end; return this; }
   execute() {
     const rows = (this.database[this.table] || []).filter(row => this.filters.every(fn => fn(row)));
-    const end = this.rangeEnd == null ? rows.length : this.rangeEnd + 1;
+    const end = this.rangeEnd == null ? (this.limitCount == null ? rows.length : this.rangeStart + this.limitCount) : this.rangeEnd + 1;
     return { data:rows.slice(this.rangeStart, end), error:null };
   }
   then(resolve, reject) { return Promise.resolve(this.execute()).then(resolve, reject); }
@@ -61,7 +65,8 @@ function fakeSupabase(database) {
 (async () => {
   const {
     detectStatus, extractOrderNumbers, extractAmounts, walmartOrderNumberVariants,
-    orderNumberSearchVariants, rawMessageContainsOrderNumber, walmartOrdersNeedingRepair
+    orderNumberSearchVariants, rawMessageContainsOrderNumber, walmartArchiveRowMatchesTrackedOrder,
+    fetchWalmartArchiveCandidatesForOrders, historicalRepairMailboxNames, walmartOrdersNeedingRepair
   } = loadTestHooks();
 
   assert.strictEqual(detectStatus('Thanks for your delivery order, Ricky Hill', ''), 'confirmed');
@@ -113,6 +118,34 @@ function fakeSupabase(database) {
     'walmart'
   ), false);
 
+  assert.strictEqual(walmartArchiveRowMatchesTrackedOrder({
+    mailbox_email:'rickyhill@hotmail.com', subject:'Thanks for your delivery order, Ricky',
+    body_text:'Order number: 2000145-47816339', order_number:null
+  }, {
+    store:'walmart', source_email:'rickyhill@hotmail.com', order_number:'200014547816339'
+  }), true);
+  assert.strictEqual(walmartArchiveRowMatchesTrackedOrder({
+    mailbox_email:'someoneelse@hotmail.com', body_text:'Order number: 2000145-47816339'
+  }, {
+    store:'walmart', source_email:'rickyhill@hotmail.com', order_number:'200014547816339'
+  }), false);
+
+  const outlookFolders = historicalRepairMailboxNames(
+    { provider:{ name:'outlook' } },
+    [
+      { path:'INBOX', flags:new Set() },
+      { path:'Archive', specialUse:'\\Archive', flags:new Set() },
+      { path:'2026 purchases', flags:new Set() },
+      { path:'Drafts', specialUse:'\\Drafts', flags:new Set() },
+      { path:'Parent', flags:new Set(['\\Noselect']) }
+    ]
+  );
+  assert.deepStrictEqual(Array.from(outlookFolders), ['INBOX','Archive','2026 purchases']);
+  assert.deepStrictEqual(Array.from(historicalRepairMailboxNames(
+    { provider:{ name:'gmail' } },
+    [{ path:'[Gmail]/All Mail', specialUse:'\\All', flags:new Set() }, { path:'INBOX', flags:new Set() }]
+  )), ['[Gmail]/All Mail']);
+
   // Every Walmart row supplied in the historical-missing report is the same 15-digit shape and
   // must produce the exact 7+8 Walmart display form used inside the live retailer emails.
   const reportedMissing = [
@@ -144,6 +177,28 @@ function fakeSupabase(database) {
   };
   const problemRows = await walmartOrdersNeedingRepair(fakeSupabase(database), 'admin', 250);
   assert.deepStrictEqual(Array.from(problemRows, row => row.id), ['missing', 'linked-zero']);
+
+  database.email_messages = [
+    {
+      id:'archived-before-import', user_id:'admin', mailbox_email:'rickyhill@hotmail.com',
+      store:'walmart', email_type:'confirmed', order_number:null,
+      subject:'Thanks for your delivery order, Ricky', from_text:'Walmart <help@walmart.com>',
+      received_at:'2026-03-27T00:01:00.000Z', body_text:'Order number: 2000145-47816339',
+      body_html:'', snippet:'', message_id:'walmart-1'
+    },
+    {
+      id:'wrong-order', user_id:'admin', mailbox_email:'rickyhill@hotmail.com',
+      store:'walmart', email_type:'confirmed', order_number:null,
+      subject:'Thanks for your delivery order, Ricky', from_text:'Walmart <help@walmart.com>',
+      received_at:'2026-03-27T00:02:00.000Z', body_text:'Order number: 2000145-47816340',
+      body_html:'', snippet:'', message_id:'walmart-2'
+    }
+  ];
+  const archiveDiscovery = await fetchWalmartArchiveCandidatesForOrders(fakeSupabase(database), 'admin', [{
+    id:'missing', user_id:'admin', store:'walmart', order_number:'200014547816339',
+    source_email:'rickyhill@hotmail.com', order_date:'2026-03-26T23:40:54.000Z'
+  }], '*', 50);
+  assert.deepStrictEqual(Array.from(archiveDiscovery.rows, row => row.id), ['archived-before-import']);
 
   console.log('Walmart historical email repair tests passed');
 })().catch(error => {

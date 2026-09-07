@@ -60,8 +60,10 @@ async function findOrderEmails(id,button){
         const detail=(result.details||[]).find(item=>String(item.tracked_order_id)===String(id))||(result.details||[])[0]||{};
         const messages={
           mailbox_not_connected:'The profile mailbox is no longer connected. Reconnect its IMAP/app password, then try again.',
+          mailbox_connection_failed:'The mailbox is connected in the profile, but authentication or the IMAP connection failed. Re-test that mailbox connection and try again.',
           no_live_message_found:'The connected mailbox was searched by order number, but no matching live message was returned.',
           imap_search_failed:'The mailbox connected, but its IMAP search failed. Check the diagnostic log and mailbox credentials.',
+          archive_mime_processed:'A matching archived email was reprocessed, but it was not recognized as a confirmation. Export that email as EML for parser review.',
           live_message_found_not_linked:'A matching message was fetched, but it did not parse/link as a retailer email. Download the EML for parser review.',
           message_processing_failed:'A matching message was found, but parsing or saving it failed. Check the server log for this order number.'
         };
