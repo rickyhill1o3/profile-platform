@@ -50,13 +50,43 @@ function notifyCheckoutForOrderTracker(userId) {
 
 function clean(v) { return String(v || '').trim(); }
 function lower(v) { return clean(v).toLowerCase(); }
-function rawMessageContainsOrderNumber(orderNumber, envelope = {}, source = null) {
-  const needle = lower(orderNumber);
-  if (!needle) return false;
+function walmartOrderNumberVariants(value) {
+  const raw = clean(value).replace(/^#+/, '').replace(/[.,)\]]+$/, '');
+  const compact = normalizeOrderRef(raw);
+  const variants = new Set([raw]);
+  if (/^\d{15}$/.test(compact)) {
+    variants.add(compact);
+    variants.add(`${compact.slice(0, 7)}-${compact.slice(7)}`);
+  }
+  return [...variants].filter(Boolean);
+}
+
+function orderNumberSearchVariants(store, value) {
+  const raw = clean(value);
+  if (!raw) return [];
+  return normalizeStoreKey(store) === 'walmart' ? walmartOrderNumberVariants(raw) : [raw];
+}
+
+function rawMessageContainsOrderNumber(orderNumber, envelope = {}, source = null, store = '') {
+  const variants = orderNumberSearchVariants(store, orderNumber).map(lower).filter(Boolean);
+  if (!variants.length) return false;
   const subject = lower(envelope?.subject || '');
-  if (subject.includes(needle)) return true;
   const raw = Buffer.isBuffer(source) ? source.toString('utf8') : String(source || '');
-  return raw.toLowerCase().includes(needle);
+  const haystacks = [subject, raw.toLowerCase()];
+  if (variants.some(needle => haystacks.some(haystack => haystack.includes(needle)))) return true;
+
+  // Historical Discord embeds store Walmart references without punctuation, while Walmart mail
+  // renders the same 15 digits as 7 digits + a dash + 8 digits. Compare only complete Walmart
+  // reference-shaped tokens so unrelated phone, payment, and tracking digits cannot match.
+  if (normalizeStoreKey(store) === 'walmart') {
+    const expected = normalizeOrderRef(orderNumber);
+    for (const haystack of haystacks) {
+      for (const match of haystack.matchAll(/\b(\d{7}(?:-|=2d)?\d{8})\b/gi)) {
+        if (normalizeOrderRef(String(match[1]).replace(/=2d/gi, '-')) === expected) return true;
+      }
+    }
+  }
+  return false;
 }
 function normalizeMailboxPassword(v, providerName = '') {
   const value = clean(v);
@@ -305,6 +335,55 @@ async function fetchTargetDeliveredArchiveForStuckOrders(supabase, userId, colum
   return [...merged.values()].filter(row => {
     if (lower(row.store) !== 'target') return false;
     return lower(row.email_type) === 'delivered' || detectStatus(row.subject || '', archivedRetailerReadableText(row)) === 'delivered';
+  }).slice(0, limit);
+}
+
+async function fetchLinkedRetailerArchiveForOrders(supabase, userId, orderIds = [], store, columns, limit = 600) {
+  // Rehydrate the exact messages already attached to damaged historical orders, even when those
+  // messages were archived as `unknown` by an older classifier and have fallen outside the newest-N
+  // archive window. Replaying them upgrades type, total, tracking, and final status idempotently.
+  const ids = [...new Set((orderIds || []).filter(Boolean).map(String))].slice(0, 1000);
+  if (!ids.length) return [];
+  const emailIds = new Set();
+  const messageIds = new Set();
+  for (let i = 0; i < ids.length; i += 100) {
+    const chunk = ids.slice(i, i + 100);
+    try {
+      const links = await supabase.from('tracked_order_emails').select('email_id').in('order_id', chunk);
+      if (!links.error) for (const row of links.data || []) if (row.email_id) emailIds.add(String(row.email_id));
+    } catch (_) {}
+    try {
+      const events = await supabase.from('tracked_order_events').select('message_id')
+        .eq('user_id', userId).in('order_id', chunk);
+      if (!events.error) for (const row of events.data || []) if (row.message_id) messageIds.add(String(row.message_id));
+    } catch (_) {}
+    try {
+      const legacy = await supabase.from('email_messages').select('id,message_id')
+        .eq('user_id', userId).in('linked_order_id', chunk);
+      if (!legacy.error) for (const row of legacy.data || []) {
+        if (row.id) emailIds.add(String(row.id));
+        if (row.message_id) messageIds.add(String(row.message_id));
+      }
+    } catch (_) {}
+  }
+
+  const merged = new Map();
+  const byId = await fetchEmailArchiveRowsByIds(supabase, userId, [...emailIds].slice(0, limit), columns, 50);
+  for (const row of byId) merged.set(String(row.id || row.message_id), row);
+  const remaining = Math.max(0, limit - merged.size);
+  const messages = remaining > 0 ? [...messageIds].slice(0, remaining) : [];
+  for (let i = 0; i < messages.length; i += 50) {
+    const result = await supabase.from('email_messages').select(columns)
+      .eq('user_id', userId).in('message_id', messages.slice(i, i + 50));
+    if (result.error) throw result.error;
+    for (const row of result.data || []) merged.set(String(row.id || row.message_id), row);
+  }
+  const wantedStore = normalizeStoreKey(store);
+  return [...merged.values()].filter(row => {
+    const archivedText = archivedRetailerReadableText(row);
+    const storedStore = normalizeStoreKey(row.store || '');
+    const detectedStore = normalizeStoreKey(detectStore(row.from_text || '', row.subject || '', archivedText));
+    return storedStore === wantedStore || detectedStore === wantedStore;
   }).slice(0, limit);
 }
 
@@ -881,10 +960,10 @@ function detectStatus(subject, text) {
   // so classify it explicitly before falling through to the generic rules.
   if (/thank you for shopping at pokemoncenter\.com/i.test(subj)) return 'confirmed';
 
-  if (/order confirmation|order confirmed|ordered:|thanks for your order|thanks for shopping with us|order received|order placed|order summary|^online shop order$/.test(subj)) return 'confirmed';
+  if (/order confirmation|order confirmed|ordered:|thanks for your (?:delivery )?order|thanks for shopping with us|order received|order placed|order summary|^online shop order$/.test(subj)) return 'confirmed';
 
-  if (/\bdelivered\b|delivery complete|items? (?:has|have) arrived/.test(subj) ||
-      /(?:your|the|this) (?:package|order|shipment) (?:has been|was|is) delivered|delivery (?:is )?complete|items? (?:has|have) arrived from order/.test(body)) return 'delivered';
+  if (/\bdelivered\b|delivery complete|items? (?:has|have) arrived|^arrived:/.test(subj) ||
+      /(?:your|the|this) (?:package|order|shipment) (?:has been|was|is) delivered|your package arrived|delivery (?:is )?complete|items? (?:has|have) arrived from order/.test(body)) return 'delivered';
 
   if (/\bshipped\b|has shipped|on (?:the|its) way|package will arrive soon|package .*arrive soon|about to ship|getting ready to ship|arrives today|out for delivery/.test(subj) ||
       /(?:your|the|this) (?:package|order|shipment) (?:has|have) shipped|we(?:'|’)ve shipped|was shipped|tracking number\s*[:#]|about to ship|getting ready to ship|shipping label has been created|arrives today|out for delivery/.test(body)) return 'shipped';
@@ -1078,11 +1157,18 @@ function extractAmounts(text) {
     }
     return null;
   };
+  const directTotal = find(['order total','grand total','total charged','total']);
+  // Walmart's confirmation template puts an explanatory sentence between the label and amount:
+  // "Order total / Includes all fees, taxes and discounts / $320.25". Keep the fallback bounded
+  // to the nearby block so an item price farther down the receipt is never mistaken for the total.
+  const walmartBlock = directTotal == null
+    ? String(text || '').match(/\border total\b[\s\S]{0,220}?\$\s*([0-9,]+(?:\.[0-9]{2})?)/i)
+    : null;
   return {
     subtotal: find(['subtotal','items subtotal']),
     tax: find(['estimated tax','sales tax','tax']),
     shipping: find(['shipping(?: & handling)?','delivery fee']),
-    total: find(['order total','grand total','total charged','total'])
+    total: directTotal ?? (walmartBlock ? money(walmartBlock[1]) : null)
   };
 }
 
@@ -3254,6 +3340,26 @@ async function targetOrdersMissingConfirmation(supabase, userId = null, limit = 
   }).slice(0, max);
 }
 
+async function walmartOrdersNeedingRepair(supabase, userId = null, limit = 250) {
+  const rows = await fetchAllSupabaseRows(() => {
+    let query = supabase.from('tracked_orders')
+      .select('id,user_id,source_order_id,profile_id,source_email,store,order_number,order_date,status,total,reconciliation_status')
+      .eq('store','walmart')
+      .not('order_number','is',null)
+      .order('order_date',{ascending:false});
+    if (userId) query = query.eq('user_id', userId);
+    return query;
+  }, 500);
+  const max = Math.max(1, Math.min(500, Number(limit || 250)));
+  return rows.filter(order => {
+    const status = lower(order.status);
+    // Completed cancellations/refunds are not tax purchases and should not displace the reported
+    // waiting/fulfilled orders from the bounded live-repair queue merely because their total is $0.
+    if (['canceled','refunded'].includes(status)) return false;
+    return status === 'waiting_confirmation' || Number(order.total || 0) <= 0;
+  }).slice(0, max);
+}
+
 async function reconcileHistoricalOrderProfileIdentity(supabase, rows = []) {
   const sourceIds = [...new Set((rows || []).map(r => r.source_order_id).filter(Boolean))];
   if (!sourceIds.length) return { corrected: 0, unlinked: 0 };
@@ -3443,9 +3549,12 @@ async function repairHistoricalOrderEmails(supabase, userId = null, adjustCredit
           const uidSet = new Set();
           const searchErrors = [];
           let exactSearchSucceeded = false;
-          // Search both the complete message and the subject. Target puts the full order number in
-          // lifecycle subjects, while some Outlook servers do not return the same hits for TEXT.
-          for (const criteria of [{ text:orderNumber }, { subject:orderNumber }]) {
+          // Search both the complete message and the subject. Historical Discord Walmart IDs omit
+          // Walmart's display dash, so query both 200014970438121 and 2000149-70438121 forms.
+          const searchValues = orderNumberSearchVariants(order.store, orderNumber);
+          const searchCriteria = [];
+          for (const value of searchValues) searchCriteria.push({ text:value }, { subject:value });
+          for (const criteria of searchCriteria) {
             try {
               const hits = await client.search(criteria, { uid:true });
               exactSearchSucceeded = true;
@@ -3482,7 +3591,7 @@ async function repairHistoricalOrderEmails(supabase, userId = null, adjustCredit
                   if (!fallbackUidRange) continue;
                   for await (const candidate of client.fetch(fallbackUidRange, { uid:true, source:true, envelope:true }, { uid:true })) {
                     detail.fallback_candidates_scanned++;
-                    if (rawMessageContainsOrderNumber(orderNumber, candidate.envelope, candidate.source)) {
+                    if (rawMessageContainsOrderNumber(orderNumber, candidate.envelope, candidate.source, order.store)) {
                       uidSet.add(Number(candidate.uid));
                     }
                   }
@@ -4617,6 +4726,25 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
       // Supreme mailbox scan. The normal background scanner continues catching up after this request.
       const targetManualLimit = Math.min(maxMessages, 120);
       const archiveColumns='id,user_id,mailbox_email,source_type,subject,from_text,to_text,cc_text,body_text,body_html,snippet,received_at,message_id,imap_uid,store,linked_order_id,email_type,order_number';
+      // Historical Walmart rows imported from Discord use a compact 15-digit reference. Load the
+      // damaged cards first so their already-linked archive messages can be reclassified, while the
+      // same IDs are also prioritized for an exact live IMAP lookup below.
+      let walmartProblemOrders = [];
+      try {
+        walmartProblemOrders = await walmartOrdersNeedingRepair(supabase, req.user_id, 250);
+      } catch (e) { console.warn('[WALMART PROBLEM ORDER QUERY]', e.message || e); }
+      let walmartArchiveRows = [];
+      try {
+        walmartArchiveRows = await fetchRecentEmailArchiveByStore(
+          supabase, req.user_id, 'walmart', archiveColumns, Math.min(maxMessages, 240)
+        );
+      } catch (e) { console.warn('[WALMART CLASSIFIED ARCHIVE]', e.message || e); }
+      let walmartLinkedReplayRows = [];
+      try {
+        walmartLinkedReplayRows = await fetchLinkedRetailerArchiveForOrders(
+          supabase, req.user_id, walmartProblemOrders.map(order => order.id), 'walmart', archiveColumns, 600
+        );
+      } catch (e) { console.warn('[WALMART LINKED ARCHIVE REPLAY]', e.message || e); }
       // Target can still use the normal classified archive path.
       const targetArchiveRows = await fetchRecentEmailArchiveByStore(
         supabase, req.user_id, 'target', archiveColumns, targetManualLimit
@@ -4696,7 +4824,7 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
       } catch (e) { console.warn('[SUPREME CLASSIFIED ARCHIVE]', e.message || e); }
 
       const merged = new Map();
-      for (const email of [...targetArchiveRows, ...targetDeliveredReplayRows, ...pokemonArchiveRows, ...supremeArchiveRows, ...(supremeDiscovery.rows || [])]) {
+      for (const email of [...walmartArchiveRows, ...walmartLinkedReplayRows, ...targetArchiveRows, ...targetDeliveredReplayRows, ...pokemonArchiveRows, ...supremeArchiveRows, ...(supremeDiscovery.rows || [])]) {
         merged.set(String(email.id||email.message_id), email);
       }
       let checked=0,matched=0,ignored=0,failed=0;
@@ -4712,7 +4840,10 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
       };
       const retailerEmails=[...merged.values()].filter(email=>{
         const text=archivedRetailerReadableText(email);
-        return ['target','supreme','pokemoncenter'].includes(lower(email.store)||detectStore(email.from_text||'',email.subject||'',text));
+        const storedStore = normalizeStoreKey(email.store || '');
+        const detectedStore = normalizeStoreKey(detectStore(email.from_text||'',email.subject||'',text));
+        return ['walmart','target','supreme','pokemoncenter'].includes(storedStore) ||
+          ['walmart','target','supreme','pokemoncenter'].includes(detectedStore);
       }).sort((a,b)=>new Date(a.received_at||0)-new Date(b.received_at||0));
       let supremeRebuild = null;
       try { supremeRebuild = await rebuildSupremeBatchAssignments(supabase, req.user_id, retailerEmails); }
@@ -4737,7 +4868,9 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
       for(const email of retailerEmails){
         checked++;
         const archivedText = archivedRetailerReadableText(email);
-        const detectedStore = lower(email.store) || detectStore(email.from_text||'', email.subject||'', archivedText);
+        const storedStore = normalizeStoreKey(email.store || '');
+        const inferredStore = normalizeStoreKey(detectStore(email.from_text||'', email.subject||'', archivedText));
+        const detectedStore = ['walmart','target','supreme','pokemoncenter'].includes(storedStore) ? storedStore : inferredStore;
         const isPokemon = detectedStore === 'pokemoncenter' || detectedStore === 'pokemon';
         let pokemonContext = null;
         if (isPokemon) {
@@ -4860,11 +4993,17 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
         ...unresolvedTargetOrders.map(order => String(order.id)),
         ...damagedLinkedOrderIds.map(String)
       ])].slice(0, 100);
+      // Walmart comes first so every one of the 34 explicitly reported historical rows remains
+      // inside the 100-order live-repair ceiling even when the Target backlog is also large.
+      const retailerPriorityOrderIds = [...new Set([
+        ...walmartProblemOrders.map(order => String(order.id)),
+        ...targetPriorityOrderIds
+      ])].slice(0, 100);
       let repair = null;
       try {
-        const requested = Math.max(Number(req.body?.repair_orders || 20), targetPriorityOrderIds.length);
+        const requested = Math.max(Number(req.body?.repair_orders || 20), retailerPriorityOrderIds.length);
         repair = await runHistoricalOrderEmailRepair(supabase, req.user_id, adjustUserCredits, confirmPendingAmazonCheckout, {
-          maxOrders: Math.min(100, requested), forceLinked: true, priorityOrderIds: targetPriorityOrderIds,
+          maxOrders: Math.min(100, requested), forceLinked: true, priorityOrderIds: retailerPriorityOrderIds,
           // A manual repair is allowed to run beside the scheduled background repair. All writes
           // are keyed/upserted by message/order identity, so this avoids a false skip safely.
           allowConcurrent: true
@@ -4874,7 +5013,7 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
       }
       // Now queue the ordinary catch-up scan for anything that was not part of the targeted set.
       try { startUserScanJob(supabase,req.user_id,adjustUserCredits,confirmPendingAmazonCheckout); } catch (_) {}
-      const result = {success:true,checked,matched,ignored,failed,target_delivered_alias_replay_messages:targetDeliveredReplayRows.length,pokemon_archive_messages:pokemonArchiveRows.length,pokemon_live_discovery:pokemonLiveDiscovery,pokemon_stats:pokemonStats,pokemon_debug:pokemonDebug,supreme_rebuild:supremeRebuild,supreme_live:supremeLive,supreme_debug:[...(supremeLive?.debug||[]).slice(-120), ...serviceOrdersForSupreme.slice(0,40).map((o,i)=>`Service order ${i+1}: id=${o.id} site=${o.site||'-'} metadata.site=${o.metadata?.site||'-'} payload site/store=${extractNamedPayloadValue(o.raw_payload||{},['site','store'])||'-'} normalized=${normalizeStoreKey(o.site || o.metadata?.site || extractNamedPayloadValue(o.raw_payload||{},['site','store']))||'-'}`)],supreme_discovery:{metadata_scanned:supremeDiscovery?.metadata_scanned||0,candidates_found:supremeDiscovery?.candidates_found||0,windows:supremeDiscovery?.windows||0},damaged_target_orders:damagedLinkedOrderIds.length,unresolved_target_orders:unresolvedTargetOrders.length,target_priority_orders:targetPriorityOrderIds.length,repair,message:`Replayed ${targetDeliveredReplayRows.length} linked Target delivery message(s) for title-alias repair; searched ${pokemonLiveDiscovery.mailboxes_checked||0} live website mailbox(es) for Pokemon Center confirmation/shipped/delivered events and matched ${pokemonLiveDiscovery.messages_matched||0}; replayed ${pokemonArchiveRows.length} Pokemon Center archive message(s); rebuilt ${supremeRebuild?.assigned||0} Supreme confirmation assignment(s); then prioritized ${targetPriorityOrderIds.length} Target order(s) missing confirmation evidence for live mailbox repair.`};
+      const result = {success:true,checked,matched,ignored,failed,walmart_problem_orders:walmartProblemOrders.length,walmart_archive_messages:walmartArchiveRows.length,walmart_linked_replay_messages:walmartLinkedReplayRows.length,target_delivered_alias_replay_messages:targetDeliveredReplayRows.length,pokemon_archive_messages:pokemonArchiveRows.length,pokemon_live_discovery:pokemonLiveDiscovery,pokemon_stats:pokemonStats,pokemon_debug:pokemonDebug,supreme_rebuild:supremeRebuild,supreme_live:supremeLive,supreme_debug:[...(supremeLive?.debug||[]).slice(-120), ...serviceOrdersForSupreme.slice(0,40).map((o,i)=>`Service order ${i+1}: id=${o.id} site=${o.site||'-'} metadata.site=${o.metadata?.site||'-'} payload site/store=${extractNamedPayloadValue(o.raw_payload||{},['site','store'])||'-'} normalized=${normalizeStoreKey(o.site || o.metadata?.site || extractNamedPayloadValue(o.raw_payload||{},['site','store']))||'-'}`)],supreme_discovery:{metadata_scanned:supremeDiscovery?.metadata_scanned||0,candidates_found:supremeDiscovery?.candidates_found||0,windows:supremeDiscovery?.windows||0},damaged_target_orders:damagedLinkedOrderIds.length,unresolved_target_orders:unresolvedTargetOrders.length,target_priority_orders:targetPriorityOrderIds.length,retailer_priority_orders:retailerPriorityOrderIds.length,repair,message:`Replayed ${walmartLinkedReplayRows.length} linked Walmart message(s) and prioritized ${walmartProblemOrders.length} Walmart order(s) for dash-aware live mailbox repair; replayed ${targetDeliveredReplayRows.length} linked Target delivery message(s); searched ${pokemonLiveDiscovery.mailboxes_checked||0} live website mailbox(es) for Pokemon Center events and matched ${pokemonLiveDiscovery.messages_matched||0}; replayed ${pokemonArchiveRows.length} Pokemon Center archive message(s); rebuilt ${supremeRebuild?.assigned||0} Supreme confirmation assignment(s); then included ${targetPriorityOrderIds.length} Target order(s) in the live repair queue.`};
       Object.assign(reconcileJob, { status:'complete', finished_at:new Date().toISOString(), result, error:null });
     } catch(error){
       console.error('[RECONCILE RETAILER EMAILS]', error.message || error);
