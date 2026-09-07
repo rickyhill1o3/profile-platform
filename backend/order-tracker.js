@@ -120,7 +120,11 @@ function htmlToReadableEmailText(value) {
     $('[aria-hidden="true"], [hidden]').remove();
     $('*').each((_, el) => {
       const style = lower($(el).attr('style') || '').replace(/\s+/g, '');
-      if (/display:none|visibility:hidden|mso-hide:all|max-height:0(?:px)?|font-size:0(?:px)?/.test(style)) $(el).remove();
+      // Do not remove a whole element merely because it has font-size:0. Walmart's current
+      // MJML templates use font-size:0 on nearly every layout table/cell to suppress inline-block
+      // whitespace, then restore a visible font size on descendants. Removing the wrapper erases
+      // the order number, total, products, tracking, and delivery text from HTML-only messages.
+      if (/display:none|visibility:hidden|mso-hide:all|max-height:0(?:px)?/.test(style)) $(el).remove();
     });
     $('br').replaceWith('\n');
     $('p,div,tr,li,h1,h2,h3,h4,h5,h6,section,article,table').each((_, el) => $(el).append('\n'));

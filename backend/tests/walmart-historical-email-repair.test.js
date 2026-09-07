@@ -7,7 +7,7 @@ function loadTestHooks() {
   const filename = path.join(__dirname, '..', 'order-tracker.js');
   const source = fs.readFileSync(filename, 'utf8').replace(
     /module\.exports = \{ registerOrderTracker, scanAll, notifyCheckoutForOrderTracker \};\s*$/,
-    'module.exports = { __test: { detectStatus, extractOrderNumbers, extractAmounts, walmartOrderNumberVariants, orderNumberSearchVariants, rawMessageContainsOrderNumber, walmartArchiveRowMatchesTrackedOrder, fetchWalmartArchiveCandidatesForOrders, historicalRepairMailboxNames, walmartOrdersNeedingRepair, findWalmartServiceOrderViaExactTracker } };'
+    'module.exports = { __test: { htmlToReadableEmailText, detectStatus, extractOrderNumbers, extractAmounts, walmartOrderNumberVariants, orderNumberSearchVariants, rawMessageContainsOrderNumber, walmartArchiveRowMatchesTrackedOrder, fetchWalmartArchiveCandidatesForOrders, historicalRepairMailboxNames, walmartOrdersNeedingRepair, findWalmartServiceOrderViaExactTracker } };'
   );
   const module = { exports:{} };
   const sandbox = {
@@ -17,7 +17,7 @@ function loadTestHooks() {
     require(id) {
       if (id === 'imapflow') return { ImapFlow:class {} };
       if (id === 'mailparser') return { simpleParser:async () => ({}) };
-      if (id === 'cheerio') return { load:() => { throw new Error('Unexpected HTML parse'); } };
+      if (id === 'cheerio') return require(id);
       if (id === './encryption') return { encrypt:value => value, decrypt:value => value };
       if (id === './discord-history-import') return { registerDiscordHistoryImport:() => {} };
       if (id === './retailer-reconciliation') return {
@@ -68,11 +68,24 @@ function fakeSupabase(database) {
 
 (async () => {
   const {
-    detectStatus, extractOrderNumbers, extractAmounts, walmartOrderNumberVariants,
+    htmlToReadableEmailText, detectStatus, extractOrderNumbers, extractAmounts, walmartOrderNumberVariants,
     orderNumberSearchVariants, rawMessageContainsOrderNumber, walmartArchiveRowMatchesTrackedOrder,
     fetchWalmartArchiveCandidatesForOrders, historicalRepairMailboxNames, walmartOrdersNeedingRepair,
     findWalmartServiceOrderViaExactTracker
   } = loadTestHooks();
+
+  // Walmart's current HTML-only lifecycle emails put font-size:0 on layout wrappers and restore
+  // the visible font size on descendants. The wrapper must survive text conversion.
+  const htmlOnlyWalmartText = htmlToReadableEmailText(`
+    <table><tr><td style="direction:ltr;font-size:0px;text-align:center">
+      <div style="font-size:14px">Order number: #2000148-13548797</div>
+      <div style="font-size:16px">Order total</div>
+      <div style="font-size:16px">Includes all fees, taxes and discounts</div>
+      <div style="font-size:16px">$159.96</div>
+    </td></tr></table>
+  `);
+  assert.match(htmlOnlyWalmartText, /2000148-13548797/);
+  assert.match(htmlOnlyWalmartText, /\$159\.96/);
 
   assert.strictEqual(detectStatus('Thanks for your delivery order, Ricky Hill', ''), 'confirmed');
   assert.strictEqual(detectStatus('Shipped: Pokemon Trading Card G... and 4 other items', ''), 'shipped');
