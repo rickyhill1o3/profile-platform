@@ -7,7 +7,7 @@ function loadTestHooks() {
   const filename = path.join(__dirname, '..', 'order-tracker.js');
   const source = fs.readFileSync(filename, 'utf8').replace(
     /module\.exports = \{ registerOrderTracker, scanAll, notifyCheckoutForOrderTracker \};\s*$/,
-    'module.exports = { __test: { detectStatus, extractOrderNumbers, extractAmounts, walmartOrderNumberVariants, orderNumberSearchVariants, rawMessageContainsOrderNumber, walmartArchiveRowMatchesTrackedOrder, fetchWalmartArchiveCandidatesForOrders, historicalRepairMailboxNames, walmartOrdersNeedingRepair } };'
+    'module.exports = { __test: { detectStatus, extractOrderNumbers, extractAmounts, walmartOrderNumberVariants, orderNumberSearchVariants, rawMessageContainsOrderNumber, walmartArchiveRowMatchesTrackedOrder, fetchWalmartArchiveCandidatesForOrders, historicalRepairMailboxNames, walmartOrdersNeedingRepair, findWalmartServiceOrderViaExactTracker } };'
   );
   const module = { exports:{} };
   const sandbox = {
@@ -55,6 +55,10 @@ class Query {
     const end = this.rangeEnd == null ? (this.limitCount == null ? rows.length : this.rangeStart + this.limitCount) : this.rangeEnd + 1;
     return { data:rows.slice(this.rangeStart, end), error:null };
   }
+  maybeSingle() {
+    const result = this.execute();
+    return Promise.resolve({ data:result.data[0] || null, error:result.data.length > 1 ? new Error('Multiple rows') : null });
+  }
   then(resolve, reject) { return Promise.resolve(this.execute()).then(resolve, reject); }
 }
 
@@ -66,7 +70,8 @@ function fakeSupabase(database) {
   const {
     detectStatus, extractOrderNumbers, extractAmounts, walmartOrderNumberVariants,
     orderNumberSearchVariants, rawMessageContainsOrderNumber, walmartArchiveRowMatchesTrackedOrder,
-    fetchWalmartArchiveCandidatesForOrders, historicalRepairMailboxNames, walmartOrdersNeedingRepair
+    fetchWalmartArchiveCandidatesForOrders, historicalRepairMailboxNames, walmartOrdersNeedingRepair,
+    findWalmartServiceOrderViaExactTracker
   } = loadTestHooks();
 
   assert.strictEqual(detectStatus('Thanks for your delivery order, Ricky Hill', ''), 'confirmed');
@@ -85,6 +90,14 @@ function fakeSupabase(database) {
   assert.deepStrictEqual(
     Array.from(extractOrderNumbers('walmart', 'Canceled: delivery from order #200014389978678', '')),
     ['200014389978678']
+  );
+  assert.deepStrictEqual(
+    Array.from(extractOrderNumbers(
+      'walmart',
+      'Thanks for your delivery order, ricky',
+      'Order date: Thu, Mar 26, 2026\nOrder number:\n#2000148-13548797\nOrder total\nIncludes all fees, taxes and discounts\n$159.96'
+    )),
+    ['2000148-13548797']
   );
 
   assert.strictEqual(extractAmounts(`
@@ -172,11 +185,51 @@ function fakeSupabase(database) {
       { id:'healthy', user_id:'admin', store:'walmart', order_number:'2000148-76543210', status:'delivered', total:75.25 },
       { id:'canceled-zero', user_id:'admin', store:'walmart', order_number:'2000143-89978678', status:'canceled', total:0 },
       { id:'other-user', user_id:'other', store:'walmart', order_number:'2000147-57957926', status:'confirmed', total:0 },
-      { id:'target', user_id:'admin', store:'target', order_number:'102003259010776', status:'waiting_confirmation', total:0 }
-    ]
+      { id:'target', user_id:'admin', store:'target', order_number:'102003259010776', status:'waiting_confirmation', total:0 },
+      {
+        id:'kix-walmart', user_id:'admin', store:'walmart', order_number:'200014813548797',
+        source_email:'kixnotherthings@gmail.com', source_order_id:'discord-kix', status:'waiting_confirmation', total:0
+      }
+    ],
+    orders:[]
   };
   const problemRows = await walmartOrdersNeedingRepair(fakeSupabase(database), 'admin', 250);
-  assert.deepStrictEqual(Array.from(problemRows, row => row.id), ['missing', 'linked-zero']);
+  assert.deepStrictEqual(Array.from(problemRows, row => row.id), ['missing', 'linked-zero', 'kix-walmart']);
+
+  const bridgedServiceOrder = {
+    id:'discord-kix', user_id:'admin', source:'discord_history', site:'walmart',
+    // Regression: the imported source payload does not contain the retailer reference, while the
+    // exact tracker row above still does.
+    external_order_id:'DISCORD-legacy-kix', metadata:{ checkout_account_email:'kixnotherthings@gmail.com' }
+  };
+  assert.strictEqual(
+    await findWalmartServiceOrderViaExactTracker(
+      fakeSupabase(database),
+      { user_id:'admin', email:'kixnotherthings@gmail.com' },
+      ['2000148-13548797'],
+      [bridgedServiceOrder]
+    ),
+    bridgedServiceOrder
+  );
+  assert.strictEqual(
+    await findWalmartServiceOrderViaExactTracker(
+      fakeSupabase(database),
+      { user_id:'admin', email:'someoneelse@gmail.com' },
+      ['2000148-13548797'],
+      [bridgedServiceOrder]
+    ),
+    null
+  );
+  database.orders.push(bridgedServiceOrder);
+  assert.strictEqual(
+    await findWalmartServiceOrderViaExactTracker(
+      fakeSupabase(database),
+      { user_id:'admin', email:'kixnotherthings@gmail.com' },
+      ['200014813548797'],
+      []
+    ),
+    bridgedServiceOrder
+  );
 
   database.email_messages = [
     {

@@ -1468,6 +1468,52 @@ async function loadServiceOrders(supabase, userId) {
     .sort((a, b) => new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime());
 }
 
+async function findWalmartServiceOrderViaExactTracker(supabase, account, orderNumbers = [], serviceOrders = []) {
+  // A historical Discord checkout already has a tracked_orders row before its old retailer email
+  // is replayed. In rare imports the source `orders` payload lost the retailer reference even
+  // though the tracker retained it, so collectOrderRefs() cannot prove that the fetched Walmart
+  // message belongs to the platform. Use the existing tracker as a narrowly scoped bridge only
+  // when the complete 15-digit Walmart reference, website user, and receiving mailbox all agree.
+  const incomingRefs = new Set((orderNumbers || []).map(normalizeOrderRef).filter(ref => /^\d{15}$/.test(ref)));
+  const mailbox = lower(account?.email);
+  const userId = clean(account?.user_id);
+  if (!incomingRefs.size || !mailbox || !userId) return null;
+
+  const variants = [...new Set((orderNumbers || []).flatMap(walmartOrderNumberVariants))];
+  if (!variants.length) return null;
+  const trackedResult = await supabase.from('tracked_orders')
+    .select('id,user_id,source_order_id,source_email,store,order_number')
+    .eq('user_id', userId)
+    .eq('store', 'walmart')
+    .in('order_number', variants)
+    .limit(Math.max(10, variants.length));
+  if (trackedResult.error) throw trackedResult.error;
+
+  const sourceIds = [...new Set((trackedResult.data || [])
+    .filter(row => incomingRefs.has(normalizeOrderRef(row.order_number)))
+    .filter(row => lower(row.source_email) === mailbox)
+    .map(row => clean(row.source_order_id))
+    .filter(Boolean))];
+  // Refuse to guess if corrupted data maps the same retailer reference/mailbox to multiple source
+  // checkouts. The normal reconciliation diagnostics will then leave the order for manual review.
+  if (sourceIds.length !== 1) return null;
+
+  const sourceId = sourceIds[0];
+  let serviceOrder = (serviceOrders || []).find(order => String(order.id) === sourceId);
+  // loadServiceOrders intentionally uses a bounded recent window plus the discord_history set.
+  // If a legacy source row predates those conventions, load only the exact tracker-owned row.
+  if (!serviceOrder) {
+    const sourceResult = await supabase.from('orders').select('*')
+      .eq('id', sourceId).eq('user_id', userId).maybeSingle();
+    if (sourceResult.error) throw sourceResult.error;
+    serviceOrder = sourceResult.data || null;
+  }
+  if (!serviceOrder || String(serviceOrder.user_id) !== userId || isOrderTrackerDeleted(serviceOrder)) return null;
+  const serviceStore = normalizeStoreKey(serviceOrder.site || serviceOrder.metadata?.site ||
+    extractNamedPayloadValue(serviceOrder.raw_payload || {}, ['site','store']));
+  return serviceStore === 'walmart' ? serviceOrder : null;
+}
+
 async function findPokemonCenterServiceOrderGlobally(supabase, orderNumber) {
   const ref = clean(orderNumber);
   if (!ref) return null;
@@ -2671,6 +2717,14 @@ async function saveParsedMessage(supabase, account, parsed, uid, adjustCredits =
   } else {
     const incomingRefs = new Set(orderNumbers.map(normalizeOrderRef).filter(Boolean));
     matchedServiceOrders = serviceOrders.filter(o => collectOrderRefs(o).some(ref => incomingRefs.has(ref)));
+    if (store === 'walmart') {
+      const exactTrackedSource = await findWalmartServiceOrderViaExactTracker(
+        supabase, account, orderNumbers, serviceOrders
+      );
+      // The exact existing tracker is more specific than a legacy source payload. Prefer its
+      // source_order_id even if a duplicate/corrupt source record happens to expose the same ID.
+      if (exactTrackedSource) matchedServiceOrders = [exactTrackedSource];
+    }
   }
 
   // Only track retailer emails that correspond to checkouts recorded by this platform.
