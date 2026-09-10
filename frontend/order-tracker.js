@@ -337,6 +337,9 @@ Imported mailbox credentials loaded: ${j.pokemon_live_discovery?.loader_diagnost
 Pokemon Center live lifecycle candidates: ${j.pokemon_live_discovery?.messages_found||0}
 Pokemon Center live exact P-number matches: ${j.pokemon_live_discovery?.messages_matched||0}
 Pokemon Center live messages saved/linked: ${j.pokemon_live_discovery?.messages_saved||0}
+Pokemon Center payment warnings found live: ${j.pokemon_live_discovery?.payment_alerts_found||0}
+Pokemon Center payment warnings saved: ${j.pokemon_live_discovery?.payment_alerts_saved||0}
+Pokemon Center payment-warning mailboxes: ${(j.pokemon_live_discovery?.payment_alert_mailboxes||[]).join(', ')||'-'}
 Pokemon Center P-numbers recovered from raw email source: ${j.pokemon_live_discovery?.raw_source_order_numbers_recovered||0}
 Pokemon Center live matched P-numbers: ${(j.pokemon_live_discovery?.matched_order_numbers||[]).join(', ')||'-'}
 Pokemon Center actual receiving mailbox matches:

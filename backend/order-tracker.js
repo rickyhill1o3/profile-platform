@@ -3342,6 +3342,15 @@ async function scanAccount(supabase, account, adjustCredits = null, onProgress =
 }
 
 
+const POKEMON_CENTER_LIVE_DISCOVERY_SUBJECTS = Object.freeze([
+  'Thank you for shopping at PokemonCenter.com!',
+  'order is on its way',
+  'package will arrive soon',
+  'package has been delivered',
+  'running a little behind',
+  'ACTION REQUIRED on Your Preorder'
+]);
+
 async function discoverPokemonCenterConfirmationsGlobally(
   supabase,
   onlyUserId,
@@ -3359,9 +3368,6 @@ async function discoverPokemonCenterConfirmationsGlobally(
     return store === 'pokemoncenter' && /^P\d{6,}$/i.test(clean(row.order_number || ''));
   });
   const targetRefs = new Set(targetRows.map(row => normalizeOrderRef(row.order_number)).filter(Boolean));
-  if (!targetRefs.size) {
-    return { mailboxes_selected:0, mailboxes_checked:0, mailbox_failures:0, messages_found:0, messages_processed:0, messages_matched:0, messages_saved:0, raw_source_order_numbers_recovered:0, matched_order_numbers:[], mailbox_matches:[], debug:['No Pokemon Center tracked P-numbers were available for live discovery.'] };
-  }
 
   const dates = targetRows
     .map(row => new Date(row.order_date || row.created_at || 0).getTime())
@@ -3391,17 +3397,14 @@ async function discoverPokemonCenterConfirmationsGlobally(
   let messagesProcessed = 0;
   let messagesMatched = 0;
   let messagesSaved = 0;
+  let paymentAlertsFound = 0;
+  let paymentAlertsSaved = 0;
   let rawSourceOrderNumbersRecovered = 0;
   const matchedOrderNumbers = new Set();
   const mailboxMatches = new Map();
+  const paymentAlertMailboxes = new Set();
   const mailboxFailuresDetail = [];
-  const lifecycleSubjects = [
-    'Thank you for shopping at PokemonCenter.com!',
-    'order is on its way',
-    'package will arrive soon',
-    'package has been delivered',
-    'running a little behind'
-  ];
+  const lifecycleSubjects = POKEMON_CENTER_LIVE_DISCOVERY_SUBJECTS;
 
   const worker = async account => {
     let client = null;
@@ -3463,6 +3466,25 @@ async function discoverPokemonCenterConfirmationsGlobally(
               const parsed = await simpleParser(msg.source);
               const text = readableEmailText(parsed);
               const store = detectStore(parsed.from?.text || '', parsed.subject || '', text);
+              if (store !== 'pokemoncenter') continue;
+
+              // Payment-reauthorization warnings deliberately contain no P-order number. Process
+              // them as standalone account alerts before the exact-order lifecycle gate below.
+              // This is the manual Reconcile path, so it must not depend on the normal UID scan
+              // having already archived today's message.
+              if (isPokemonCenterPaymentAlert(store, parsed.subject || '', text)) {
+                paymentAlertsFound++;
+                paymentAlertMailboxes.add(lower(account.email));
+                const result = await saveParsedMessage(
+                  supabase, account, parsed, msg.uid, adjustCredits, confirmPendingAmazonCheckout
+                );
+                if (result?.alert_saved) paymentAlertsSaved++;
+                if (debug.length < 240) debug.push(
+                  `Live Pokemon payment alert: receiving_mailbox=${account.email} uid=${msg.uid} result=${result?.alert_saved ? 'SAVED' : `NOT_SAVED:${result?.reason || 'alert table unavailable'}`} subject=${JSON.stringify(clean(parsed.subject || '').slice(0,160))}`
+                );
+                continue;
+              }
+
               const rawSource = Buffer.isBuffer(msg.source) ? msg.source.toString('utf8') : String(msg.source || '');
               const parsedRefs = extractOrderNumbers('pokemoncenter', parsed.subject || '', `${text}\n${String(parsed.html || '')}`)
                 .map(normalizeOrderRef).filter(Boolean);
@@ -3470,7 +3492,7 @@ async function discoverPokemonCenterConfirmationsGlobally(
                 .map(match => normalizeOrderRef(match[1])).filter(Boolean);
               const refs = [...new Set([...parsedRefs, ...rawRefs])];
               const matchedRef = refs.find(ref => targetRefs.has(ref));
-              if (store !== 'pokemoncenter' || !matchedRef) continue;
+              if (!matchedRef) continue;
               if (!parsedRefs.includes(matchedRef) && rawRefs.includes(matchedRef)) {
                 rawSourceOrderNumbersRecovered++;
                 if (debug.length < 240) debug.push(`Live Pokemon raw-source P-number recovered: order=${matchedRef} receiving_mailbox=${account.email} uid=${msg.uid}`);
@@ -3528,6 +3550,9 @@ async function discoverPokemonCenterConfirmationsGlobally(
     messages_processed:messagesProcessed,
     messages_matched:messagesMatched,
     messages_saved:messagesSaved,
+    payment_alerts_found:paymentAlertsFound,
+    payment_alerts_saved:paymentAlertsSaved,
+    payment_alert_mailboxes:[...paymentAlertMailboxes].sort(),
     raw_source_order_numbers_recovered:rawSourceOrderNumbersRecovered,
     matched_order_numbers:[...matchedOrderNumbers].sort(),
     mailbox_matches:[...mailboxMatches.values()].sort((a,b) => a.order_number.localeCompare(b.order_number) || a.event_type.localeCompare(b.event_type)),
@@ -5280,7 +5305,7 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
       // still the only ownership rule; the receiving inbox can never move or charge an order.
       let pokemonArchiveRows = [];
       let pokemonArchiveDiscovery = { rows:[], metadata_scanned:0, candidates_found:0, since:null };
-      let pokemonLiveDiscovery = { mailboxes_selected:0, mailboxes_checked:0, mailbox_failures:0, messages_found:0, messages_processed:0, messages_matched:0, messages_saved:0, raw_source_order_numbers_recovered:0, matched_order_numbers:[], debug:[] };
+      let pokemonLiveDiscovery = { mailboxes_selected:0, mailboxes_checked:0, mailbox_failures:0, messages_found:0, messages_processed:0, messages_matched:0, messages_saved:0, payment_alerts_found:0, payment_alerts_saved:0, payment_alert_mailboxes:[], raw_source_order_numbers_recovered:0, matched_order_numbers:[], debug:[] };
       try {
         const pokemonTrackerMeta = await supabase.from('tracked_orders')
           .select('id,user_id,source_order_id,store,order_number,status,order_date,created_at')
@@ -5531,7 +5556,7 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
       }
       // Now queue the ordinary catch-up scan for anything that was not part of the targeted set.
       try { startUserScanJob(supabase,req.user_id,adjustUserCredits,confirmPendingAmazonCheckout); } catch (_) {}
-      const result = {success:true,checked,matched,ignored,failed,walmart_problem_orders:walmartProblemOrders.length,walmart_archive_messages:walmartArchiveRows.length,walmart_linked_replay_messages:walmartLinkedReplayRows.length,walmart_targeted_archive_messages:repair?.walmart_archive_candidates||0,target_delivered_alias_replay_messages:targetDeliveredReplayRows.length,pokemon_archive_messages:pokemonArchiveRows.length,pokemon_live_discovery:pokemonLiveDiscovery,pokemon_stats:pokemonStats,pokemon_debug:pokemonDebug,supreme_rebuild:supremeRebuild,supreme_live:supremeLive,supreme_debug:[...(supremeLive?.debug||[]).slice(-120), ...serviceOrdersForSupreme.slice(0,40).map((o,i)=>`Service order ${i+1}: id=${o.id} site=${o.site||'-'} metadata.site=${o.metadata?.site||'-'} payload site/store=${extractNamedPayloadValue(o.raw_payload||{},['site','store'])||'-'} normalized=${normalizeStoreKey(o.site || o.metadata?.site || extractNamedPayloadValue(o.raw_payload||{},['site','store']))||'-'}`)],supreme_discovery:{metadata_scanned:supremeDiscovery?.metadata_scanned||0,candidates_found:supremeDiscovery?.candidates_found||0,windows:supremeDiscovery?.windows||0},damaged_target_orders:damagedLinkedOrderIds.length,unresolved_target_orders:unresolvedTargetOrders.length,target_priority_orders:targetPriorityOrderIds.length,retailer_priority_orders:retailerPriorityOrderIds.length,repair,message:`Replayed ${walmartLinkedReplayRows.length} already-linked Walmart message(s), recovered ${repair?.walmart_archive_candidates||0} exact previously-unlinked Walmart archive message(s), and searched all selectable folders for ${walmartProblemOrders.length} Walmart order(s); replayed ${targetDeliveredReplayRows.length} linked Target delivery message(s); searched ${pokemonLiveDiscovery.mailboxes_checked||0} live website mailbox(es) for Pokemon Center events and matched ${pokemonLiveDiscovery.messages_matched||0}; replayed ${pokemonArchiveRows.length} Pokemon Center archive message(s); rebuilt ${supremeRebuild?.assigned||0} Supreme confirmation assignment(s); then included ${targetPriorityOrderIds.length} Target order(s) in the live repair queue.`};
+      const result = {success:true,checked,matched,ignored,failed,walmart_problem_orders:walmartProblemOrders.length,walmart_archive_messages:walmartArchiveRows.length,walmart_linked_replay_messages:walmartLinkedReplayRows.length,walmart_targeted_archive_messages:repair?.walmart_archive_candidates||0,target_delivered_alias_replay_messages:targetDeliveredReplayRows.length,pokemon_archive_messages:pokemonArchiveRows.length,pokemon_live_discovery:pokemonLiveDiscovery,pokemon_stats:pokemonStats,pokemon_debug:pokemonDebug,supreme_rebuild:supremeRebuild,supreme_live:supremeLive,supreme_debug:[...(supremeLive?.debug||[]).slice(-120), ...serviceOrdersForSupreme.slice(0,40).map((o,i)=>`Service order ${i+1}: id=${o.id} site=${o.site||'-'} metadata.site=${o.metadata?.site||'-'} payload site/store=${extractNamedPayloadValue(o.raw_payload||{},['site','store'])||'-'} normalized=${normalizeStoreKey(o.site || o.metadata?.site || extractNamedPayloadValue(o.raw_payload||{},['site','store']))||'-'}`)],supreme_discovery:{metadata_scanned:supremeDiscovery?.metadata_scanned||0,candidates_found:supremeDiscovery?.candidates_found||0,windows:supremeDiscovery?.windows||0},damaged_target_orders:damagedLinkedOrderIds.length,unresolved_target_orders:unresolvedTargetOrders.length,target_priority_orders:targetPriorityOrderIds.length,retailer_priority_orders:retailerPriorityOrderIds.length,repair,message:`Replayed ${walmartLinkedReplayRows.length} already-linked Walmart message(s), recovered ${repair?.walmart_archive_candidates||0} exact previously-unlinked Walmart archive message(s), and searched all selectable folders for ${walmartProblemOrders.length} Walmart order(s); replayed ${targetDeliveredReplayRows.length} linked Target delivery message(s); searched ${pokemonLiveDiscovery.mailboxes_checked||0} live website mailbox(es), matched ${pokemonLiveDiscovery.messages_matched||0} exact Pokemon Center lifecycle message(s), and saved ${pokemonLiveDiscovery.payment_alerts_saved||0} payment warning(s); replayed ${pokemonArchiveRows.length} Pokemon Center archive message(s); rebuilt ${supremeRebuild?.assigned||0} Supreme confirmation assignment(s); then included ${targetPriorityOrderIds.length} Target order(s) in the live repair queue.`};
       Object.assign(reconcileJob, { status:'complete', finished_at:new Date().toISOString(), result, error:null });
     } catch(error){
       console.error('[RECONCILE RETAILER EMAILS]', error.message || error);

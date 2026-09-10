@@ -7,7 +7,7 @@ function loadTestHooks() {
   const filename = path.join(__dirname, '..', 'order-tracker.js');
   const source = fs.readFileSync(filename, 'utf8').replace(
     /module\.exports = \{ registerOrderTracker, scanAll, notifyCheckoutForOrderTracker \};\s*$/,
-    'module.exports = { __test: { detectStatus, detectStore, readableEmailText, isPokemonCenterPaymentAlert, safePokemonPaymentUrl, extractPokemonPaymentActionUrl, extractPokemonPaymentActionUrlFromText, parsePokemonCenterPaymentAlert, saveParsedMessage } };'
+    'module.exports = { __test: { detectStatus, detectStore, readableEmailText, isPokemonCenterPaymentAlert, safePokemonPaymentUrl, extractPokemonPaymentActionUrl, extractPokemonPaymentActionUrlFromText, parsePokemonCenterPaymentAlert, saveParsedMessage, POKEMON_CENTER_LIVE_DISCOVERY_SUBJECTS } };'
   );
   const module = { exports:{} };
   const sandbox = {
@@ -68,6 +68,10 @@ function fakeSupabase(database) { return { from:table => new Query(database, tab
   assert.strictEqual(hooks.detectStore(parsed.from.text, subject, readable), 'pokemoncenter');
   assert.strictEqual(hooks.detectStatus(subject, readable), 'payment_needed');
   assert.strictEqual(hooks.isPokemonCenterPaymentAlert('pokemoncenter', subject, readable), true);
+  assert.ok(
+    hooks.POKEMON_CENTER_LIVE_DISCOVERY_SUBJECTS.includes('ACTION REQUIRED on Your Preorder'),
+    'manual live reconciliation must search for orderless payment-warning subjects'
+  );
   assert.strictEqual(hooks.extractPokemonPaymentActionUrl(html), actionUrl);
   assert.strictEqual(hooks.safePokemonPaymentUrl('https://evil.example/payment'), '');
 
