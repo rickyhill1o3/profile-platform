@@ -3,6 +3,7 @@ const token=localStorage.getItem('token');
 if(!token) location.href='login.html';
 const headers={'Authorization':`Bearer ${token}`,'Content-Type':'application/json'};
 let allOrders=[];
+let pokemonPaymentAlerts=[];
 let discordHistoryJobId='';
 let discordHistoryPreview=null;
 const $=id=>document.getElementById(id);
@@ -15,9 +16,46 @@ async function api(path,opt={}){const r=await fetch(API+path,{...opt,headers:{..
 function setProgress(percent,stage,detail=''){const p=Math.max(0,Math.min(100,Number(percent)||0));$('scanProgressBar').style.width=`${p}%`;$('scanPercent').textContent=`${Math.round(p)}%`;if(stage)$('scanStage').textContent=stage;if(detail)$('scanDetail').textContent=detail}
 function showWarning(text){$('scanWarning').hidden=!text;$('scanWarning').textContent=text||''}
 function renderAccounts(accounts=[]){const el=$('scanAccounts');el.innerHTML=accounts.length?accounts.map(a=>`<div class="mail-account"><div class="mail-ok">✓ ${esc(a.email)}</div><div>${esc(a.provider||'IMAP')} · ${a.last_success_at?'Last scan '+new Date(a.last_success_at).toLocaleString():'Ready for first scan'}</div>${a.scanned_through_at?`<div class="subtle-text">Scanned through ${new Date(a.scanned_through_at).toLocaleString()}</div>`:''}${a.last_error?`<div class="mail-error">${esc(a.last_error)}</div>`:''}</div>`).join(''):'<p class="subtle-text">No supported IMAP/app password was found in saved profiles.</p>'}
+function renderPokemonPaymentAlerts(){
+  const center=$('pokemonPaymentAlertCenter'),list=$('pokemonPaymentAlertList'),count=$('pokemonPaymentAlertCount');
+  if(!center||!list||!count)return;
+  const wasHidden=center.hidden;
+  center.hidden=!pokemonPaymentAlerts.length;
+  count.textContent=String(pokemonPaymentAlerts.length);
+  document.title=pokemonPaymentAlerts.length?`(${pokemonPaymentAlerts.length}) Payment action required · Order Tracker`:'Order Tracker';
+  list.innerHTML=pokemonPaymentAlerts.map(a=>`<article class="payment-alert-card"><h3>${esc(a.product_hint||'Pokémon Center preorder')}</h3><div class="payment-alert-meta"><div><small>Received by mailbox</small><b>${esc(a.mailbox_email||'Unknown mailbox')}</b></div><div><small>Update by</small><b>${esc(a.deadline_text||'Open the email for the deadline')}</b></div><div><small>Warning received</small><b>${a.received_at?new Date(a.received_at).toLocaleString():'—'}</b>${Number(a.reminder_count||1)>1?`<br><small>${Number(a.reminder_count)} daily reminders received</small>`:''}</div></div><p class="payment-alert-help"><b>No order number was included.</b> If you placed more than one matching preorder, check every order in ${esc(a.mailbox_email||'this mailbox')}.</p><div class="payment-alert-actions">${a.action_url?`<a class="btn payment-alert-primary" href="${esc(a.action_url)}" target="_blank" rel="noopener noreferrer">Update payment on Pokémon Center</a>`:''}<button class="btn" onclick="openPaymentAlertEmail('${esc(a.id)}')">View payment email</button><button class="btn" onclick="resolvePaymentAlert('${esc(a.id)}')">Mark fixed — payment updated</button></div></article>`).join('');
+  if(wasHidden&&pokemonPaymentAlerts.length)requestAnimationFrame(()=>center.focus({preventScroll:false}));
+}
+function notifyNewPokemonPaymentAlerts(alerts=[]){
+  let seen=[];try{seen=JSON.parse(sessionStorage.getItem('pokemonPaymentAlertIds')||'[]')}catch(_){}
+  const known=new Set(Array.isArray(seen)?seen:[]);
+  const fresh=alerts.filter(a=>a?.id&&!known.has(String(a.id)));
+  if(fresh.length&&typeof Notification!=='undefined'&&Notification.permission==='granted'){
+    const first=fresh[0];
+    new Notification('Pokémon Center payment action required',{body:`${first.mailbox_email||'Mailbox'} · ${first.product_hint||'Preorder payment needs attention'}`});
+  }
+  try{sessionStorage.setItem('pokemonPaymentAlertIds',JSON.stringify(alerts.map(a=>String(a.id)).filter(Boolean)))}catch(_){}
+}
+async function loadPokemonPaymentAlerts(){
+  const j=await api('/orders/account-alerts');
+  pokemonPaymentAlerts=Array.isArray(j.alerts)?j.alerts:[];
+  notifyNewPokemonPaymentAlerts(pokemonPaymentAlerts);
+  renderPokemonPaymentAlerts();
+  if(j.migration_required)showWarning('Pokémon Center payment alerts need the included Supabase migration before they can be displayed.');
+  return j;
+}
+async function openPaymentAlertEmail(id){
+  const r=await fetch(`${API}/orders/account-alerts/${encodeURIComponent(id)}/email`,{headers:{Authorization:`Bearer ${token}`}});
+  if(!r.ok){alert((await r.text().catch(()=>''))||'The payment email could not be opened.');return}
+  const html=await r.text();const w=window.open('','_blank');w.document.open();w.document.write(html);w.document.close();
+}
+async function resolvePaymentAlert(id){
+  if(!confirm('Only dismiss this warning after the payment information has been updated or the preorder has been canceled. Continue?'))return;
+  try{await api(`/orders/account-alerts/${encodeURIComponent(id)}/resolve`,{method:'POST',body:'{}'});await loadPokemonPaymentAlerts()}catch(error){alert(error.message||'The payment warning could not be resolved.')}
+}
 function applyOrders(orders=[],summary={}){allOrders=orders;render();$('countAll').textContent=allOrders.length;$('countActive').textContent=(summary.confirmed||0)+(summary.processing||0);$('countSuccess').textContent=(summary.shipped||0)+(summary.delivered||0);$('countCanceled').textContent=(summary.canceled||0)+(summary.refunded||0);$('successRate').textContent=`${Number(summary.success_rate||0).toFixed(1)}%`}
-async function bootstrap(){const j=await api('/orders/bootstrap');renderAccounts(j.accounts||[]);applyOrders(j.orders||[],j.summary||{});$('scanMessage').textContent=`${j.connected_count||0} connected mailbox${Number(j.connected_count||0)===1?'':'es'}. Scans continue from the last saved IMAP UID, so previously checked messages are not searched again.`;if(Array.isArray(j.warnings)&&j.warnings.length)showWarning(`Some optional data could not be refreshed: ${j.warnings.join(' | ')}`);if(j.is_super_admin){$('aycdPanel').hidden=false;$('oneTimePokemonPanel').hidden=false;$('discordHistoryPanel').hidden=false;refreshAycdStatus();loadDiscordHistoryConfig()}return j}
-async function loadOrders(){const qs=new URLSearchParams();if($('statusFilter').value)qs.set('status',$('statusFilter').value);if($('yearFilter').value)qs.set('year',$('yearFilter').value);const j=await api('/orders/tracked?'+qs);applyOrders(j.orders||[],j.summary||{})}
+async function bootstrap(){const j=await api('/orders/bootstrap');renderAccounts(j.accounts||[]);applyOrders(j.orders||[],j.summary||{});try{await loadPokemonPaymentAlerts()}catch(error){showWarning(error.message)}$('scanMessage').textContent=`${j.connected_count||0} connected mailbox${Number(j.connected_count||0)===1?'':'es'}. Scans continue from the last saved IMAP UID, so previously checked messages are not searched again.`;if(Array.isArray(j.warnings)&&j.warnings.length)showWarning(`Some optional data could not be refreshed: ${j.warnings.join(' | ')}`);if(j.is_super_admin){$('aycdPanel').hidden=false;$('oneTimePokemonPanel').hidden=false;$('discordHistoryPanel').hidden=false;refreshAycdStatus();loadDiscordHistoryConfig()}return j}
+async function loadOrders(){const qs=new URLSearchParams();if($('statusFilter').value)qs.set('status',$('statusFilter').value);if($('yearFilter').value)qs.set('year',$('yearFilter').value);const [j]=await Promise.all([api('/orders/tracked?'+qs),loadPokemonPaymentAlerts().catch(()=>null)]);applyOrders(j.orders||[],j.summary||{})}
 function isPokemonCenterOrder(o){const store=String(o.store||'').toLowerCase().replace(/[^a-z0-9]/g,'');return store==='pokemon'||store==='pokemoncenter'}
 function hasPokemonConfirmationEmail(o){const c=o.email_counts||{};return Boolean(o.has_confirmation_email)||Number(c.confirmed||0)>0}
 function displayOrderStatus(o){const s=String(o.status||'waiting_confirmation').toLowerCase();if(isPokemonCenterOrder(o)&&['confirmed','processing','waiting_confirmation'].includes(s)&&!hasPokemonConfirmationEmail(o))return 'waiting_confirmation';return s}
@@ -345,3 +383,4 @@ Repair skipped: ${r.reason||'no candidates'}`:''}${detailText}${missingText}`);a
 $('refreshOrders').onclick=loadOrders;$('statusFilter').onchange=()=>{render();loadOrders().catch(e=>showWarning(e.message));};$('yearFilter').onchange=()=>{render();loadOrders().catch(e=>showWarning(e.message));};$('searchOrders').oninput=render;
 initYears();
 runAutomaticScan().catch(async e=>{showWarning(e.message);try{await bootstrap()}catch(_){}setProgress(100,'Order tracker loaded with saved data','The automatic mailbox scan could not finish, but your existing orders are available.')}).finally(()=>{setTimeout(()=>{$('scanOverlay').hidden=true;$('trackerApp').hidden=false},350)});
+setInterval(()=>loadPokemonPaymentAlerts().catch(()=>{}),60000);

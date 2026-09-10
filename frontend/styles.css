@@ -30,6 +30,20 @@ h1,h2,h3,h4,p{margin:0}
 .auth-card{padding:28px}
 .topbar{display:flex;justify-content:space-between;gap:20px;align-items:flex-start;background:var(--panel);border:1px solid var(--line);border-radius:var(--radius-xl);padding:24px;box-shadow:var(--shadow)}
 .topbar-actions{display:flex;gap:12px;flex-wrap:wrap;justify-content:flex-end}
+.account-payment-alert-center{margin-top:18px;padding:20px;border:2px solid #ef4444;border-radius:var(--radius-xl);background:linear-gradient(135deg,#fff1f2,#fff7ed);box-shadow:0 18px 45px rgba(185,28,28,.13)}
+.account-payment-alert-center[hidden]{display:none}
+.account-payment-alert-heading{display:flex;justify-content:space-between;gap:18px;align-items:flex-start}
+.account-payment-alert-heading h2{color:#991b1b;margin-bottom:6px}
+.account-payment-alert-heading>span{display:inline-flex;min-width:36px;height:36px;padding:0 11px;align-items:center;justify-content:center;border-radius:999px;background:#b91c1c;color:#fff;font-weight:900}
+.account-payment-alert-list{display:grid;gap:12px;margin-top:15px}
+.account-payment-alert-item{padding:15px;border:1px solid #fca5a5;border-left:6px solid #dc2626;border-radius:14px;background:#fff}
+.account-payment-alert-item h3{color:#7f1d1d;margin-bottom:8px}
+.account-payment-alert-meta{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
+.account-payment-alert-meta>div{padding:9px 10px;border-radius:10px;background:#fff7ed;overflow-wrap:anywhere}
+.account-payment-alert-meta small{display:block;color:#9a3412}
+.account-payment-alert-item p{margin-top:10px;color:#7c2d12}
+.account-payment-alert-actions{display:flex;gap:9px;flex-wrap:wrap;margin-top:12px}
+.account-payment-alert-action{background:#b91c1c;color:#fff;border-color:#991b1b}
 .eyebrow{font-size:12px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:#3b82f6;margin-bottom:8px}
 .subtle-text{color:var(--muted)}
 .success-text{color:var(--success)}
@@ -120,9 +134,10 @@ h1,h2,h3,h4,p{margin:0}
   .product-list{max-height:none}
 }
 @media (max-width:860px){
-  .topbar,.panel-header,.section-heading,.toolbar-row{flex-direction:column;align-items:stretch}
+  .topbar,.panel-header,.section-heading,.toolbar-row,.account-payment-alert-heading{flex-direction:column;align-items:stretch}
   .stats-grid,.form-grid{grid-template-columns:1fr}
   .product-card-controls{grid-template-columns:1fr}
+  .account-payment-alert-meta{grid-template-columns:1fr}
 }
 @media (max-width:560px){
   .app-shell{padding:16px}
