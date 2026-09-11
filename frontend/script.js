@@ -1554,6 +1554,8 @@ async function loadProfileEditor() {
     email.value = addr.email || "";
     phone.value = addr.phone || "";
     address1.value = addr.address1 || "";
+    const address2Input = document.getElementById("address2");
+    if (address2Input) address2Input.value = addr.address2 || "";
     city.value = addr.city || "";
     state.value = addr.state || "";
     zip.value = addr.zip || "";
@@ -1590,6 +1592,7 @@ if (profileForm) {
             email: email.value.trim(),
             phone: phone.value.trim(),
             address1: address1.value.trim(),
+            address2: document.getElementById("address2")?.value.trim() || "",
             city: city.value.trim(),
             state: state.value,
             zip: zip.value.trim(),
@@ -5030,6 +5033,90 @@ async function loadProductSelectionChanges() {
 }
 
 let productSelectionExportUsersCache = [];
+let productSelectionAccountSummaryRequest = 0;
+
+function productSelectionRunStatusSite(site = '') {
+    return String(site || '').toLowerCase() === 'pokemon' ? 'pokemoncenter' : String(site || '').toLowerCase();
+}
+
+async function loadProductSelectionAccountSummary() {
+    const panel = document.getElementById('productSelectionAccountSummary');
+    const userSelect = document.getElementById('productSelectionExportUser');
+    const siteSelect = document.getElementById('productSelectionExportSite');
+    if (!panel || !userSelect || !siteSelect) return;
+
+    const userId = userSelect.value || '';
+    const site = productSelectionRunStatusSite(siteSelect.value || 'target');
+    const siteLabel = siteSelect.selectedOptions?.[0]?.textContent || 'Store';
+    const selectedUser = productSelectionExportUsersCache.find((row) => String(row.user_id) === String(userId));
+    const userLabel = selectedUser ? userExportDisplayName(selectedUser) : 'Selected user';
+    const requestId = ++productSelectionAccountSummaryRequest;
+
+    if (!userId) {
+        panel.innerHTML = '<div class="profile-account-summary__empty">Choose a user to see the account emails assigned to this store.</div>';
+        return;
+    }
+
+    panel.innerHTML = `<div class="profile-account-summary__empty">Loading ${escapeHTML(siteLabel)} account emails for ${escapeHTML(userLabel)}...</div>`;
+    try {
+        const params = new URLSearchParams({ site, user_id: userId });
+        const data = await authJSON(API + '/admin/store-run-status?' + params.toString());
+        if (requestId !== productSelectionAccountSummaryRequest) return;
+
+        const user = (Array.isArray(data.users) ? data.users : []).find((row) => String(row.id) === String(userId));
+        const store = (user?.stores || []).find((row) => String(row.site) === site);
+        const profiles = Array.isArray(store?.profile_accounts) ? store.profile_accounts : [];
+        const allEmails = [...new Set(profiles.flatMap((profile) => {
+            const values = Array.isArray(profile.login_emails) && profile.login_emails.length
+                ? profile.login_emails
+                : [profile.login_email];
+            return values.map((email) => String(email || '').trim().toLowerCase()).filter(Boolean);
+        }))];
+        const activeCount = store?.is_enabled ? profiles.length : 0;
+        const stateLabel = store?.is_enabled
+            ? `${activeCount} active ${siteLabel} account${activeCount === 1 ? '' : 's'}`
+            : `0 active · ${profiles.length} assigned (store paused)`;
+
+        panel.innerHTML = `
+          <div class="profile-account-summary__header">
+            <div>
+              <h4>${escapeHTML(siteLabel)} accounts for ${escapeHTML(user?.user_display || user?.email || userLabel)}</h4>
+              <p class="subtle-text">${escapeHTML(stateLabel)}. These are the retailer login emails assigned to this user for the selected store.</p>
+            </div>
+            <div class="panel-actions">
+              <span class="status-pill ${store?.is_enabled ? 'status-success' : 'status-muted'}">${escapeHTML(store?.is_enabled ? `${activeCount} active` : 'Paused')}</span>
+              ${allEmails.length ? '<button class="btn" type="button" data-copy-profile-account-emails>Copy account emails</button>' : ''}
+            </div>
+          </div>
+          <div class="profile-account-summary__list">
+            ${profiles.length ? profiles.map((profile, index) => {
+                const loginEmails = Array.isArray(profile.login_emails) && profile.login_emails.length
+                    ? profile.login_emails
+                    : (profile.login_email ? [profile.login_email] : []);
+                return `<div class="profile-account-summary__row">
+                  <div class="profile-account-summary__identity">
+                    <strong>${escapeHTML(profile.profile_name || `Profile ${index + 1}`)}</strong>
+                    ${loginEmails.length
+                        ? loginEmails.map((email) => `<span class="profile-account-summary__email">${escapeHTML(email)}</span>`).join('')
+                        : '<span class="profile-account-summary__email profile-account-summary__email--missing">Login email missing on this profile</span>'}
+                  </div>
+                  <span class="status-pill ${store?.is_enabled ? 'status-success' : 'status-muted'}">${store?.is_enabled ? 'Active' : 'Paused'}</span>
+                </div>`;
+            }).join('') : `<div class="profile-account-summary__empty">No profiles are assigned to ${escapeHTML(siteLabel)} for this user.</div>`}
+          </div>`;
+
+        panel.querySelector('[data-copy-profile-account-emails]')?.addEventListener('click', async (event) => {
+            await copyTextToClipboard(allEmails.join('\n'));
+            const button = event.currentTarget;
+            const original = button.textContent;
+            button.textContent = 'Emails copied';
+            setTimeout(() => { button.textContent = original; }, 1200);
+        });
+    } catch (err) {
+        if (requestId !== productSelectionAccountSummaryRequest) return;
+        panel.innerHTML = `<div class="profile-account-summary__empty">${escapeHTML(err.message || 'Could not load account emails.')}</div>`;
+    }
+}
 
 function updateProductSelectionExportStatusBanner() {
     const banner = document.getElementById("productSelectionExportStatus");
@@ -5219,7 +5306,10 @@ function initProductSelectionAdminTools() {
     const exportUserSelect = document.getElementById("productSelectionExportUser");
     if (exportUserSelect && !exportUserSelect.dataset.statusBound) {
         exportUserSelect.dataset.statusBound = "1";
-        exportUserSelect.addEventListener("change", updateProductSelectionExportStatusBanner);
+        exportUserSelect.addEventListener("change", () => {
+            updateProductSelectionExportStatusBanner();
+            loadProductSelectionAccountSummary().catch(() => {});
+        });
     }
     if (siteSelect && !siteSelect.dataset.exportUsersBound) {
         siteSelect.dataset.exportUsersBound = "1";
@@ -5230,6 +5320,7 @@ function initProductSelectionAdminTools() {
             if (output) output.value = "";
             if (results) results.innerHTML = "";
             updateProductSelectionExportStatusBanner();
+            await loadProductSelectionAccountSummary();
         });
     }
     if (saveName && !saveName.dataset.bound) {
@@ -5252,7 +5343,7 @@ function initProductSelectionAdminTools() {
         clearButton.addEventListener("click", clearProductSelectionsForSelectedStore);
     }
     loadProductSelectionChanges().catch(() => {});
-    loadProductSelectionExportUsers().catch(() => {});
+    loadProductSelectionExportUsers().then(loadProductSelectionAccountSummary).catch(() => {});
     loadTargetRecommendedListNameAdmin().catch(() => {});
 }
 

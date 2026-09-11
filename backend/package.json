@@ -5,7 +5,7 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "test": "node tests/order-tracker-global-mailbox-pagination.test.js && node tests/discord-history-import.test.js && node tests/target-historical-email-repair.test.js && node tests/target-delivery-title-alias.test.js && node tests/walmart-historical-email-repair.test.js && node tests/pokemon-payment-alert.test.js"
+    "test": "node tests/order-tracker-global-mailbox-pagination.test.js && node tests/discord-history-import.test.js && node tests/target-historical-email-repair.test.js && node tests/target-delivery-title-alias.test.js && node tests/walmart-historical-email-repair.test.js && node tests/pokemon-payment-alert.test.js && node tests/profile-account-summary.test.js && node tests/profile-address-line-2.test.js"
   },
   "keywords": [],
   "author": "",

@@ -97,6 +97,7 @@ const registerSuccessNetwork = require("./success-network");
 const { registerOrderTracker, notifyCheckoutForOrderTracker } = require("./order-tracker");
 const { registerMarketValueEngine } = require("./market-value-engine");
 const { registerMasterProductCatalog } = require("./master-product-catalog");
+const { buildProfileAccountsByUserStore } = require("./profile-account-summary");
 const supabase = require("./database");
 const { encrypt, decrypt } = require("./encryption");
 
@@ -8459,10 +8460,12 @@ app.get("/admin/store-run-status", auth, admin, async (req, res) => {
         const profileSyncMap = await loadProfileSyncStatus(userIds);
 
         let assignmentRows = [];
+        const exactEmailsByProfileStore = new Map();
+        const fallbackEmailsByProfileId = new Map();
         if (userIds.length) {
             const { data: rawProfiles, error: profilesError } = await supabase
                 .from("profiles")
-                .select("id, user_id, account_type, created_at")
+                .select("id, user_id, profile_name, account_type, created_at")
                 .in("user_id", userIds);
             if (profilesError) return res.status(500).json({ error: profilesError.message });
 
@@ -8474,6 +8477,18 @@ app.get("/admin/store-run-status", auth, admin, async (req, res) => {
                 if (!id || !cleanStore || cleanStore === "raffle" || !STORE_RUN_STATUS_SITES.includes(cleanStore)) return;
                 if (!storeSetsByProfileId.has(id)) storeSetsByProfileId.set(id, new Set());
                 storeSetsByProfileId.get(id).add(cleanStore);
+            };
+            const addEmailToSet = (map, key, email) => {
+                const cleanEmail = String(email || "").trim().toLowerCase();
+                if (!key || !cleanEmail || !/^\S+@\S+\.\S+$/.test(cleanEmail)) return;
+                if (!map.has(key)) map.set(key, new Set());
+                map.get(key).add(cleanEmail);
+            };
+            const addStoreEmailForProfile = (profileId, store, email) => {
+                const id = String(profileId || "");
+                const cleanStore = normalizeProfileAccountType(store);
+                if (!id || !cleanStore || !STORE_RUN_STATUS_SITES.includes(cleanStore)) return;
+                addEmailToSet(exactEmailsByProfileStore, `${id}:${cleanStore}`, email);
             };
 
             (rawProfiles || []).forEach((profile) => {
@@ -8495,39 +8510,55 @@ app.get("/admin/store-run-status", auth, admin, async (req, res) => {
             try {
                 const { data: credentialData, error: credentialError } = await supabase
                     .from("profile_store_credentials")
-                    .select("profile_id, store")
+                    .select("profile_id, store, login_email")
                     .in("profile_id", Array.from(profilesById.keys()));
                 if (!credentialError) {
-                    (credentialData || []).forEach((row) => addStoreForProfile(row.profile_id, row.store));
+                    (credentialData || []).forEach((row) => {
+                        addStoreForProfile(row.profile_id, row.store);
+                        addStoreEmailForProfile(row.profile_id, row.store, row.login_email);
+                    });
                 }
             } catch (_) {
                 // Older deployments may not have profile_store_credentials yet.
             }
 
+            let accountRows = [];
             try {
-                const { data: accountData, error: accountError } = await supabase
+                const primary = await supabase
                     .from("accounts")
-                    .select("profile_id, provider, account_type")
+                    .select("profile_id, provider, account_type, login_email")
                     .in("profile_id", Array.from(profilesById.keys()));
-                if (!accountError) {
-                    (accountData || []).forEach((row) => addStoreForProfile(row.profile_id, row.provider || row.account_type));
+                if (!primary.error) accountRows = primary.data || [];
+                else {
+                    // Some accounts schemas only have provider; account_type is optional.
+                    const fallback = await supabase
+                        .from("accounts")
+                        .select("profile_id, provider, login_email")
+                        .in("profile_id", Array.from(profilesById.keys()));
+                    if (!fallback.error) accountRows = fallback.data || [];
                 }
             } catch (_) {
-                // Some accounts schemas only have provider; account_type is optional.
                 try {
                     const { data: accountData, error: accountError } = await supabase
                         .from("accounts")
-                        .select("profile_id, provider")
+                        .select("profile_id, provider, login_email")
                         .in("profile_id", Array.from(profilesById.keys()));
-                    if (!accountError) {
-                        (accountData || []).forEach((row) => addStoreForProfile(row.profile_id, row.provider));
-                    }
+                    if (!accountError) accountRows = accountData || [];
                 } catch (_) {}
             }
+            accountRows.forEach((row) => {
+                const profileId = String(row.profile_id || "");
+                const store = row.provider || row.account_type;
+                addStoreForProfile(profileId, store);
+                addStoreEmailForProfile(profileId, store, row.login_email);
+                addEmailToSet(fallbackEmailsByProfileId, profileId, row.login_email);
+            });
 
             assignmentRows = (rawProfiles || []).map((profile) => {
                 const stores = Array.from(storeSetsByProfileId.get(String(profile.id)) || []);
                 return {
+                    profile_id: profile.id,
+                    profile_name: profile.profile_name || "",
                     user_id: profile.user_id,
                     stores: stores.length ? stores : [normalizeProfileAccountType(profile.account_type || "general")],
                     updated_at: profile.created_at || null,
@@ -8547,10 +8578,17 @@ app.get("/admin/store-run-status", auth, admin, async (req, res) => {
                 current[store] = (current[store] || 0) + 1;
                 const changedAt = row.updated_at || row.created_at || null;
                 if (changedAt && (!updated[store] || new Date(changedAt) > new Date(updated[store]))) updated[store] = changedAt;
+
             });
             profileCounts.set(userId, current);
             profileUpdated.set(userId, updated);
         });
+
+        const profileAccountsByUserStore = buildProfileAccountsByUserStore(
+            assignmentRows,
+            exactEmailsByProfileStore,
+            fallbackEmailsByProfileId
+        );
 
         const usersOut = (users || []).map((user) => {
             const status = statusMap.get(String(user.id)) || Object.fromEntries(STORE_RUN_STATUS_SITES.map((site) => [site, false]));
@@ -8595,6 +8633,7 @@ app.get("/admin/store-run-status", auth, admin, async (req, res) => {
                             is_enabled: currentEnabled,
                             updated_at: runChangedAt,
                             profile_count: currentCount,
+                            profile_accounts: userFilter ? (profileAccountsByUserStore.get(`${user.id}:${site}`) || []) : [],
                             profile_updated_at: newestProfileAt,
                             ...sync,
                             changed_since_acknowledged: changedSinceAcknowledged

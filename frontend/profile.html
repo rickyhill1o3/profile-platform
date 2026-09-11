@@ -73,7 +73,8 @@
               <div class="field"><label for="last_name">Last Name</label><input class="input" id="last_name" required /></div>
               <div class="field field--full"><label for="email">Email</label><input class="input" id="email" required /></div>
               <div class="field field--full"><label for="phone">Phone</label><input class="input" id="phone" maxlength="10" placeholder="xxxxxxxxxx" required /></div>
-              <div class="field field--full"><label for="address1">Address</label><input class="input" id="address1" required /></div>
+              <div class="field field--full"><label for="address1">Address Line 1</label><input class="input" id="address1" autocomplete="address-line1" required /></div>
+              <div class="field field--full"><label for="address2">Address Line 2 <span class="subtle-text">(optional)</span></label><input class="input" id="address2" autocomplete="address-line2" placeholder="Apartment, suite, unit, door, etc." /></div>
               <div class="field"><label for="city">City</label><input class="input" id="city" required /></div>
               <div class="field">
                 <label for="state">State</label>
@@ -131,6 +132,6 @@
     </div>
   </div>
 
-  <script src="script.js?v=20260728-profile-limits"></script>
+  <script src="script.js?v=20260911-address-line-2"></script>
 </body>
 </html>
