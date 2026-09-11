@@ -995,6 +995,20 @@ async function loadProfiles() {
 
 
 
+const PROFILE_STATE_OPTIONS = [
+    ['AL', 'Alabama'], ['AK', 'Alaska'], ['AZ', 'Arizona'], ['AR', 'Arkansas'], ['CA', 'California'],
+    ['CO', 'Colorado'], ['CT', 'Connecticut'], ['DE', 'Delaware'], ['FL', 'Florida'], ['GA', 'Georgia'],
+    ['HI', 'Hawaii'], ['ID', 'Idaho'], ['IL', 'Illinois'], ['IN', 'Indiana'], ['IA', 'Iowa'],
+    ['KS', 'Kansas'], ['KY', 'Kentucky'], ['LA', 'Louisiana'], ['ME', 'Maine'], ['MD', 'Maryland'],
+    ['MA', 'Massachusetts'], ['MI', 'Michigan'], ['MN', 'Minnesota'], ['MS', 'Mississippi'], ['MO', 'Missouri'],
+    ['MT', 'Montana'], ['NE', 'Nebraska'], ['NV', 'Nevada'], ['NH', 'New Hampshire'], ['NJ', 'New Jersey'],
+    ['NM', 'New Mexico'], ['NY', 'New York'], ['NC', 'North Carolina'], ['ND', 'North Dakota'], ['OH', 'Ohio'],
+    ['OK', 'Oklahoma'], ['OR', 'Oregon'], ['PA', 'Pennsylvania'], ['RI', 'Rhode Island'], ['SC', 'South Carolina'],
+    ['SD', 'South Dakota'], ['TN', 'Tennessee'], ['TX', 'Texas'], ['UT', 'Utah'], ['VT', 'Vermont'],
+    ['VA', 'Virginia'], ['WA', 'Washington'], ['WV', 'West Virginia'], ['WI', 'Wisconsin'], ['WY', 'Wyoming'],
+    ['DC', 'District of Columbia'], ['PR', 'Puerto Rico']
+];
+
 function ensureBulkProfileEditModal() {
     let modal = document.getElementById('bulkProfileEditModal');
     if (modal) return modal;
@@ -1032,6 +1046,14 @@ function ensureBulkProfileEditModal() {
                     </select>
                     <small>AYCD profiles count as email-connected without requiring an individual Gmail app password.</small>
                 </label>
+                <label class="field">
+                    <span>Shipping state</span>
+                    <select id="bulkProfileState" class="input">
+                        <option value="">No change</option>
+                        ${PROFILE_STATE_OPTIONS.map(([code, name]) => `<option value="${name}">${name} (${code})</option>`).join('')}
+                    </select>
+                    <small>Sets the same shipping state on every selected profile. All other shipping fields stay unchanged.</small>
+                </label>
                 <div id="bulkProfileEditMessage" class="form-help"></div>
             </div>
             <div class="bulk-edit-footer">
@@ -1049,10 +1071,11 @@ function openBulkProfileEdit(group, ids) {
     modal.dataset.group = group;
     modal.dataset.ids = JSON.stringify(ids);
     modal.querySelector('#bulkProfileEditTitle').textContent = `Edit ${ids.length} selected ${group} profile${ids.length === 1 ? '' : 's'}`;
-    modal.querySelector('#bulkProfileEditSummary').textContent = 'Only fields entered below will be changed. Existing emails, shipping details, cards, and profile names stay untouched.';
+    modal.querySelector('#bulkProfileEditSummary').textContent = 'Only fields selected or entered below will be changed. Existing emails, cards, profile names, and other shipping details stay untouched.';
     modal.querySelector('#bulkProfileLoginPassword').value = '';
     modal.querySelector('#bulkProfileGmailAppPassword').value = '';
     modal.querySelector('#bulkProfileAycdAction').value = 'keep';
+    modal.querySelector('#bulkProfileState').value = '';
     const message = modal.querySelector('#bulkProfileEditMessage');
     message.textContent = '';
     message.className = 'form-help';
@@ -1063,7 +1086,8 @@ function openBulkProfileEdit(group, ids) {
         const loginPassword = modal.querySelector('#bulkProfileLoginPassword').value;
         const gmailAppPassword = modal.querySelector('#bulkProfileGmailAppPassword').value.replace(/\s+/g, '');
         const aycdAction = modal.querySelector('#bulkProfileAycdAction').value;
-        if (!loginPassword && !gmailAppPassword && aycdAction === 'keep') {
+        const state = modal.querySelector('#bulkProfileState').value;
+        if (!loginPassword && !gmailAppPassword && aycdAction === 'keep' && !state) {
             message.textContent = 'Choose at least one change.';
             return;
         }
@@ -1078,12 +1102,14 @@ function openBulkProfileEdit(group, ids) {
                     store: group,
                     login_password: loginPassword || undefined,
                     gmail_app_password: gmailAppPassword || undefined,
-                    use_aycd_inbox: aycdAction === 'keep' ? undefined : aycdAction === 'enable'
+                    use_aycd_inbox: aycdAction === 'keep' ? undefined : aycdAction === 'enable',
+                    state: state || undefined
                 })
             });
             const data = await response.json().catch(() => ({}));
             if (!response.ok || data.error) throw new Error(data.error || 'Could not update selected profiles.');
-            message.textContent = `Updated ${data.updated_count || ids.length} profile${(data.updated_count || ids.length) === 1 ? '' : 's'}.`;
+            const updatedCount = data.updated_count || ids.length;
+            message.textContent = `Updated ${updatedCount} profile${updatedCount === 1 ? '' : 's'}.${data.state ? ` Shipping state set to ${data.state}.` : ''}`;
             message.className = 'form-help success';
             ids.forEach((id) => selectedProfileIds.delete(String(id)));
             await loadProfiles();

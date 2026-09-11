@@ -98,6 +98,7 @@ const { registerOrderTracker, notifyCheckoutForOrderTracker } = require("./order
 const { registerMarketValueEngine } = require("./market-value-engine");
 const { registerMasterProductCatalog } = require("./master-product-catalog");
 const { buildProfileAccountsByUserStore } = require("./profile-account-summary");
+const { normalizeBulkProfileState } = require("./profile-bulk-update");
 const supabase = require("./database");
 const { encrypt, decrypt } = require("./encryption");
 
@@ -437,7 +438,7 @@ async function getUserProfilesWithRelations(userId) {
       id,
       profile_name,
       account_type,
-      addresses(email, phone),
+      addresses(id, profile_id, first_name, last_name, email, phone, address1, address2, city, state, zip),
       payments(card_last4)
     `)
         .eq("user_id", userId);
@@ -9628,84 +9629,119 @@ app.patch("/profiles/bulk", auth, async (req, res) => {
         const hasLoginPassword = Object.prototype.hasOwnProperty.call(req.body || {}, 'login_password') && String(req.body.login_password || '').length > 0;
         const hasGmailPassword = Object.prototype.hasOwnProperty.call(req.body || {}, 'gmail_app_password') && String(req.body.gmail_app_password || '').replace(/\s+/g, '').length > 0;
         const hasAycd = typeof req.body?.use_aycd_inbox === 'boolean';
-        if (!hasLoginPassword && !hasGmailPassword && !hasAycd) return res.status(400).json({ error: 'No profile changes were provided' });
+        const hasState = Object.prototype.hasOwnProperty.call(req.body || {}, 'state') && String(req.body.state || '').trim().length > 0;
+        const requestedState = hasState ? normalizeBulkProfileState(req.body.state) : '';
+        if (hasState && !requestedState) return res.status(400).json({ error: 'Choose a valid state.' });
+        if (!hasLoginPassword && !hasGmailPassword && !hasAycd && !hasState) return res.status(400).json({ error: 'No profile changes were provided' });
 
         const allProfiles = await getUserProfilesWithRelations(req.user_id);
         const owned = (allProfiles || []).filter((profile) => ids.includes(String(profile.id)) && profileAssignedStores(profile).includes(store));
         if (!owned.length) return res.status(404).json({ error: 'No matching profiles found in this store group' });
         const ownedIds = owned.map((profile) => String(profile.id));
 
-        let existingRows = [];
-        try {
-            // Supabase/PostgREST can reject very large `in(...)` filters because the generated
-            // request URL becomes too long. Load credentials in bounded chunks so hundreds of
-            // selected profiles can be edited together safely.
-            for (let i = 0; i < ownedIds.length; i += 75) {
-                const idChunk = ownedIds.slice(i, i + 75);
-                const { data, error } = await supabase
-                    .from('profile_store_credentials')
-                    .select('*')
-                    .in('profile_id', idChunk)
-                    .eq('store', store);
-                if (error) throw error;
-                existingRows.push(...(data || []));
-            }
-        } catch (error) {
-            return res.status(500).json({ error: `Could not load store credentials: ${error.message}` });
-        }
-        const byProfile = new Map(existingRows.map((row) => [String(row.profile_id), row]));
-        const rows = owned.map((profile) => {
-            const current = byProfile.get(String(profile.id)) || {};
-            const fallbackAccount = (profile.accounts || []).find((account) => normalizeProfileAccountType(account.provider || account.account_type || '') === store) || profile.accounts?.[0] || {};
-            return {
-                ...(current.id ? { id: current.id } : {}),
-                profile_id: profile.id,
-                store,
-                login_email: current.login_email || fallbackAccount.username || fallbackAccount.email || profile.addresses?.[0]?.email || null,
-                login_password: hasLoginPassword ? String(req.body.login_password) : (current.login_password || fallbackAccount.password || null),
-                gmail_app_password: hasGmailPassword ? normalizeStoredGmailAppPassword(req.body.gmail_app_password) : (current.gmail_app_password || null),
-                amazon_2fa_secret: current.amazon_2fa_secret || fallbackAccount.two_fa_secret || null,
-                use_aycd_inbox: hasAycd ? !!req.body.use_aycd_inbox : !!current.use_aycd_inbox
-            };
-        });
-
-        // Process bounded concurrent writes. Sequentially updating 500-700 profiles can exceed
-        // Render's request timeout even though every individual update is valid.
-        for (let i = 0; i < rows.length; i += 20) {
-            const chunk = rows.slice(i, i + 20);
-            const results = await Promise.all(chunk.map(async (row) => {
-                if (row.id) {
-                    const { id, ...changes } = row;
-                    return supabase.from('profile_store_credentials').update(changes).eq('id', id);
+        const hasCredentialChanges = hasLoginPassword || hasGmailPassword || hasAycd;
+        if (hasCredentialChanges) {
+            let existingRows = [];
+            try {
+                // Supabase/PostgREST can reject very large `in(...)` filters because the generated
+                // request URL becomes too long. Load credentials in bounded chunks so hundreds of
+                // selected profiles can be edited together safely.
+                for (let i = 0; i < ownedIds.length; i += 75) {
+                    const idChunk = ownedIds.slice(i, i + 75);
+                    const { data, error } = await supabase
+                        .from('profile_store_credentials')
+                        .select('*')
+                        .in('profile_id', idChunk)
+                        .eq('store', store);
+                    if (error) throw error;
+                    existingRows.push(...(data || []));
                 }
-                return supabase.from('profile_store_credentials').insert(row);
-            }));
-            const failed = results.find((result) => result?.error);
-            if (failed?.error) throw failed.error;
-        }
-
-        if (hasLoginPassword) {
-            const accountRows = [];
-            for (let i = 0; i < ownedIds.length; i += 75) {
-                const { data, error } = await supabase
-                    .from('accounts')
-                    .select('id,profile_id,provider')
-                    .in('profile_id', ownedIds.slice(i, i + 75));
-                if (error) throw error;
-                accountRows.push(...(data || []));
+            } catch (error) {
+                return res.status(500).json({ error: `Could not load store credentials: ${error.message}` });
             }
-            const matchingAccounts = accountRows.filter((account) => normalizeProfileAccountType(account.provider || '') === store);
-            for (let i = 0; i < matchingAccounts.length; i += 25) {
-                const results = await Promise.all(matchingAccounts.slice(i, i + 25).map((account) =>
-                    supabase.from('accounts').update({ login_password: String(req.body.login_password) }).eq('id', account.id)
-                ));
+            const byProfile = new Map(existingRows.map((row) => [String(row.profile_id), row]));
+            const rows = owned.map((profile) => {
+                const current = byProfile.get(String(profile.id)) || {};
+                const fallbackAccount = (profile.accounts || []).find((account) => normalizeProfileAccountType(account.provider || account.account_type || '') === store) || profile.accounts?.[0] || {};
+                return {
+                    ...(current.id ? { id: current.id } : {}),
+                    profile_id: profile.id,
+                    store,
+                    login_email: current.login_email || fallbackAccount.username || fallbackAccount.email || profile.addresses?.[0]?.email || null,
+                    login_password: hasLoginPassword ? String(req.body.login_password) : (current.login_password || fallbackAccount.password || null),
+                    gmail_app_password: hasGmailPassword ? normalizeStoredGmailAppPassword(req.body.gmail_app_password) : (current.gmail_app_password || null),
+                    amazon_2fa_secret: current.amazon_2fa_secret || fallbackAccount.two_fa_secret || null,
+                    use_aycd_inbox: hasAycd ? !!req.body.use_aycd_inbox : !!current.use_aycd_inbox
+                };
+            });
+
+            // Process bounded concurrent writes. Sequentially updating 500-700 profiles can exceed
+            // Render's request timeout even though every individual update is valid.
+            for (let i = 0; i < rows.length; i += 20) {
+                const chunk = rows.slice(i, i + 20);
+                const results = await Promise.all(chunk.map(async (row) => {
+                    if (row.id) {
+                        const { id, ...changes } = row;
+                        return supabase.from('profile_store_credentials').update(changes).eq('id', id);
+                    }
+                    return supabase.from('profile_store_credentials').insert(row);
+                }));
                 const failed = results.find((result) => result?.error);
                 if (failed?.error) throw failed.error;
             }
+
+            if (hasLoginPassword) {
+                const accountRows = [];
+                for (let i = 0; i < ownedIds.length; i += 75) {
+                    const { data, error } = await supabase
+                        .from('accounts')
+                        .select('id,profile_id,provider')
+                        .in('profile_id', ownedIds.slice(i, i + 75));
+                    if (error) throw error;
+                    accountRows.push(...(data || []));
+                }
+                const matchingAccounts = accountRows.filter((account) => normalizeProfileAccountType(account.provider || '') === store);
+                for (let i = 0; i < matchingAccounts.length; i += 25) {
+                    const results = await Promise.all(matchingAccounts.slice(i, i + 25).map((account) =>
+                        supabase.from('accounts').update({ login_password: String(req.body.login_password) }).eq('id', account.id)
+                    ));
+                    const failed = results.find((result) => result?.error);
+                    if (failed?.error) throw failed.error;
+                }
+            }
         }
 
-        await markProfileSyncChanged(req.user_id, [store], 'profiles_bulk_updated');
-        res.json({ success: true, updated_count: ownedIds.length, store });
+        let stateUpdatedCount = 0;
+        if (hasState) {
+            for (let i = 0; i < ownedIds.length; i += 75) {
+                const { data, error } = await supabase
+                    .from('addresses')
+                    .update({ state: requestedState })
+                    .in('profile_id', ownedIds.slice(i, i + 75))
+                    .select('profile_id');
+                if (error) throw error;
+                stateUpdatedCount += (data || []).length;
+            }
+            if (stateUpdatedCount !== ownedIds.length) {
+                throw new Error(`State was updated for ${stateUpdatedCount} of ${ownedIds.length} selected profiles. One or more profiles are missing a shipping address.`);
+            }
+
+            const targetProfiles = owned.filter((profile) => profileAssignedStores(profile).map(normalizeProfileAccountType).includes('target'));
+            for (let i = 0; i < targetProfiles.length; i += 10) {
+                await Promise.all(targetProfiles.slice(i, i + 10).map((profile) => {
+                    const address = { ...(profile.addresses?.[0] || {}), state: requestedState };
+                    return syncTargetAddressVersion({ userId: req.user_id, profileId: profile.id, address }).catch((error) => {
+                        console.error('Target address version capture failed after bulk state update:', error.message || error);
+                    });
+                }));
+            }
+        }
+
+        const changedStores = hasState
+            ? [...new Set(owned.flatMap((profile) => profileAssignedStores(profile).map(normalizeProfileAccountType)).filter(Boolean))]
+            : [store];
+        await markProfileSyncChanged(req.user_id, changedStores, 'profiles_bulk_updated');
+        res.json({ success: true, updated_count: ownedIds.length, state_updated_count: stateUpdatedCount, state: hasState ? requestedState : null, store });
     } catch (err) {
         const status = err.message === 'This account has been revoked' ? 403 : 500;
         res.status(status).json({ error: err.message || 'Bulk profile update failed' });
