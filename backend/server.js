@@ -98,6 +98,11 @@ const { registerOrderTracker, notifyCheckoutForOrderTracker } = require("./order
 const { registerMarketValueEngine } = require("./market-value-engine");
 const { registerMasterProductCatalog } = require("./master-product-catalog");
 const { buildProfileAccountsByUserStore } = require("./profile-account-summary");
+const {
+    buildTargetProfileOwnershipIndex,
+    resolveOwnedTargetProfile,
+    buildUserScopedTargetEvents
+} = require("./target-profile-event-ownership");
 const { normalizeBulkProfileState } = require("./profile-bulk-update");
 const supabase = require("./database");
 const { encrypt, decrypt } = require("./encryption");
@@ -8925,8 +8930,12 @@ async function recordTargetProfileAddressOutcome({ payload, resolvedUser, webhoo
 
     const profiles = await getUserProfilesWithRelations(resolvedUser.id);
     const targetProfiles = (profiles || []).filter((profile) => profileAssignedStores(profile).map(normalizeProfileAccountType).includes('target'));
-    const profile = targetProfiles.find((item) => parsed.accountEmail && extractEmail(item.addresses?.[0]?.email || '') === parsed.accountEmail)
-        || targetProfiles.find((item) => parsed.profileName && normalizeTargetProfileTrackerText(item.profile_name || '') === normalizeTargetProfileTrackerText(parsed.profileName));
+    const profile = resolveOwnedTargetProfile(buildTargetProfileOwnershipIndex(targetProfiles), parsed, {
+        // resolvedUser was established before this function is called. Profile-name recovery is
+        // therefore limited to that one user's unique Target profiles and can never jump users.
+        allowProfileFallback: true,
+        allowProfileFallbackWhenEmailUnmatched: true
+    });
     if (!profile) return null;
 
     const address = profile.addresses?.[0] || {};
@@ -9012,9 +9021,14 @@ app.get('/target-profile-health', auth, async (req, res) => {
 
         const { data: profileRows, error: profileError } = await supabase
             .from('profiles')
-            .select('*,addresses(*)')
+            .select('*,addresses(*),accounts(*)')
             .eq('user_id', req.user_id);
         if (profileError) return res.status(500).json({ error: profileError.message });
+
+        const credentialMap = await loadProfileStoreCredentials((profileRows || []).map((profile) => profile.id));
+        for (const profile of profileRows || []) {
+            profile.store_credentials = credentialMap.get(String(profile.id)) || {};
+        }
 
         const assignments = await loadProfileStoreAssignments(req.user_id);
         const targetProfiles = (profileRows || []).filter((profile) => {
@@ -9039,80 +9053,13 @@ app.get('/target-profile-health', auth, async (req, res) => {
             if (syncResult?.unavailable) addressHistoryAvailable = false;
         }
 
-        const byEmail = new Map();
-        const byName = new Map();
-        const byProfileNumber = new Map();
-        const duplicateProfileNumbers = new Set();
-        for (const profile of targetProfiles) {
-            const email = extractEmail(profile.addresses?.[0]?.email || '');
-            if (email) byEmail.set(email, profile);
-            const name = normalizeTargetProfileTrackerText(profile.profile_name || '');
-            if (name && !byName.has(name)) byName.set(name, profile);
-            const number = extractTargetProfileNumber(profile.profile_name || '');
-            if (number) {
-                if (byProfileNumber.has(number)) duplicateProfileNumbers.add(number);
-                else byProfileNumber.set(number, profile);
-            }
-        }
-        for (const number of duplicateProfileNumbers) byProfileNumber.delete(number);
-
-        const eventsByProfile = new Map(targetProfiles.map((profile) => [String(profile.id), []]));
-        // Do not pre-filter by the database row's `type`. Older Shikari error deliveries and some
-        // forwarded/replayed webhook rows were stored under a non-checkout type even though the raw
-        // payload is unmistakably a Target checkout result. We classify the raw payload below, which
-        // is the authoritative source for Target health. This also recovers historical reseller rows
-        // such as explicit `Profile: Target #83` events that were visible in Discord but skipped here.
-        const webhookRows = await getWebhookLogEntries({ limit: 50000, from: since.slice(0, 10) });
-        let matchedEvents = 0;
-        const unmatchedResellerEvents = [];
-
-        for (const row of webhookRows || []) {
-            if (!row?.payload) continue;
-            const parsed = classifyTargetProfileWebhook(row.payload);
-            if (!parsed.category) continue;
-            const payloadSite = normalizeProfileAccountType(cleanFieldValue(buildFieldMapFromEmbeds(row.payload || {})?.fields?.site || row.payload?.site || row.site || ''));
-            if (payloadSite !== 'target') continue;
-            let profile = parsed.accountEmail ? byEmail.get(parsed.accountEmail) : null;
-            // Shikari error webhooks can contain an Account email that does not exactly match the
-            // currently saved profile email (or may have been imported/edited later). Always fall
-            // back to the explicit Shikari Profile field / Target # number when email matching fails.
-            // Profile-name matching is intentionally independent of the Account match so either field
-            // can resolve the event.
-            if (!profile && parsed.profileName) {
-                const normalizedProfileName = normalizeTargetProfileTrackerText(parsed.profileName);
-                profile = byName.get(normalizedProfileName) || null;
-                if (!profile) {
-                    const number = extractTargetProfileNumber(parsed.profileName);
-                    if (number) profile = byProfileNumber.get(number) || null;
-                }
-            }
-            if (!profile) {
-                if (parsed.category === 'reseller') unmatchedResellerEvents.push({
-                    id: row.id, created_at: row.created_at, profile_name: parsed.profileName || '', account_email: parsed.accountEmail || '', order_id: parsed.orderId || ''
-                });
-                continue;
-            }
-
-            const profileEvents = eventsByProfile.get(String(profile.id));
-            profileEvents.push({
-                id: row.id,
-                created_at: row.created_at,
-                category: parsed.category,
-                reason: parsed.reason,
-                order_id: parsed.orderId || '',
-                product: row.product_name || row.product || '',
-                sku: row.sku || '',
-                bot: row.bot || row.source || '',
-                account_email: parsed.accountEmail || extractEmail(profile.addresses?.[0]?.email || '')
-            });
-            matchedEvents += 1;
-        }
-
         const addressHistoryByProfile = new Map();
         let globalAddressPatterns = [];
+        let ownVersions = [];
+        let ownAddressEvents = [];
         if (addressHistoryAvailable && targetProfiles.length) {
             const profileIds = targetProfiles.map((profile) => profile.id);
-            const { data: ownVersions, error: versionsError } = await supabase
+            const { data: versionRows, error: versionsError } = await supabase
                 .from('target_profile_address_versions')
                 .select('*')
                 .eq('user_id', req.user_id)
@@ -9122,51 +9069,54 @@ app.get('/target-profile-health', auth, async (req, res) => {
                 if (targetAddressHistoryTableMissing(versionsError)) addressHistoryAvailable = false;
                 else throw versionsError;
             }
+            ownVersions = versionRows || [];
 
-            // Backfill recent webhook outcomes onto the current address version when the profile/address
-            // existed unchanged at the time of the webhook. This safely recovers events from before this
-            // analytics feature was deployed without guessing across a later address edit.
-            if (Array.isArray(ownVersions) && ownVersions.length) {
-                const activeVersionByProfile = new Map((ownVersions || []).filter((v) => !v.valid_to).map((v) => [String(v.profile_id), v]));
-                const profileById = new Map(targetProfiles.map((p) => [String(p.id), p]));
-                const inferredRows = [];
-                for (const [profileId, eventList] of eventsByProfile.entries()) {
-                    const version = activeVersionByProfile.get(String(profileId));
-                    const profile = profileById.get(String(profileId));
-                    if (!version || !profile) continue;
-                    const modifiedMs = profileTargetLastModifiedMs(profile);
-                    for (const event of eventList || []) {
-                        const eventMs = new Date(event.created_at || 0).getTime() || 0;
-                        if (!event.id || !eventMs || (modifiedMs && eventMs < modifiedMs)) continue;
-                        inferredRows.push({
-                            webhook_log_id: String(event.id), user_id: req.user_id, profile_id: profile.id,
-                            address_version_id: version.id, event_at: event.created_at, category: event.category,
-                            reason: event.reason || '', order_id: event.order_id || '', account_email: event.account_email || '',
-                            profile_name: profile.profile_name || ''
-                        });
-                    }
-                }
-                for (let i = 0; i < inferredRows.length; i += 250) {
-                    const batch = inferredRows.slice(i, i + 250);
-                    const { error: backfillError } = await supabase.from('target_profile_address_events').upsert(batch, { onConflict: 'webhook_log_id' });
-                    if (backfillError && !targetAddressHistoryTableMissing(backfillError)) console.warn('Target address outcome backfill failed:', backfillError.message || backfillError);
-                }
-            }
-
-            const { data: ownAddressEvents, error: ownEventsError } = await supabase
+            const { data: eventRows, error: ownEventsError } = await supabase
                 .from('target_profile_address_events')
-                .select('address_version_id,profile_id,category,event_at,reason,order_id')
+                .select('id,webhook_log_id,user_id,address_version_id,profile_id,category,event_at,reason,order_id,account_email,profile_name,created_at')
                 .eq('user_id', req.user_id)
+                .in('profile_id', profileIds)
                 .gte('event_at', since)
                 .order('event_at', { ascending: false });
             if (ownEventsError) {
                 if (targetAddressHistoryTableMissing(ownEventsError)) addressHistoryAvailable = false;
                 else throw ownEventsError;
             }
+            ownAddressEvents = eventRows || [];
+        }
 
-            if (addressHistoryAvailable) {
+        // Successful checkouts come from the signed-in user's own order rows, never the global
+        // webhook log. This preserves older successes even if an earlier dashboard visit moved a
+        // guessed address-event row to a different user. Failed/reseller events remain sourced from
+        // target_profile_address_events, where user_id and profile_id were stamped during intake.
+        const ownedTargetOrders = [];
+        for (let offset = 0; offset < 50000; offset += 1000) {
+            const { data: orderBatch, error: ownedOrdersError } = await supabase
+                .from('orders')
+                .select('id,user_id,external_order_id,created_at,site,sku,product_name,source,metadata,raw_payload')
+                .eq('user_id', req.user_id)
+                .ilike('site', 'target')
+                .gte('created_at', since)
+                .order('created_at', { ascending: false })
+                .range(offset, offset + 999);
+            if (ownedOrdersError) throw ownedOrdersError;
+            ownedTargetOrders.push(...(orderBatch || []));
+            if ((orderBatch || []).length < 1000) break;
+        }
+
+        const scopedTargetEvents = buildUserScopedTargetEvents({
+            profiles: targetProfiles,
+            storedEvents: ownAddressEvents,
+            ownedOrders: ownedTargetOrders,
+            classifyPayload: classifyTargetProfileWebhook
+        });
+        const eventsByProfile = scopedTargetEvents.eventsByProfile;
+        const acceptedStoredEvents = scopedTargetEvents.acceptedStoredEvents;
+        const matchedEvents = scopedTargetEvents.matchedEvents;
+
+        if (addressHistoryAvailable && targetProfiles.length) {
                 const eventCountsByVersion = new Map();
-                for (const event of ownAddressEvents || []) {
+                for (const event of acceptedStoredEvents) {
                     const key = String(event.address_version_id || '');
                     if (!key) continue;
                     if (!eventCountsByVersion.has(key)) eventCountsByVersion.set(key, { success: 0, reseller: 0, order_id: 0, other: 0, total: 0, latest_event: null });
@@ -9240,7 +9190,6 @@ app.get('/target-profile-health', auth, async (req, res) => {
                         }))
                         .sort((a, b) => b.attempts - a.attempts || a.pattern_label.localeCompare(b.pattern_label));
                 }
-            }
         }
 
         const profiles = targetProfiles.map((profile) => {
