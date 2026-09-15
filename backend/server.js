@@ -7805,7 +7805,7 @@ function normalizeImportedProfilePayload(entry = {}, accountType = "walmart") {
 }
 
 
-const PROFILE_ACCOUNT_TYPES = new Set(["general", "walmart", "target", "samsclub", "amazon", "bandai", "crunchyroll", "pokemoncenter", "raffle"]);
+const PROFILE_ACCOUNT_TYPES = new Set(["general", "walmart", "target", "samsclub", "costco", "amazon", "bandai", "crunchyroll", "pokemoncenter", "raffle"]);
 
 function normalizeProfileAccountType(value = "general") {
     const raw = String(value || "general").trim().toLowerCase();
@@ -7816,6 +7816,9 @@ function normalizeProfileAccountType(value = "general") {
     }
     if (["pokemoncenter", "pokemon", "pokecenter", "pc"].includes(type)) {
         return "pokemoncenter";
+    }
+    if (["costco", "costcowholesale"].includes(type)) {
+        return "costco";
     }
     if (["crunchyroll", "crunchy", "cr"].includes(type)) {
         return "crunchyroll";
@@ -7828,11 +7831,12 @@ function normalizeProfileAccountType(value = "general") {
 }
 
 
-const STORE_RUN_STATUS_SITES = ["target", "walmart", "samsclub", "amazon", "bandai", "general", "crunchyroll", "pokemoncenter"];
+const STORE_RUN_STATUS_SITES = ["target", "walmart", "samsclub", "costco", "amazon", "bandai", "general", "crunchyroll", "pokemoncenter"];
 const STORE_RUN_STATUS_LABELS = {
     target: "Target",
     walmart: "Walmart",
     samsclub: "Sam's Club",
+    costco: "Costco",
     amazon: "Amazon",
     bandai: "Premium Bandai",
     general: "General",
@@ -7947,7 +7951,7 @@ function normalizeStoreCredentialsPayload(payload = {}) {
     const raw = payload.store_credentials && typeof payload.store_credentials === 'object' ? payload.store_credentials : {};
     const stores = normalizeAssignedStores(payload.assigned_stores, payload.account_type);
     const out = {};
-    const imapStores = new Set(['target', 'walmart', 'samsclub', 'amazon', 'bandai']);
+    const imapStores = new Set(['target', 'walmart', 'samsclub', 'costco', 'amazon', 'bandai', 'pokemoncenter']);
     const sharedGmailAppPassword = normalizeStoredGmailAppPassword(payload.gmail_app_password)
         || Object.values(raw).map((item) => normalizeStoredGmailAppPassword(item?.gmail_app_password)).find(Boolean)
         || '';
@@ -7958,7 +7962,7 @@ function normalizeStoreCredentialsPayload(payload = {}) {
         out[store] = {
             store,
             login_email: String(item.login_email || '').trim() || String(payload.account_login_email || payload.email || '').trim(),
-            login_password: String(item.login_password || '').trim() || String(payload.account_login_password || '').trim(),
+            login_password: store === 'pokemoncenter' ? '' : (String(item.login_password || '').trim() || String(payload.account_login_password || '').trim()),
             gmail_app_password: normalizeStoredGmailAppPassword(item.gmail_app_password) || (isImapStore ? sharedGmailAppPassword : normalizeStoredGmailAppPassword(payload.gmail_app_password)),
             amazon_2fa_secret: String(item.amazon_2fa_secret || item.two_fa_secret || '').trim() || String(payload.amazon_2fa_secret || '').trim(),
             use_aycd_inbox: item.use_aycd_inbox === true || String(item.use_aycd_inbox || '').toLowerCase() === 'true'
@@ -8043,10 +8047,18 @@ async function replaceProfileStoreCredentials(profileId, payload = {}) {
 function accountForExport(profile = {}, group = '') {
     const cleanGroup = normalizeProfileAccountType(group || profile.account_type || 'general');
     if (profile.store_credentials && profile.store_credentials[cleanGroup]) {
-        return profile.store_credentials[cleanGroup];
+        const credential = profile.store_credentials[cleanGroup];
+        if (cleanGroup === 'pokemoncenter' && !String(credential.login_email || '').trim()) {
+            return { ...credential, login_email: profile.addresses?.[0]?.email || '' };
+        }
+        return credential;
     }
     const accounts = Array.isArray(profile.accounts) ? profile.accounts : [];
-    return accounts.find((acct) => normalizeProfileAccountType(acct.provider || '') === cleanGroup) || accounts[0] || {};
+    const account = accounts.find((acct) => normalizeProfileAccountType(acct.provider || '') === cleanGroup) || accounts[0] || {};
+    if (cleanGroup === 'pokemoncenter' && !String(account.login_email || '').trim()) {
+        return { ...account, login_email: profile.addresses?.[0]?.email || '' };
+    }
+    return account;
 }
 
 async function enforceProfileAssignmentLimits({ userId, role, stores, excludeProfileId = null }) {
@@ -8471,7 +8483,7 @@ app.get("/admin/store-run-status", auth, admin, async (req, res) => {
         if (userIds.length) {
             const { data: rawProfiles, error: profilesError } = await supabase
                 .from("profiles")
-                .select("id, user_id, profile_name, account_type, created_at")
+                .select("id, user_id, profile_name, account_type, created_at, addresses(email)")
                 .in("user_id", userIds);
             if (profilesError) return res.status(500).json({ error: profilesError.message });
 
@@ -8499,6 +8511,7 @@ app.get("/admin/store-run-status", auth, admin, async (req, res) => {
 
             (rawProfiles || []).forEach((profile) => {
                 addStoreForProfile(profile.id, profile.account_type || "general");
+                addEmailToSet(fallbackEmailsByProfileId, String(profile.id || ''), profile.addresses?.[0]?.email);
             });
 
             try {
@@ -9335,7 +9348,17 @@ app.get("/profiles", auth, async (req, res) => {
 
         (data || []).forEach((profile) => {
             profile.store_assignments = assignments?.get(String(profile.id)) || [normalizeProfileAccountType(profile.account_type || "general")];
-            profile.store_credentials = credentials.get(String(profile.id)) || {};
+            profile.store_credentials = { ...(credentials.get(String(profile.id)) || {}) };
+            if (profile.store_assignments.map(normalizeProfileAccountType).includes('pokemoncenter') && !profile.store_credentials.pokemoncenter) {
+                profile.store_credentials.pokemoncenter = {
+                    store: 'pokemoncenter',
+                    login_email: String(profile.addresses?.[0]?.email || '').trim(),
+                    login_password: '',
+                    gmail_app_password: '',
+                    amazon_2fa_secret: '',
+                    use_aycd_inbox: false
+                };
+            }
             if (String(profileUser.role || '').toLowerCase() !== 'super_admin') {
                 profile.store_assignments = profile.store_assignments.filter((store) => normalizeProfileAccountType(store) !== 'walmart');
                 if (!profile.store_assignments.length) profile.store_assignments = ['general'];
@@ -9569,13 +9592,13 @@ app.patch("/profiles/bulk", auth, async (req, res) => {
         await ensureUserNotRevoked(req.user_id);
         const ids = Array.isArray(req.body?.ids) ? [...new Set(req.body.ids.map((id) => String(id || '').trim()).filter(Boolean))] : [];
         const store = normalizeProfileAccountType(req.body?.store || '');
-        const allowedStores = new Set(['target', 'walmart', 'samsclub', 'amazon', 'bandai', 'crunchyroll', 'pokemoncenter', 'general']);
+        const allowedStores = new Set(['target', 'walmart', 'samsclub', 'costco', 'amazon', 'bandai', 'crunchyroll', 'pokemoncenter', 'general']);
         const bulkUser = await ensureUserNotRevoked(req.user_id);
         if (store === 'walmart' && String(bulkUser.role || '').toLowerCase() !== 'super_admin') return res.status(403).json({ error: 'Walmart profiles are available only to the super admin.' });
         if (!ids.length) return res.status(400).json({ error: 'No profile ids were provided' });
         if (!allowedStores.has(store) || store === 'all') return res.status(400).json({ error: 'Choose a specific store group before bulk editing.' });
 
-        const hasLoginPassword = Object.prototype.hasOwnProperty.call(req.body || {}, 'login_password') && String(req.body.login_password || '').length > 0;
+        const hasLoginPassword = store !== 'pokemoncenter' && Object.prototype.hasOwnProperty.call(req.body || {}, 'login_password') && String(req.body.login_password || '').length > 0;
         const hasGmailPassword = Object.prototype.hasOwnProperty.call(req.body || {}, 'gmail_app_password') && String(req.body.gmail_app_password || '').replace(/\s+/g, '').length > 0;
         const hasAycd = typeof req.body?.use_aycd_inbox === 'boolean';
         const hasState = Object.prototype.hasOwnProperty.call(req.body || {}, 'state') && String(req.body.state || '').trim().length > 0;
@@ -10855,6 +10878,7 @@ function polarProfileGroupLabel(group) {
         walmart: "walmart",
         target: "target",
         samsclub: "sam's club",
+        costco: "costco",
         crunchyroll: "crunchyroll",
         pokemoncenter: "pokemon center",
         amazon: "amazon",
@@ -11214,6 +11238,7 @@ app.get("/admin/export/accounts-txt", auth, admin, async (req, res) => {
                 user_id,
                 account_type,
                 created_at,
+                addresses(email),
                 accounts(*)
             `)
             .order("created_at", { ascending: false });
@@ -11280,6 +11305,7 @@ app.get("/admin/export/gmail-imap-txt", auth, admin, async (req, res) => {
                 user_id,
                 account_type,
                 created_at,
+                addresses(email),
                 accounts(*)
             `)
             .order("created_at", { ascending: false });

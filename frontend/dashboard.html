@@ -54,6 +54,7 @@
       <div class="stat-card"><span class="stat-label">Premium Bandai</span><strong class="stat-value" id="bandaiProfileCountStat">0</strong><span class="stat-help">Bandai-ready profiles</span></div>
       <div class="stat-card"><span class="stat-label">Retail</span><strong class="stat-value" id="retailProfileCountStat">0</strong><span class="stat-help">Target + Walmart profiles</span></div>
       <div class="stat-card"><span class="stat-label">Sam's Club</span><strong class="stat-value" id="samsclubProfileCountStat">0</strong><span class="stat-help">Sam's Club profiles</span></div>
+      <div class="stat-card"><span class="stat-label">Costco</span><strong class="stat-value" id="costcoProfileCountStat">0</strong><span class="stat-help">Costco profiles</span></div>
       <div class="stat-card"><span class="stat-label">General</span><strong class="stat-value" id="generalProfileCountStat">0</strong><span class="stat-help">Supreme or custom releases</span></div>
       <div class="stat-card"><span class="stat-label">Raffle</span><strong class="stat-value" id="raffleProfileCountStat">0</strong><span class="stat-help">Bulk raffle entries</span></div>
       <div class="stat-card"><span class="stat-label">Credits</span><strong class="stat-value" id="creditsBalanceStat">0</strong><span class="stat-help" id="creditsBalanceHelp">Available to spend</span></div>
@@ -67,6 +68,7 @@
         <button class="admin-nav-button" type="button" data-user-nav="target">Target</button>
         <button class="admin-nav-button" type="button" data-user-nav="walmart" data-super-admin-dashboard-store="walmart">Walmart</button>
         <button class="admin-nav-button" type="button" data-user-nav="samsclub">Sam's Club</button>
+        <button class="admin-nav-button" type="button" data-user-nav="costco">Costco</button>
         <button class="admin-nav-button" type="button" data-user-nav="amazon">Amazon</button>
         <button class="admin-nav-button" type="button" data-user-nav="bandai">Premium Bandai</button>
         <button class="admin-nav-button" type="button" data-user-nav="general">General</button>
@@ -97,7 +99,7 @@
         <section class="admin-pane is-active" data-user-pane="profiles">
           <section class="panel banner banner-soft">
             <strong>Profile Manager</strong>
-            <p class="subtle-text">Create one profile with shared shipping and payment, then assign it to Target, Walmart, Sam's Club, Amazon, Premium Bandai, Crunchyroll, Pokémon Center, or General.</p>
+            <p class="subtle-text">Create one profile with shared shipping and payment, then assign it to Target, Walmart, Sam's Club, Costco, Amazon, Premium Bandai, Crunchyroll, Pokémon Center, or General.</p>
             <div class="panel-actions">
               <button class="btn btn-primary" onclick="createProfile()">Create Profile</button>
               <button class="btn" type="button" id="showProfileImportButton">Import Profiles</button>
@@ -108,6 +110,7 @@
                   <option value="target">Target</option>
                   <option value="walmart" data-super-admin-dashboard-store="walmart">Walmart</option>
                   <option value="samsclub">Sam's Club</option>
+                  <option value="costco">Costco</option>
                   <option value="amazon">Amazon</option>
                   <option value="bandai">Premium Bandai</option>
                   <option value="general">General</option>
@@ -218,6 +221,17 @@
             </div>
             <div id="amazonProductsPanel" class="store-products-panel"></div>
           </section>
+        </section>
+
+        <section class="admin-pane" data-user-pane="costco">
+          <section class="panel banner banner-soft">
+            <strong>Costco hub</strong>
+            <p class="subtle-text">Costco profiles include the Costco login and the IMAP or AYCD mailbox connection used for order-email tracking.</p>
+            <div class="panel-actions">
+              <button class="btn btn-primary" onclick="createProfile()">Create / Assign Costco Profile</button>
+            </div>
+          </section>
+          <section class="panel" id="costcoProfilesPanel"></section>
         </section>
 
         <section class="admin-pane" data-user-pane="bandai">
@@ -546,6 +560,6 @@
     </section>
   </div>
 
-  <script src="script.js?v=20260911-bulk-state" defer></script>
+  <script src="script.js?v=20260915-pkc-costco" defer></script>
 </body>
 </html>

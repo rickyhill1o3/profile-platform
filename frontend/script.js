@@ -158,7 +158,7 @@ const PAGE_SIZE = 10;
 let profileImportBound = false;
 let raffleBuilderBound = false;
 let allDashboardProfiles = [];
-let profileGroupFilters = { all: '', general: '', walmart: '', target: '', samsclub: '', amazon: '', bandai: '', crunchyroll: '', pokemoncenter: '', raffle: '' };
+let profileGroupFilters = { all: '', general: '', walmart: '', target: '', samsclub: '', costco: '', amazon: '', bandai: '', crunchyroll: '', pokemoncenter: '', raffle: '' };
 let targetProfileHealthFilter = 'all';
 let targetProfileHealthCache = { data: null, loadedAt: 0 };
 let selectedProfileIds = new Set();
@@ -423,9 +423,11 @@ const STORE_CREDENTIAL_CONFIG = {
     target: { label: 'Target', method: 'imap', help: 'Target uses email, account password, and Gmail app password / IMAP.' },
     walmart: { label: 'Walmart', method: 'imap', help: 'Walmart uses email, account password, and Gmail app password / IMAP.' },
     samsclub: { label: "Sam's Club", method: 'imap', help: "Sam's Club uses email, account password, and Gmail app password / IMAP." },
+    costco: { label: 'Costco', method: 'imap', help: 'Costco uses login email, account password, and email app password / IMAP for order emails.', imapLabel: 'Costco Email App Password / IMAP' },
     amazon: { label: 'Amazon', method: 'amazon2fa_imap', help: 'Amazon uses email, password, authenticator / 2FA secret, and IMAP or AYCD for email-confirmed checkout billing.' },
     bandai: { label: 'Premium Bandai', method: 'imap', help: 'Premium Bandai uses login email, account password, and Gmail app password / IMAP.' },
-    crunchyroll: { label: 'Crunchyroll', method: 'password', help: 'Crunchyroll uses email and password only.' }
+    crunchyroll: { label: 'Crunchyroll', method: 'password', help: 'Crunchyroll uses email and password only.' },
+    pokemoncenter: { label: 'Pokémon Center', method: 'guest_imap', help: 'Pokémon Center uses guest checkout. Save the checkout email and its email app password / IMAP; no Pokémon Center account password is needed.', imapLabel: 'Pokémon Center Email App Password / IMAP' }
 };
 
 function profileStoreCredentials(profile = {}, store = '') {
@@ -433,12 +435,17 @@ function profileStoreCredentials(profile = {}, store = '') {
     const fromMap = profile.store_credentials && profile.store_credentials[key];
     if (fromMap) return fromMap;
     const accounts = Array.isArray(profile.accounts) ? profile.accounts : [];
-    return accounts.find((acct) => String(acct.provider || '').toLowerCase() === key) || accounts[0] || {};
+    const matchingAccount = accounts.find((acct) => String(acct.provider || '').toLowerCase() === key);
+    if (matchingAccount) return matchingAccount;
+    if (key === 'pokemoncenter') {
+        return { store: key, login_email: profile.addresses?.[0]?.email || '' };
+    }
+    return accounts[0] || {};
 }
 
 function firstSavedImapAppPassword(profile = {}, existingValues = {}) {
     const imapStores = Object.entries(STORE_CREDENTIAL_CONFIG)
-        .filter(([, cfg]) => ['imap', 'amazon2fa_imap'].includes(cfg.method))
+        .filter(([, cfg]) => ['imap', 'guest_imap', 'amazon2fa_imap'].includes(cfg.method))
         .map(([store]) => store);
 
     for (const store of imapStores) {
@@ -469,21 +476,22 @@ function storeCredentialBlock(store, values = {}) {
     const sharedEmail = escapeHTML(document.getElementById('email')?.value || '');
 
     let extra = '';
-    if (['imap', 'amazon2fa_imap'].includes(cfg.method)) {
+    if (['imap', 'guest_imap', 'amazon2fa_imap'].includes(cfg.method)) {
         const imapHelpId = `${prefix}_gmail_app_password_help`;
+        const imapLabel = escapeHTML(cfg.imapLabel || `${cfg.label} Gmail App Password / IMAP`);
         extra = `
             <div class="field field--full">
                 <label for="${prefix}_gmail_app_password">
-                    ${cfg.label} Gmail App Password / IMAP
+                    ${imapLabel}
                     <button class="help-link-button" type="button" data-toggle-help="${imapHelpId}">What is this?</button>
                 </label>
-                <input class="input" id="${prefix}_gmail_app_password" type="password" value="${gmailAppPassword}" placeholder="Gmail App Password" autocomplete="new-password" />
+                <input class="input" id="${prefix}_gmail_app_password" type="password" value="${gmailAppPassword}" placeholder="Email app password / IMAP password" autocomplete="new-password" />
                 <div class="setup-step-actions" style="margin-top:8px;align-items:center;">
                     <button class="btn" type="button" data-test-imap="${store}">Test IMAP Connection</button>
                     <span id="${prefix}_imap_test_status" class="form-help" aria-live="polite"></span>
                 </div>
                 <div class="inline-help-card" id="${imapHelpId}" hidden>
-                    A Gmail app password is different from your normal Gmail password. Create the store account first, then turn on 2-Step Verification in your Gmail account. After 2-Step Verification is on, search Gmail/Google Account settings for <strong>App passwords</strong>, create a new app password, and paste the 16-character code here. It usually looks like <strong>xxxx xxxx xxxx xxxx</strong>.
+                    Use the app password or IMAP password required by this email provider. For Gmail, turn on 2-Step Verification, create an <strong>App password</strong>, and paste the 16-character code here. Outlook/Hotmail may use its own app-password or IMAP authorization flow.
                 </div>
             </div>`;
     }
@@ -495,7 +503,7 @@ function storeCredentialBlock(store, values = {}) {
             </div>`;
     }
 
-    if (['imap', 'amazon2fa_imap'].includes(cfg.method)) {
+    if (['imap', 'guest_imap', 'amazon2fa_imap'].includes(cfg.method)) {
         extra += `
             <div class="field field--full aycd-profile-option">
                 <label class="checkbox-row" for="${prefix}_use_aycd_inbox">
@@ -508,19 +516,7 @@ function storeCredentialBlock(store, values = {}) {
             </div>`;
     }
 
-    return `
-        <section class="credential-store-card" data-store-credential-card="${store}">
-            <div class="panel-header">
-                <div>
-                    <h4>${cfg.label} Login</h4>
-                    <p class="form-help">${cfg.help}</p>
-                </div>
-            </div>
-            <div class="form-grid">
-                <div class="field field--full">
-                    <label for="${prefix}_login_email">${cfg.label} Login Email</label>
-                    <input class="input" id="${prefix}_login_email" value="${loginEmail || sharedEmail}" placeholder="Login Email" />
-                </div>
+    const passwordFields = cfg.method === 'guest_imap' ? '' : `
                 <div class="field">
                     <label for="${prefix}_login_password">${cfg.label} Password</label>
                     <input class="input" id="${prefix}_login_password" type="password" value="${loginPassword}" placeholder="Account Password" />
@@ -528,7 +524,22 @@ function storeCredentialBlock(store, values = {}) {
                 <div class="field field-actions">
                     <label>&nbsp;</label>
                     <button class="btn" type="button" onclick="togglePasswordVisibility('${prefix}_login_password', this)">Show</button>
+                </div>`;
+
+    return `
+        <section class="credential-store-card" data-store-credential-card="${store}">
+            <div class="panel-header">
+                <div>
+                    <h4>${cfg.method === 'guest_imap' ? `${cfg.label} Guest Checkout Email` : `${cfg.label} Login`}</h4>
+                    <p class="form-help">${cfg.help}</p>
                 </div>
+            </div>
+            <div class="form-grid">
+                <div class="field field--full">
+                    <label for="${prefix}_login_email">${cfg.method === 'guest_imap' ? `${cfg.label} Checkout Email` : `${cfg.label} Login Email`}</label>
+                    <input class="input" id="${prefix}_login_email" value="${loginEmail || sharedEmail}" placeholder="${cfg.method === 'guest_imap' ? 'Guest checkout email' : 'Login Email'}" />
+                </div>
+                ${passwordFields}
                 ${extra}
             </div>
         </section>`;
@@ -551,7 +562,7 @@ function toggleAccountCredentialFields(profile = null) {
         const saved = profileStoreCredentials(profile || {}, store);
         const current = existingValues[store] || {};
         const values = Object.assign({}, saved, Object.fromEntries(Object.entries(current).filter(([, value]) => value)));
-        if (['imap', 'amazon2fa_imap'].includes(STORE_CREDENTIAL_CONFIG[store]?.method) && !String(values.gmail_app_password || '').trim() && sharedGmailAppPassword) {
+        if (['imap', 'guest_imap', 'amazon2fa_imap'].includes(STORE_CREDENTIAL_CONFIG[store]?.method) && !String(values.gmail_app_password || '').trim() && sharedGmailAppPassword) {
             values.gmail_app_password = sharedGmailAppPassword;
         }
         return storeCredentialBlock(store, values);
@@ -586,6 +597,7 @@ function credentialStatusForStore(profile = {}, store = '') {
     const usesAycd = !!creds.use_aycd_inbox;
     const has2fa = !!String(creds.amazon_2fa_secret || creds.two_fa_secret || '').trim();
     if (cfg.method === 'imap') return hasEmail && hasPassword && (hasImap || usesAycd) ? 'Login complete' : 'Missing login info';
+    if (cfg.method === 'guest_imap') return hasEmail && (hasImap || usesAycd) ? 'Login complete' : 'Missing login info';
     if (cfg.method === 'amazon2fa_imap') return hasEmail && hasPassword && has2fa && (hasImap || usesAycd) ? 'Login complete' : 'Missing login info';
     return hasEmail && hasPassword ? 'Login complete' : 'Missing login info';
 }
@@ -671,6 +683,7 @@ async function loadProfiles() {
         walmart: document.getElementById("walmartProfilesPanel"),
         target: document.getElementById("targetProfilesPanel"),
         samsclub: document.getElementById("samsclubProfilesPanel"),
+        costco: document.getElementById("costcoProfilesPanel"),
         amazon: document.getElementById("amazonProfilesPanel"),
         bandai: document.getElementById("bandaiProfilesPanel"),
         crunchyroll: document.getElementById("crunchyrollProfilesPanel"),
@@ -717,7 +730,7 @@ async function loadProfiles() {
         }
 
         allDashboardProfiles = profiles;
-        const groups = { all: [], general: [], walmart: [], target: [], samsclub: [], amazon: [], bandai: [], crunchyroll: [], pokemoncenter: [], raffle: [] };
+        const groups = { all: [], general: [], walmart: [], target: [], samsclub: [], costco: [], amazon: [], bandai: [], crunchyroll: [], pokemoncenter: [], raffle: [] };
         profiles.forEach((p) => {
             groups.all.push(p);
             const assignedStores = profileAssignedStores(p);
@@ -759,6 +772,7 @@ async function loadProfiles() {
         setStat("bandaiProfileCountStat", groups.bandai.length);
         setStat("retailProfileCountStat", groups.target.length + groups.walmart.length);
         setStat("samsclubProfileCountStat", groups.samsclub.length);
+        setStat("costcoProfileCountStat", groups.costco.length);
         setStat("raffleProfileCountStat", groups.raffle.length);
         setStat("generalProfileCountStat", groups.general.length);
 
@@ -767,10 +781,10 @@ async function loadProfiles() {
             walmart: "Walmart Profiles",
             target: "Target Profiles",
             samsclub: "Sam's Club Profiles",
+            costco: "Costco Profiles",
             amazon: "Amazon Profiles",
             bandai: "Premium Bandai Profiles",
             crunchyroll: "Crunchyroll Profiles",
-            pokemoncenter: "Pokémon Center Profiles",
             all: "All Profiles",
             pokemoncenter: "Pokémon Center Profiles",
             raffle: "Raffle Profiles"
@@ -781,8 +795,10 @@ async function loadProfiles() {
             walmart: "Profiles configured for Walmart accounts.",
             target: "Profiles configured for Target accounts.",
             samsclub: "Profiles configured for Sam's Club accounts.",
+            costco: "Profiles configured for Costco accounts and order-email tracking.",
             amazon: "Profiles configured for Amazon accounts.",
             bandai: "Profiles configured for Premium Bandai accounts and order-email tracking.",
+            pokemoncenter: "Guest-checkout profiles with Pokémon Center order-email tracking.",
             raffle: "Bulk-built raffle entries. Payment fields use invalid placeholder card-style numbers unless edited manually."
         };
 
@@ -1027,7 +1043,7 @@ function ensureBulkProfileEditModal() {
                 <button class="btn" type="button" data-bulk-edit-close>Close</button>
             </div>
             <div class="bulk-edit-body">
-                <label class="field">
+                <label class="field" data-bulk-account-password>
                     <span>Account password</span>
                     <input id="bulkProfileLoginPassword" class="input" type="password" autocomplete="new-password" placeholder="Leave blank to keep existing passwords" />
                     <small>Applies the same retailer account password to every selected profile.</small>
@@ -1072,6 +1088,8 @@ function openBulkProfileEdit(group, ids) {
     modal.dataset.ids = JSON.stringify(ids);
     modal.querySelector('#bulkProfileEditTitle').textContent = `Edit ${ids.length} selected ${group} profile${ids.length === 1 ? '' : 's'}`;
     modal.querySelector('#bulkProfileEditSummary').textContent = 'Only fields selected or entered below will be changed. Existing emails, cards, profile names, and other shipping details stay untouched.';
+    const accountPasswordField = modal.querySelector('[data-bulk-account-password]');
+    if (accountPasswordField) accountPasswordField.style.display = group === 'pokemoncenter' ? 'none' : '';
     modal.querySelector('#bulkProfileLoginPassword').value = '';
     modal.querySelector('#bulkProfileGmailAppPassword').value = '';
     modal.querySelector('#bulkProfileAycdAction').value = 'keep';
@@ -1083,7 +1101,7 @@ function openBulkProfileEdit(group, ids) {
 
     const saveButton = modal.querySelector('#bulkProfileEditSave');
     saveButton.onclick = async () => {
-        const loginPassword = modal.querySelector('#bulkProfileLoginPassword').value;
+        const loginPassword = group === 'pokemoncenter' ? '' : modal.querySelector('#bulkProfileLoginPassword').value;
         const gmailAppPassword = modal.querySelector('#bulkProfileGmailAppPassword').value.replace(/\s+/g, '');
         const aycdAction = modal.querySelector('#bulkProfileAycdAction').value;
         const state = modal.querySelector('#bulkProfileState').value;
@@ -2258,6 +2276,7 @@ async function updateExportCount() {
         walmart: "Walmart",
         target: "Target",
         samsclub: "Sam's Club",
+        costco: "Costco",
         crunchyroll: "Crunchyroll",
         pokemoncenter: "Pokémon Center",
         amazon: "Amazon",
@@ -5382,6 +5401,7 @@ const STORE_RUN_STATUS_OPTIONS = [
     { site: 'target', label: 'Target' },
     { site: 'walmart', label: 'Walmart' },
     { site: 'samsclub', label: "Sam's Club" },
+    { site: 'costco', label: 'Costco' },
     { site: 'amazon', label: 'Amazon' },
     { site: 'general', label: 'General' },
     { site: 'crunchyroll', label: 'Crunchyroll' },
@@ -5472,6 +5492,7 @@ async function initAdminStoreRunStatus() {
     const exportShikariProfilesButton = document.getElementById('adminRunStatusExportShikariProfilesButton');
     const exportPolarProfilesButton = document.getElementById('adminRunStatusExportPolarProfilesButton');
     const exportAccountsButton = document.getElementById('adminRunStatusExportAccountsButton');
+    const exportCostcoAccountsButton = document.getElementById('adminRunStatusExportCostcoAccountsButton');
     const exportGmailButton = document.getElementById('adminRunStatusExportGmailButton');
     const summary = document.getElementById('adminRunStatusSummary');
     const syncBanner = document.getElementById('adminProfileSyncStatusBanner');
@@ -5554,11 +5575,26 @@ async function initAdminStoreRunStatus() {
         }
     };
 
+    const exportActiveCostcoAccounts = async () => {
+        try {
+            const params = new URLSearchParams({ group: 'costco', active_only: '1' });
+            if (userFilter.value) params.set('user_id', userFilter.value);
+            const date = new Date().toISOString().slice(0, 10);
+            const filename = promptForExportFilename(`accounts-costco-active-${date}`);
+            if (!filename) return;
+            params.set('filename', filename);
+            await downloadExportFile(API + '/admin/export/accounts-txt?' + params.toString(), filename + '.txt');
+        } catch (err) {
+            if (err.message) alert(err.message);
+        }
+    };
+
     if (exportProfilesButton) exportProfilesButton.addEventListener('click', () => exportActive('/admin/export/profiles-json', 'refract-profiles', '.json'));
     if (exportStellarProfilesButton) exportStellarProfilesButton.addEventListener('click', () => exportActive('/admin/export/profiles-stellar-json', 'stellar-profiles', '.json'));
     if (exportShikariProfilesButton) exportShikariProfilesButton.addEventListener('click', () => exportActive('/admin/export/profiles-shikari-csv', 'shikari-profiles', '.csv'));
     if (exportPolarProfilesButton) exportPolarProfilesButton.addEventListener('click', () => exportActive('/admin/export/profiles-polar-json', 'polar-profiles', '.json'));
     if (exportAccountsButton) exportAccountsButton.addEventListener('click', () => exportActive('/admin/export/accounts-txt', 'accounts', '.txt'));
+    if (exportCostcoAccountsButton) exportCostcoAccountsButton.addEventListener('click', exportActiveCostcoAccounts);
     if (exportGmailButton) exportGmailButton.addEventListener('click', () => exportActive('/admin/export/gmail-imap-txt', 'gmail-imap', '.txt'));
 
     const load = async () => {
@@ -5718,6 +5754,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         document.getElementById("targetProfilesPanel") ||
         document.getElementById("walmartProfilesPanel") ||
         document.getElementById("samsclubProfilesPanel") ||
+        document.getElementById("costcoProfilesPanel") ||
         document.getElementById("amazonProfilesPanel") ||
         document.getElementById("generalProfilesPanel") ||
         document.getElementById("raffleProfilesPanel")
@@ -5943,13 +5980,13 @@ async function collectSetupWizardState() {
         },
         {
             key: 'assignments', title: 'Assign stores to your profiles', complete: credentialSummary.assignedStores.size > 0,
-            description: 'Choose Target, Walmart, Amazon, Pokémon Center, General, or any other store that should use each profile.',
+            description: 'Choose Target, Walmart, Costco, Amazon, Pokémon Center, General, or any other store that should use each profile.',
             detail: credentialSummary.assignedStores.size ? `Assigned stores: ${Array.from(credentialSummary.assignedStores).map((s) => STORE_CREDENTIAL_CONFIG[s]?.label || s).join(', ')}.` : 'Edit a profile and select at least one store.',
             nav: 'profiles', action: 'Edit Profiles'
         },
         {
             key: 'credentials', title: 'Complete store logins, IMAP, and 2FA', complete: hasCredentials,
-            description: 'Store accounts need a login. Target/Walmart generally need an email app password; Amazon generally needs an authenticator secret.',
+            description: 'Store accounts need their required login details. Pokémon Center needs only the guest-checkout email and IMAP; Costco needs its login password and IMAP.',
             detail: credentialSummary.missingStores.size ? `Missing or incomplete: ${Array.from(credentialSummary.missingStores).map((s) => STORE_CREDENTIAL_CONFIG[s]?.label || s).join(', ')}.` : (hasCredentials ? 'Required credentials are complete.' : 'Assign a store before credentials can be checked.'),
             nav: 'profiles', action: 'Add Credentials', help: true
         },
