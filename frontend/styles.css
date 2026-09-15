@@ -1223,6 +1223,7 @@ h1,h2,h3,h4,p{margin:0}
 .target-health-summary strong { font-size:1.05rem; }
 .target-health-summary--success { background:#ecfdf3; border-color:#86d6a6; }
 .target-health-summary--reseller { background:#fff0f0; border-color:#f39a9a; }
+.target-health-summary--standby { background:#eef6ff; border-color:#8bbcf2; }
 .target-health-summary--order { background:#fff7e6; border-color:#f1c36a; }
 .target-health-summary--other { background:#f4f4f5; border-color:#c9c9ce; }
 .target-profile-health { margin:10px 0; padding:9px 10px; border-radius:10px; border:1px solid #d8dee7; background:#f8fafc; }
@@ -1234,6 +1235,8 @@ h1,h2,h3,h4,p{margin:0}
 .target-profile-health--success .target-profile-health__badge { background:#15803d; color:white; }
 .target-profile-health--reseller { background:#fff0f0; border-color:#ef7d7d; box-shadow:0 0 0 2px rgba(220,38,38,.06); }
 .target-profile-health--reseller .target-profile-health__badge { background:#b91c1c; color:white; }
+.target-profile-health--standby { background:#eef6ff; border-color:#79ade7; box-shadow:0 0 0 2px rgba(37,99,235,.05); }
+.target-profile-health--standby .target-profile-health__badge { background:#2563eb; color:white; }
 .target-profile-health--order_id { background:#fff7e6; border-color:#e4ad42; }
 .target-profile-health--order_id .target-profile-health__badge { background:#b7791f; color:white; }
 .target-profile-health--other { background:#f4f4f5; border-color:#bfc2c8; }
@@ -1269,6 +1272,8 @@ h1,h2,h3,h4,p{margin:0}
 .target-address-balance.is-over{border-color:#e9a2a2;background:#fff1f1;color:#9b2626}
 .target-reseller-review{display:flex;flex-direction:column;gap:2px;margin-top:8px;padding:7px 8px;border:1px solid #e89191;border-radius:8px;background:#fff7f7;color:#991b1b;font-size:.72rem}
 .target-reseller-review span{color:#7f1d1d}
+.target-standby-review{display:flex;flex-direction:column;gap:2px;margin-top:8px;padding:7px 8px;border:1px solid #8bbcf2;border-radius:8px;background:#f5f9ff;color:#174d8f;font-size:.72rem}
+.target-standby-review span{color:#315f95}
 .target-checkout-history{margin-top:8px;border-top:1px solid rgba(100,116,139,.2);padding-top:7px}
 .target-checkout-history summary{cursor:pointer;font-size:.78rem;font-weight:700;color:#3e4b5b;user-select:none}
 .target-checkout-history__list{display:grid;gap:5px;margin-top:7px}

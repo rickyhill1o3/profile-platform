@@ -805,7 +805,7 @@ async function loadProfiles() {
         const renderGroup = (groupKey) => {
             const rawItems = (groups[groupKey] || []).slice();
             if (groupKey === 'target') {
-                const priority = { reseller: 0, order_id: 1, other: 2, success: 3, no_activity: 4 };
+                const priority = { reseller: 0, standby: 1, order_id: 2, other: 3, success: 4, no_activity: 5 };
                 rawItems.sort((a, b) => {
                     const aStatus = targetHealthByProfile.get(String(a.id))?.current_status || 'no_activity';
                     const bStatus = targetHealthByProfile.get(String(b.id))?.current_status || 'no_activity';
@@ -845,16 +845,17 @@ async function loadProfiles() {
                         <div class="target-health-overview">
                             <div class="target-health-overview__intro">
                                 <strong>Target Account Health</strong>
-                                <span>Last ${escapeHTML(String(targetProfileHealth.days || 30))} days of Target checkout webhooks. Reseller is the highest-priority account warning.</span>
+                                <span>Last ${escapeHTML(String(targetProfileHealth.days || 30))} days of Target checkout webhooks. Reseller is the highest-priority account warning; an address change moves that profile to standby until its next attempt.</span>
                             </div>
                             <div class="target-health-summary-grid">
                                 <div class="target-health-summary target-health-summary--success"><span>Successful now</span><strong>${Number(totals.success || 0)}</strong></div>
                                 <div class="target-health-summary target-health-summary--reseller"><span>Reseller attention</span><strong>${Number(totals.reseller || 0)}</strong></div>
+                                <div class="target-health-summary target-health-summary--standby"><span>Standby after change</span><strong>${Number(totals.standby || 0)}</strong></div>
                                 <div class="target-health-summary target-health-summary--order"><span>Order ID</span><strong>${Number(totals.order_id || 0)}</strong></div>
                                 <div class="target-health-summary target-health-summary--other"><span>Other errors</span><strong>${Number(totals.other || 0)}</strong></div>
                                 <div class="target-health-summary"><span>No recent activity</span><strong>${Number(totals.no_activity || 0)}</strong></div>
                             </div>
-                            <div class="subtle-text">Reseller warnings stay marked until that profile/address is edited after the reseller cancellation. This keeps last night's reseller accounts visible even if a later checkout succeeds.</div>
+                            <div class="subtle-text">Change the address once after a reseller cancellation. The profile then stays in standby—so you know it was already changed—until a newer checkout tests that address and replaces standby with the new result.</div>
                             ${(() => {
                                 const groups = Array.isArray(targetProfileHealth.address_distribution) ? targetProfileHealth.address_distribution : [];
                                 if (!groups.length) return '';
@@ -891,6 +892,7 @@ async function loadProfiles() {
                         ${groupKey === 'target' ? `<select class="input" data-target-health-filter aria-label="Filter Target account health">
                             <option value="all" ${targetProfileHealthFilter === 'all' ? 'selected' : ''}>All health statuses</option>
                             <option value="reseller" ${targetProfileHealthFilter === 'reseller' ? 'selected' : ''}>Reseller attention</option>
+                            <option value="standby" ${targetProfileHealthFilter === 'standby' ? 'selected' : ''}>Standby — address changed</option>
                             <option value="order_id" ${targetProfileHealthFilter === 'order_id' ? 'selected' : ''}>Order ID</option>
                             <option value="other" ${targetProfileHealthFilter === 'other' ? 'selected' : ''}>Other errors</option>
                             <option value="success" ${targetProfileHealthFilter === 'success' ? 'selected' : ''}>Successful</option>
@@ -936,16 +938,20 @@ async function loadProfiles() {
                             ${groupKey === "target" ? (() => {
                                 const health = targetHealthByProfile.get(String(p.id));
                                 const current = String(health?.current_status || "no_activity");
-                                const labels = { success: "Successful", reseller: "Reseller", order_id: "Order ID", other: "Other error", no_activity: "No recent activity" };
+                                const labels = { success: "Successful", reseller: "Reseller", standby: "Standby — address changed", order_id: "Order ID", other: "Other error", no_activity: "No recent activity" };
                                 const latest = health?.latest_event || null;
                                 const counts = health?.counts || {};
-                                const when = latest?.created_at ? new Date(latest.created_at).toLocaleString() : "No checkout webhook in the last 30 days";
-                                const latestReason = latest?.reason ? ` · ${escapeHTML(latest.reason)}` : "";
-                                const orderRef = latest?.order_id ? ` · Order ${escapeHTML(latest.order_id)}` : "";
+                                const standbySince = health?.standby_since || null;
+                                const when = current === 'standby' && standbySince
+                                    ? `Address changed ${new Date(standbySince).toLocaleString()} · waiting for the next checkout attempt`
+                                    : (latest?.created_at ? new Date(latest.created_at).toLocaleString() : "No checkout webhook in the last 30 days");
+                                const latestReason = current !== 'standby' && latest?.reason ? ` · ${escapeHTML(latest.reason)}` : "";
+                                const orderRef = current !== 'standby' && latest?.order_id ? ` · Order ${escapeHTML(latest.order_id)}` : "";
                                 const addressHistory = Array.isArray(health?.address_history) ? health.address_history : [];
                                 const recentEvents = Array.isArray(health?.recent_events) ? health.recent_events : [];
                                 const lastReseller = health?.last_reseller_event || null;
                                 const resellerNotice = current === 'reseller' && lastReseller ? `<div class="target-reseller-review"><b>Reseller review needed</b><span>${escapeHTML(new Date(lastReseller.created_at).toLocaleString())}${lastReseller.order_id ? ` · Order ${escapeHTML(lastReseller.order_id)}` : ''}</span></div>` : '';
+                                const standbyNotice = current === 'standby' ? `<div class="target-standby-review"><b>Address change recorded — do not change it again yet</b><span>This profile will leave standby automatically after its next checkout attempt.${lastReseller?.created_at ? ` Previous reseller cancellation: ${escapeHTML(new Date(lastReseller.created_at).toLocaleString())}${lastReseller.order_id ? ` · Order ${escapeHTML(lastReseller.order_id)}` : ''}.` : ''}</span></div>` : '';
                                 const eventHistoryHtml = recentEvents.length ? `<details class="target-checkout-history"><summary>Recent checkout results (${recentEvents.length})</summary><div class="target-checkout-history__list">${recentEvents.map(event => `<div class="target-checkout-history__item target-checkout-history__item--${escapeHTML(event.category || 'other')}"><b>${escapeHTML(labels[event.category] || event.category || 'Event')}</b><span>${escapeHTML(new Date(event.created_at).toLocaleString())}</span>${event.order_id ? `<span>Order ${escapeHTML(event.order_id)}</span>` : ''}${event.reason ? `<span>${escapeHTML(event.reason)}</span>` : ''}</div>`).join('')}</div></details>` : '';
                                 const historyHtml = addressHistory.length ? `<details class="target-address-history"><summary>Address history (${addressHistory.length})</summary><div class="target-address-history__list">${addressHistory.map((version, index) => {
                                     const vc = version.counts || {};
@@ -966,6 +972,7 @@ async function loadProfiles() {
                                         <span><b>${Number(counts.other || 0)}</b> other</span>
                                     </div>
                                     ${resellerNotice}
+                                    ${standbyNotice}
                                     ${eventHistoryHtml}
                                     ${historyHtml}
                                 </div>`;

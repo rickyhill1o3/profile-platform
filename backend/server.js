@@ -103,6 +103,7 @@ const {
     resolveOwnedTargetProfile,
     buildUserScopedTargetEvents
 } = require("./target-profile-event-ownership");
+const { deriveTargetProfileHealthState } = require("./target-profile-health-state");
 const { normalizeBulkProfileState } = require("./profile-bulk-update");
 const supabase = require("./database");
 const { encrypt, decrypt } = require("./encryption");
@@ -9209,24 +9210,24 @@ app.get('/target-profile-health', auth, async (req, res) => {
             const events = (eventsByProfile.get(String(profile.id)) || []).sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0));
             const counts = summarizeTargetProfileEvents(events);
             const latest = counts.latest;
-            const lastResellerMs = new Date(counts.lastByCategory.reseller || 0).getTime() || 0;
             const profileModifiedMs = profileTargetLastModifiedMs(profile);
-            const resellerNeedsAttention = Boolean(lastResellerMs && lastResellerMs >= profileModifiedMs);
-            let current_status = 'no_activity';
-            // Reseller warnings stay active until the profile/address is edited after that cancellation.
-            // A later success no longer hides an unresolved reseller flag.
-            if (resellerNeedsAttention) current_status = 'reseller';
-            else if (latest?.category === 'success') current_status = 'success';
-            else if (latest?.category === 'reseller') current_status = 'reseller';
-            else if (latest?.category === 'order_id') current_status = 'order_id';
-            else if (latest?.category === 'other') current_status = 'other';
+            const addressHistory = addressHistoryByProfile.get(String(profile.id)) || [];
+            const state = deriveTargetProfileHealthState({
+                events,
+                addressVersions: addressHistory,
+                profileModifiedAt: profileModifiedMs ? new Date(profileModifiedMs).toISOString() : null
+            });
 
             return {
                 profile_id: profile.id,
                 profile_name: profile.profile_name || '',
                 email: extractEmail(profile.addresses?.[0]?.email || ''),
-                current_status,
-                reseller_needs_attention: resellerNeedsAttention,
+                current_status: state.current_status,
+                reseller_needs_attention: state.reseller_needs_attention,
+                standby_since: state.standby_since,
+                standby_reason: state.standby_reason,
+                address_changed_after_reseller: state.address_changed_after_reseller,
+                latest_post_change_event: state.latest_post_change_event,
                 profile_last_modified_at: profileModifiedMs ? new Date(profileModifiedMs).toISOString() : null,
                 counts: {
                     success: counts.success,
@@ -9237,8 +9238,8 @@ app.get('/target-profile-health', auth, async (req, res) => {
                 },
                 latest_event: latest || null,
                 recent_events: events.slice(0, 12),
-                last_reseller_event: events.find((event) => event.category === 'reseller') || null,
-                address_history: addressHistoryByProfile.get(String(profile.id)) || []
+                last_reseller_event: state.last_reseller_event,
+                address_history: addressHistory
             };
         });
 
@@ -9309,7 +9310,7 @@ app.get('/target-profile-health', auth, async (req, res) => {
             acc[profile.current_status] = (acc[profile.current_status] || 0) + 1;
             for (const key of ['success','reseller','order_id','other']) acc.events[key] += Number(profile.counts?.[key] || 0);
             return acc;
-        }, { profiles: 0, success: 0, reseller: 0, order_id: 0, other: 0, no_activity: 0, events: { success: 0, reseller: 0, order_id: 0, other: 0 } });
+        }, { profiles: 0, success: 0, reseller: 0, standby: 0, order_id: 0, other: 0, no_activity: 0, events: { success: 0, reseller: 0, order_id: 0, other: 0 } });
 
         res.json({
             days, since, profiles, totals, matched_events: matchedEvents,
