@@ -103,7 +103,7 @@ const {
     resolveOwnedTargetProfile,
     buildUserScopedTargetEvents
 } = require("./target-profile-event-ownership");
-const { deriveTargetProfileHealthState } = require("./target-profile-health-state");
+const { deriveTargetProfileHealthState, targetAddressVersionChangeTime } = require("./target-profile-health-state");
 const { normalizeBulkProfileState } = require("./profile-bulk-update");
 const supabase = require("./database");
 const { encrypt, decrypt } = require("./encryption");
@@ -8888,17 +8888,9 @@ async function syncTargetAddressVersion({ userId, profileId, address, effectiveA
         throw activeError;
     }
     if (active?.address_fingerprint === fingerprint) {
-        const activeFromMs = new Date(active.valid_from || 0).getTime() || 0;
-        const requestedFromMs = new Date(at || 0).getTime() || 0;
-        if (requestedFromMs && (!activeFromMs || requestedFromMs < activeFromMs)) {
-            const { data: adjusted, error: adjustError } = await supabase
-                .from('target_profile_address_versions')
-                .update({ valid_from: at })
-                .eq('id', active.id)
-                .select('*')
-                .single();
-            if (!adjustError && adjusted) return { version: adjusted, unavailable: false };
-        }
+        // Never rewrite an existing version's start date during a dashboard read. `at` can be the
+        // profile's original timestamp when the addresses table has no updated_at trigger, which
+        // previously backdated a freshly saved address and prevented standby from activating.
         return { version: active, unavailable: false };
     }
     if (active?.id) {
@@ -9153,8 +9145,18 @@ app.get('/target-profile-health', auth, async (req, res) => {
                         pattern_label: version.pattern_label || '',
                         valid_from: version.valid_from,
                         valid_to: version.valid_to,
+                        created_at: version.created_at || null,
                         is_current: !version.valid_to,
                         counts: eventCountsByVersion.get(String(version.id)) || { success: 0, reseller: 0, order_id: 0, other: 0, total: 0, latest_event: null }
+                    });
+                }
+                for (const versions of addressHistoryByProfile.values()) {
+                    for (const version of versions) {
+                        version.change_detected_at = targetAddressVersionChangeTime(version, versions).iso;
+                    }
+                    versions.sort((a, b) => {
+                        if (a.is_current !== b.is_current) return a.is_current ? -1 : 1;
+                        return new Date(b.change_detected_at || b.valid_from || 0) - new Date(a.change_detected_at || a.valid_from || 0);
                     });
                 }
 

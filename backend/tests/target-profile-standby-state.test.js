@@ -1,7 +1,7 @@
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
-const { deriveTargetProfileHealthState } = require('../target-profile-health-state');
+const { deriveTargetProfileHealthState, targetAddressVersionChangeTime } = require('../target-profile-health-state');
 
 const reseller = (createdAt, versionId = 'address-old') => ({
     id: `reseller-${createdAt}`,
@@ -61,13 +61,44 @@ const addressChangedBeforeCancel = deriveTargetProfileHealthState({
 });
 assert.strictEqual(addressChangedBeforeCancel.current_status, 'reseller');
 
+// Regression: dashboard refreshes used to rewind a newly inserted address version to the
+// profile's original timestamp. The row's created_at preserves the real 9/15 address edit and
+// must recover both the displayed change date and standby state.
+const backdatedCurrentAddress = {
+    id: 'address-backdated',
+    valid_from: '2026-09-01T19:03:28.000Z',
+    created_at: '2026-09-15T23:50:00.000Z',
+    valid_to: null,
+    is_current: true
+};
+const backdatedRecovery = deriveTargetProfileHealthState({
+    events: [reseller('2026-09-11T09:33:36.000Z', 'address-old')],
+    addressVersions: [backdatedCurrentAddress, oldAddress],
+    profileModifiedAt: '2026-09-01T19:03:28.000Z'
+});
+assert.strictEqual(backdatedRecovery.current_status, 'standby');
+assert.strictEqual(backdatedRecovery.standby_since, '2026-09-15T23:50:00.000Z');
+assert.strictEqual(
+    targetAddressVersionChangeTime(backdatedCurrentAddress, [backdatedCurrentAddress, oldAddress]).iso,
+    '2026-09-15T23:50:00.000Z'
+);
+
+const backdatedAfterAttempt = deriveTargetProfileHealthState({
+    events: [event('success', '2026-09-16T12:00:00.000Z'), reseller('2026-09-11T09:33:36.000Z', 'address-old')],
+    addressVersions: [backdatedCurrentAddress, oldAddress],
+    profileModifiedAt: '2026-09-01T19:03:28.000Z'
+});
+assert.strictEqual(backdatedAfterAttempt.current_status, 'success');
+
 const frontendSource = fs.readFileSync(path.resolve(__dirname, '..', '..', 'frontend', 'script.js'), 'utf8');
 assert.match(frontendSource, /Standby — address changed/);
 assert.match(frontendSource, /data-target-health-filter[\s\S]*?value="standby"/);
 assert.match(frontendSource, /do not change it again yet/i);
+assert.match(frontendSource, /version\.change_detected_at \|\| version\.valid_from/);
 
 const serverSource = fs.readFileSync(path.resolve(__dirname, '..', 'server.js'), 'utf8');
 assert.match(serverSource, /deriveTargetProfileHealthState/);
 assert.match(serverSource, /standby:\s*0/);
+assert.doesNotMatch(serverSource, /requestedFromMs/, 'dashboard reads must never rewind an active address version');
 
 console.log('target profile standby state tests passed');
