@@ -1,5 +1,6 @@
 const { Client, GatewayIntentBits, Partials, ChannelType, EmbedBuilder, PermissionsBitField } = require('discord.js');
 const jwt = require('jsonwebtoken');
+const { mergeManageableGuilds, removeManageableGuild } = require('./success-network-ownership');
 
 function cleanText(v, n = 2000) { return String(v || '').replace(/\u0000/g, '').slice(0, n); }
 function isSuper(user, superEmail) { return user?.role === 'super_admin' || String(user?.email || '').toLowerCase() === String(superEmail || '').toLowerCase(); }
@@ -245,6 +246,73 @@ module.exports = function registerSuccessNetwork({ app, supabase, auth, admin, g
     const { data } = await supabase.from('discord_success_connections').select('*').eq('admin_user_id', userId).maybeSingle();
     return data || null;
   }
+  async function saveGuildConnection(userId, guild, existingConnection = null, connectionLabel = 'Discord server connected') {
+    const existing = existingConnection || await getConnection(userId);
+    const row = {
+      admin_user_id: userId,
+      discord_user_id: existing?.discord_user_id || null,
+      discord_username: existing?.discord_username || connectionLabel,
+      manageable_guilds: mergeManageableGuilds(existing?.manageable_guilds, {
+        id: String(guild.id),
+        name: cleanText(guild.name, 200),
+        icon: guild.icon || null
+      }),
+      connected_at: existing?.connected_at || new Date().toISOString(),
+      updated_at: new Date().toISOString()
+    };
+    const { data, error } = await supabase.from('discord_success_connections').upsert(row, { onConflict: 'admin_user_id' }).select('*').single();
+    if (error) throw error;
+    if (!data || String(data.admin_user_id) !== String(userId) || !allowedGuildIds(data).has(String(guild.id))) {
+      throw new Error('Discord server ownership could not be saved to the website admin account. Please reconnect Discord.');
+    }
+    return data;
+  }
+  async function removeGuildConnection(userId, guildId) {
+    if (!userId) return;
+    const connection = await getConnection(userId);
+    if (!connection) return;
+    const manageableGuilds = removeManageableGuild(connection.manageable_guilds, guildId);
+    const { error } = await supabase.from('discord_success_connections').update({
+      manageable_guilds: manageableGuilds,
+      updated_at: new Date().toISOString()
+    }).eq('admin_user_id', userId);
+    if (error) throw error;
+  }
+  async function removeGuildFromOtherConnections(targetAdminId, guildId) {
+    const { data: connections, error } = await supabase.from('discord_success_connections')
+      .select('admin_user_id,manageable_guilds');
+    if (error) throw error;
+    for (const connection of connections || []) {
+      if (String(connection.admin_user_id) === String(targetAdminId)) continue;
+      if (!allowedGuildIds(connection).has(String(guildId))) continue;
+      await removeGuildConnection(connection.admin_user_id, guildId);
+    }
+  }
+  async function transferSavedSourceOwnership(guildId, targetAdminId) {
+    const { data: source, error } = await supabase.from('discord_success_channels')
+      .select('*')
+      .eq('guild_id', String(guildId))
+      .maybeSingle();
+    if (error) throw error;
+    if (!source || String(source.admin_user_id || '') === String(targetAdminId)) return source || null;
+
+    const previousOwnerId = source.admin_user_id || null;
+    const { data: transferred, error: transferError } = await supabase.from('discord_success_channels').update({
+      admin_user_id: targetAdminId,
+      updated_at: new Date().toISOString()
+    }).eq('id', source.id).select('*').single();
+    if (transferError) throw transferError;
+
+    const { error: postsError } = await supabase.from('discord_success_posts').update({
+      source_admin_user_id: targetAdminId
+    }).eq('guild_id', String(source.guild_id)).eq('source_channel_id', String(source.source_channel_id));
+    if (postsError) throw postsError;
+
+    if (previousOwnerId && String(previousOwnerId) !== String(targetAdminId)) {
+      await removeGuildConnection(previousOwnerId, source.guild_id);
+    }
+    return transferred;
+  }
   function allowedGuildIds(connection) {
     return new Set((Array.isArray(connection?.manageable_guilds) ? connection.manageable_guilds : []).map(g => String(g.id)));
   }
@@ -443,19 +511,13 @@ module.exports = function registerSuccessNetwork({ app, supabase, auth, admin, g
       }
       if (!guild) throw new Error('The bot was not found in the selected Discord server. Confirm the installation and try again.');
 
-      const existing = await getConnection(decoded.user_id);
-      const manageableMap = new Map((Array.isArray(existing?.manageable_guilds) ? existing.manageable_guilds : []).map(g => [String(g.id), g]));
-      manageableMap.set(String(guild.id), { id: String(guild.id), name: cleanText(guild.name, 200), icon: guild.icon || null });
-      const row = {
-        admin_user_id: decoded.user_id,
-        discord_user_id: existing?.discord_user_id || null,
-        discord_username: existing?.discord_username || 'Discord server connected',
-        manageable_guilds: [...manageableMap.values()],
-        connected_at: existing?.connected_at || new Date().toISOString(),
-        updated_at: new Date().toISOString()
-      };
-      const { error } = await supabase.from('discord_success_connections').upsert(row, { onConflict: 'admin_user_id' });
-      if (error) throw error;
+      // The signed state identifies the exact website admin who clicked the
+      // connect button. Save the guild to that admin and reclaim any older
+      // source row for the same guild so Super Admin visibility never becomes
+      // ownership of another admin's Discord server.
+      await saveGuildConnection(decoded.user_id, guild);
+      await removeGuildFromOtherConnections(decoded.user_id, guild.id);
+      await transferSavedSourceOwnership(guild.id, decoded.user_id);
       return res.redirect(`${base}/success-network.html?discord_success_connected=1&guild_id=${encodeURIComponent(guild.id)}`);
     } catch (err) {
       return res.redirect(`${base}/success-network.html?discord_success_error=${encodeURIComponent(err.message || 'Discord connection failed')}`);
@@ -505,7 +567,100 @@ module.exports = function registerSuccessNetwork({ app, supabase, auth, admin, g
       };
     }
 
-    res.json({ bot_ready: ready, configured: !!token, oauth_configured: !!clientId, client_id: clientId, is_super_admin: superAdmin, connection, sources, master, total_posts: count || 0 });
+    res.json({ bot_ready: ready, configured: !!token, oauth_configured: !!clientId, client_id: clientId, is_super_admin: superAdmin, current_user_id: user.id, connection, sources, master, total_posts: count || 0 });
+  });
+
+  app.get('/admin/success-network/assignable-admins', auth, admin, async (req, res) => {
+    try {
+      const user = await getCurrentUser(req);
+      if (!isSuper(user, SUPER_ADMIN_EMAIL)) return res.status(403).json({ error: 'Super admin only' });
+      const { data: admins, error } = await supabase.from('users')
+        .select('id,email,role,revoked')
+        .eq('role', 'admin')
+        .order('email');
+      if (error) throw error;
+
+      let groupByUser = new Map();
+      try {
+        const { data: memberships } = await supabase.from('admin_organization_members')
+          .select('user_id,member_role,admin_organizations(id,name,owner_user_id)');
+        groupByUser = new Map((memberships || []).map(row => [String(row.user_id), {
+          group_id: row.admin_organizations?.id || null,
+          group_name: cleanText(row.admin_organizations?.name || '', 200),
+          group_owner: row.member_role === 'owner' || String(row.admin_organizations?.owner_user_id || '') === String(row.user_id)
+        }]));
+      } catch (_) {}
+
+      res.json((admins || []).filter(row => row.revoked !== true).map(row => ({
+        id: row.id,
+        email: row.email,
+        role: row.role,
+        ...(groupByUser.get(String(row.id)) || { group_id: null, group_name: '', group_owner: false })
+      })));
+    } catch (err) { res.status(500).json({ error: err.message }); }
+  });
+
+  app.post('/admin/success-network/assign-owner', auth, admin, async (req, res) => {
+    try {
+      const user = await getCurrentUser(req);
+      if (!isSuper(user, SUPER_ADMIN_EMAIL)) return res.status(403).json({ error: 'Super admin only' });
+      const sourceId = cleanText(req.body?.source_id, 80);
+      const targetAdminId = cleanText(req.body?.admin_user_id, 80);
+      if (!sourceId || !targetAdminId) return res.status(400).json({ error: 'Choose a Discord server and an admin.' });
+
+      const [{ data: source, error: sourceError }, { data: targetAdmin, error: adminError }] = await Promise.all([
+        supabase.from('discord_success_channels').select('*').eq('id', sourceId).maybeSingle(),
+        supabase.from('users').select('id,email,role,revoked').eq('id', targetAdminId).maybeSingle()
+      ]);
+      if (sourceError) throw sourceError;
+      if (adminError) throw adminError;
+      if (!source) return res.status(404).json({ error: 'Discord success server was not found.' });
+      if (!targetAdmin || targetAdmin.role !== 'admin' || targetAdmin.revoked === true) {
+        return res.status(400).json({ error: 'Choose an active admin account.' });
+      }
+
+      await ensureClient();
+      if (!client || !ready) return res.status(503).json({ error: 'Discord bot is not connected.' });
+      const guild = await client.guilds.fetch(String(source.guild_id));
+      const channel = await guild.channels.fetch(String(source.source_channel_id));
+      if (!channel?.isTextBased()) return res.status(400).json({ error: 'The saved success channel is no longer available.' });
+      const permissionProblem = botChannelPermissionProblem(channel, guild);
+      if (permissionProblem) return res.status(400).json({ error: permissionProblem });
+
+      const previousOwnerId = source.admin_user_id || null;
+      await saveGuildConnection(targetAdmin.id, guild, null, 'Discord server assigned by Super Admin');
+      await removeGuildFromOtherConnections(targetAdmin.id, guild.id);
+      const { error: deactivateError } = await supabase.from('discord_success_channels').update({
+        is_active: false,
+        updated_at: new Date().toISOString()
+      }).eq('admin_user_id', targetAdmin.id).neq('id', source.id);
+      if (deactivateError) throw deactivateError;
+
+      const { data: assignedSource, error: updateError } = await supabase.from('discord_success_channels').update({
+        admin_user_id: targetAdmin.id,
+        guild_name: cleanText(guild.name, 200),
+        source_channel_name: cleanText(channel.name, 200),
+        is_active: true,
+        updated_at: new Date().toISOString()
+      }).eq('id', source.id).select('*').single();
+      if (updateError) throw updateError;
+
+      const { error: postsError } = await supabase.from('discord_success_posts').update({
+        source_admin_user_id: targetAdmin.id
+      }).eq('guild_id', String(source.guild_id)).eq('source_channel_id', String(source.source_channel_id));
+      if (postsError) throw postsError;
+
+      if (previousOwnerId && String(previousOwnerId) !== String(targetAdmin.id)) {
+        await removeGuildConnection(previousOwnerId, source.guild_id);
+      }
+
+      res.json({
+        success: true,
+        source: assignedSource,
+        assigned_admin: { id: targetAdmin.id, email: targetAdmin.email },
+        previous_owner_id: previousOwnerId
+      });
+    } catch (err) { res.status(500).json({ error: err.message }); }
   });
 
   app.get('/admin/success-network/guilds', auth, admin, async (req, res) => {
