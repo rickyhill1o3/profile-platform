@@ -36,6 +36,7 @@
         <button class="admin-nav-button" type="button" data-store-nav="inventory">Add Inventory</button>
         <button class="admin-nav-button" type="button" data-store-nav="pricing">Pricing</button>
         <button class="admin-nav-button" type="button" data-store-nav="discounts">Discount Codes</button>
+        <button class="admin-nav-button" type="button" data-store-nav="raffles">Raffles</button>
         <button class="admin-nav-button" type="button" data-store-nav="edit">Edit Product</button>
         <button class="admin-nav-button" type="button" data-store-nav="orders">Orders</button>
         <button class="admin-nav-button" type="button" data-store-nav="receipts">Receipts</button>
@@ -252,6 +253,64 @@
               <table class="admin-table">
                 <thead><tr><th>Code</th><th>Type</th><th>Value</th><th>Usage</th><th>Rules</th><th>Status</th><th>Actions</th></tr></thead>
                 <tbody id="storeDiscountsBody"><tr><td colspan="7">Loading discount codes...</td></tr></tbody>
+              </table>
+            </div>
+          </section>
+        </section>
+
+        <section class="admin-pane" data-store-pane="raffles">
+          <section class="panel">
+            <div class="panel-header">
+              <div>
+                <h2>Automatic Member Raffle Manager</h2>
+                <p class="subtle-text">Create an all-member raffle or isolate entry to one admin group. Eligible members must click Enter raffle; the winner is drawn and emailed automatically when the timer ends.</p>
+              </div>
+              <a class="btn" href="raffle.html" target="_blank" rel="noopener noreferrer">Open Member Page</a>
+            </div>
+            <form id="raffleForm" class="form-grid">
+              <input type="hidden" id="raffleId" />
+              <div class="field field--full">
+                <label for="raffleProductId">Reserved storefront product</label>
+                <select class="input" id="raffleProductId" required><option value="">Choose a product with inventory</option></select>
+                <div class="subtle-text">The linked unit is hidden from the regular shop while the raffle is active.</div>
+              </div>
+              <div class="field">
+                <label for="raffleAudienceType">Eligible audience</label>
+                <select class="input" id="raffleAudienceType"><option value="all_members">All active website members</option><option value="admin_group">One admin group only</option></select>
+              </div>
+              <div class="field" id="raffleAudienceAdminField" hidden>
+                <label for="raffleAudienceAdminId">Admin group</label>
+                <select class="input" id="raffleAudienceAdminId"><option value="">Choose My, Apex, Guppies, or another group</option></select>
+              </div>
+              <div class="field field--full"><div class="banner banner-soft" id="raffleAudiencePreview">All active customer members can view this raffle, but each member must enter manually.</div></div>
+              <div class="field">
+                <label for="raffleFulfillmentMode">Prize type</label>
+                <select class="input" id="raffleFulfillmentMode"><option value="purchase">Winner purchases at the configured price</option><option value="free">Free prize — no winner payment</option></select>
+              </div>
+              <div class="field"><label>Drawing</label><div class="input" aria-readonly="true">Automatic at the exact end time</div></div>
+              <div class="field field--full"><label for="raffleTitle">Raffle title</label><input class="input" id="raffleTitle" required value="Pokémon Trading Card Game: 30th Celebration Elite Trainer Box" /></div>
+              <div class="field field--full"><label for="raffleDescription">Description</label><textarea class="input" id="raffleDescription" rows="3" placeholder="One sealed ETB reserved for the selected raffle winner."></textarea></div>
+              <div class="field field--full"><label for="raffleImageUrl">Image URL</label><input class="input" id="raffleImageUrl" placeholder="Filled from the selected storefront product" /></div>
+              <div class="field"><label for="raffleRetailPrice">Winner retail price</label><input class="input" id="raffleRetailPrice" type="number" min="0" step="0.01" required value="70.00" /></div>
+              <div class="field"><label for="raffleShippingPrice">Shipping price</label><input class="input" id="raffleShippingPrice" type="number" min="0" step="0.01" required value="8.95" /></div>
+              <div class="field"><label for="raffleMarketLow">Market value low</label><input class="input" id="raffleMarketLow" type="number" min="0" step="0.01" value="150.00" /></div>
+              <div class="field"><label for="raffleMarketHigh">Market value high</label><input class="input" id="raffleMarketHigh" type="number" min="0" step="0.01" value="170.00" /></div>
+              <div class="field"><label for="raffleStartsAt">Raffle starts</label><input class="input" id="raffleStartsAt" type="datetime-local" required /></div>
+              <div class="field"><label for="raffleEndsAt">Automatic draw time</label><input class="input" id="raffleEndsAt" type="datetime-local" required /></div>
+              <div class="field"><label for="raffleClaimHours">Winner checkout window (hours)</label><input class="input" id="raffleClaimHours" type="number" min="1" max="168" step="1" value="24" /></div>
+              <div class="field checkbox-field"><label class="checkbox-row"><input id="raffleHideProduct" type="checkbox" checked /><span>Hide linked product from normal shop</span></label></div>
+              <div class="field field--full"><label for="raffleTerms">Additional terms</label><textarea class="input" id="raffleTerms" rows="3">Members only. Each eligible member must manually enter before the countdown ends. Website accounts are not entered automatically, and no public entry is available. Odds depend on the number of manual entries. A retail winner must complete checkout before the claim deadline or a fallback redraw may occur. Void where prohibited.</textarea></div>
+              <div class="field field--full panel-actions panel-actions--split"><button class="btn" type="button" id="raffleFormReset">New raffle / reset</button><button class="btn btn-primary" type="submit" id="raffleSaveButton">Create raffle</button></div>
+            </form>
+            <div class="banner" id="raffleMessage">New raffles default to a 48-hour manual-entry window with an automatic drawing at the end.</div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-header"><div><h2>Current and Past Raffles</h2><p class="subtle-text">Winners are drawn automatically from manual entries. Recovery draw appears only after a draw error or an expired retail claim.</p></div><button class="btn" type="button" id="refreshRafflesButton">Refresh</button></div>
+            <div class="table-wrap table-wrap--admin-scroll">
+              <table class="admin-table">
+                <thead><tr><th>Raffle</th><th>Audience</th><th>Status</th><th>Timer</th><th>Entries</th><th>Prize</th><th>Winner</th><th>Actions</th></tr></thead>
+                <tbody id="storeRafflesBody"><tr><td colspan="8">Loading raffles…</td></tr></tbody>
               </table>
             </div>
           </section>

@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>The Shore Shack | Retail Raffles</title>
+  <meta name="description" content="Members-only manual-entry raffle drawings from The Shore Shack." />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body class="marketing-page raffle-page">
+  <header class="marketing-header">
+    <div class="marketing-shell marketing-nav">
+      <a href="index.html" class="brand-mark">
+        <span class="brand-mark__logo">TSS</span>
+        <span><strong>The Shore Shack</strong><small>Members-only raffles</small></span>
+      </a>
+      <nav class="marketing-links">
+        <a href="dashboard.html">Dashboard</a><a href="shop.html">Public Shop</a><a href="raffle.html" aria-current="page">My Raffles</a><a href="guide.html">User Guide</a>
+      </nav>
+    </div>
+  </header>
+
+  <main>
+    <section class="marketing-section raffle-hero-section">
+      <div class="marketing-shell">
+        <div class="raffle-hero">
+          <div>
+            <p class="eyebrow">Private member drawings</p>
+            <h1>Be active. Enter before time runs out.</h1>
+            <p>Sign in and manually enter each raffle you want to join. At zero, the system securely selects one winner from the members who entered and immediately emails the result and checkout link.</p>
+          </div>
+          <div class="raffle-hero__trust">
+            <strong>Manual entry required</strong>
+            <span>Signed-in members only</span>
+            <span>All-member or private group pool</span>
+          </div>
+        </div>
+        <div id="raffle-page-message" class="banner raffle-page-message">Loading current raffles…</div>
+        <div id="raffle-list" class="raffle-list" aria-live="polite"></div>
+        <section class="panel raffle-rules-card">
+          <h2>How it works</h2>
+          <ol>
+            <li>Sign in, open an available raffle, and click <strong>Enter raffle</strong> before its countdown ends.</li>
+            <li>All-member raffles accept any active customer member; private group raffles accept only members in the selected admin group.</li>
+            <li>When the countdown reaches zero, the server locks the manual entries and randomly draws one winner.</li>
+            <li>The winner receives a private email with a direct checkout link and also sees checkout here.</li>
+            <li>Retail raffles require payment before the claim deadline; free-prize raffles require no payment.</li>
+          </ol>
+          <p class="subtle-text">Raffles are not available to public shop visitors. Creating an account does not automatically enter a raffle. Odds depend on the number of members who manually enter. If a retail winner does not complete checkout by the deadline, the same locked entry pool can be used for a fallback redraw.</p>
+        </section>
+      </div>
+    </section>
+  </main>
+
+  <script src="raffle.js"></script>
+</body>
+</html>

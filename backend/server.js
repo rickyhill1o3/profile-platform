@@ -4685,6 +4685,15 @@ app.post("/webhooks/stripe", bodyParser.raw({ type: "application/json" }), async
                 metadata: session.metadata || {}
             });
 
+            if (String(session.metadata?.checkout_type || "") === "raffle_winner_purchase") {
+                if (!shopRoutes?.recordRaffleWinnerSaleFromStripeSession) {
+                    throw new Error("Raffle storefront sale handler is not available");
+                }
+                const raffleSaleResult = await shopRoutes.recordRaffleWinnerSaleFromStripeSession(session);
+                console.log("Raffle winner Stripe sale processed:", raffleSaleResult);
+                return res.json({ received: true, raffle_purchase: true, result: raffleSaleResult });
+            }
+
             if (String(session.metadata?.checkout_type || "") === "storefront_purchase") {
                 if (shopRoutes?.recordStorefrontSaleFromStripeSession) {
                     const saleResult = await shopRoutes.recordStorefrontSaleFromStripeSession(session);

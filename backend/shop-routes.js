@@ -25,6 +25,7 @@ function countEffectiveSkus(product) {
 const fs = require('fs');
 const path = require('path');
 const cheerio = require('cheerio');
+const { registerStorefrontRaffleRoutes } = require('./storefront-raffles');
 
 function dollarsToCents(value) {
   const num = Number(value);
@@ -936,17 +937,19 @@ async function allocateCostFIFO({ supabase, storefrontProductId, quantity }) {
   return { allocatedCostCents, allocations };
 }
 
-async function recordStorefrontSaleFromStripeSession({ supabase, session, stripe }) {
+async function recordStorefrontSaleFromStripeSession({ supabase, session, stripe, sendOrderConfirmation }) {
   try {
-    if (stripe && session?.id) {
+    if (stripe && session?.id && String(session?.metadata?.complimentary_prize || '') !== 'true') {
       session = await stripe.checkout.sessions.retrieve(session.id, { expand: ['customer', 'line_items.data.taxes.rate'] });
     }
   } catch (err) {
     console.warn('Could not expand Stripe tax details:', err.message || err);
   }
   const metadata = session?.metadata || {};
+  const checkoutType = String(metadata.checkout_type || '');
+  const isRafflePurchase = checkoutType === 'raffle_winner_purchase';
   const taxVerification = deriveStripeTaxVerification(session);
-  if (String(metadata.checkout_type || '') !== 'storefront_purchase') {
+  if (!['storefront_purchase', 'raffle_winner_purchase'].includes(checkoutType)) {
     return { skipped: 'not_storefront_checkout' };
   }
 
@@ -1003,7 +1006,9 @@ async function recordStorefrontSaleFromStripeSession({ supabase, session, stripe
 
   const amountSubtotal = Number(session.amount_subtotal || 0);
   const amountTotal = Number(session.amount_total || 0);
-  const shippingCents = Number(session.total_details?.amount_shipping || 0);
+  const shippingCents = isRafflePurchase
+    ? Number(metadata.raffle_shipping_price_cents || 0)
+    : Number(session.total_details?.amount_shipping || 0);
   const taxCents = Number(session.total_details?.amount_tax || 0);
   const saleSubtotalExShipping = Math.max(0, amountSubtotal - shippingCents);
 
@@ -1012,7 +1017,9 @@ async function recordStorefrontSaleFromStripeSession({ supabase, session, stripe
     return {
       ...entry,
       product,
-      subtotal_cents: Number(product.sale_price_cents || 0) * Number(entry.quantity || 0)
+      subtotal_cents: (isRafflePurchase
+        ? Number(metadata.raffle_price_cents || 0)
+        : Number(product.sale_price_cents || 0)) * Number(entry.quantity || 0)
     };
   });
   const subtotalBase = lineSubtotalByProduct.reduce((sum, entry) => sum + Number(entry.subtotal_cents || 0), 0) || 1;
@@ -1055,6 +1062,9 @@ async function recordStorefrontSaleFromStripeSession({ supabase, session, stripe
           allocations,
           raw_session: session,
           cart_items: saleItems,
+          checkout_type: checkoutType,
+          raffle_id: isRafflePurchase ? String(metadata.raffle_id || '') : null,
+          raffle_entry_id: isRafflePurchase ? String(metadata.raffle_entry_id || '') : null,
           fulfillment_status: 'paid',
           customer_name: session.customer_details?.name || null,
           shipping_name: session.shipping_details?.name || session.customer_details?.name || null,
@@ -1070,7 +1080,9 @@ async function recordStorefrontSaleFromStripeSession({ supabase, session, stripe
   }
 
   await Promise.all(saleItems.map((entry) => recalculateProductInventory(supabase, entry.storefront_product_id)));
-  const emailResult = await sendStorefrontOrderConfirmation({ sales: insertedSales });
+  const emailResult = typeof sendOrderConfirmation === 'function'
+    ? await sendOrderConfirmation({ sales: insertedSales })
+    : { customer: { attempted: false }, admin: { attempted: false } };
   return { recorded: true, sales: insertedSales, email: emailResult };
 }
 
@@ -1285,6 +1297,23 @@ function registerShopRoutes({
     catch (err) { return { attempted: true, success: false, to, error: err.message || String(err) }; }
   }
 
+  const raffleRoutes = registerStorefrontRaffleRoutes({
+    app,
+    supabase,
+    stripe,
+    auth,
+    getCurrentUser,
+    buildAppUrl,
+    sendEmail,
+    superAdminEmail: SUPER_ADMIN_EMAIL,
+    recordStorefrontSale: async (session) => recordStorefrontSaleFromStripeSession({
+      supabase,
+      session,
+      stripe,
+      sendOrderConfirmation: sendStorefrontOrderConfirmation
+    })
+  });
+
   app.get('/public/store/products', async (req, res) => {
     try {
       const { data, error } = await supabase
@@ -1294,9 +1323,11 @@ function registerShopRoutes({
         .order('created_at', { ascending: false });
       if (error) return res.status(500).json({ error: error.message });
 
+      const reservedProductIds = new Set(await raffleRoutes.listReservedProductIds());
+
       const visibleProducts = (data || []).filter((row) => {
         const status = String(row?.status || 'active').trim().toLowerCase();
-        return status === 'active' && Number(row?.stock_on_hand || 0) > 0;
+        return status === 'active' && Number(row?.stock_on_hand || 0) > 0 && !reservedProductIds.has(String(row.id));
       });
 
       res.json({ products: visibleProducts.map(withMoney) });
@@ -2201,6 +2232,10 @@ app.post('/public/store/checkout-session', async (req, res) => {
     }
     const compactItems = Array.from(grouped.entries()).map(([product_id, quantity]) => ({ product_id, quantity }));
     const productIds = compactItems.map((entry) => entry.product_id);
+    const reservedProductIds = new Set(await raffleRoutes.listReservedProductIds());
+    if (productIds.some((id) => reservedProductIds.has(String(id)))) {
+      return res.status(409).json({ error: 'One or more products are reserved for an active raffle.' });
+    }
 
     const { data: items, error } = await supabase
       .from('storefront_products')
@@ -2340,7 +2375,8 @@ return {
         superAdminEmail: SUPER_ADMIN_EMAIL
       }),
     recordStorefrontSaleFromStripeSession: async (session) =>
-      recordStorefrontSaleFromStripeSession({ supabase, session, stripe })
+      recordStorefrontSaleFromStripeSession({ supabase, session, stripe, sendOrderConfirmation: sendStorefrontOrderConfirmation }),
+    recordRaffleWinnerSaleFromStripeSession: raffleRoutes.recordRaffleWinnerSaleFromStripeSession
   };
 }
 

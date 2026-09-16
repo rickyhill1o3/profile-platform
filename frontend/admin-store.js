@@ -26,7 +26,7 @@ function countEffectiveSkus(product) {
 (function () {
   const panes = Array.from(document.querySelectorAll('[data-store-pane]'));
   const navButtons = Array.from(document.querySelectorAll('[data-store-nav]'));
-  const state = { products: [], orders: [], receipts: [], overrides: [], discounts: [], accounting: null, editingProductId: '', activeOrder: null };
+  const state = { products: [], orders: [], receipts: [], overrides: [], discounts: [], raffles: [], raffleGroups: [], raffleMemberCount: 0, accounting: null, editingProductId: '', activeOrder: null };
   function $(id) { return document.getElementById(id); }
   function setPane(name) { panes.forEach((pane) => pane.classList.toggle('is-active', pane.dataset.storePane === name)); navButtons.forEach((button) => button.classList.toggle('is-active', button.dataset.storeNav === name)); }
   function escape(value) { return typeof escapeHTML === 'function' ? escapeHTML(value) : String(value || ''); }
@@ -95,6 +95,154 @@ function countEffectiveSkus(product) {
       button.disabled = true; showMessage('storeAdminMessage', 'Merging products...');
       try { await authJSON(API + '/admin/store/products/' + encodeURIComponent(targetId) + '/merge', { method: 'POST', body: JSON.stringify({ source_product_id: sourceId }) }); showMessage('storeAdminMessage', 'Products merged successfully.'); await refreshAll(); }
       catch (error) { showMessage('storeAdminMessage', error.message || 'Could not merge products.', true); } finally { button.disabled = false; }
+    }));
+  }
+
+  function localDateTimeInput(value) {
+    const date = value ? new Date(value) : new Date();
+    if (Number.isNaN(date.getTime())) return '';
+    return new Date(date.getTime() - (date.getTimezoneOffset() * 60000)).toISOString().slice(0, 16);
+  }
+
+  function setDefaultRaffleWindow() {
+    const startsAt = new Date();
+    const endsAt = new Date(startsAt.getTime() + (48 * 60 * 60 * 1000));
+    $('raffleStartsAt').value = localDateTimeInput(startsAt);
+    $('raffleEndsAt').value = localDateTimeInput(endsAt);
+  }
+
+  function populateRaffleProducts() {
+    const select = $('raffleProductId'); if (!select) return;
+    const selected = select.value;
+    const products = state.products.filter((product) => product.status !== 'merged' && Number(product.stock_on_hand || 0) > 0);
+    select.innerHTML = '<option value="">Choose a product with inventory</option>' + products.map((product) => `<option value="${escape(product.id)}">${escape(product.title || product.primary_sku || product.id)} — ${escape(product.stock_on_hand || 0)} in stock</option>`).join('');
+    if (products.some((product) => String(product.id) === String(selected))) select.value = selected;
+  }
+
+  function populateRaffleGroups() {
+    const select = $('raffleAudienceAdminId'); if (!select) return;
+    const selected = select.value;
+    select.innerHTML = '<option value="">Choose My, Apex, Guppies, or another group</option>' + state.raffleGroups.map((group) => `<option value="${escape(group.id)}" data-label="${escape(group.label || group.email)}" data-count="${escape(group.eligible_count || 0)}">${escape(group.label || group.email)} — ${escape(group.eligible_count || 0)} eligible members</option>`).join('');
+    if (state.raffleGroups.some((group) => String(group.id) === String(selected))) select.value = selected;
+    updateRaffleAudiencePreview();
+  }
+
+  function updateRaffleAudiencePreview() {
+    const groupOnly = $('raffleAudienceType')?.value === 'admin_group';
+    if ($('raffleAudienceAdminField')) $('raffleAudienceAdminField').hidden = !groupOnly;
+    const preview = $('raffleAudiencePreview'); if (!preview) return;
+    if (!groupOnly) {
+      const total = Number(state.raffleMemberCount || 0);
+      preview.textContent = total ? `All ${total} active customer members can view this raffle, but each must enter manually.` : 'All active customer members can view this raffle, but each must enter manually.';
+      return;
+    }
+    const option = $('raffleAudienceAdminId')?.selectedOptions?.[0];
+    preview.textContent = option?.value ? `Only ${option.dataset.label || option.textContent} members can enter. Current eligible audience: ${option.dataset.count || 0}; entry is still manual.` : 'Choose the admin group whose members may manually enter this drawing.';
+  }
+
+  function updateRaffleFulfillmentFields() {
+    const free = $('raffleFulfillmentMode')?.value === 'free';
+    ['raffleRetailPrice', 'raffleShippingPrice', 'raffleClaimHours'].forEach((id) => { if ($(id)) $(id).disabled = free; });
+    if (free) {
+      $('raffleRetailPrice').value = '0.00';
+      $('raffleShippingPrice').value = '0.00';
+    } else {
+      if (Number($('raffleRetailPrice').value || 0) <= 0) $('raffleRetailPrice').value = '70.00';
+      if (Number($('raffleShippingPrice').value || 0) <= 0) $('raffleShippingPrice').value = '8.95';
+    }
+  }
+
+  function resetRaffleForm() {
+    $('raffleForm')?.reset();
+    $('raffleId').value = '';
+    $('raffleAudienceType').value = 'all_members';
+    $('raffleAudienceAdminId').value = '';
+    $('raffleFulfillmentMode').value = 'purchase';
+    $('raffleTitle').value = 'Pokémon Trading Card Game: 30th Celebration Elite Trainer Box';
+    $('raffleRetailPrice').value = '70.00';
+    $('raffleShippingPrice').value = '8.95';
+    $('raffleMarketLow').value = '150.00';
+    $('raffleMarketHigh').value = '170.00';
+    $('raffleClaimHours').value = '24';
+    $('raffleHideProduct').checked = true;
+    $('raffleTerms').value = 'Members only. Each eligible member must manually enter before the countdown ends. Website accounts are not entered automatically, and no public entry is available. Odds depend on the number of manual entries. A retail winner must complete checkout before the claim deadline or a fallback redraw may occur. Void where prohibited.';
+    updateRaffleAudiencePreview();
+    updateRaffleFulfillmentFields();
+    setDefaultRaffleWindow();
+    $('raffleSaveButton').textContent = 'Create raffle';
+    showMessage('raffleMessage', 'Ready to create a new 48-hour manual-entry member raffle with an automatic draw.');
+  }
+
+  function loadRaffleIntoForm(raffleId) {
+    const raffle = state.raffles.find((item) => String(item.id) === String(raffleId));
+    if (!raffle) return;
+    $('raffleId').value = raffle.id || '';
+    $('raffleProductId').value = raffle.linked_storefront_product_id || '';
+    $('raffleAudienceType').value = raffle.audience_type || 'all_members';
+    $('raffleAudienceAdminId').value = raffle.audience_admin_id || '';
+    $('raffleFulfillmentMode').value = raffle.fulfillment_mode || 'purchase';
+    $('raffleTitle').value = raffle.title || '';
+    $('raffleDescription').value = raffle.description || '';
+    $('raffleImageUrl').value = raffle.image_url || '';
+    $('raffleRetailPrice').value = Number(raffle.retail_price || 0).toFixed(2);
+    $('raffleShippingPrice').value = Number(raffle.shipping_price || 0).toFixed(2);
+    $('raffleMarketLow').value = Number(raffle.market_value_low || 0) ? Number(raffle.market_value_low).toFixed(2) : '';
+    $('raffleMarketHigh').value = Number(raffle.market_value_high || 0) ? Number(raffle.market_value_high).toFixed(2) : '';
+    $('raffleStartsAt').value = localDateTimeInput(raffle.starts_at);
+    $('raffleEndsAt').value = localDateTimeInput(raffle.ends_at);
+    $('raffleClaimHours').value = raffle.winner_claim_hours || 24;
+    $('raffleHideProduct').checked = raffle.hide_linked_product !== false;
+    $('raffleTerms').value = raffle.terms || '';
+    updateRaffleAudiencePreview();
+    updateRaffleFulfillmentFields();
+    $('raffleSaveButton').textContent = 'Save raffle changes';
+    showMessage('raffleMessage', `Editing ${raffle.title}.`);
+    setPane('raffles');
+  }
+
+  function renderRaffles() {
+    const body = $('storeRafflesBody'); if (!body) return;
+    if (!state.raffles.length) { body.innerHTML = '<tr><td colspan="8">No raffles created yet.</td></tr>'; return; }
+    body.innerHTML = state.raffles.map((raffle) => {
+      const status = String(raffle.status || 'scheduled');
+      const canDraw = ['closed', 'claim_expired', 'draw_error'].includes(status);
+      const canEdit = Number(raffle.entry_count || 0) === 0 && !raffle.winner_user_id && !['paid', 'fulfilled', 'canceled', 'drawing'].includes(status);
+      const canCancel = !['paid', 'fulfilled', 'canceled'].includes(status);
+      const canFulfill = raffle.fulfillment_mode === 'free' && status === 'winner_selected';
+      const product = state.products.find((item) => String(item.id) === String(raffle.linked_storefront_product_id));
+      return `<tr>
+        <td><div class="raffle-admin-product-preview">${raffle.image_url ? `<img src="${escape(raffle.image_url)}" alt="" />` : ''}<div><strong>${escape(raffle.title)}</strong><div class="subtle-text">${escape(product?.primary_sku || 'Reserved storefront unit')}</div></div></div></td>
+        <td><strong>${escape(raffle.audience_label || 'All active members')}</strong><div class="subtle-text">${raffle.audience_type === 'admin_group' ? 'Private admin group' : 'All website members'}</div></td>
+        <td><span class="raffle-admin-status raffle-admin-status--${escape(status)}">${escape(status.replaceAll('_', ' '))}</span>${raffle.draw_error ? `<div class="subtle-text" style="color:#b91c1c">${escape(raffle.draw_error)}</div>` : ''}</td>
+        <td><div>${escape(dateTime(raffle.starts_at))}</div><div class="subtle-text">to ${escape(dateTime(raffle.ends_at))}</div>${raffle.claim_expires_at ? `<div class="subtle-text">Claim by ${escape(dateTime(raffle.claim_expires_at))}</div>` : ''}</td>
+        <td><strong>${escape(raffle.entry_count || 0)}</strong></td>
+        <td>${raffle.fulfillment_mode === 'free' ? '<strong>FREE</strong><div class="subtle-text">No payment</div>' : `${money(raffle.retail_price)}<div class="subtle-text">+ ${money(raffle.shipping_price)} shipping</div>`}</td>
+        <td>${raffle.winner_email ? `<strong>${escape(raffle.winner_email)}</strong><div class="subtle-text">${status === 'paid' ? 'Paid' : status === 'fulfilled' ? 'Fulfilled' : 'Selected + emailed'}</div>` : '—'}</td>
+        <td><div class="raffle-admin-actions">${canEdit ? `<button class="btn" type="button" data-edit-raffle="${escape(raffle.id)}">Edit</button>` : ''}${canDraw ? `<button class="btn btn-primary" type="button" data-draw-raffle="${escape(raffle.id)}">${status === 'claim_expired' ? 'Redraw' : 'Retry draw'}</button>` : ''}${canFulfill ? `<button class="btn btn-primary" type="button" data-fulfill-raffle="${escape(raffle.id)}">Mark free prize fulfilled</button>` : ''}${canCancel ? `<button class="btn btn-danger" type="button" data-cancel-raffle="${escape(raffle.id)}">Cancel</button>` : ''}</div></td>
+      </tr>`;
+    }).join('');
+    body.querySelectorAll('[data-edit-raffle]').forEach((button) => button.addEventListener('click', () => loadRaffleIntoForm(button.dataset.editRaffle)));
+    body.querySelectorAll('[data-draw-raffle]').forEach((button) => button.addEventListener('click', async () => {
+      const raffle = state.raffles.find((item) => String(item.id) === String(button.dataset.drawRaffle));
+      if (!confirm(`Randomly select ${raffle?.status === 'claim_expired' ? 'another' : 'a'} winner from the eligible entries?`)) return;
+      button.disabled = true; showMessage('raffleMessage', 'Selecting a winner securely…');
+      try {
+        const result = await authJSON(API + '/admin/store/raffles/' + encodeURIComponent(button.dataset.drawRaffle) + '/draw', { method: 'POST' });
+        showMessage('raffleMessage', `Winner selected: ${result.winner?.user_email || result.winner?.email || 'user'}. ${result.email?.success ? 'Notification email sent.' : `Email failed: ${result.email?.error || 'unknown error'}`}`, !result.email?.success);
+        await loadRaffles();
+      } catch (error) { showMessage('raffleMessage', error.message || 'Could not draw a winner.', true); } finally { button.disabled = false; }
+    }));
+    body.querySelectorAll('[data-fulfill-raffle]').forEach((button) => button.addEventListener('click', async () => {
+      if (!confirm('Mark this free prize fulfilled? This creates a $0 storefront order, consumes one inventory unit, and emails the winner.')) return;
+      button.disabled = true;
+      try { await authJSON(API + '/admin/store/raffles/' + encodeURIComponent(button.dataset.fulfillRaffle) + '/fulfill-free', { method: 'POST' }); showMessage('raffleMessage', 'Free prize marked fulfilled and moved into the storefront order flow.'); await refreshAll(); }
+      catch (error) { showMessage('raffleMessage', error.message || 'Could not fulfill the free prize.', true); } finally { button.disabled = false; }
+    }));
+    body.querySelectorAll('[data-cancel-raffle]').forEach((button) => button.addEventListener('click', async () => {
+      if (!confirm('Cancel this raffle and release its linked product back to the regular shop?')) return;
+      button.disabled = true;
+      try { await authJSON(API + '/admin/store/raffles/' + encodeURIComponent(button.dataset.cancelRaffle) + '/cancel', { method: 'POST' }); showMessage('raffleMessage', 'Raffle canceled and product released.'); await loadRaffles(); }
+      catch (error) { showMessage('raffleMessage', error.message || 'Could not cancel raffle.', true); } finally { button.disabled = false; }
     }));
   }
   function openEditPane(productId) {
@@ -232,7 +380,7 @@ function countEffectiveSkus(product) {
       catch (error) { showMessage('discountMessage', error.message || 'Could not delete discount.', true); } finally { button.disabled = false; }
     }));
   }
-  async function loadProducts() { const data = await authJSON(API + '/admin/store/products'); state.products = Array.isArray(data.products) ? data.products : []; renderProducts(); renderTopStats(); }
+  async function loadProducts() { const data = await authJSON(API + '/admin/store/products'); state.products = Array.isArray(data.products) ? data.products : []; renderProducts(); populateRaffleProducts(); renderRaffles(); renderTopStats(); }
 
   async function refreshActiveOrderTax() {
     const order = state.activeOrder;
@@ -253,7 +401,31 @@ function countEffectiveSkus(product) {
   async function loadOrders() { showMessage('storeOrdersMessage', 'Loading active orders...'); try { const data = await authJSON(API + '/admin/store/orders'); state.orders = Array.isArray(data.orders) ? data.orders : []; renderOrders(); showMessage('storeOrdersMessage', state.orders.length ? `Loaded ${state.orders.length} active order${state.orders.length === 1 ? '' : 's'}.` : 'No active storefront orders right now.'); } catch (error) { state.orders = []; renderOrders(); showMessage('storeOrdersMessage', `Could not load orders: ${error.message || 'Unknown error'}`, true); throw error; } }
   async function loadAccounting() { const data = await authJSON(API + '/admin/store/accounting/summary'); state.accounting = data || {}; $('accountingExportLink').href = API + '/admin/store/accounting/export.csv'; renderAccounting(); renderTopStats(); }
   async function loadDiscounts() { const data = await authJSON(API + '/api/discounts'); state.discounts = Array.isArray(data.discounts) ? data.discounts : []; renderDiscounts(); }
-  async function refreshAll() { await Promise.all([loadProducts(), loadReceipts(), loadOverrides(), loadOrders(), loadAccounting(), loadDiscounts()]); }
+  async function loadRaffles() {
+    try {
+      const data = await authJSON(API + '/admin/store/raffles');
+      state.raffles = Array.isArray(data.raffles) ? data.raffles : [];
+      renderRaffles();
+    } catch (error) {
+      state.raffles = [];
+      renderRaffles();
+      showMessage('raffleMessage', `${error.message || 'Could not load raffles.'} If this is the first raffle, run backend/sql/STOREFRONT_RAFFLES.sql in Supabase.`, true);
+    }
+  }
+  async function loadRaffleGroups() {
+    try {
+      const data = await authJSON(API + '/admin/store/raffle-groups');
+      state.raffleGroups = Array.isArray(data.groups) ? data.groups : [];
+      state.raffleMemberCount = Number(data.active_member_count || 0);
+      populateRaffleGroups();
+    } catch (error) {
+      state.raffleGroups = [];
+      state.raffleMemberCount = 0;
+      populateRaffleGroups();
+      showMessage('raffleMessage', error.message || 'Could not load admin raffle groups.', true);
+    }
+  }
+  async function refreshAll() { await Promise.all([loadProducts(), loadReceipts(), loadOverrides(), loadOrders(), loadAccounting(), loadDiscounts(), loadRaffles(), loadRaffleGroups()]); }
   function bindPaneNav() { navButtons.forEach((button) => button.addEventListener('click', () => setPane(button.dataset.storeNav))); }
   async function lookupProductDetails() {
     const site = $('storeManualSite')?.value || ''; const sku = $('storeManualSku')?.value || ''; if (!site || !sku) return;
@@ -304,13 +476,66 @@ function countEffectiveSkus(product) {
       } catch (error) { showMessage('discountMessage', error.message || 'Could not save discount.', true); }
     });
   }
+  function bindRaffleForm() {
+    $('raffleFormReset')?.addEventListener('click', resetRaffleForm);
+    $('refreshRafflesButton')?.addEventListener('click', loadRaffles);
+    $('raffleAudienceType')?.addEventListener('change', updateRaffleAudiencePreview);
+    $('raffleAudienceAdminId')?.addEventListener('change', updateRaffleAudiencePreview);
+    $('raffleFulfillmentMode')?.addEventListener('change', updateRaffleFulfillmentFields);
+    $('raffleProductId')?.addEventListener('change', () => {
+      const product = state.products.find((item) => String(item.id) === String($('raffleProductId').value));
+      if (!product) return;
+      $('raffleTitle').value = product.title || $('raffleTitle').value;
+      $('raffleDescription').value = product.description || $('raffleDescription').value;
+      $('raffleImageUrl').value = product.image_url || $('raffleImageUrl').value;
+    });
+    $('raffleForm')?.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const raffleId = $('raffleId').value.trim();
+      const startsAt = new Date($('raffleStartsAt').value);
+      const endsAt = new Date($('raffleEndsAt').value);
+      if (Number.isNaN(startsAt.getTime()) || Number.isNaN(endsAt.getTime()) || endsAt <= startsAt) {
+        showMessage('raffleMessage', 'Choose a valid start time and an end time after it.', true);
+        return;
+      }
+      const payload = {
+        linked_storefront_product_id: $('raffleProductId').value,
+        audience_type: $('raffleAudienceType').value,
+        audience_admin_id: $('raffleAudienceType').value === 'admin_group' ? $('raffleAudienceAdminId').value : null,
+        audience_label: $('raffleAudienceType').value === 'admin_group' ? ($('raffleAudienceAdminId').selectedOptions?.[0]?.dataset?.label || '') : 'All active members',
+        fulfillment_mode: $('raffleFulfillmentMode').value,
+        title: $('raffleTitle').value,
+        description: $('raffleDescription').value,
+        image_url: $('raffleImageUrl').value,
+        retail_price: $('raffleFulfillmentMode').value === 'free' ? 0 : $('raffleRetailPrice').value,
+        shipping_price: $('raffleFulfillmentMode').value === 'free' ? 0 : $('raffleShippingPrice').value,
+        market_value_low: $('raffleMarketLow').value,
+        market_value_high: $('raffleMarketHigh').value,
+        starts_at: startsAt.toISOString(),
+        ends_at: endsAt.toISOString(),
+        winner_claim_hours: $('raffleFulfillmentMode').value === 'free' ? 24 : $('raffleClaimHours').value,
+        hide_linked_product: $('raffleHideProduct').checked,
+        terms: $('raffleTerms').value
+      };
+      const saveButton = $('raffleSaveButton'); saveButton.disabled = true;
+      showMessage('raffleMessage', raffleId ? 'Saving raffle changes…' : 'Creating raffle…');
+      try {
+        await authJSON(API + (raffleId ? '/admin/store/raffles/' + encodeURIComponent(raffleId) : '/admin/store/raffles'), { method: raffleId ? 'PATCH' : 'POST', body: JSON.stringify(payload) });
+        resetRaffleForm();
+        showMessage('raffleMessage', raffleId ? 'Raffle updated.' : 'Raffle created. Its linked product is now reserved.');
+        await Promise.all([loadRaffles(), loadProducts()]);
+      } catch (error) { showMessage('raffleMessage', error.message || 'Could not save raffle.', true); }
+      finally { saveButton.disabled = false; }
+    });
+  }
   async function init() {
     if (!requireAdminAccess()) return;
-    bindPaneNav(); bindInventoryForm(); bindPricingForm(); bindEditForm(); bindDiscountForm();
+    bindPaneNav(); bindInventoryForm(); bindPricingForm(); bindEditForm(); bindDiscountForm(); bindRaffleForm();
     $('refreshStoreDataButton')?.addEventListener('click', refreshAll);
     $('refreshStoreOrdersButton')?.addEventListener('click', () => loadOrders().catch(() => {}));
     $('storeReceiptRefreshTax')?.addEventListener('click', refreshActiveOrderTax);
     $('discountActive').value = 'true';
+    setDefaultRaffleWindow();
     document.querySelectorAll('[data-close-store-modal]').forEach((button) => button.addEventListener('click', () => closeStoreModal(button.dataset.closeStoreModal)));
     $('storeTrackingSave')?.addEventListener('click', async () => {
       const order = state.activeOrder; if (!order) return;
