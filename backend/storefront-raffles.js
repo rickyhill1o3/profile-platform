@@ -46,7 +46,8 @@ function chooseRaffleWinner(entries, randomInt = crypto.randomInt) {
 }
 
 function isActiveMember(user) {
-  return String(user?.role || '').toLowerCase() === 'user' && !user?.revoked && Boolean(String(user?.email || '').trim());
+  const role = String(user?.role || '').toLowerCase();
+  return ['user', 'admin', 'super_admin'].includes(role) && !user?.revoked && Boolean(String(user?.email || '').trim());
 }
 
 function isUserEligibleForRaffle(user, raffle, groupOwnerIds = []) {
@@ -461,7 +462,7 @@ function registerStorefrontRaffleRoutes({
       const userResult = await supabase.from('users').select('id,email,role,owner_admin_id,revoked').eq('id', signedInUser.id).maybeSingle();
       if (userResult.error) throw userResult.error;
       const user = userResult.data;
-      if (!isActiveMember(user)) return res.status(403).json({ error: 'Only active customer accounts can enter raffles.' });
+      if (!isActiveMember(user)) return res.status(403).json({ error: 'Only active website accounts can enter raffles.' });
 
       const raffleResult = await supabase.from('storefront_raffles').select('*').eq('id', req.params.id).maybeSingle();
       if (raffleResult.error) throw raffleResult.error;
@@ -490,7 +491,7 @@ function registerStorefrontRaffleRoutes({
       }
       res.status(201).json({ entered: true, entry: entryResult.data });
     } catch (error) {
-      if (/entry (has not opened|is closed)|only active customer|not assigned to your member group/i.test(error.message || '')) return res.status(409).json({ error: error.message });
+      if (/entry (has not opened|is closed)|only active website|not assigned to your member group/i.test(error.message || '')) return res.status(409).json({ error: error.message });
       raffleError(res, error);
     }
   });

@@ -81,11 +81,13 @@ function raffleCard(raffle) {
   const price = raffle.free_prize
     ? '<span><small>Winner price</small><strong>FREE</strong></span><span><small>Shipping</small><strong>Included</strong></span>'
     : `<span><small>Winner price</small><strong>${raffleMoney(raffle.retail_price)}</strong></span><span><small>Shipping</small><strong>${raffleMoney(raffle.shipping_price)}</strong></span>`;
+  const joinedCount = Number(raffle.entry_count || 0);
+  const joinedLabel = `${joinedCount} ${joinedCount === 1 ? 'user' : 'users'} joined`;
   return `<article class="panel raffle-card" data-raffle-card="${raffleEscape(raffle.id)}">
     <div class="raffle-card__media">${image}<span class="raffle-status raffle-status--${raffleEscape(raffle.status)}">${raffleEscape(statusLabel(raffle.status))}</span></div>
     <div class="raffle-card__body">
       <div><p class="eyebrow">Members-only · ${raffleEscape(raffle.audience_label)}</p><h2>${raffleEscape(raffle.title)}</h2><p class="subtle-text">${raffleEscape(raffle.description || 'One reserved prize will be assigned by an automatic random drawing at the end of the timer.')}</p></div>
-      <div class="raffle-price-grid">${price}${market}<span><small>Manual entries</small><strong>${Number(raffle.entry_count || 0)}</strong></span></div>
+      <div class="raffle-price-grid">${price}${market}<span><small>Raffle participation</small><strong>${raffleEscape(joinedLabel)}</strong></span></div>
       <div class="raffle-countdown"><span>${raffleEscape(countdownTitle)}</span><strong data-raffle-countdown="${raffleEscape(target || '')}" data-raffle-status="${raffleEscape(raffle.status)}">${raffleEscape(countdown)}</strong><small>${raffle.status === 'live' ? `Ends ${raffleEscape(raffleDate(raffle.ends_at))}` : raffleEscape(statusLabel(raffle.status))}</small></div>
       ${actionMarkup(raffle)}
       ${raffle.terms ? `<details class="raffle-terms"><summary>Raffle terms</summary><p>${raffleEscape(raffle.terms)}</p></details>` : ''}

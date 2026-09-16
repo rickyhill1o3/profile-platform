@@ -133,7 +133,7 @@ function countEffectiveSkus(product) {
     const preview = $('raffleAudiencePreview'); if (!preview) return;
     if (!groupOnly) {
       const total = Number(state.raffleMemberCount || 0);
-      preview.textContent = total ? `All ${total} active customer members can view this raffle, but each must enter manually.` : 'All active customer members can view this raffle, but each must enter manually.';
+      preview.textContent = total ? `All ${total} active website accounts—users, admins, and super admins—can view and manually enter this raffle.` : 'All active website accounts—users, admins, and super admins—can view and manually enter this raffle.';
       return;
     }
     const option = $('raffleAudienceAdminId')?.selectedOptions?.[0];
@@ -215,7 +215,7 @@ function countEffectiveSkus(product) {
         <td><strong>${escape(raffle.audience_label || 'All active members')}</strong><div class="subtle-text">${raffle.audience_type === 'admin_group' ? 'Private admin group' : 'All website members'}</div></td>
         <td><span class="raffle-admin-status raffle-admin-status--${escape(status)}">${escape(status.replaceAll('_', ' '))}</span>${raffle.draw_error ? `<div class="subtle-text" style="color:#b91c1c">${escape(raffle.draw_error)}</div>` : ''}</td>
         <td><div>${escape(dateTime(raffle.starts_at))}</div><div class="subtle-text">to ${escape(dateTime(raffle.ends_at))}</div>${raffle.claim_expires_at ? `<div class="subtle-text">Claim by ${escape(dateTime(raffle.claim_expires_at))}</div>` : ''}</td>
-        <td><strong>${escape(raffle.entry_count || 0)}</strong></td>
+        <td><strong>${escape(Number(raffle.entry_count || 0))} joined</strong></td>
         <td>${raffle.fulfillment_mode === 'free' ? '<strong>FREE</strong><div class="subtle-text">No payment</div>' : `${money(raffle.retail_price)}<div class="subtle-text">+ ${money(raffle.shipping_price)} shipping</div>`}</td>
         <td>${raffle.winner_email ? `<strong>${escape(raffle.winner_email)}</strong><div class="subtle-text">${status === 'paid' ? 'Paid' : status === 'fulfilled' ? 'Fulfilled' : 'Selected + emailed'}</div>` : '—'}</td>
         <td><div class="raffle-admin-actions">${canEdit ? `<button class="btn" type="button" data-edit-raffle="${escape(raffle.id)}">Edit</button>` : ''}${canDraw ? `<button class="btn btn-primary" type="button" data-draw-raffle="${escape(raffle.id)}">${status === 'claim_expired' ? 'Redraw' : 'Retry draw'}</button>` : ''}${canFulfill ? `<button class="btn btn-primary" type="button" data-fulfill-raffle="${escape(raffle.id)}">Mark free prize fulfilled</button>` : ''}${canCancel ? `<button class="btn btn-danger" type="button" data-cancel-raffle="${escape(raffle.id)}">Cancel</button>` : ''}</div></td>
