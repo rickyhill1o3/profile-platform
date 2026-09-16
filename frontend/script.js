@@ -160,8 +160,10 @@ let raffleBuilderBound = false;
 let allDashboardProfiles = [];
 let profileGroupFilters = { all: '', general: '', walmart: '', target: '', samsclub: '', costco: '', amazon: '', bandai: '', crunchyroll: '', pokemoncenter: '', raffle: '' };
 let targetProfileHealthFilter = 'all';
+let targetPhysicalAddressFilter = '';
 let targetProfileHealthCache = { data: null, loadedAt: 0 };
 let selectedProfileIds = new Set();
+let visibleDashboardProfileIdsByGroup = new Map();
 
 consumeOAuthRedirectParams();
 
@@ -730,6 +732,7 @@ async function loadProfiles() {
         }
 
         allDashboardProfiles = profiles;
+        visibleDashboardProfileIdsByGroup = new Map();
         const groups = { all: [], general: [], walmart: [], target: [], samsclub: [], costco: [], amazon: [], bandai: [], crunchyroll: [], pokemoncenter: [], raffle: [] };
         profiles.forEach((p) => {
             groups.all.push(p);
@@ -761,6 +764,13 @@ async function loadProfiles() {
             }
         }
         const targetHealthByProfile = new Map((targetProfileHealth.profiles || []).map((item) => [String(item.profile_id), item]));
+        const targetAddressGroups = Array.isArray(targetProfileHealth.address_distribution) ? targetProfileHealth.address_distribution : [];
+        let activeTargetAddressGroup = targetAddressGroups.find((row) => String(row.group_key || '') === targetPhysicalAddressFilter) || null;
+        if (targetPhysicalAddressFilter && !activeTargetAddressGroup) {
+            targetPhysicalAddressFilter = '';
+            activeTargetAddressGroup = null;
+        }
+        const activeTargetAddressProfileIds = new Set((activeTargetAddressGroup?.profile_ids || []).map(String));
 
         const setStat = (id, value) => {
             const el = document.getElementById(id);
@@ -825,10 +835,14 @@ async function loadProfiles() {
                     return haystack.includes(filterValue);
                 })
                 : rawItems;
+            if (groupKey === 'target' && activeTargetAddressGroup) {
+                items = items.filter((p) => activeTargetAddressProfileIds.has(String(p.id)));
+            }
             if (groupKey === 'target' && targetProfileHealthFilter !== 'all') {
                 items = items.filter((p) => (targetHealthByProfile.get(String(p.id))?.current_status || 'no_activity') === targetProfileHealthFilter);
             }
-            const selectedCount = rawItems.filter((p) => selectedProfileIds.has(String(p.id))).length;
+            visibleDashboardProfileIdsByGroup.set(groupKey, items.map((p) => String(p.id)));
+            const selectedCount = items.filter((p) => selectedProfileIds.has(String(p.id))).length;
 
             let html = `
                 <section class="profile-group-section">
@@ -857,7 +871,7 @@ async function loadProfiles() {
                             </div>
                             <div class="subtle-text">Change the address once after a reseller cancellation. The profile then stays in standby—so you know it was already changed—until a newer checkout tests that address and replaces standby with the new result.</div>
                             ${(() => {
-                                const groups = Array.isArray(targetProfileHealth.address_distribution) ? targetProfileHealth.address_distribution : [];
+                                const groups = targetAddressGroups;
                                 if (!groups.length) return '';
                                 const next = targetProfileHealth.next_underfilled_address || null;
                                 return `<div class="target-address-distribution">
@@ -868,7 +882,8 @@ async function loadProfiles() {
                                         const delta = Number(row.delta || 0);
                                         const balance = delta === 0 ? 'Balanced' : delta > 0 ? `${delta} over` : `${Math.abs(delta)} under`;
                                         const variants = Array.isArray(row.variants) ? row.variants : [];
-                                        return `<tr><td><strong>${escapeHTML(row.label || 'Unknown')}</strong>${row.is_saved_pool && row.pool_id ? `<button class="btn btn-small target-address-pool-remove" type="button" data-target-address-pool-remove="${escapeHTML(row.pool_id)}">Remove</button>` : ''}</td><td>${Number(row.actual_count || 0)}</td><td>${Number(row.ideal_count || 0)}</td><td><span class="target-address-balance ${delta === 0 ? 'is-even' : delta > 0 ? 'is-over' : 'is-under'}">${escapeHTML(balance)}</span>${delta > 0 ? `<button class="btn btn-small target-balance-select" type="button" data-target-balance-select="${escapeHTML(row.group_key || '')}" data-target-balance-excess="${delta}">Select ${delta} excess</button>` : ''}</td><td>${variants.length ? variants.slice(0,4).map(v => `${escapeHTML(v.address || '')} <b>×${Number(v.count || 0)}</b>`).join('<br>') : '<span class="subtle-text">No profiles assigned yet</span>'}${variants.length > 4 ? `<br><span class="subtle-text">+${variants.length - 4} more variants</span>` : ''}</td></tr>`;
+                                        const isActive = String(row.group_key || '') === targetPhysicalAddressFilter;
+                                        return `<tr class="${isActive ? 'is-filtered' : ''}"><td><button class="target-address-filter-button ${isActive ? 'is-active' : ''}" type="button" data-target-address-filter="${escapeHTML(row.group_key || '')}" aria-pressed="${isActive ? 'true' : 'false'}"><strong>${escapeHTML(row.label || 'Unknown')}</strong><span>View ${Number(row.actual_count || 0)} profile${Number(row.actual_count || 0) === 1 ? '' : 's'}</span></button>${row.is_saved_pool && row.pool_id ? `<button class="btn btn-small target-address-pool-remove" type="button" data-target-address-pool-remove="${escapeHTML(row.pool_id)}">Remove</button>` : ''}</td><td>${Number(row.actual_count || 0)}</td><td>${Number(row.ideal_count || 0)}</td><td><span class="target-address-balance ${delta === 0 ? 'is-even' : delta > 0 ? 'is-over' : 'is-under'}">${escapeHTML(balance)}</span>${delta > 0 ? `<button class="btn btn-small target-balance-select" type="button" data-target-balance-select="${escapeHTML(row.group_key || '')}" data-target-balance-excess="${delta}">Select ${delta} excess</button>` : ''}</td><td>${variants.length ? variants.slice(0,4).map(v => `${escapeHTML(v.address || '')} <b>×${Number(v.count || 0)}</b>`).join('<br>') : '<span class="subtle-text">No profiles assigned yet</span>'}${variants.length > 4 ? `<br><span class="subtle-text">+${variants.length - 4} more variants</span>` : ''}</td></tr>`;
                                     }).join('')}
                                     </tbody></table></div>
                                     <div class="subtle-text">The even target recalculates automatically as profiles are added or removed. For example, 103 profiles across 5 physical addresses produces targets of 21, 21, 21, 20 and 20.</div>
@@ -887,6 +902,11 @@ async function loadProfiles() {
                             })()}
                         </div>`;
                     })() : ""}
+                    <div data-profile-list-anchor="${groupKey}"></div>
+                    ${groupKey === 'target' && activeTargetAddressGroup ? `<div class="target-address-filter-active" role="status">
+                        <div><span>Showing physical address</span><strong>${escapeHTML(activeTargetAddressGroup.label || 'Selected address')}</strong><small>${Number(activeTargetAddressGroup.actual_count || 0)} profile${Number(activeTargetAddressGroup.actual_count || 0) === 1 ? '' : 's'}, including its address-line variants</small></div>
+                        <button class="btn" type="button" data-target-address-filter-clear>Show all addresses</button>
+                    </div>` : ''}
                     <div class="toolbar-row profile-group-toolbar">
                         <input class="input" type="search" placeholder="Search ${labels[groupKey].toLowerCase()}" value="${escapeHTML(profileGroupFilters[groupKey] || '')}" data-profile-search="${groupKey}" />
                         ${groupKey === 'target' ? `<select class="input" data-target-health-filter aria-label="Filter Target account health">
@@ -1138,6 +1158,7 @@ function openBulkProfileEdit(group, ids) {
             message.textContent = `Updated ${updatedCount} profile${updatedCount === 1 ? '' : 's'}.${data.state ? ` Shipping state set to ${data.state}.` : ''}`;
             message.className = 'form-help success';
             ids.forEach((id) => selectedProfileIds.delete(String(id)));
+            if (group === 'target' && state) targetProfileHealthCache = { data: null, loadedAt: 0 };
             await loadProfiles();
             setTimeout(() => modal.classList.remove('is-open'), 500);
         } catch (error) {
@@ -1163,6 +1184,21 @@ function bindProfileDashboardControls() {
             loadProfiles();
         });
     });
+    document.querySelectorAll('[data-target-address-filter]').forEach((button) => {
+        button.addEventListener('click', async () => {
+            const key = String(button.dataset.targetAddressFilter || '');
+            targetPhysicalAddressFilter = targetPhysicalAddressFilter === key ? '' : key;
+            await loadProfiles();
+            document.querySelector('[data-profile-list-anchor="target"]')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        });
+    });
+    document.querySelectorAll('[data-target-address-filter-clear]').forEach((button) => {
+        button.addEventListener('click', async () => {
+            targetPhysicalAddressFilter = '';
+            await loadProfiles();
+            document.querySelector('[data-profile-list-anchor="target"]')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        });
+    });
     document.querySelectorAll('[data-target-address-pool-add]').forEach((button) => {
         button.addEventListener('click', async () => {
             const address1 = prompt('Physical address line 1 (example: 194 Tabernacle Lane):');
@@ -1179,6 +1215,7 @@ function bindProfileDashboardControls() {
                 });
                 const data = await response.json().catch(() => ({}));
                 if (!response.ok || data.error) throw new Error(data.error || 'Could not add address.');
+                targetProfileHealthCache = { data: null, loadedAt: 0 };
                 await loadProfiles();
             } catch (error) { alert(error.message || 'Could not add address.'); }
         });
@@ -1193,6 +1230,7 @@ function bindProfileDashboardControls() {
                 });
                 const data = await response.json().catch(() => ({}));
                 if (!response.ok || data.error) throw new Error(data.error || 'Could not remove address.');
+                targetProfileHealthCache = { data: null, loadedAt: 0 };
                 await loadProfiles();
             } catch (error) { alert(error.message || 'Could not remove address.'); }
         });
@@ -1201,7 +1239,7 @@ function bindProfileDashboardControls() {
         button.addEventListener('click', () => {
             const key = String(button.dataset.targetBalanceSelect || '');
             const excess = Math.max(0, Number(button.dataset.targetBalanceExcess || 0));
-            const group = (targetProfileHealth.address_distribution || []).find((row) => String(row.group_key || '') === key);
+            const group = (targetProfileHealthCache.data?.address_distribution || []).find((row) => String(row.group_key || '') === key);
             if (!group || !excess) return;
             const ids = (group.profile_ids || []).slice(-excess).map(String);
             ids.forEach((id) => selectedProfileIds.add(id));
@@ -1218,20 +1256,16 @@ function bindProfileDashboardControls() {
     document.querySelectorAll('[data-profile-select-visible]').forEach((button) => {
         button.addEventListener('click', () => {
             const group = button.dataset.profileSelectVisible;
-            const filterValue = String(profileGroupFilters[group] || '').trim().toLowerCase();
-            allDashboardProfiles.filter((p) => profileInGroup(p, group)).forEach((p) => {
-                const address = p.addresses?.[0] || {};
-                const payment = p.payments?.[0] || {};
-                const haystack = [p.profile_name, address.email, address.phone, address.city, address.state, payment.card_last4].join(' ').toLowerCase();
-                if (!filterValue || haystack.includes(filterValue)) selectedProfileIds.add(String(p.id));
-            });
+            const visibleIds = visibleDashboardProfileIdsByGroup.get(group) || [];
+            visibleIds.forEach((id) => selectedProfileIds.add(String(id)));
             loadProfiles();
         });
     });
     document.querySelectorAll('[data-profile-edit-group]').forEach((button) => {
         button.addEventListener('click', () => {
             const group = button.dataset.profileEditGroup;
-            const ids = allDashboardProfiles.filter((p) => profileInGroup(p, group) && selectedProfileIds.has(String(p.id))).map((p) => String(p.id));
+            const visibleIds = new Set(visibleDashboardProfileIdsByGroup.get(group) || []);
+            const ids = allDashboardProfiles.filter((p) => profileInGroup(p, group) && visibleIds.has(String(p.id)) && selectedProfileIds.has(String(p.id))).map((p) => String(p.id));
             if (!ids.length) return;
             openBulkProfileEdit(group, ids);
         });
@@ -1239,7 +1273,8 @@ function bindProfileDashboardControls() {
     document.querySelectorAll('[data-profile-delete-group]').forEach((button) => {
         button.addEventListener('click', async () => {
             const group = button.dataset.profileDeleteGroup;
-            const ids = allDashboardProfiles.filter((p) => profileInGroup(p, group) && selectedProfileIds.has(String(p.id))).map((p) => String(p.id));
+            const visibleIds = new Set(visibleDashboardProfileIdsByGroup.get(group) || []);
+            const ids = allDashboardProfiles.filter((p) => profileInGroup(p, group) && visibleIds.has(String(p.id)) && selectedProfileIds.has(String(p.id))).map((p) => String(p.id));
             if (!ids.length) return;
             if (!confirm(`Delete ${ids.length} selected ${group} profile(s)?`)) return;
             const res = await fetch(API + '/profiles/bulk', {
@@ -1253,6 +1288,7 @@ function bindProfileDashboardControls() {
                 return;
             }
             ids.forEach((id) => selectedProfileIds.delete(String(id)));
+            if (group === 'target') targetProfileHealthCache = { data: null, loadedAt: 0 };
             await loadProfiles();
         });
     });

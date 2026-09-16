@@ -1264,6 +1264,19 @@ h1,h2,h3,h4,p{margin:0}
 /* Target physical-address distribution + sticky reseller review */
 .target-address-distribution{margin-top:12px;border-top:1px solid #e3e8ef;padding-top:11px}
 .target-address-distribution__table{min-width:880px}
+.target-address-distribution__table tr.is-filtered td{background:#edf5ff;border-color:#8eb9ee}
+.target-address-filter-button{display:flex;max-width:100%;flex-direction:column;gap:2px;padding:0;border:0;background:transparent;color:#17233a;text-align:left;cursor:pointer;font:inherit}
+.target-address-filter-button strong{color:#1d4ed8;text-decoration:underline;text-decoration-thickness:1px;text-underline-offset:2px}
+.target-address-filter-button span{font-size:.66rem;font-weight:700;color:#64748b}
+.target-address-filter-button:hover strong,.target-address-filter-button:focus-visible strong{color:#1e40af;text-decoration-thickness:2px}
+.target-address-filter-button:focus-visible{outline:2px solid #60a5fa;outline-offset:3px;border-radius:3px}
+.target-address-filter-button.is-active strong{color:#173f8a}
+.target-address-filter-active{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:12px 0 8px;padding:10px 12px;border:1px solid #8eb9ee;border-radius:10px;background:#edf5ff;color:#173f8a}
+.target-address-filter-active>div{display:flex;min-width:0;flex-direction:column;gap:2px}
+.target-address-filter-active span{font-size:.65rem;font-weight:800;letter-spacing:.04em;text-transform:uppercase}
+.target-address-filter-active strong{font-size:.86rem;overflow-wrap:anywhere}
+.target-address-filter-active small{font-size:.7rem;color:#4d6685}
+.target-address-filter-active .btn{flex:none;background:#fff}
 .target-address-balance-next{margin:7px 0 9px;padding:8px 10px;border:1px solid #c9d7e8;border-radius:9px;background:#f4f8fd;font-size:.78rem;color:#334155}
 .target-address-balance-next.is-balanced{border-color:#9bd4ad;background:#effbf3;color:#176334}
 .target-address-balance{display:inline-flex;border-radius:999px;padding:2px 7px;font-size:.7rem;font-weight:700;border:1px solid #cfd6df;background:#f8fafc}
@@ -1285,3 +1298,4 @@ h1,h2,h3,h4,p{margin:0}
 .target-checkout-history__item--success{border-color:#9bd4ad;background:#f3fbf5}
 .target-balance-select{display:block;margin-top:5px;padding:3px 7px;font-size:.68rem}
 .target-address-pool-remove{display:block;margin-top:5px;padding:2px 6px;font-size:.65rem}
+@media(max-width:640px){.target-address-filter-active{align-items:stretch;flex-direction:column}.target-address-filter-active .btn{width:100%}}
