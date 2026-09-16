@@ -1,6 +1,6 @@
 const { Client, GatewayIntentBits, Partials, ChannelType, EmbedBuilder, PermissionsBitField } = require('discord.js');
 const jwt = require('jsonwebtoken');
-const { mergeManageableGuilds, removeManageableGuild } = require('./success-network-ownership');
+const { mergeManageableGuilds, removeManageableGuild, fallbackDiscordUserId } = require('./success-network-ownership');
 
 function cleanText(v, n = 2000) { return String(v || '').replace(/\u0000/g, '').slice(0, n); }
 function isSuper(user, superEmail) { return user?.role === 'super_admin' || String(user?.email || '').toLowerCase() === String(superEmail || '').toLowerCase(); }
@@ -250,7 +250,12 @@ module.exports = function registerSuccessNetwork({ app, supabase, auth, admin, g
     const existing = existingConnection || await getConnection(userId);
     const row = {
       admin_user_id: userId,
-      discord_user_id: existing?.discord_user_id || null,
+      // The current installation flow uses Discord's bot authorization callback,
+      // which identifies the selected guild but does not return the installing
+      // person's Discord user ID. Older schemas require this column to be NOT
+      // NULL, so use a stable, unique website-admin identity until a real Discord
+      // user ID is available. Ownership remains keyed by admin_user_id.
+      discord_user_id: existing?.discord_user_id || fallbackDiscordUserId(userId),
       discord_username: existing?.discord_username || connectionLabel,
       manageable_guilds: mergeManageableGuilds(existing?.manageable_guilds, {
         id: String(guild.id),

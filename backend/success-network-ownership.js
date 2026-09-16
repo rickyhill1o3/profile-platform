@@ -24,5 +24,10 @@ function removeManageableGuild(existingGuilds, guildId) {
     .filter(guild => guild.id && guild.id !== removeId);
 }
 
-module.exports = { mergeManageableGuilds, removeManageableGuild };
+function fallbackDiscordUserId(adminUserId) {
+  const cleanId = String(adminUserId || '').trim();
+  if (!cleanId) throw new Error('Website admin ID is required for a Discord server connection.');
+  return `website-admin:${cleanId}`;
+}
 
+module.exports = { mergeManageableGuilds, removeManageableGuild, fallbackDiscordUserId };
