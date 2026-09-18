@@ -5562,7 +5562,7 @@ async function initAdminStoreRunStatus() {
 
     const updateProfileSyncBanner = () => {
         if (!syncBanner) return;
-        const selectedUser = lastUsers.find((user) => user.id === userFilter.value);
+        const selectedUser = lastUsers.find((user) => String(user.id) === String(userFilter.value));
         const selectedStore = storeFilter.value;
         syncBanner.className = 'export-sync-banner export-sync-banner--neutral';
         if (!selectedUser || !selectedStore) {
@@ -5650,14 +5650,15 @@ async function initAdminStoreRunStatus() {
             const data = await authJSON(API + '/admin/store-run-status' + (params.toString() ? `?${params.toString()}` : ''));
             lastData = data;
             const users = Array.isArray(data.users) ? data.users : [];
-            if (!userFilter.value) {
-                lastUsers = users;
-                renderUserOptions(users);
-            } else if (!lastUsers.length) {
-                lastUsers = users;
-                renderUserOptions(users);
-                userFilter.value = params.get('user_id') || '';
-            }
+            // A selected-user request returns only that user. Merge that fresh row
+            // into the full selector cache so the banner and dropdown immediately
+            // use the same post-acknowledgment sync state as the table.
+            const mergeUserCache = window.ProfileSyncState?.mergeUserCache;
+            lastUsers = typeof mergeUserCache === 'function'
+                ? mergeUserCache(lastUsers, users, !userFilter.value)
+                : users;
+            renderUserOptions(lastUsers);
+            if (params.get('user_id')) userFilter.value = params.get('user_id');
             const activeSummary = STORE_RUN_STATUS_OPTIONS.map((store) => `${store.label}: ${Number(data.summary?.[store.site] || 0)} active`).join(' • ');
             if (summary) summary.textContent = activeSummary;
             updateProfileSyncBanner();
