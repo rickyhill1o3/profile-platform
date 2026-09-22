@@ -33,6 +33,33 @@ function countEffectiveSkus(product) {
   function money(value) { return typeof formatMoney === 'function' ? formatMoney(value) : `$${Number(value || 0).toFixed(2)}`; }
   function dateTime(value) { return typeof formatDateTime === 'function' ? formatDateTime(value) : String(value || '—'); }
   function showMessage(id, text, isError = false) { const el = $(id); if (!el) return; el.textContent = text; el.style.color = isError ? '#b91c1c' : ''; }
+  function shippingAddressLines(order = {}) {
+    const address = order.shipping_address || {};
+    const cityStateZip = [address.city, [address.state, address.postal_code].filter(Boolean).join(' ')].filter(Boolean).join(', ');
+    return [order.shipping_name, address.line1, address.line2, cityStateZip, address.country, order.shipping_phone ? `Phone: ${order.shipping_phone}` : ''].filter(Boolean);
+  }
+  function renderShippingAddress(order = {}, includeName = true) {
+    const lines = shippingAddressLines(order);
+    const shown = includeName ? lines : lines.filter((line) => line !== order.shipping_name);
+    if (!shown.length || !order.has_shipping_address) return '<span class="shipping-address-missing">Address not saved — open Receipt and refresh from Stripe.</span>';
+    return `<address class="store-shipping-address">${shown.map((line) => escape(line)).join('<br>')}</address>`;
+  }
+  async function copyText(value) {
+    const text = String(value || '');
+    if (!text) throw new Error('No shipping address is available to copy.');
+    if (navigator.clipboard?.writeText) return navigator.clipboard.writeText(text);
+    const textarea = document.createElement('textarea');
+    textarea.value = text; textarea.setAttribute('readonly', ''); textarea.style.position = 'fixed'; textarea.style.opacity = '0';
+    document.body.appendChild(textarea); textarea.select();
+    const copied = document.execCommand('copy'); textarea.remove();
+    if (!copied) throw new Error('Could not copy the shipping address.');
+  }
+  async function copyShippingAddress(order, button) {
+    try {
+      await copyText(shippingAddressLines(order).join('\n'));
+      if (button) { const oldText = button.textContent; button.textContent = 'Copied'; setTimeout(() => { button.textContent = oldText; }, 1400); }
+    } catch (error) { alert(error.message || String(error)); }
+  }
   function requireAdminAccess() {
     if (typeof requireAuthForPrivatePages === 'function' && !requireAuthForPrivatePages()) return false;
     const user = typeof currentUser === 'function' ? currentUser() : null;
@@ -284,6 +311,12 @@ function countEffectiveSkus(product) {
     state.activeOrder = order;
     $('storeReceiptOrder').textContent = order.order_number || order.session_id || 'Order';
     $('storeReceiptCustomer').textContent = [order.shipping_name, order.customer_email].filter(Boolean).join(' — ') || '—';
+    $('storeReceiptShippingAddress').innerHTML = renderShippingAddress(order);
+    $('storeReceiptShippingNotice').textContent = order.has_shipping_address
+      ? 'This is the shipping address collected during checkout.'
+      : 'No complete shipping address is saved yet. Refresh it from Stripe before creating the label.';
+    $('storeReceiptShippingNotice').classList.toggle('shipping-address-missing', !order.has_shipping_address);
+    $('storeReceiptCopyShipping').disabled = !order.has_shipping_address;
     $('storeReceiptItems').innerHTML = (order.items || []).map((item) => `<tr><td>${escape(item.title)}</td><td>${escape(item.quantity)}</td><td>${money(item.unit_price)}</td><td>${money(item.subtotal)}</td><td>${money(item.tax)}</td><td>${money(item.total)}</td></tr>`).join('') || '<tr><td colspan="6">No items found.</td></tr>';
     $('storeReceiptSubtotal').textContent = money(order.subtotal);
     $('storeReceiptShipping').textContent = money(order.shipping);
@@ -347,9 +380,11 @@ function countEffectiveSkus(product) {
     body.innerHTML = state.orders.length ? state.orders.map((order) => {
       const itemSummary = (order.items || []).map((item) => `${escape(item.title || 'Item')} × ${escape(item.quantity || 0)}${Number(item.refunded_quantity || 0) ? ` <span class="subtle-text">(${escape(item.refunded_quantity)} refunded)</span>` : ''}`).join('<br>');
       const emailVerification = `<div><strong>Customer:</strong> ${statusBadge(order.customer_email_status, order.customer_email_error, order.customer_email_sent_at)}</div><div><strong>Admin:</strong> ${statusBadge(order.admin_email_status, order.admin_email_error, order.admin_email_sent_at)}</div>`;
-      return `<tr><td>${escape(dateTime(order.placed_at))}</td><td><strong>${escape(order.order_number || order.session_id || 'Order')}</strong></td><td><div>${escape(order.customer_email || '—')}</div><div class="subtle-text">${escape(order.shipping_name || '')}</div></td><td>${itemSummary || '—'}</td><td><div>${money(order.total)}</div>${Number(order.refunded_total || 0) ? `<div class="subtle-text">Refunded ${money(order.refunded_total)}</div>` : ''}</td><td><span class="badge">${escape(order.status || 'paid')}</span></td><td>${emailVerification}</td><td><div>${escape(order.tracking_number || '—')}</div><div class="subtle-text">${escape(order.tracking_carrier || '')}</div></td><td><div class="store-order-actions"><button class="btn" type="button" data-view-receipt="${escape(order.session_id)}">Receipt</button><button class="btn" type="button" data-open-tracking="${escape(order.session_id)}">Tracking</button><button class="btn btn-danger" type="button" data-open-refund="${escape(order.session_id)}" ${Number(order.remaining_total || 0) <= 0 ? 'disabled' : ''}>Refund</button><button class="btn" type="button" data-resend-order-confirmation="${escape(order.session_id)}">Resend emails</button></div></td></tr>`;
-    }).join('') : '<tr><td colspan="9">No active orders found.</td></tr>';
+      const copyButton = order.has_shipping_address ? `<button class="btn btn--compact" type="button" data-copy-shipping="${escape(order.session_id)}">Copy address</button>` : '';
+      return `<tr><td>${escape(dateTime(order.placed_at))}</td><td><strong>${escape(order.order_number || order.session_id || 'Order')}</strong></td><td><div>${escape(order.customer_email || '—')}</div><div class="subtle-text">${escape(order.shipping_name || '')}</div></td><td><div class="store-order-ship-to">${renderShippingAddress(order, false)}${copyButton}</div></td><td>${itemSummary || '—'}</td><td><div>${money(order.total)}</div>${Number(order.refunded_total || 0) ? `<div class="subtle-text">Refunded ${money(order.refunded_total)}</div>` : ''}</td><td><span class="badge">${escape(order.status || 'paid')}</span></td><td>${emailVerification}</td><td><div>${escape(order.tracking_number || '—')}</div><div class="subtle-text">${escape(order.tracking_carrier || '')}</div></td><td><div class="store-order-actions"><button class="btn" type="button" data-view-receipt="${escape(order.session_id)}">Receipt</button><button class="btn" type="button" data-open-tracking="${escape(order.session_id)}">Tracking</button><button class="btn btn-danger" type="button" data-open-refund="${escape(order.session_id)}" ${Number(order.remaining_total || 0) <= 0 ? 'disabled' : ''}>Refund</button><button class="btn" type="button" data-resend-order-confirmation="${escape(order.session_id)}">Resend emails</button></div></td></tr>`;
+    }).join('') : '<tr><td colspan="10">No active orders found.</td></tr>';
     body.querySelectorAll('[data-view-receipt]').forEach((button) => button.addEventListener('click', () => { const order = state.orders.find((row) => String(row.session_id) === String(button.dataset.viewReceipt)); if (order) openReceipt(order); }));
+    body.querySelectorAll('[data-copy-shipping]').forEach((button) => button.addEventListener('click', () => { const order = state.orders.find((row) => String(row.session_id) === String(button.dataset.copyShipping)); if (order) copyShippingAddress(order, button); }));
     body.querySelectorAll('[data-open-tracking]').forEach((button) => button.addEventListener('click', () => { const order = state.orders.find((row) => String(row.session_id) === String(button.dataset.openTracking)); if (order) openTracking(order); }));
     body.querySelectorAll('[data-open-refund]').forEach((button) => button.addEventListener('click', () => { const order = state.orders.find((row) => String(row.session_id) === String(button.dataset.openRefund)); if (order) openRefund(order); }));
     body.querySelectorAll('[data-resend-order-confirmation]').forEach((button) => button.addEventListener('click', async () => {
@@ -392,6 +427,21 @@ function countEffectiveSkus(product) {
       const result = await authJSON(`${API}/admin/store/orders/${encodeURIComponent(order.session_id)}/refresh-tax`, { method: 'POST' });
       order.tax_verification = result.tax_verification || {};
       openReceipt(order);
+    } catch (err) { alert(err.message || String(err)); }
+    finally { button.disabled = false; button.textContent = oldText; }
+  }
+
+  async function refreshActiveOrderShipping() {
+    const order = state.activeOrder;
+    if (!order?.session_id) return;
+    const button = $('storeReceiptRefreshShipping');
+    const oldText = button.textContent;
+    button.disabled = true; button.textContent = 'Refreshing…';
+    try {
+      const result = await authJSON(`${API}/admin/store/orders/${encodeURIComponent(order.session_id)}/refresh-shipping`, { method: 'POST' });
+      Object.assign(order, result.order || {});
+      openReceipt(order);
+      renderOrders();
     } catch (err) { alert(err.message || String(err)); }
     finally { button.disabled = false; button.textContent = oldText; }
   }
@@ -534,6 +584,8 @@ function countEffectiveSkus(product) {
     $('refreshStoreDataButton')?.addEventListener('click', refreshAll);
     $('refreshStoreOrdersButton')?.addEventListener('click', () => loadOrders().catch(() => {}));
     $('storeReceiptRefreshTax')?.addEventListener('click', refreshActiveOrderTax);
+    $('storeReceiptRefreshShipping')?.addEventListener('click', refreshActiveOrderShipping);
+    $('storeReceiptCopyShipping')?.addEventListener('click', (event) => { if (state.activeOrder) copyShippingAddress(state.activeOrder, event.currentTarget); });
     $('discountActive').value = 'true';
     setDefaultRaffleWindow();
     document.querySelectorAll('[data-close-store-modal]').forEach((button) => button.addEventListener('click', () => closeStoreModal(button.dataset.closeStoreModal)));

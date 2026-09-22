@@ -26,6 +26,12 @@ const fs = require('fs');
 const path = require('path');
 const cheerio = require('cheerio');
 const { registerStorefrontRaffleRoutes } = require('./storefront-raffles');
+const {
+  extractStripeShippingContact,
+  extractStoredShippingContact,
+  hasAddress,
+  shippingAddressLines
+} = require('./storefront-shipping-address');
 
 function dollarsToCents(value) {
   const num = Number(value);
@@ -1024,7 +1030,8 @@ async function recordStorefrontSaleFromStripeSession({ supabase, session, stripe
   });
   const subtotalBase = lineSubtotalByProduct.reduce((sum, entry) => sum + Number(entry.subtotal_cents || 0), 0) || 1;
 
-  const shippingAddress = session.customer_details?.address || session.shipping_details?.address || {};
+  const shippingContact = extractStripeShippingContact(session);
+  const shippingAddress = shippingContact.address;
   const insertedSales = [];
 
   for (let index = 0; index < lineSubtotalByProduct.length; index += 1) {
@@ -1067,7 +1074,8 @@ async function recordStorefrontSaleFromStripeSession({ supabase, session, stripe
           raffle_entry_id: isRafflePurchase ? String(metadata.raffle_entry_id || '') : null,
           fulfillment_status: 'paid',
           customer_name: session.customer_details?.name || null,
-          shipping_name: session.shipping_details?.name || session.customer_details?.name || null,
+          shipping_name: shippingContact.name || session.customer_details?.name || null,
+          shipping_phone: shippingContact.phone || session.customer_details?.phone || null,
           shipping_address: shippingAddress,
           tax_verification: taxVerification
         },
@@ -1174,12 +1182,16 @@ function mapSalesToOrder(rows = []) {
   if (!Array.isArray(rows) || !rows.length) return null;
   const first = rows[0] || {};
   const metadata = first.metadata || {};
+  const shippingContact = extractStoredShippingContact(metadata);
   return {
     session_id: first.stripe_session_id || first.id,
     order_number: metadata.order_number || first.stripe_session_id || first.id,
     placed_at: first.sold_at || first.created_at,
     customer_email: first.customer_email || '',
-    shipping_name: metadata.shipping_name || metadata.customer_name || '',
+    shipping_name: shippingContact.name || metadata.shipping_name || metadata.customer_name || '',
+    shipping_phone: shippingContact.phone || metadata.shipping_phone || metadata.customer_phone || '',
+    shipping_address: shippingContact.address,
+    has_shipping_address: hasAddress(shippingContact.address),
     subtotal: centsToDollars(rows.reduce((sum, row) => sum + Number(row.sale_subtotal_cents || 0), 0)),
     shipping: centsToDollars(rows.reduce((sum, row) => sum + Number(row.shipping_cents || 0), 0)),
     tax: centsToDollars(rows.reduce((sum, row) => sum + Number(row.tax_cents || 0), 0)),
@@ -1252,14 +1264,23 @@ function registerShopRoutes({
     const itemHtml = (order?.items || []).map((item) => `<li>${htmlEscape(item.title)} × ${Number(item.quantity || 0)}</li>`).join('');
     const orderNumber = order?.order_number || 'Storefront order';
     const total = `$${Number(order?.total || 0).toFixed(2)}`;
+    const shippingLines = shippingAddressLines({
+      name: order?.shipping_name,
+      phone: order?.shipping_phone,
+      address: order?.shipping_address
+    });
+    const shippingText = shippingLines.length ? ['','Ship to:', ...shippingLines] : ['', 'Ship to: Address not available in the saved checkout yet.'];
+    const shippingHtml = shippingLines.length
+      ? `<p><strong>Ship to:</strong><br>${shippingLines.map(htmlEscape).join('<br>')}</p>`
+      : '<p><strong>Ship to:</strong> Address not available in the saved checkout yet.</p>';
     return {
       order,
       customerSubject: `Thank you for your purchase — ${orderNumber}`,
       customerText: ['Thank you for shopping with The Shore Shack.','',`Order: ${orderNumber}`,...itemLines,`Total: ${total}`,'','We received your order and will email tracking information after it ships.'].join('\n'),
       customerHtml: `<h2>Thank you for your purchase!</h2><p>We received your order from The Shore Shack.</p><p><strong>Order:</strong> ${htmlEscape(orderNumber)}</p><ul>${itemHtml}</ul><p><strong>Total:</strong> ${htmlEscape(total)}</p><p>We will email tracking information after your order ships.</p>`,
       adminSubject: `New storefront sale — ${orderNumber}`,
-      adminText: ['A new storefront sale was completed.','',`Order: ${orderNumber}`,`Customer: ${order?.customer_email || 'No customer email provided'}`,...itemLines,`Total: ${total}`].join('\n'),
-      adminHtml: `<h2>New storefront sale</h2><p><strong>Order:</strong> ${htmlEscape(orderNumber)}</p><p><strong>Customer:</strong> ${htmlEscape(order?.customer_email || 'No customer email provided')}</p><ul>${itemHtml}</ul><p><strong>Total:</strong> ${htmlEscape(total)}</p>`
+      adminText: ['A new storefront sale was completed.','',`Order: ${orderNumber}`,`Customer: ${order?.customer_email || 'No customer email provided'}`,...shippingText,...itemLines,`Total: ${total}`].join('\n'),
+      adminHtml: `<h2>New storefront sale</h2><p><strong>Order:</strong> ${htmlEscape(orderNumber)}</p><p><strong>Customer:</strong> ${htmlEscape(order?.customer_email || 'No customer email provided')}</p>${shippingHtml}<ul>${itemHtml}</ul><p><strong>Total:</strong> ${htmlEscape(total)}</p>`
     };
   }
 
@@ -1905,6 +1926,41 @@ function registerShopRoutes({
         if (error) throw new Error(error.message);
       }
       res.json({ ok: true, tax_verification: verification });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post('/admin/store/orders/:sessionId/refresh-shipping', auth, admin, async (req, res) => {
+    try {
+      if (!stripe) return res.status(400).json({ error: 'Stripe is not configured yet' });
+      const sessionId = String(req.params.sessionId || '').trim();
+      if (!sessionId) return res.status(400).json({ error: 'Missing Stripe session ID' });
+      const session = await stripe.checkout.sessions.retrieve(sessionId, { expand: ['customer'] });
+      const shippingContact = extractStripeShippingContact(session);
+      if (!hasAddress(shippingContact.address)) {
+        return res.status(404).json({ error: 'Stripe did not return a complete shipping address for this checkout.' });
+      }
+      const sales = await loadHydratedStorefrontOrder(sessionId);
+      if (!sales.length) return res.status(404).json({ error: 'Storefront order not found' });
+      for (const sale of sales) {
+        const nextMetadata = {
+          ...(sale.metadata || {}),
+          customer_name: session.customer_details?.name || sale.metadata?.customer_name || null,
+          shipping_name: shippingContact.name || sale.metadata?.shipping_name || null,
+          shipping_phone: shippingContact.phone || sale.metadata?.shipping_phone || null,
+          shipping_address: shippingContact.address,
+          raw_session: session
+        };
+        const { error } = await supabase.from('storefront_sales').update({
+          shipping_zip: shippingContact.address.postal_code || null,
+          shipping_state: shippingContact.address.state || null,
+          metadata: nextMetadata
+        }).eq('id', sale.id);
+        if (error) throw new Error(error.message);
+        sale.metadata = nextMetadata;
+      }
+      res.json({ success: true, order: mapSalesToOrder(sales) });
     } catch (err) {
       res.status(500).json({ error: err.message });
     }

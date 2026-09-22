@@ -2472,13 +2472,13 @@ async function exportProfilesPolarJson() {
 async function exportAccountsTxt() {
     try {
         const { params } = await getExportCountAndParams();
-        const filename = promptForExportFilename("accounts");
+        const filename = promptForExportFilename("shikari-accounts");
         if (!filename) return;
 
         params.append("filename", filename);
 
         const url = API + "/admin/export/accounts-txt" + (params.toString() ? "?" + params.toString() : "");
-        await downloadExportFile(url, filename + ".txt");
+        await downloadExportFile(url, filename + ".csv");
     } catch (err) {
         if (err.message) alert(err.message);
     }
@@ -2615,13 +2615,13 @@ function tickCountdownCards() {
 async function exportGmailImapTxt() {
     try {
         const { params } = await getExportCountAndParams();
-        const filename = promptForExportFilename("gmail-imap");
+        const filename = promptForExportFilename("shikari-imap");
         if (!filename) return;
 
         params.append("filename", filename);
 
         const url = API + "/admin/export/gmail-imap-txt" + (params.toString() ? "?" + params.toString() : "");
-        await downloadExportFile(url, filename + ".txt");
+        await downloadExportFile(url, filename + ".csv");
     } catch (err) {
         if (err.message) alert(err.message);
     }
@@ -5624,10 +5624,10 @@ async function initAdminStoreRunStatus() {
             const params = new URLSearchParams({ group: 'costco', active_only: '1' });
             if (userFilter.value) params.set('user_id', userFilter.value);
             const date = new Date().toISOString().slice(0, 10);
-            const filename = promptForExportFilename(`accounts-costco-active-${date}`);
+            const filename = promptForExportFilename(`shikari-accounts-costco-active-${date}`);
             if (!filename) return;
             params.set('filename', filename);
-            await downloadExportFile(API + '/admin/export/accounts-txt?' + params.toString(), filename + '.txt');
+            await downloadExportFile(API + '/admin/export/accounts-txt?' + params.toString(), filename + '.csv');
         } catch (err) {
             if (err.message) alert(err.message);
         }
@@ -5637,9 +5637,9 @@ async function initAdminStoreRunStatus() {
     if (exportStellarProfilesButton) exportStellarProfilesButton.addEventListener('click', () => exportActive('/admin/export/profiles-stellar-json', 'stellar-profiles', '.json'));
     if (exportShikariProfilesButton) exportShikariProfilesButton.addEventListener('click', () => exportActive('/admin/export/profiles-shikari-csv', 'shikari-profiles', '.csv'));
     if (exportPolarProfilesButton) exportPolarProfilesButton.addEventListener('click', () => exportActive('/admin/export/profiles-polar-json', 'polar-profiles', '.json'));
-    if (exportAccountsButton) exportAccountsButton.addEventListener('click', () => exportActive('/admin/export/accounts-txt', 'accounts', '.txt'));
+    if (exportAccountsButton) exportAccountsButton.addEventListener('click', () => exportActive('/admin/export/accounts-txt', 'shikari-accounts', '.csv'));
     if (exportCostcoAccountsButton) exportCostcoAccountsButton.addEventListener('click', exportActiveCostcoAccounts);
-    if (exportGmailButton) exportGmailButton.addEventListener('click', () => exportActive('/admin/export/gmail-imap-txt', 'gmail-imap', '.txt'));
+    if (exportGmailButton) exportGmailButton.addEventListener('click', () => exportActive('/admin/export/gmail-imap-txt', 'shikari-imap', '.csv'));
 
     const load = async () => {
         panel.innerHTML = '<div class="empty-card"><p>Loading store run status...</p></div>';

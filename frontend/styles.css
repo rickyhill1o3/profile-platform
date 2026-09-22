@@ -1069,10 +1069,18 @@ h1,h2,h3,h4,p{margin:0}
 /* Storefront order management */
 .store-order-actions{display:grid;grid-template-columns:repeat(2,minmax(92px,1fr));gap:7px;min-width:210px}
 .store-order-actions .btn{width:100%;padding:8px 10px}
-.storefront-admin-shell [data-store-pane="orders"] .admin-table{min-width:1250px}
+.storefront-admin-shell [data-store-pane="orders"] .admin-table{min-width:1480px}
 .storefront-admin-shell [data-store-pane="orders"] .admin-table th:last-child,
 .storefront-admin-shell [data-store-pane="orders"] .admin-table td:last-child{min-width:225px;width:225px}
 .storefront-admin-shell [data-store-pane="orders"] .admin-table td{vertical-align:top}
+.store-order-ship-to{display:grid;gap:8px;min-width:190px}
+.store-order-ship-to .btn{justify-self:start}
+.store-shipping-address{margin:0;font-style:normal;line-height:1.45;white-space:normal}
+.shipping-address-missing{color:#b91c1c;font-weight:700}
+.receipt-shipping-card{margin:14px 0 18px;padding:14px 16px;border:2px solid #bfdbfe;border-radius:14px;background:#eff6ff}
+.receipt-shipping-card h3{margin:0 0 4px}
+.panel-header--compact{gap:12px;align-items:flex-start}
+.panel-header--compact .table-actions{flex:0 0 auto}
 .store-modal{display:none;position:fixed;inset:0;z-index:10000;align-items:center;justify-content:center;padding:20px}
 .store-modal.is-open{display:flex}
 .store-modal__backdrop{position:absolute;inset:0;background:rgba(15,23,42,.58)}

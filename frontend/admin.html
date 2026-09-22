@@ -444,14 +444,13 @@ placeholder="Enter one SKU per line&#10;12345678&#10;87654321"></textarea>
                 </select></div>
             </div>
             <div class="toolbar-row toolbar-row--spread"><span id="exportCountBanner" class="subtle-text">Checking
-                export count...</span><span class="subtle-text">Account export format:
-                username:::password:::proxie</span></div>
+                export count...</span><span class="subtle-text">Shikari CSV formats: accounts use username,password; IMAP uses imap_server,port,username,password.</span></div>
             <div class="panel-actions"><button class="btn" onclick="exportProfilesJson()">Export Refract Profiles
                 JSON</button><button class="btn" onclick="exportProfilesStellarJson()">Export Stellar Profiles
                 JSON</button><button class="btn" onclick="exportProfilesShikariCsv()">Export Shikari Profiles
                 CSV</button><button class="btn" onclick="exportProfilesPolarJson()">Export Polar Profiles
-                JSON</button><button class="btn btn-primary" onclick="exportAccountsTxt()">Export Account
-                Logins</button><button class="btn btn-primary" onclick="exportGmailImapTxt()">Export Gmail / 2FA</button></div>
+                JSON</button><button class="btn btn-primary" onclick="exportAccountsTxt()">Export Shikari Accounts
+                CSV</button><button class="btn btn-primary" onclick="exportGmailImapTxt()">Export Shikari IMAP CSV</button></div>
           </section>
         </section>
 
@@ -628,15 +627,15 @@ placeholder="Enter one SKU per line&#10;12345678&#10;87654321"></textarea>
               </div>
               <div class="field field-actions">
                 <label>&nbsp;</label>
-                <button class="btn" type="button" id="adminRunStatusExportAccountsButton">Export Active Logins</button>
+                <button class="btn" type="button" id="adminRunStatusExportAccountsButton">Export Active Shikari Accounts</button>
               </div>
               <div class="field field-actions">
                 <label>&nbsp;</label>
-                <button class="btn" type="button" id="adminRunStatusExportCostcoAccountsButton">Export Active Costco Accounts</button>
+                <button class="btn" type="button" id="adminRunStatusExportCostcoAccountsButton">Export Active Costco Accounts CSV</button>
               </div>
               <div class="field field-actions">
                 <label>&nbsp;</label>
-                <button class="btn" type="button" id="adminRunStatusExportGmailButton">Export Active Gmail / 2FA</button>
+                <button class="btn" type="button" id="adminRunStatusExportGmailButton">Export Active Shikari IMAP</button>
               </div>
             </div>
             <div id="adminProfileSyncStatusBanner" class="export-sync-banner export-sync-banner--neutral" style="margin:12px 0;">Choose a store and user to review profile update status.</div>
@@ -1088,7 +1087,7 @@ placeholder="Enter one SKU per line&#10;12345678&#10;87654321"></textarea>
     </div>
   </div>
   <script src="profile-sync-state.js?v=20260918-profile-sync-display"></script>
-  <script src="script.js?v=20260918-profile-sync-display"></script>
+  <script src="script.js?v=20260922-shikari-credentials"></script>
   <script src="products.js?v=20260323b"></script>
 
 

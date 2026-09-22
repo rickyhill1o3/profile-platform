@@ -392,6 +392,7 @@
                     <th>Placed</th>
                     <th>Order</th>
                     <th>Customer</th>
+                    <th>Ship to</th>
                     <th>Items</th>
                     <th>Total</th>
                     <th>Status</th>
@@ -401,7 +402,7 @@
                   </tr>
                 </thead>
                 <tbody id="storeOrdersBody">
-                  <tr><td colspan="9">Loading orders...</td></tr>
+                  <tr><td colspan="10">Loading orders...</td></tr>
                 </tbody>
               </table>
             </div>
@@ -490,6 +491,13 @@
     <section class="store-modal__panel store-modal__panel--wide" role="dialog" aria-modal="true" aria-labelledby="storeReceiptTitle">
       <div class="panel-header"><div><h2 id="storeReceiptTitle">Customer Receipt</h2><p class="subtle-text" id="storeReceiptOrder"></p></div><button class="btn" type="button" data-close-store-modal="storeReceiptModal">Close</button></div>
       <p><strong>Customer:</strong> <span id="storeReceiptCustomer">—</span></p>
+      <section class="receipt-shipping-card" aria-labelledby="storeReceiptShippingHeading">
+        <div class="panel-header panel-header--compact">
+          <div><h3 id="storeReceiptShippingHeading">Shipping address</h3><p class="subtle-text" id="storeReceiptShippingNotice"></p></div>
+          <div class="table-actions"><button class="btn" type="button" id="storeReceiptCopyShipping">Copy address</button><button class="btn" type="button" id="storeReceiptRefreshShipping">Refresh from Stripe</button></div>
+        </div>
+        <address class="store-shipping-address" id="storeReceiptShippingAddress">—</address>
+      </section>
       <div class="table-wrap"><table class="admin-table"><thead><tr><th>Item</th><th>Qty</th><th>Unit price</th><th>Item subtotal</th><th>Tax</th><th>Line total</th></tr></thead><tbody id="storeReceiptItems"></tbody></table></div>
       <div class="receipt-totals">
         <div><span>Items subtotal</span><strong id="storeReceiptSubtotal">$0.00</strong></div>

@@ -95,6 +95,7 @@ const registerProductCatalogRoutes = require("./product-catalog-routes");
 const registerShopRoutes = require("./shop-routes");
 const registerSuccessNetwork = require("./success-network");
 const { registerOrderTracker, notifyCheckoutForOrderTracker } = require("./order-tracker");
+const { buildShikariAccountsCsv, buildShikariImapCsv } = require("./shikari-credential-exports");
 const { registerMarketValueEngine } = require("./market-value-engine");
 const { registerMasterProductCatalog } = require("./master-product-catalog");
 const { buildProfileAccountsByUserStore } = require("./profile-account-summary");
@@ -11240,7 +11241,7 @@ app.get("/admin/export/accounts-txt", auth, admin, async (req, res) => {
     try {
         const currentUser = await getCurrentUser(req);
         const { user_id, group } = req.query;
-        const filename = (req.query.filename || "accounts").replace(/[^a-zA-Z0-9-_]/g, "");
+        const filename = (req.query.filename || "shikari-accounts").replace(/[^a-zA-Z0-9-_]/g, "");
         const activeOnly = String(req.query.active_only || "") === "1";
 
         let query = supabase
@@ -11278,22 +11279,18 @@ app.get("/admin/export/accounts-txt", auth, admin, async (req, res) => {
         let exportProfiles = await attachAndFilterProfilesByStore(profiles || [], group || "");
         exportProfiles = await filterProfilesByActiveRunStatus(exportProfiles, group || "", activeOnly);
 
-        const rows = exportProfiles
-            .map((profile) => {
-                const account = accountForExport(profile, group || profile.account_type);
-                const email = (account.login_email || "").trim();
-                const password = (account.login_password || "").trim();
+        const rows = exportProfiles.map((profile) => {
+            const account = accountForExport(profile, group || profile.account_type);
+            return {
+                username: account.login_email,
+                password: account.login_password
+            };
+        });
 
-                if (!email && !password) return null;
+        const output = buildShikariAccountsCsv(rows);
 
-                return `${email}:::${password}:::proxie`;
-            })
-            .filter(Boolean);
-
-        const output = ["account email:account password", ...rows].join("\n");
-
-        res.setHeader("Content-Type", "text/plain; charset=utf-8");
-        res.setHeader("Content-Disposition", `attachment; filename="${filename}.txt"`);
+        res.setHeader("Content-Type", "text/csv; charset=utf-8");
+        res.setHeader("Content-Disposition", `attachment; filename="${filename}.csv"`);
         res.send(output);
     } catch (err) {
         console.error(err);
@@ -11307,7 +11304,7 @@ app.get("/admin/export/gmail-imap-txt", auth, admin, async (req, res) => {
     try {
         const currentUser = await getCurrentUser(req);
         const { user_id, group } = req.query;
-        const filename = (req.query.filename || "gmail-imap").replace(/[^a-zA-Z0-9-_]/g, "");
+        const filename = (req.query.filename || "shikari-imap").replace(/[^a-zA-Z0-9-_]/g, "");
         const activeOnly = String(req.query.active_only || "") === "1";
 
         let query = supabase
@@ -11345,22 +11342,18 @@ app.get("/admin/export/gmail-imap-txt", auth, admin, async (req, res) => {
         let exportProfiles = await attachAndFilterProfilesByStore(profiles || [], group || "");
         exportProfiles = await filterProfilesByActiveRunStatus(exportProfiles, group || "", activeOnly);
 
-        const rows = exportProfiles
-            .map((profile) => {
-                const account = accountForExport(profile, group || profile.account_type);
-                const email = String(account.login_email || "").trim();
-                const appPassOr2fa = String(account.gmail_app_password || account.amazon_2fa_secret || "").trim();
+        const rows = exportProfiles.map((profile) => {
+            const account = accountForExport(profile, group || profile.account_type);
+            return {
+                username: account.login_email,
+                password: account.gmail_app_password || account.amazon_2fa_secret
+            };
+        });
 
-                if (!email && !appPassOr2fa) return null;
+        const output = buildShikariImapCsv(rows);
 
-                return `Gmail;${email};${appPassOr2fa}`;
-            })
-            .filter(Boolean);
-
-        const output = ["Gmail;email;app/2fapass", ...rows].join("\n");
-
-        res.setHeader("Content-Type", "text/plain; charset=utf-8");
-        res.setHeader("Content-Disposition", `attachment; filename="${filename}.txt"`);
+        res.setHeader("Content-Type", "text/csv; charset=utf-8");
+        res.setHeader("Content-Disposition", `attachment; filename="${filename}.csv"`);
         res.send(output);
     } catch (err) {
         console.error(err);
