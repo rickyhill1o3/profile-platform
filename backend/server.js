@@ -98,6 +98,7 @@ const { registerOrderTracker, notifyCheckoutForOrderTracker } = require("./order
 const { buildShikariAccountsCsv, buildShikariImapCsv } = require("./shikari-credential-exports");
 const { registerMarketValueEngine } = require("./market-value-engine");
 const { registerMasterProductCatalog } = require("./master-product-catalog");
+const { fetchAllSupabaseRows, fetchAllSupabaseRowsInBatches } = require("./supabase-pagination");
 const { buildProfileAccountsByUserStore } = require("./profile-account-summary");
 const {
     buildTargetProfileOwnershipIndex,
@@ -8469,19 +8470,18 @@ app.get("/admin/store-run-status", auth, admin, async (req, res) => {
         const siteFilter = normalizeStoreRunSite(req.query.site || "");
         const userFilter = String(req.query.user_id || "").trim();
 
-        let usersQuery = supabase
-            .from("users")
-            .select("id, email, role, owner_admin_id, discord_username, discord_display_name, discord_user_id")
-            .order("email", { ascending: true });
+        const buildUsersQuery = () => {
+            let query = supabase
+                .from("users")
+                .select("id, email, role, owner_admin_id, discord_username, discord_display_name, discord_user_id")
+                .order("email", { ascending: true })
+                .order("id", { ascending: true });
+            if (currentUser.role !== "super_admin") query = query.eq("owner_admin_id", currentUser.id);
+            if (userFilter) query = query.eq("id", userFilter);
+            return query;
+        };
 
-        if (currentUser.role !== "super_admin") {
-            usersQuery = usersQuery.eq("owner_admin_id", currentUser.id);
-        }
-        if (userFilter) {
-            usersQuery = usersQuery.eq("id", userFilter);
-        }
-
-        const { data: users, error: usersError } = await usersQuery;
+        const { data: users, error: usersError } = await fetchAllSupabaseRows(buildUsersQuery);
         if (usersError) return res.status(500).json({ error: usersError.message });
 
         const userIds = (users || []).map((u) => u.id);
@@ -8492,10 +8492,11 @@ app.get("/admin/store-run-status", auth, admin, async (req, res) => {
         const exactEmailsByProfileStore = new Map();
         const fallbackEmailsByProfileId = new Map();
         if (userIds.length) {
-            const { data: rawProfiles, error: profilesError } = await supabase
+            const { data: rawProfiles, error: profilesError } = await fetchAllSupabaseRows(() => supabase
                 .from("profiles")
                 .select("id, user_id, profile_name, account_type, created_at, addresses(email)")
-                .in("user_id", userIds);
+                .in("user_id", userIds)
+                .order("id", { ascending: true }));
             if (profilesError) return res.status(500).json({ error: profilesError.message });
 
             const profilesById = new Map((rawProfiles || []).map((profile) => [String(profile.id), profile]));
@@ -8526,10 +8527,11 @@ app.get("/admin/store-run-status", auth, admin, async (req, res) => {
             });
 
             try {
-                const { data: assignmentData, error: assignmentError } = await supabase
+                const { data: assignmentData, error: assignmentError } = await fetchAllSupabaseRows(() => supabase
                     .from("profile_store_assignments")
                     .select("profile_id, user_id, store")
-                    .in("user_id", userIds);
+                    .in("user_id", userIds)
+                    .order("profile_id", { ascending: true }));
                 if (!assignmentError) {
                     (assignmentData || []).forEach((row) => addStoreForProfile(row.profile_id, row.store));
                 }
@@ -8538,10 +8540,14 @@ app.get("/admin/store-run-status", auth, admin, async (req, res) => {
             }
 
             try {
-                const { data: credentialData, error: credentialError } = await supabase
-                    .from("profile_store_credentials")
-                    .select("profile_id, store, login_email")
-                    .in("profile_id", Array.from(profilesById.keys()));
+                const { data: credentialData, error: credentialError } = await fetchAllSupabaseRowsInBatches(
+                    Array.from(profilesById.keys()),
+                    (profileIds) => supabase
+                        .from("profile_store_credentials")
+                        .select("profile_id, store, login_email")
+                        .in("profile_id", profileIds)
+                        .order("profile_id", { ascending: true })
+                );
                 if (!credentialError) {
                     (credentialData || []).forEach((row) => {
                         addStoreForProfile(row.profile_id, row.store);
@@ -8554,25 +8560,37 @@ app.get("/admin/store-run-status", auth, admin, async (req, res) => {
 
             let accountRows = [];
             try {
-                const primary = await supabase
-                    .from("accounts")
-                    .select("profile_id, provider, account_type, login_email")
-                    .in("profile_id", Array.from(profilesById.keys()));
+                const primary = await fetchAllSupabaseRowsInBatches(
+                    Array.from(profilesById.keys()),
+                    (profileIds) => supabase
+                        .from("accounts")
+                        .select("profile_id, provider, account_type, login_email")
+                        .in("profile_id", profileIds)
+                        .order("profile_id", { ascending: true })
+                );
                 if (!primary.error) accountRows = primary.data || [];
                 else {
                     // Some accounts schemas only have provider; account_type is optional.
-                    const fallback = await supabase
-                        .from("accounts")
-                        .select("profile_id, provider, login_email")
-                        .in("profile_id", Array.from(profilesById.keys()));
+                    const fallback = await fetchAllSupabaseRowsInBatches(
+                        Array.from(profilesById.keys()),
+                        (profileIds) => supabase
+                            .from("accounts")
+                            .select("profile_id, provider, login_email")
+                            .in("profile_id", profileIds)
+                            .order("profile_id", { ascending: true })
+                    );
                     if (!fallback.error) accountRows = fallback.data || [];
                 }
             } catch (_) {
                 try {
-                    const { data: accountData, error: accountError } = await supabase
-                        .from("accounts")
-                        .select("profile_id, provider, login_email")
-                        .in("profile_id", Array.from(profilesById.keys()));
+                    const { data: accountData, error: accountError } = await fetchAllSupabaseRowsInBatches(
+                        Array.from(profilesById.keys()),
+                        (profileIds) => supabase
+                            .from("accounts")
+                            .select("profile_id, provider, login_email")
+                            .in("profile_id", profileIds)
+                            .order("profile_id", { ascending: true })
+                    );
                     if (!accountError) accountRows = accountData || [];
                 } catch (_) {}
             }
