@@ -1,6 +1,7 @@
 'use strict';
 
 const { fetchAllSupabaseRows } = require('./supabase-pagination');
+const { shouldAutoPauseStores } = require('./credit-run-policy');
 
 function productSelectionRunStatusSite(site = '') {
     const normalized = String(site || '').trim().toLowerCase();
@@ -28,7 +29,36 @@ async function loadActiveProductSelectionUserIds(supabase, site, scopedUserIds =
 
     const { data, error } = await fetchAllSupabaseRows(buildQuery);
     if (error) throw new Error(error.message || 'Could not load active store accounts.');
-    return new Set((data || []).map((row) => String(row.user_id || '').trim()).filter(Boolean));
+
+    const activeUserIds = [...new Set((data || []).map((row) => String(row.user_id || '').trim()).filter(Boolean))];
+    if (!activeUserIds.length) return new Set();
+
+    // Store status is the primary filter, but the credit balance is an
+    // additional fail-safe. If an older/stale status row still says Active
+    // after the user dropped below -15, never expose that user to a bot export.
+    const { data: creditRows, error: creditError } = await fetchAllSupabaseRows(() => supabase
+        .from('user_credit_balances')
+        .select('user_id, balance')
+        .in('user_id', activeUserIds)
+        .order('user_id', { ascending: true }));
+    if (creditError) throw new Error(creditError.message || 'Could not verify credit eligibility for product exports.');
+
+    const creditPausedUserIds = new Set((creditRows || [])
+        .filter((row) => shouldAutoPauseStores(row.balance))
+        .map((row) => String(row.user_id || '').trim())
+        .filter(Boolean));
+
+    if (creditPausedUserIds.size) {
+        const blockedIds = [...creditPausedUserIds];
+        const { error: pauseError } = await supabase
+            .from('user_store_run_status')
+            .update({ is_enabled: false, updated_at: new Date().toISOString() })
+            .in('user_id', blockedIds)
+            .eq('is_enabled', true);
+        if (pauseError) throw new Error(pauseError.message || 'Could not pause credit-ineligible store accounts.');
+    }
+
+    return new Set(activeUserIds.filter((userId) => !creditPausedUserIds.has(userId)));
 }
 
 function filterRowsToActiveUsers(rows = [], activeUserIds = new Set()) {
