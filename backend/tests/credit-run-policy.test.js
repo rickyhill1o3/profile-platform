@@ -8,7 +8,11 @@ const {
     crossedAutoPauseThreshold,
     canActivateStore,
     creditsNeededForReactivation,
-    shouldRestoreAfterCreditPurchase
+    shouldRestoreAfterCreditPurchase,
+    isCreditLimitExemptRole,
+    shouldAutoPauseStoresForRole,
+    canRoleActivateStore,
+    creditsNeededForRoleReactivation
 } = require('../credit-run-policy');
 
 assert.strictEqual(CREDIT_AUTO_PAUSE_THRESHOLD, -15);
@@ -26,6 +30,14 @@ assert.strictEqual(creditsNeededForReactivation(4), 0);
 assert.strictEqual(shouldRestoreAfterCreditPurchase(-31, 0, 'stripe_purchase'), true, 'a purchase reaching zero must qualify for selective automatic restoration');
 assert.strictEqual(shouldRestoreAfterCreditPurchase(-31, -1, 'stripe_purchase'), false, 'a purchase that stays negative must not restore stores');
 assert.strictEqual(shouldRestoreAfterCreditPurchase(-31, 0, 'order_refunded'), false, 'non-purchase credits must not trigger automatic restoration');
+
+assert.strictEqual(isCreditLimitExemptRole('super_admin'), true, 'the site owner role must be credit-limit exempt');
+assert.strictEqual(isCreditLimitExemptRole('admin'), false, 'regular admins keep the normal credit policy');
+assert.strictEqual(shouldAutoPauseStoresForRole(-1025, 'super_admin'), false, 'a negative owner balance must never auto-pause stores');
+assert.strictEqual(shouldAutoPauseStoresForRole(-16, 'user'), true, 'regular users still auto-pause below -15');
+assert.strictEqual(canRoleActivateStore(-1025, 'super_admin'), true, 'the site owner can enable stores at any balance');
+assert.strictEqual(canRoleActivateStore(-1, 'user'), false, 'regular users still need a non-negative balance to enable stores');
+assert.strictEqual(creditsNeededForRoleReactivation(-1025, 'super_admin'), 0, 'the owner is never asked to buy credits to reactivate');
 
 const projectRoot = path.resolve(__dirname, '..', '..');
 const serverSource = fs.readFileSync(path.join(projectRoot, 'backend', 'server.js'), 'utf8');
@@ -45,8 +57,8 @@ assert.match(
 );
 assert.match(
     serverSource,
-    /app\.put\("\/store-run-status"[\s\S]*?isEnabled && !canActivateStore\(balance\)[\s\S]*?status\(409\)/,
-    'a negative balance must block manual store reactivation'
+    /app\.put\("\/store-run-status"[\s\S]*?isEnabled && !canRoleActivateStore\(balance, req\.role\)[\s\S]*?status\(409\)/,
+    'a negative balance must block regular-user reactivation without blocking the super admin'
 );
 assert.match(
     serverSource,
@@ -55,8 +67,8 @@ assert.match(
 );
 assert.match(
     serverSource,
-    /app\.get\("\/credits\/me"[\s\S]*?balance:?[\s\S]*?stores_auto_paused: shouldAutoPauseStores\(balance\)/,
-    'the credit endpoint must expose the signed balance and pause state'
+    /app\.get\("\/credits\/me"[\s\S]*?balance,?[\s\S]*?stores_auto_paused: shouldAutoPauseStoresForRole\(balance, req\.role\)/,
+    'the credit endpoint must expose the signed balance and role-aware pause state'
 );
 assert.match(
     serverSource,
@@ -67,8 +79,20 @@ assert.match(frontendSource, /Negative balance allowed through -15 credits/);
 assert.match(frontendSource, /Stores automatically paused/);
 assert.match(frontendSource, /Reach 0 credits before reactivating this store/);
 assert.match(frontendSource, /Stores you paused yourself stay paused/);
+assert.match(frontendSource, /Super admin account — never auto-paused for credits/);
 assert.match(adminHtml, /<th>Run Status<\/th>/);
 assert.match(dashboardHtml, /id="creditsBalanceStat"[\s\S]*?href="buy-credits\.html">Buy credits →<\/a>/, 'the dashboard credit card must provide a direct purchase link');
-assert.match(dashboardHtml, /script\.js\?v=20260923-auto-credit-restore/, 'the dashboard must request the selective automatic-restoration frontend instead of a cached older script');
+assert.match(dashboardHtml, /script\.js\?v=20260923-super-admin-credit-exempt/, 'the dashboard must request the super-admin credit-exemption frontend instead of a cached older script');
+
+assert.match(
+    serverSource,
+    /async function pauseActiveStoresForCreditLimit[\s\S]*?isCreditLimitExemptRole\(role\)[\s\S]*?bypassBalance: true[\s\S]*?credit_limit_exempt: true/,
+    'an owner that was previously auto-paused must be restored without requiring a non-negative balance'
+);
+assert.match(
+    serverSource,
+    /const willCrossAutoPauseThreshold = creditsToCharge > 0[\s\S]*?!isCreditLimitExemptRole\(user\.role\)[\s\S]*?crossedAutoPauseThreshold/,
+    'successful checkout processing must not flag or notify the super admin for the -15 threshold'
+);
 
 console.log('credit run policy tests passed');

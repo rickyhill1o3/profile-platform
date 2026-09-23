@@ -7,23 +7,25 @@ const {
     filterRowsToActiveUsers
 } = require('../product-selection-run-status');
 
-function mockSupabase(runStatusRows, creditRows) {
+function mockSupabase(runStatusRows, creditRows, userRows = []) {
     const settingsRows = [];
     return {
         from(table) {
             const filters = [];
             let allowedIds = null;
+            let allowedIdColumn = 'user_id';
             let updateValues = null;
             let upsertValues = null;
             const sourceForTable = () => {
                 if (table === 'user_store_run_status') return runStatusRows;
                 if (table === 'user_credit_balances') return creditRows;
+                if (table === 'users') return userRows;
                 if (table === 'app_settings') return settingsRows;
                 throw new Error(`Unexpected table ${table}`);
             };
             const filteredRows = () => sourceForTable()
                 .filter((row) => filters.every(([column, value]) => row[column] === value))
-                .filter((row) => !allowedIds || allowedIds.has(String(row.user_id)));
+                .filter((row) => !allowedIds || allowedIds.has(String(row[allowedIdColumn])));
             const applyMutation = () => {
                 if (table === 'user_store_run_status' && updateValues) {
                     filteredRows().forEach((row) => Object.assign(row, updateValues));
@@ -44,7 +46,8 @@ function mockSupabase(runStatusRows, creditRows) {
                 select() { return builder; },
                 eq(column, value) { filters.push([column, value]); return builder; },
                 in(column, values) {
-                    assert.strictEqual(column, 'user_id');
+                    assert.ok(['user_id', 'id'].includes(column));
+                    allowedIdColumn = column;
                     allowedIds = new Set(values.map(String));
                     return builder;
                 },
@@ -73,6 +76,7 @@ function mockSupabase(runStatusRows, creditRows) {
     assert.strictEqual(productSelectionRunStatusSite('pokemon'), 'pokemoncenter');
 
     const runStatusRows = [
+        { user_id: 'owner', site: 'target', is_enabled: false },
         { user_id: 'torres', site: 'target', is_enabled: false },
         { user_id: 'linkin', site: 'target', is_enabled: true },
         { user_id: 'battgirl', site: 'target', is_enabled: true },
@@ -80,17 +84,26 @@ function mockSupabase(runStatusRows, creditRows) {
         { user_id: 'torres', site: 'amazon', is_enabled: true }
     ];
     const supabase = mockSupabase(runStatusRows, [
+        { user_id: 'owner', balance: -1025 },
         { user_id: 'linkin', balance: 8 },
         { user_id: 'battgirl', balance: -15 },
         { user_id: 'jose', balance: -31 }
+    ], [
+        { id: 'owner', role: 'super_admin' },
+        { id: 'linkin', role: 'user' },
+        { id: 'battgirl', role: 'user' },
+        { id: 'jose', role: 'user' }
     ]);
 
     const activeTargetUsers = await loadActiveProductSelectionUserIds(supabase, 'target', null);
-    assert.deepStrictEqual(activeTargetUsers, new Set(['linkin', 'battgirl']), 'paused Target users must be excluded');
+    assert.deepStrictEqual(activeTargetUsers, new Set(['owner', 'linkin', 'battgirl']), 'regular paused users must be excluded while super admin remains exportable');
     assert.strictEqual(runStatusRows.find((row) => row.user_id === 'jose').is_enabled, false, 'a stale active status must be repaired when credit balance is below -15');
 
     const scopedActiveUsers = await loadActiveProductSelectionUserIds(supabase, 'target', ['torres', 'linkin']);
     assert.deepStrictEqual(scopedActiveUsers, new Set(['linkin']), 'admin scope and active status must both apply');
+
+    const scopedSuperAdmin = await loadActiveProductSelectionUserIds(supabase, 'target', ['owner']);
+    assert.deepStrictEqual(scopedSuperAdmin, new Set(['owner']), 'super admin must remain exportable despite a paused status and negative balance');
 
     const selections = [
         { user_id: 'torres', sku: 'paused-sku' },
@@ -110,6 +123,7 @@ function mockSupabase(runStatusRows, creditRows) {
 
     const eligibilitySource = fs.readFileSync(path.join(__dirname, '..', 'product-selection-run-status.js'), 'utf8');
     assert.match(eligibilitySource, /from\('user_credit_balances'\)/, 'product exports must verify credit eligibility directly');
+    assert.match(eligibilitySource, /from\('users'\)[\s\S]*?eq\('role', 'super_admin'\)/, 'product exports must explicitly include super admin accounts');
     assert.match(eligibilitySource, /shouldAutoPauseStores\(row\.balance\)/, 'the same below -15 policy must drive export exclusion');
     assert.match(eligibilitySource, /pauseStoresForCreditLimit\(supabase, blockedId/, 'stale active run-status rows must be repaired with automatic-pause provenance');
 

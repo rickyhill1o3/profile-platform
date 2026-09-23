@@ -114,7 +114,11 @@ const {
     crossedAutoPauseThreshold,
     canActivateStore,
     creditsNeededForReactivation,
-    shouldRestoreAfterCreditPurchase
+    shouldRestoreAfterCreditPurchase,
+    isCreditLimitExemptRole,
+    shouldAutoPauseStoresForRole,
+    canRoleActivateStore,
+    creditsNeededForRoleReactivation
 } = require("./credit-run-policy");
 const {
     pauseStoresForCreditLimit,
@@ -776,14 +780,28 @@ async function getUserCreditBalance(userId) {
     return asSignedCredits(balance.balance, DEFAULT_FREE_CREDITS);
 }
 
-async function pauseActiveStoresForCreditLimit(userId, balance) {
+async function pauseActiveStoresForCreditLimit(userId, balance, knownRole = null) {
+    const role = knownRole || (await getUserById(userId))?.role;
+    if (isCreditLimitExemptRole(role)) {
+        const restored = await restoreCreditPausedStores(userId, balance, {
+            requirePending: false,
+            bypassBalance: true,
+            changeReason: "super_admin_credit_exemption_restore"
+        });
+        return {
+            paused: false,
+            paused_sites: [],
+            restored_sites: restored.restored_sites,
+            credit_limit_exempt: true
+        };
+    }
     return pauseStoresForCreditLimit(supabase, userId, balance);
 }
 
 async function restoreCreditPausedStores(userId, balance, options = {}) {
     const result = await restoreAutomaticallyPausedStores(supabase, userId, balance, options);
     if (result.restored_sites.length) {
-        await markProfileSyncChanged(userId, result.restored_sites, "credit_purchase_auto_restore");
+        await markProfileSyncChanged(userId, result.restored_sites, options.changeReason || "credit_purchase_auto_restore");
     }
     return result;
 }
@@ -808,8 +826,12 @@ async function loadRecentCreditTransactions(userId) {
 }
 
 async function reconcileCreditStoreLifecycle(userId, balance, transactions = null) {
+    const user = await getUserById(userId);
+    if (isCreditLimitExemptRole(user?.role)) {
+        return pauseActiveStoresForCreditLimit(userId, balance, user.role);
+    }
     if (shouldAutoPauseStores(balance)) {
-        return pauseActiveStoresForCreditLimit(userId, balance);
+        return pauseActiveStoresForCreditLimit(userId, balance, user?.role);
     }
 
     const pendingResult = await restoreCreditPausedStores(userId, balance, { requirePending: true });
@@ -4659,7 +4681,9 @@ async function recordSuccessfulCheckout(payload) {
 
     const currentBalance = await getUserCreditBalance(user.id);
     const projectedBalance = currentBalance - creditsToCharge;
-    const willCrossAutoPauseThreshold = creditsToCharge > 0 && crossedAutoPauseThreshold(currentBalance, projectedBalance);
+    const willCrossAutoPauseThreshold = creditsToCharge > 0
+        && !isCreditLimitExemptRole(user.role)
+        && crossedAutoPauseThreshold(currentBalance, projectedBalance);
 
     const isAmazonPendingVerification = String(normalized.site || '').toLowerCase().includes('amazon');
 
@@ -4860,6 +4884,7 @@ app.get("/credits/me", auth, async (req, res) => {
         const balanceRow = await ensureUserCreditBalance(req.user_id);
         const balance = asSignedCredits(balanceRow.balance, 0);
         await reconcileCreditStoreLifecycle(req.user_id, balance);
+        const creditLimitExempt = isCreditLimitExemptRole(req.role);
         res.json({
             balance,
             free_starter_credits: DEFAULT_FREE_CREDITS,
@@ -4868,10 +4893,11 @@ app.get("/credits/me", auth, async (req, res) => {
             monthly_fee_cents: Number(process.env.MONTHLY_MEMBERSHIP_FEE_CENTS || 0),
             auto_pause_threshold: CREDIT_AUTO_PAUSE_THRESHOLD,
             reactivation_minimum_balance: STORE_REACTIVATION_MINIMUM_BALANCE,
-            can_enable_stores: canActivateStore(balance),
-            credits_needed_for_reactivation: creditsNeededForReactivation(balance),
-            stores_auto_paused: shouldAutoPauseStores(balance),
-            automatic_credit_purchase_restore: true
+            can_enable_stores: canRoleActivateStore(balance, req.role),
+            credits_needed_for_reactivation: creditsNeededForRoleReactivation(balance, req.role),
+            stores_auto_paused: shouldAutoPauseStoresForRole(balance, req.role),
+            automatic_credit_purchase_restore: !creditLimitExempt,
+            credit_limit_exempt: creditLimitExempt
         });
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -5481,7 +5507,8 @@ app.get("/admin/credits/users", auth, admin, async (req, res) => {
             const balance = balancesByUser.get(user.id) || await ensureUserCreditBalance(user.id);
             const creditsBalance = asSignedCredits(balance.balance, 0);
             const userTransactions = transactionsByUser.get(user.id) || [];
-            if (shouldAutoPauseStores(creditsBalance) || findLegacyRecoveryWindow(userTransactions)) {
+            const creditLimitExempt = isCreditLimitExemptRole(user.role);
+            if (creditLimitExempt || shouldAutoPauseStores(creditsBalance) || findLegacyRecoveryWindow(userTransactions)) {
                 await reconcileCreditStoreLifecycle(user.id, creditsBalance, userTransactions);
             }
             items.push({
@@ -5492,10 +5519,11 @@ app.get("/admin/credits/users", auth, admin, async (req, res) => {
                 lifetime_credits_spent: asWholeCredits(balance.lifetime_credits_spent, 0),
                 credit_summary: creditSummaryByUser.get(user.id) || summarizeCreditTransactions([]),
                 insufficient_orders: insufficientCounts.get(user.id) || 0,
-                needs_removal: shouldAutoPauseStores(creditsBalance),
-                can_reactivate: canActivateStore(creditsBalance),
-                is_negative_allowance: creditsBalance < 0 && !shouldAutoPauseStores(creditsBalance),
-                credits_needed_for_reactivation: creditsNeededForReactivation(creditsBalance)
+                needs_removal: shouldAutoPauseStoresForRole(creditsBalance, user.role),
+                can_reactivate: canRoleActivateStore(creditsBalance, user.role),
+                is_negative_allowance: creditsBalance < 0 && !creditLimitExempt && !shouldAutoPauseStores(creditsBalance),
+                credits_needed_for_reactivation: creditsNeededForRoleReactivation(creditsBalance, user.role),
+                credit_limit_exempt: creditLimitExempt
             });
         }
 
@@ -5563,6 +5591,7 @@ app.get("/admin/users/:id/credits/history", auth, admin, async (req, res) => {
 
         const balance = asSignedCredits(balanceRow.balance, 0);
         await reconcileCreditStoreLifecycle(targetUser.id, balance, txRows);
+        const creditLimitExempt = isCreditLimitExemptRole(targetUser.role);
 
         res.json({
             user: { id: targetUser.id, email: targetUser.email, role: targetUser.role, discord_username: targetUser.discord_username || '', discord_display_name: targetUser.discord_display_name || '', user_display: formatDiscordDisplayName(targetUser) },
@@ -5570,10 +5599,11 @@ app.get("/admin/users/:id/credits/history", auth, admin, async (req, res) => {
             lifetime_credits_granted: asWholeCredits(balanceRow.lifetime_credits_granted, 0),
             lifetime_credits_spent: asWholeCredits(balanceRow.lifetime_credits_spent, 0),
             credit_summary: summarizeCreditTransactions(txRows),
-            needs_removal: shouldAutoPauseStores(balance),
-            can_reactivate: canActivateStore(balance),
-            is_negative_allowance: balance < 0 && !shouldAutoPauseStores(balance),
-            credits_needed_for_reactivation: creditsNeededForReactivation(balance),
+            needs_removal: shouldAutoPauseStoresForRole(balance, targetUser.role),
+            can_reactivate: canRoleActivateStore(balance, targetUser.role),
+            is_negative_allowance: balance < 0 && !creditLimitExempt && !shouldAutoPauseStores(balance),
+            credits_needed_for_reactivation: creditsNeededForRoleReactivation(balance, targetUser.role),
+            credit_limit_exempt: creditLimitExempt,
             transactions: txRows,
             orders: decoratedOrders
         });
@@ -6541,7 +6571,7 @@ async function recheckSuccessfulOrderCredits({ currentUser, order = null, webhoo
         targetOrder = { ...targetOrder, credits_charged: expectedCredits, metadata: { ...(targetOrder.metadata || {}), corrected_credits_charged: expectedCredits } };
         changed = true;
         message = `Credits were rechecked. Previous charge: ${existingCredits}. Correct charge: ${expectedCredits}. Charged ${deltaNeeded} additional credits.`;
-        if (crossedAutoPauseThreshold(previousBalance, balanceAfter)) {
+        if (!isCreditLimitExemptRole(targetUser.role) && crossedAutoPauseThreshold(previousBalance, balanceAfter)) {
             await sendCreditDepletedNotifications({ user: targetUser, previousBalance, newBalance: balanceAfter, creditsCharged: deltaNeeded, order: targetOrder });
         }
     } else if (deltaNeeded === 0) {
@@ -7754,16 +7784,18 @@ app.get("/user/activity", auth, async (req, res) => {
         const decoratedOrders = await decorateOrderHistoryRows(orderRows);
         const balance = asSignedCredits(balanceRow.balance, 0);
         await reconcileCreditStoreLifecycle(currentUser.id, balance, txRows);
+        const creditLimitExempt = isCreditLimitExemptRole(currentUser.role);
 
         res.json({
             user: { id: currentUser.id, email: currentUser.email, role: currentUser.role },
             balance,
             lifetime_credits_granted: asWholeCredits(balanceRow.lifetime_credits_granted, 0),
             lifetime_credits_spent: asWholeCredits(balanceRow.lifetime_credits_spent, 0),
-            needs_removal: shouldAutoPauseStores(balance),
-            can_reactivate: canActivateStore(balance),
-            is_negative_allowance: balance < 0 && !shouldAutoPauseStores(balance),
-            credits_needed_for_reactivation: creditsNeededForReactivation(balance),
+            needs_removal: shouldAutoPauseStoresForRole(balance, currentUser.role),
+            can_reactivate: canRoleActivateStore(balance, currentUser.role),
+            is_negative_allowance: balance < 0 && !creditLimitExempt && !shouldAutoPauseStores(balance),
+            credits_needed_for_reactivation: creditsNeededForRoleReactivation(balance, currentUser.role),
+            credit_limit_exempt: creditLimitExempt,
             transactions: txRows,
             orders: decoratedOrders
         });
@@ -8528,6 +8560,7 @@ app.get("/store-run-status", auth, async (req, res) => {
         await ensureUserNotRevoked(req.user_id);
         const balance = await getUserCreditBalance(req.user_id);
         await reconcileCreditStoreLifecycle(req.user_id, balance);
+        const creditLimitExempt = isCreditLimitExemptRole(req.role);
         const statusMap = await loadStoreRunStatusForUsers([req.user_id]);
         const status = statusMap.get(String(req.user_id)) || Object.fromEntries(STORE_RUN_STATUS_SITES.map((site) => [site, false]));
         res.json({
@@ -8540,10 +8573,11 @@ app.get("/store-run-status", auth, async (req, res) => {
             credit_balance: balance,
             auto_pause_threshold: CREDIT_AUTO_PAUSE_THRESHOLD,
             reactivation_minimum_balance: STORE_REACTIVATION_MINIMUM_BALANCE,
-            can_enable_stores: canActivateStore(balance),
-            credits_needed_for_reactivation: creditsNeededForReactivation(balance),
-            stores_auto_paused: shouldAutoPauseStores(balance),
-            automatic_credit_purchase_restore: true
+            can_enable_stores: canRoleActivateStore(balance, req.role),
+            credits_needed_for_reactivation: creditsNeededForRoleReactivation(balance, req.role),
+            stores_auto_paused: shouldAutoPauseStoresForRole(balance, req.role),
+            automatic_credit_purchase_restore: !creditLimitExempt,
+            credit_limit_exempt: creditLimitExempt
         });
     } catch (err) {
         res.status(500).json({ error: err.message || "Could not load store run status" });
@@ -8557,8 +8591,8 @@ app.put("/store-run-status", auth, async (req, res) => {
         if (!site) return res.status(400).json({ error: "Invalid store" });
         const isEnabled = !!req.body?.is_enabled;
         const balance = await getUserCreditBalance(req.user_id);
-        if (isEnabled && !canActivateStore(balance)) {
-            const creditsNeeded = creditsNeededForReactivation(balance);
+        if (isEnabled && !canRoleActivateStore(balance, req.role)) {
+            const creditsNeeded = creditsNeededForRoleReactivation(balance, req.role);
             return res.status(409).json({
                 error: `Your balance must be at least ${STORE_REACTIVATION_MINIMUM_BALANCE} credits before you can reactivate a store. Buy ${creditsNeeded} more credit${creditsNeeded === 1 ? '' : 's'}, then try again.`,
                 balance,

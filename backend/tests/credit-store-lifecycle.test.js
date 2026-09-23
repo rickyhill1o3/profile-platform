@@ -95,6 +95,22 @@ function mockSupabase(seed = {}) {
     assert.strictEqual(manualRestore.restored, false);
     assert.strictEqual(manualDb.tables.user_store_run_status[0].is_enabled, false, 'an explicit manual pause must cancel automatic restoration');
 
+    const exemptDb = mockSupabase({
+        user_store_run_status: [
+            { user_id: 'owner', site: 'target', is_enabled: true, updated_at: '2026-09-23T00:00:00.000Z' },
+            { user_id: 'owner', site: 'amazon', is_enabled: false, updated_at: '2026-09-01T00:00:00.000Z' }
+        ]
+    });
+    await pauseStoresForCreditLimit(exemptDb, 'owner', -1025, { now: '2026-09-23T01:00:00.000Z' });
+    const exemptRestore = await restoreAutomaticallyPausedStores(exemptDb, 'owner', -1025, {
+        requirePending: false,
+        bypassBalance: true,
+        now: '2026-09-23T02:00:00.000Z'
+    });
+    assert.deepStrictEqual(exemptRestore.restored_sites, ['target'], 'a super-admin exemption must reverse prior provenance-tracked automatic pauses at any balance');
+    assert.strictEqual(exemptDb.tables.user_store_run_status.find((row) => row.site === 'target').is_enabled, true);
+    assert.strictEqual(exemptDb.tables.user_store_run_status.find((row) => row.site === 'amazon').is_enabled, false, 'the exemption must not turn on a manually paused store');
+
     const legacyTransactions = [
         { id: 'charge-1', amount_delta: -5, reason: 'successful_checkout', balance_after: -14, created_at: '2026-09-20T10:00:00.000Z' },
         { id: 'charge-2', amount_delta: -5, reason: 'successful_checkout', balance_after: -19, created_at: '2026-09-20T11:00:00.000Z' },

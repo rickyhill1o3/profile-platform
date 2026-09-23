@@ -6,6 +6,22 @@ function normalizeBalance(value) {
     return Number.isFinite(parsed) ? Math.round(parsed) : 0;
 }
 
+function isCreditLimitExemptRole(role = '') {
+    return String(role || '').trim().toLowerCase() === 'super_admin';
+}
+
+function shouldAutoPauseStoresForRole(balance, role = '') {
+    return !isCreditLimitExemptRole(role) && shouldAutoPauseStores(balance);
+}
+
+function canRoleActivateStore(balance, role = '') {
+    return isCreditLimitExemptRole(role) || canActivateStore(balance);
+}
+
+function creditsNeededForRoleReactivation(balance, role = '') {
+    return isCreditLimitExemptRole(role) ? 0 : creditsNeededForReactivation(balance);
+}
+
 function shouldAutoPauseStores(balance) {
     return normalizeBalance(balance) < CREDIT_AUTO_PAUSE_THRESHOLD;
 }
@@ -35,5 +51,9 @@ module.exports = {
     crossedAutoPauseThreshold,
     canActivateStore,
     creditsNeededForReactivation,
-    shouldRestoreAfterCreditPurchase
+    shouldRestoreAfterCreditPurchase,
+    isCreditLimitExemptRole,
+    shouldAutoPauseStoresForRole,
+    canRoleActivateStore,
+    creditsNeededForRoleReactivation
 };

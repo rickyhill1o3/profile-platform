@@ -32,7 +32,27 @@ async function loadActiveProductSelectionUserIds(supabase, site, scopedUserIds =
     if (error) throw new Error(error.message || 'Could not load active store accounts.');
 
     const activeUserIds = [...new Set((data || []).map((row) => String(row.user_id || '').trim()).filter(Boolean))];
-    if (!activeUserIds.length) return new Set();
+
+    // The site owner does not purchase credits from their own service. Super
+    // admin selections must remain exportable even when an earlier credit
+    // auto-pause turned off the corresponding Store Run Status row.
+    const buildSuperAdminQuery = () => {
+        let query = supabase
+            .from('users')
+            .select('id')
+            .eq('role', 'super_admin')
+            .order('id', { ascending: true });
+        if (scope) query = query.in('id', scope);
+        return query;
+    };
+    const { data: superAdminRows, error: superAdminError } = await fetchAllSupabaseRows(buildSuperAdminQuery);
+    if (superAdminError) throw new Error(superAdminError.message || 'Could not load super admin export accounts.');
+
+    const superAdminUserIds = new Set((superAdminRows || [])
+        .map((row) => String(row.id || '').trim())
+        .filter(Boolean));
+    const creditCheckedUserIds = activeUserIds.filter((userId) => !superAdminUserIds.has(userId));
+    if (!creditCheckedUserIds.length) return superAdminUserIds;
 
     // Store status is the primary filter, but the credit balance is an
     // additional fail-safe. If an older/stale status row still says Active
@@ -40,7 +60,7 @@ async function loadActiveProductSelectionUserIds(supabase, site, scopedUserIds =
     const { data: creditRows, error: creditError } = await fetchAllSupabaseRows(() => supabase
         .from('user_credit_balances')
         .select('user_id, balance')
-        .in('user_id', activeUserIds)
+        .in('user_id', creditCheckedUserIds)
         .order('user_id', { ascending: true }));
     if (creditError) throw new Error(creditError.message || 'Could not verify credit eligibility for product exports.');
 
@@ -56,7 +76,10 @@ async function loadActiveProductSelectionUserIds(supabase, site, scopedUserIds =
         }
     }
 
-    return new Set(activeUserIds.filter((userId) => !creditPausedUserIds.has(userId)));
+    return new Set([
+        ...superAdminUserIds,
+        ...creditCheckedUserIds.filter((userId) => !creditPausedUserIds.has(userId))
+    ]);
 }
 
 function filterRowsToActiveUsers(rows = [], activeUserIds = new Set()) {

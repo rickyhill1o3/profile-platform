@@ -118,7 +118,7 @@ async function markCreditPurchaseRestorePending(supabase, userId, balance, optio
 }
 
 async function restoreAutomaticallyPausedStores(supabase, userId, balance, options = {}) {
-    if (!canActivateStore(balance)) return { restored: false, restored_sites: [] };
+    if (!options.bypassBalance && !canActivateStore(balance)) return { restored: false, restored_sites: [] };
     const state = await loadCreditAutoPauseState(supabase, userId);
     if (!state.sites.length || (!state.restore_pending && options.requirePending !== false)) {
         return { restored: false, restored_sites: [] };

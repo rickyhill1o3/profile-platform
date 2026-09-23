@@ -3260,7 +3260,9 @@ async function loadCreditsBalance() {
         stat.textContent = balance;
         const help = document.getElementById('creditsBalanceHelp');
         if (help) {
-            help.textContent = data.stores_auto_paused
+            help.textContent = data.credit_limit_exempt
+                ? 'Super admin account — never auto-paused for credits'
+                : data.stores_auto_paused
                 ? `Stores paused — buy ${Number(data.credits_needed_for_reactivation || 0)} credits to reach 0; credit-paused stores restore automatically`
                 : balance < 0
                     ? 'Negative balance allowed through -15 credits'
@@ -4770,7 +4772,9 @@ async function loadUserActivity() {
     try {
         const data = await authJSON(API + '/user/activity');
         const balance = Number(data.balance || 0);
-        const creditStatus = data.needs_removal
+        const creditStatus = data.credit_limit_exempt
+            ? ' • Super admin credit exemption; stores never auto-pause'
+            : data.needs_removal
             ? ` • Stores auto-paused — buy ${Number(data.credits_needed_for_reactivation || 0)} credits to reach 0; only credit-paused stores restore automatically`
             : data.is_negative_allowance
                 ? ' • Active negative-credit allowance; stores pause below -15'
@@ -4851,7 +4855,9 @@ async function loadUserCreditReceipt(userId) {
         const user = data.user || {};
         const balance = Number(data.balance || 0);
         const creditSummary = data.credit_summary || {};
-        const creditStatus = data.needs_removal
+        const creditStatus = data.credit_limit_exempt
+            ? 'Super admin credit exemption (never auto-paused)'
+            : data.needs_removal
             ? `Stores auto-paused; ${Number(data.credits_needed_for_reactivation || 0)} credits needed to reach 0`
             : data.is_negative_allowance
                 ? 'Active negative-credit allowance (through -15)'
@@ -4943,7 +4949,9 @@ async function loadCreditsAdminPane() {
               <td>${escapeHTML(String(item.credit_summary?.free_or_bonus || 0))}</td>
               <td>${escapeHTML(String(item.credit_summary?.refunded || 0))}</td>
               <td>${escapeHTML(String(item.credit_summary?.checkout_charged || 0))}</td>
-              <td>${item.needs_removal
+              <td>${item.credit_limit_exempt
+                    ? '<span class="status-tag status-tag--success">Super admin exempt</span><br><span class="subtle-text">Never auto-paused for credits</span>'
+                    : item.needs_removal
                     ? `<span class="status-tag status-tag--danger">Stores auto-paused</span><br><span class="subtle-text">Needs ${escapeHTML(String(item.credits_needed_for_reactivation || 0))} to reach 0</span>`
                     : item.is_negative_allowance
                         ? '<span class="status-tag credit-allowance-tag">Active allowance</span><br><span class="subtle-text">Pauses below -15</span>'
@@ -5494,7 +5502,9 @@ async function loadStoreRunStatusPanel() {
         const balance = Number(data.credit_balance || 0);
         const canEnableStores = data.can_enable_stores !== false;
         const creditsNeeded = Number(data.credits_needed_for_reactivation || 0);
-        const creditPolicyBanner = data.stores_auto_paused
+        const creditPolicyBanner = data.credit_limit_exempt
+            ? `<div class="credit-policy-banner"><strong>Super admin credit exemption</strong><p>Your credit balance is still tracked, but it will never automatically pause your stores or remove your account from product-selection exports.</p></div>`
+            : data.stores_auto_paused
             ? `<div class="credit-policy-banner credit-policy-banner--danger"><strong>Stores automatically paused</strong><p>Your balance is ${escapeHTML(String(balance))} credits, below the -15 active limit. If a credit purchase brings you to 0 or higher, only the stores paused by this credit limit will turn back on automatically. Stores you paused yourself stay paused.</p></div>`
             : balance < 0
                 ? `<div class="credit-policy-banner credit-policy-banner--warning"><strong>Negative-credit allowance in use</strong><p>Your balance is ${escapeHTML(String(balance))} credits. Active stores may continue through -15. If you pause a store, your balance must reach 0 before you can turn it back on.</p></div>`
