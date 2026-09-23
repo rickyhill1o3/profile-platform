@@ -42,6 +42,10 @@ async function fetchAllSupabaseRows(buildQuery, pageSize = 1000) {
 
 const cheerio = require("cheerio");
 const crypto = require("crypto");
+const {
+    loadActiveProductSelectionUserIds,
+    filterRowsToActiveUsers
+} = require('./product-selection-run-status');
 
 const SUPPORTED_SITES = new Set(["amazon", "target", "walmart", "samsclub", "crunchyroll", "general", "supreme", "pokemon"]);
 const REQUESTABLE_SITES = new Set(["amazon", "target", "walmart", "samsclub", "crunchyroll", "general", "supreme", "pokemon"]);
@@ -1710,6 +1714,7 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
             const scopedUserIds = rawScopedUserIds === null
                 ? null
                 : [...new Set([...(rawScopedUserIds || []), currentUser?.id].filter(Boolean))];
+            const activeUserIds = await loadActiveProductSelectionUserIds(supabase, site, scopedUserIds);
 
             const buildSelectionQuery = () => {
                 let query = supabase
@@ -1738,7 +1743,7 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
             const grouped = new Map();
             const processedProducts = new Map();
 
-            (data || []).forEach((row) => {
+            filterRowsToActiveUsers(data, activeUserIds).forEach((row) => {
                 if (!row.user_id) return;
                 const currentProduct = row.catalog_products || {};
                 const currentSkus = parseMultiSkuValue(currentProduct.sku);
@@ -1768,7 +1773,7 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
             // user_product_preferences, so the super-admin could disappear from
             // the dropdown when their current site had no remaining selected rows
             // (for example immediately after removing products).
-            if (currentUser?.id && !grouped.has(currentUser.id)) {
+            if (currentUser?.id && activeUserIds.has(String(currentUser.id)) && !grouped.has(currentUser.id)) {
                 grouped.set(currentUser.id, {
                     user_id: currentUser.id,
                     selection_count: 0,
@@ -1928,6 +1933,19 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
                 return res.status(403).json({ error: 'You do not have access to this user.' });
             }
 
+            const activeUserIds = await loadActiveProductSelectionUserIds(
+                supabase,
+                site,
+                requestedUserId ? [requestedUserId] : scopedUserIds
+            );
+
+            // A paused account keeps its saved selections, but it must never be
+            // included in an operational product export. Returning an empty
+            // export also protects against stale UI state or a hand-built URL.
+            if (requestedUserId && !activeUserIds.has(requestedUserId)) {
+                return res.json({ site, batch_size: 29, users: [], text: '', excluded_paused: true });
+            }
+
             const buildExportQuery = () => {
                 let query = supabase
                     .from('user_product_preferences')
@@ -1954,7 +1972,7 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
                 return parseMultiSkuValue(product.sku).length > 1;
             });
 
-            const resolvedData = (data || []).map((row) => {
+            const resolvedData = filterRowsToActiveUsers(data, activeUserIds).map((row) => {
                 const currentProduct = row.catalog_products || {};
                 const currentSkus = parseMultiSkuValue(currentProduct.sku);
 

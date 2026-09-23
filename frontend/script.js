@@ -3256,11 +3256,18 @@ async function loadCreditsBalance() {
     if (!stat || !token()) return;
     try {
         const data = await authJSON(API + '/credits/me');
-        stat.textContent = Number(data.balance || 0);
+        const balance = Number(data.balance || 0);
+        stat.textContent = balance;
         const help = document.getElementById('creditsBalanceHelp');
-        if (help) help.textContent = 'Available to spend';
+        if (help) {
+            help.textContent = data.stores_auto_paused
+                ? `Stores paused — buy ${Number(data.credits_needed_for_reactivation || 0)} credits to reach 0`
+                : balance < 0
+                    ? 'Negative balance allowed through -15 credits'
+                    : 'Available to spend';
+        }
         const current = currentUser() || {};
-        current.credits_balance = Number(data.balance || 0);
+        current.credits_balance = balance;
         localStorage.user = JSON.stringify(current);
     } catch (err) {
         const msg = document.getElementById('creditsPurchaseMessage');
@@ -4763,7 +4770,12 @@ async function loadUserActivity() {
     try {
         const data = await authJSON(API + '/user/activity');
         const balance = Number(data.balance || 0);
-        summary.textContent = `Current balance: ${balance} credits • Lifetime granted: ${Number(data.lifetime_credits_granted || 0)} • Lifetime spent: ${Number(data.lifetime_credits_spent || 0)}${data.needs_removal ? ' • Flagged for removal until positive balance is restored' : ''}`;
+        const creditStatus = data.needs_removal
+            ? ` • Stores auto-paused — buy ${Number(data.credits_needed_for_reactivation || 0)} credits to reach 0, then reactivate stores manually`
+            : data.is_negative_allowance
+                ? ' • Active negative-credit allowance; stores pause below -15'
+                : '';
+        summary.textContent = `Current balance: ${balance} credits • Lifetime granted: ${Number(data.lifetime_credits_granted || 0)} • Lifetime spent: ${Number(data.lifetime_credits_spent || 0)}${creditStatus}`;
         const orders = Array.isArray(data.orders) ? data.orders : [];
         const statusLabel = (value) => {
             const raw = String(value || '').trim().toLowerCase();
@@ -4839,9 +4851,14 @@ async function loadUserCreditReceipt(userId) {
         const user = data.user || {};
         const balance = Number(data.balance || 0);
         const creditSummary = data.credit_summary || {};
+        const creditStatus = data.needs_removal
+            ? `Stores auto-paused; ${Number(data.credits_needed_for_reactivation || 0)} credits needed to reach 0`
+            : data.is_negative_allowance
+                ? 'Active negative-credit allowance (through -15)'
+                : 'Eligible to activate stores';
         summary.innerHTML = `
             <strong>${escapeHTML(userDisplayName(user))}</strong>
-            <span class="subtle-text"> • Balance: ${escapeHTML(String(balance))} credits • Purchased: ${escapeHTML(String(creditSummary.purchased || 0))} • Free / Bonus: ${escapeHTML(String(creditSummary.free_or_bonus || 0))} • Refunded: ${escapeHTML(String(creditSummary.refunded || 0))} • Checkout Charges: ${escapeHTML(String(creditSummary.checkout_charged || 0))} • ${data.needs_removal ? 'Needs removal until positive balance' : 'Eligible / positive balance'}</span>
+            <span class="subtle-text"> • Balance: ${escapeHTML(String(balance))} credits • Purchased: ${escapeHTML(String(creditSummary.purchased || 0))} • Free / Bonus: ${escapeHTML(String(creditSummary.free_or_bonus || 0))} • Refunded: ${escapeHTML(String(creditSummary.refunded || 0))} • Checkout Charges: ${escapeHTML(String(creditSummary.checkout_charged || 0))} • ${escapeHTML(creditStatus)}</span>
         `;
 
         const transactions = Array.isArray(data.transactions) ? data.transactions : [];
@@ -4926,7 +4943,11 @@ async function loadCreditsAdminPane() {
               <td>${escapeHTML(String(item.credit_summary?.free_or_bonus || 0))}</td>
               <td>${escapeHTML(String(item.credit_summary?.refunded || 0))}</td>
               <td>${escapeHTML(String(item.credit_summary?.checkout_charged || 0))}</td>
-              <td>${item.needs_removal ? `<span class="status-tag status-tag--danger">Flagged until positive</span>` : '<span class="subtle-text">No</span>'}</td>
+              <td>${item.needs_removal
+                    ? `<span class="status-tag status-tag--danger">Stores auto-paused</span><br><span class="subtle-text">Needs ${escapeHTML(String(item.credits_needed_for_reactivation || 0))} to reach 0</span>`
+                    : item.is_negative_allowance
+                        ? '<span class="status-tag credit-allowance-tag">Active allowance</span><br><span class="subtle-text">Pauses below -15</span>'
+                        : '<span class="status-tag status-tag--success">Eligible</span>'}</td>
               <td class="table-actions">
                 <button class="btn" type="button" data-credit-user="${escapeHTML(item.id)}" data-credit-action="details">Details</button>
                 <button class="btn" type="button" data-credit-user="${escapeHTML(item.id)}" data-credit-action="add">Add</button>
@@ -5470,7 +5491,16 @@ async function loadStoreRunStatusPanel() {
         ]);
         const profileSyncBySite = new Map((profileSyncData.stores || []).map((row) => [row.site, row]));
         const stores = Array.isArray(data.stores) ? data.stores : [];
+        const balance = Number(data.credit_balance || 0);
+        const canEnableStores = data.can_enable_stores !== false;
+        const creditsNeeded = Number(data.credits_needed_for_reactivation || 0);
+        const creditPolicyBanner = data.stores_auto_paused
+            ? `<div class="credit-policy-banner credit-policy-banner--danger"><strong>Stores automatically paused</strong><p>Your balance is ${escapeHTML(String(balance))} credits, below the -15 active limit. Buy ${escapeHTML(String(creditsNeeded))} credits to reach 0, then manually turn back on each store you want to run.</p></div>`
+            : balance < 0
+                ? `<div class="credit-policy-banner credit-policy-banner--warning"><strong>Negative-credit allowance in use</strong><p>Your balance is ${escapeHTML(String(balance))} credits. Active stores may continue through -15. If you pause a store, your balance must reach 0 before you can turn it back on.</p></div>`
+                : '';
         const html = `
+            ${creditPolicyBanner}
             <div class="store-run-status-list">
                 ${stores.map((store) => {
                     const sync = profileSyncBySite.get(store.site) || {};
@@ -5483,6 +5513,7 @@ async function loadStoreRunStatusPanel() {
                                 ? 'Active: The Shore Shack may attempt checkouts for this store.'
                                 : 'Paused: Your accounts should not be run for this store.'}</p>
                             <p class="subtle-text">Last updated: ${escapeHTML(formatDateTimeShort(store.updated_at))}</p>
+                            ${!store.is_enabled && !canEnableStores ? '<p class="store-credit-lock">Reach 0 credits before reactivating this store.</p>' : ''}
                             <div class="export-sync-banner ${needsUpdate ? 'export-sync-banner--pending' : 'export-sync-banner--synced'}" style="margin-top:8px;">
                                 ${needsUpdate
                                     ? `🔴 Profiles changed. Your admin still needs to update the ${escapeHTML(store.label)} profiles.`
@@ -5490,7 +5521,7 @@ async function loadStoreRunStatusPanel() {
                             </div>
                         </div>
                         <label class="run-toggle">
-                            <input type="checkbox" data-store-run-toggle="${escapeHTML(store.site)}" ${store.is_enabled ? 'checked' : ''} />
+                            <input type="checkbox" data-store-run-toggle="${escapeHTML(store.site)}" ${store.is_enabled ? 'checked' : ''} ${!store.is_enabled && !canEnableStores ? 'disabled' : ''} />
                             <span>${store.is_enabled ? 'Active' : 'Paused'}</span>
                         </label>
                     </article>

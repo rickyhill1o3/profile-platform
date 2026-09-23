@@ -107,6 +107,14 @@ const {
 } = require("./target-profile-event-ownership");
 const { deriveTargetProfileHealthState, targetAddressVersionChangeTime } = require("./target-profile-health-state");
 const { normalizeBulkProfileState } = require("./profile-bulk-update");
+const {
+    CREDIT_AUTO_PAUSE_THRESHOLD,
+    STORE_REACTIVATION_MINIMUM_BALANCE,
+    shouldAutoPauseStores,
+    crossedAutoPauseThreshold,
+    canActivateStore,
+    creditsNeededForReactivation
+} = require("./credit-run-policy");
 const supabase = require("./database");
 const { encrypt, decrypt } = require("./encryption");
 
@@ -759,35 +767,63 @@ async function getUserCreditBalance(userId) {
     return asSignedCredits(balance.balance, DEFAULT_FREE_CREDITS);
 }
 
+async function pauseActiveStoresForCreditLimit(userId, balance) {
+    if (!shouldAutoPauseStores(balance)) {
+        return { paused: false, paused_sites: [] };
+    }
+
+    const { data: activeRows, error: loadError } = await supabase
+        .from("user_store_run_status")
+        .select("site")
+        .eq("user_id", userId)
+        .eq("is_enabled", true);
+    if (loadError) throw new Error(loadError.message);
+
+    const pausedSites = [...new Set((activeRows || []).map((row) => String(row.site || '').trim()).filter(Boolean))];
+    if (!pausedSites.length) return { paused: false, paused_sites: [] };
+
+    const { error: pauseError } = await supabase
+        .from("user_store_run_status")
+        .update({ is_enabled: false, updated_at: new Date().toISOString() })
+        .eq("user_id", userId)
+        .eq("is_enabled", true);
+    if (pauseError) throw new Error(pauseError.message);
+
+    return { paused: true, paused_sites: pausedSites };
+}
+
 
 async function sendCreditDepletedNotifications({ user, previousBalance, newBalance, creditsCharged, order }) {
     const buyCreditsUrl = process.env.CREDIT_PURCHASE_URL || 'https://theshoreshacktcg.com/buy-credits';
     const userEmail = String(user?.email || '').trim();
     const orderRef = String(order?.external_order_id || order?.id || '').trim();
 
-    const userSubject = 'Your Shore Shack credits have run out';
+    const userSubject = 'Your Shore Shack stores were paused due to your credit balance';
     const userText = [
-        'Your Shore Shack checkout credit balance has reached 0 or below.',
+        `Your Shore Shack credit balance dropped below ${CREDIT_AUTO_PAUSE_THRESHOLD}, so all active stores were automatically paused.`,
         '',
         `Previous balance: ${previousBalance} credits`,
         `Credits charged: ${creditsCharged}`,
         `Current balance: ${newBalance} credits`,
         orderRef ? `Order: ${orderRef}` : '',
         '',
-        'To continue using The Shore Shack checkout service, please purchase more credits:',
-        buyCreditsUrl
+        `Purchase enough credits to bring your balance back to at least ${STORE_REACTIVATION_MINIMUM_BALANCE}:`,
+        buyCreditsUrl,
+        '',
+        'After your balance reaches 0, open Store Run Status and manually turn back on each store you want to run.'
     ].filter(Boolean).join('\n');
 
     const userHtml = `
-        <p>Your Shore Shack checkout credit balance has reached <strong>0 or below</strong>.</p>
+        <p>Your Shore Shack credit balance dropped below <strong>${CREDIT_AUTO_PAUSE_THRESHOLD}</strong>, so all active stores were automatically paused.</p>
         <p>
             Previous balance: <strong>${previousBalance}</strong> credits<br>
             Credits charged: <strong>${creditsCharged}</strong><br>
             Current balance: <strong>${newBalance}</strong> credits
             ${orderRef ? `<br>Order: <strong>${orderRef}</strong>` : ''}
         </p>
-        <p>To continue using The Shore Shack checkout service, please purchase more credits.</p>
+        <p>Purchase enough credits to bring your balance back to at least <strong>${STORE_REACTIVATION_MINIMUM_BALANCE}</strong>.</p>
         <p><a href="${buyCreditsUrl}">Buy more credits</a></p>
+        <p>After your balance reaches 0, open <strong>Store Run Status</strong> and manually turn back on each store you want to run.</p>
     `;
 
     if (userEmail) {
@@ -801,9 +837,9 @@ async function sendCreditDepletedNotifications({ user, previousBalance, newBalan
     try {
         await sendEmail({
             to: SUPER_ADMIN_EMAIL,
-            subject: `User credits depleted: ${userEmail || user?.id || 'unknown user'}`,
+            subject: `User stores auto-paused: ${userEmail || user?.id || 'unknown user'}`,
             text: [
-                'A user has reached 0 or negative credits.',
+                `A user dropped below ${CREDIT_AUTO_PAUSE_THRESHOLD} credits and their active stores were automatically paused.`,
                 '',
                 `User: ${userEmail || user?.id || 'unknown'}`,
                 `Previous balance: ${previousBalance}`,
@@ -811,7 +847,7 @@ async function sendCreditDepletedNotifications({ user, previousBalance, newBalan
                 `Current balance: ${newBalance}`,
                 orderRef ? `Order: ${orderRef}` : '',
                 '',
-                "Remove this user\'s accounts from active checkout runs until they purchase more credits."
+                'The user must purchase enough credits to reach 0, then manually reactivate the stores they want to run.'
             ].filter(Boolean).join('\n')
         });
     } catch (err) {
@@ -888,6 +924,14 @@ async function adjustUserCredits({ userId, delta, reason, note = "", metadata = 
         });
 
     if (txError) throw new Error(txError.message);
+
+    if (shouldAutoPauseStores(nextBalance)) {
+        try {
+            await pauseActiveStoresForCreditLimit(userId, nextBalance);
+        } catch (pauseError) {
+            console.error('Automatic credit-limit store pause failed:', pauseError.message || pauseError);
+        }
+    }
 
     return nextBalance;
 }
@@ -4578,7 +4622,8 @@ async function recordSuccessfulCheckout(payload) {
     const creditsToCharge = asWholeCredits(resolvedCost.credits, 0);
 
     const currentBalance = await getUserCreditBalance(user.id);
-    const willBeZeroOrNegative = creditsToCharge > 0 && (currentBalance - creditsToCharge) <= 0;
+    const projectedBalance = currentBalance - creditsToCharge;
+    const willCrossAutoPauseThreshold = creditsToCharge > 0 && crossedAutoPauseThreshold(currentBalance, projectedBalance);
 
     const isAmazonPendingVerification = String(normalized.site || '').toLowerCase().includes('amazon');
 
@@ -4607,8 +4652,9 @@ async function recordSuccessfulCheckout(payload) {
             purchase_price: Number(normalized.price || 0) || 0,
             email_verification_required: isAmazonPendingVerification,
             previous_balance: currentBalance,
-            projected_balance_after_charge: currentBalance - creditsToCharge,
-            balance_went_zero_or_negative: willBeZeroOrNegative,
+            projected_balance_after_charge: projectedBalance,
+            balance_went_zero_or_negative: creditsToCharge > 0 && projectedBalance <= 0,
+            balance_crossed_auto_pause_limit: willCrossAutoPauseThreshold,
             pokemon_credit_items: resolvedCost.pokemonMultiItemMatch?.items || []
         },
         raw_payload: payload
@@ -4631,7 +4677,7 @@ async function recordSuccessfulCheckout(payload) {
             orderId: order.id
         });
 
-        if (willBeZeroOrNegative) {
+        if (willCrossAutoPauseThreshold) {
             await sendCreditDepletedNotifications({
                 user,
                 previousBalance: currentBalance,
@@ -4776,12 +4822,19 @@ app.post("/webhooks/stripe", bodyParser.raw({ type: "application/json" }), async
 app.get("/credits/me", auth, async (req, res) => {
     try {
         const balanceRow = await ensureUserCreditBalance(req.user_id);
+        const balance = asSignedCredits(balanceRow.balance, 0);
+        await pauseActiveStoresForCreditLimit(req.user_id, balance);
         res.json({
-            balance: asWholeCredits(balanceRow.balance, 0),
+            balance,
             free_starter_credits: DEFAULT_FREE_CREDITS,
             lifetime_credits_granted: asWholeCredits(balanceRow.lifetime_credits_granted, 0),
             lifetime_credits_spent: asWholeCredits(balanceRow.lifetime_credits_spent, 0),
-            monthly_fee_cents: Number(process.env.MONTHLY_MEMBERSHIP_FEE_CENTS || 0)
+            monthly_fee_cents: Number(process.env.MONTHLY_MEMBERSHIP_FEE_CENTS || 0),
+            auto_pause_threshold: CREDIT_AUTO_PAUSE_THRESHOLD,
+            reactivation_minimum_balance: STORE_REACTIVATION_MINIMUM_BALANCE,
+            can_enable_stores: canActivateStore(balance),
+            credits_needed_for_reactivation: creditsNeededForReactivation(balance),
+            stores_auto_paused: shouldAutoPauseStores(balance)
         });
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -5390,6 +5443,7 @@ app.get("/admin/credits/users", auth, admin, async (req, res) => {
         for (const user of users || []) {
             const balance = balancesByUser.get(user.id) || await ensureUserCreditBalance(user.id);
             const creditsBalance = asSignedCredits(balance.balance, 0);
+            await pauseActiveStoresForCreditLimit(user.id, creditsBalance);
             items.push({
                 ...user,
                 user_display: formatDiscordDisplayName(user),
@@ -5398,7 +5452,10 @@ app.get("/admin/credits/users", auth, admin, async (req, res) => {
                 lifetime_credits_spent: asWholeCredits(balance.lifetime_credits_spent, 0),
                 credit_summary: creditSummaryByUser.get(user.id) || summarizeCreditTransactions([]),
                 insufficient_orders: insufficientCounts.get(user.id) || 0,
-                needs_removal: creditsBalance <= 0
+                needs_removal: shouldAutoPauseStores(creditsBalance),
+                can_reactivate: canActivateStore(creditsBalance),
+                is_negative_allowance: creditsBalance < 0 && !shouldAutoPauseStores(creditsBalance),
+                credits_needed_for_reactivation: creditsNeededForReactivation(creditsBalance)
             });
         }
 
@@ -5464,13 +5521,19 @@ app.get("/admin/users/:id/credits/history", auth, admin, async (req, res) => {
 
         const decoratedOrders = await decorateOrderHistoryRows(orderRows);
 
+        const balance = asSignedCredits(balanceRow.balance, 0);
+        await pauseActiveStoresForCreditLimit(targetUser.id, balance);
+
         res.json({
             user: { id: targetUser.id, email: targetUser.email, role: targetUser.role, discord_username: targetUser.discord_username || '', discord_display_name: targetUser.discord_display_name || '', user_display: formatDiscordDisplayName(targetUser) },
-            balance: asSignedCredits(balanceRow.balance, 0),
+            balance,
             lifetime_credits_granted: asWholeCredits(balanceRow.lifetime_credits_granted, 0),
             lifetime_credits_spent: asWholeCredits(balanceRow.lifetime_credits_spent, 0),
             credit_summary: summarizeCreditTransactions(txRows),
-            needs_removal: asSignedCredits(balanceRow.balance, 0) < 0,
+            needs_removal: shouldAutoPauseStores(balance),
+            can_reactivate: canActivateStore(balance),
+            is_negative_allowance: balance < 0 && !shouldAutoPauseStores(balance),
+            credits_needed_for_reactivation: creditsNeededForReactivation(balance),
             transactions: txRows,
             orders: decoratedOrders
         });
@@ -6438,7 +6501,7 @@ async function recheckSuccessfulOrderCredits({ currentUser, order = null, webhoo
         targetOrder = { ...targetOrder, credits_charged: expectedCredits, metadata: { ...(targetOrder.metadata || {}), corrected_credits_charged: expectedCredits } };
         changed = true;
         message = `Credits were rechecked. Previous charge: ${existingCredits}. Correct charge: ${expectedCredits}. Charged ${deltaNeeded} additional credits.`;
-        if (previousBalance > 0 && balanceAfter <= 0) {
+        if (crossedAutoPauseThreshold(previousBalance, balanceAfter)) {
             await sendCreditDepletedNotifications({ user: targetUser, previousBalance, newBalance: balanceAfter, creditsCharged: deltaNeeded, order: targetOrder });
         }
     } else if (deltaNeeded === 0) {
@@ -7174,6 +7237,7 @@ app.get('/admin/announcements/settings', auth, admin, async (req, res) => {
     try {
         const currentUser = await getCurrentUser(req);
         const adminSettings = await getAdminWebhookSettings(currentUser.id).catch(() => ({}));
+
         res.json({
             announcement_webhook_url: String(adminSettings?.announcement_webhook_url || ''),
             announcement_ping_mode: normalizeAnnouncementConfig(adminSettings).ping_mode,
@@ -7648,13 +7712,18 @@ app.get("/user/activity", auth, async (req, res) => {
         ]);
 
         const decoratedOrders = await decorateOrderHistoryRows(orderRows);
+        const balance = asSignedCredits(balanceRow.balance, 0);
+        await pauseActiveStoresForCreditLimit(currentUser.id, balance);
 
         res.json({
             user: { id: currentUser.id, email: currentUser.email, role: currentUser.role },
-            balance: asSignedCredits(balanceRow.balance, 0),
+            balance,
             lifetime_credits_granted: asWholeCredits(balanceRow.lifetime_credits_granted, 0),
             lifetime_credits_spent: asWholeCredits(balanceRow.lifetime_credits_spent, 0),
-            needs_removal: asSignedCredits(balanceRow.balance, 0) < 0,
+            needs_removal: shouldAutoPauseStores(balance),
+            can_reactivate: canActivateStore(balance),
+            is_negative_allowance: balance < 0 && !shouldAutoPauseStores(balance),
+            credits_needed_for_reactivation: creditsNeededForReactivation(balance),
             transactions: txRows,
             orders: decoratedOrders
         });
@@ -8417,6 +8486,8 @@ app.post("/admin/profile-sync-status/acknowledge", auth, admin, async (req, res)
 app.get("/store-run-status", auth, async (req, res) => {
     try {
         await ensureUserNotRevoked(req.user_id);
+        const balance = await getUserCreditBalance(req.user_id);
+        await pauseActiveStoresForCreditLimit(req.user_id, balance);
         const statusMap = await loadStoreRunStatusForUsers([req.user_id]);
         const status = statusMap.get(String(req.user_id)) || Object.fromEntries(STORE_RUN_STATUS_SITES.map((site) => [site, false]));
         res.json({
@@ -8425,7 +8496,13 @@ app.get("/store-run-status", auth, async (req, res) => {
                 label: STORE_RUN_STATUS_LABELS[site] || site,
                 is_enabled: !!status[site],
                 updated_at: status[`${site}_updated_at`] || null
-            }))
+            })),
+            credit_balance: balance,
+            auto_pause_threshold: CREDIT_AUTO_PAUSE_THRESHOLD,
+            reactivation_minimum_balance: STORE_REACTIVATION_MINIMUM_BALANCE,
+            can_enable_stores: canActivateStore(balance),
+            credits_needed_for_reactivation: creditsNeededForReactivation(balance),
+            stores_auto_paused: shouldAutoPauseStores(balance)
         });
     } catch (err) {
         res.status(500).json({ error: err.message || "Could not load store run status" });
@@ -8438,6 +8515,15 @@ app.put("/store-run-status", auth, async (req, res) => {
         const site = normalizeStoreRunSite(req.body?.site);
         if (!site) return res.status(400).json({ error: "Invalid store" });
         const isEnabled = !!req.body?.is_enabled;
+        const balance = await getUserCreditBalance(req.user_id);
+        if (isEnabled && !canActivateStore(balance)) {
+            const creditsNeeded = creditsNeededForReactivation(balance);
+            return res.status(409).json({
+                error: `Your balance must be at least ${STORE_REACTIVATION_MINIMUM_BALANCE} credits before you can reactivate a store. Buy ${creditsNeeded} more credit${creditsNeeded === 1 ? '' : 's'}, then try again.`,
+                balance,
+                credits_needed_for_reactivation: creditsNeeded
+            });
+        }
         const now = new Date().toISOString();
 
         const { data: previousStatus } = await supabase
