@@ -7,7 +7,8 @@ const {
     shouldAutoPauseStores,
     crossedAutoPauseThreshold,
     canActivateStore,
-    creditsNeededForReactivation
+    creditsNeededForReactivation,
+    shouldRestoreAfterCreditPurchase
 } = require('../credit-run-policy');
 
 assert.strictEqual(CREDIT_AUTO_PAUSE_THRESHOLD, -15);
@@ -22,6 +23,9 @@ assert.strictEqual(canActivateStore(-1), false, 'negative balances cannot reacti
 assert.strictEqual(canActivateStore(0), true, 'a zero balance can reactivate a store');
 assert.strictEqual(creditsNeededForReactivation(-31), 31);
 assert.strictEqual(creditsNeededForReactivation(4), 0);
+assert.strictEqual(shouldRestoreAfterCreditPurchase(-31, 0, 'stripe_purchase'), true, 'a purchase reaching zero must qualify for selective automatic restoration');
+assert.strictEqual(shouldRestoreAfterCreditPurchase(-31, -1, 'stripe_purchase'), false, 'a purchase that stays negative must not restore stores');
+assert.strictEqual(shouldRestoreAfterCreditPurchase(-31, 0, 'order_refunded'), false, 'non-purchase credits must not trigger automatic restoration');
 
 const projectRoot = path.resolve(__dirname, '..', '..');
 const serverSource = fs.readFileSync(path.join(projectRoot, 'backend', 'server.js'), 'utf8');
@@ -36,8 +40,18 @@ assert.match(
 );
 assert.match(
     serverSource,
+    /async function adjustUserCredits[\s\S]*?shouldRestoreAfterCreditPurchase\(previousBalance, nextBalance, normalizedReason\)[\s\S]*?markCreditPurchaseRestorePending[\s\S]*?restoreCreditPausedStores/,
+    'a qualifying credit purchase must restore only provenance-tracked automatic pauses'
+);
+assert.match(
+    serverSource,
     /app\.put\("\/store-run-status"[\s\S]*?isEnabled && !canActivateStore\(balance\)[\s\S]*?status\(409\)/,
     'a negative balance must block manual store reactivation'
+);
+assert.match(
+    serverSource,
+    /app\.put\("\/store-run-status"[\s\S]*?forgetAutomaticallyPausedStore\(supabase, req\.user_id, site\)/,
+    'an explicit user store toggle must cancel automatic restoration for that store'
 );
 assert.match(
     serverSource,
@@ -52,8 +66,9 @@ assert.match(
 assert.match(frontendSource, /Negative balance allowed through -15 credits/);
 assert.match(frontendSource, /Stores automatically paused/);
 assert.match(frontendSource, /Reach 0 credits before reactivating this store/);
+assert.match(frontendSource, /Stores you paused yourself stay paused/);
 assert.match(adminHtml, /<th>Run Status<\/th>/);
 assert.match(dashboardHtml, /id="creditsBalanceStat"[\s\S]*?href="buy-credits\.html">Buy credits →<\/a>/, 'the dashboard credit card must provide a direct purchase link');
-assert.match(dashboardHtml, /script\.js\?v=20260923-credit-balance/, 'the dashboard must request the signed-balance frontend instead of a cached older script');
+assert.match(dashboardHtml, /script\.js\?v=20260923-auto-credit-restore/, 'the dashboard must request the selective automatic-restoration frontend instead of a cached older script');
 
 console.log('credit run policy tests passed');

@@ -113,8 +113,17 @@ const {
     shouldAutoPauseStores,
     crossedAutoPauseThreshold,
     canActivateStore,
-    creditsNeededForReactivation
+    creditsNeededForReactivation,
+    shouldRestoreAfterCreditPurchase
 } = require("./credit-run-policy");
+const {
+    pauseStoresForCreditLimit,
+    markCreditPurchaseRestorePending,
+    restoreAutomaticallyPausedStores,
+    forgetAutomaticallyPausedStore,
+    findLegacyRecoveryWindow,
+    recoverLegacyAutomaticallyPausedStores
+} = require("./credit-store-lifecycle");
 const supabase = require("./database");
 const { encrypt, decrypt } = require("./encryption");
 
@@ -768,28 +777,47 @@ async function getUserCreditBalance(userId) {
 }
 
 async function pauseActiveStoresForCreditLimit(userId, balance) {
-    if (!shouldAutoPauseStores(balance)) {
-        return { paused: false, paused_sites: [] };
+    return pauseStoresForCreditLimit(supabase, userId, balance);
+}
+
+async function restoreCreditPausedStores(userId, balance, options = {}) {
+    const result = await restoreAutomaticallyPausedStores(supabase, userId, balance, options);
+    if (result.restored_sites.length) {
+        await markProfileSyncChanged(userId, result.restored_sites, "credit_purchase_auto_restore");
+    }
+    return result;
+}
+
+async function recoverLegacyCreditPausedStores(userId, balance, transactions = []) {
+    const result = await recoverLegacyAutomaticallyPausedStores(supabase, userId, balance, transactions);
+    if (result.restored_sites.length) {
+        await markProfileSyncChanged(userId, result.restored_sites, "legacy_credit_purchase_auto_restore");
+    }
+    return result;
+}
+
+async function loadRecentCreditTransactions(userId) {
+    const { data, error } = await maybeMany("credit_transactions", (qb) =>
+        qb.select("id,user_id,amount_delta,reason,balance_after,created_at")
+            .eq("user_id", userId)
+            .order("created_at", { ascending: true })
+            .limit(500)
+    );
+    if (error) throw new Error(error.message);
+    return data || [];
+}
+
+async function reconcileCreditStoreLifecycle(userId, balance, transactions = null) {
+    if (shouldAutoPauseStores(balance)) {
+        return pauseActiveStoresForCreditLimit(userId, balance);
     }
 
-    const { data: activeRows, error: loadError } = await supabase
-        .from("user_store_run_status")
-        .select("site")
-        .eq("user_id", userId)
-        .eq("is_enabled", true);
-    if (loadError) throw new Error(loadError.message);
+    const pendingResult = await restoreCreditPausedStores(userId, balance, { requirePending: true });
+    if (pendingResult.restored) return pendingResult;
 
-    const pausedSites = [...new Set((activeRows || []).map((row) => String(row.site || '').trim()).filter(Boolean))];
-    if (!pausedSites.length) return { paused: false, paused_sites: [] };
-
-    const { error: pauseError } = await supabase
-        .from("user_store_run_status")
-        .update({ is_enabled: false, updated_at: new Date().toISOString() })
-        .eq("user_id", userId)
-        .eq("is_enabled", true);
-    if (pauseError) throw new Error(pauseError.message);
-
-    return { paused: true, paused_sites: pausedSites };
+    const history = Array.isArray(transactions) ? transactions : await loadRecentCreditTransactions(userId);
+    if (!findLegacyRecoveryWindow(history)) return pendingResult;
+    return recoverLegacyCreditPausedStores(userId, balance, history);
 }
 
 
@@ -810,7 +838,7 @@ async function sendCreditDepletedNotifications({ user, previousBalance, newBalan
         `Purchase enough credits to bring your balance back to at least ${STORE_REACTIVATION_MINIMUM_BALANCE}:`,
         buyCreditsUrl,
         '',
-        'After your balance reaches 0, open Store Run Status and manually turn back on each store you want to run.'
+        'When a credit purchase brings your balance to 0 or higher, only the stores paused automatically for this credit limit will turn back on. Stores you paused yourself stay paused.'
     ].filter(Boolean).join('\n');
 
     const userHtml = `
@@ -823,7 +851,7 @@ async function sendCreditDepletedNotifications({ user, previousBalance, newBalan
         </p>
         <p>Purchase enough credits to bring your balance back to at least <strong>${STORE_REACTIVATION_MINIMUM_BALANCE}</strong>.</p>
         <p><a href="${buyCreditsUrl}">Buy more credits</a></p>
-        <p>After your balance reaches 0, open <strong>Store Run Status</strong> and manually turn back on each store you want to run.</p>
+        <p>When a credit purchase brings your balance to 0 or higher, only stores paused automatically for this credit limit will turn back on. Stores you paused yourself stay paused.</p>
     `;
 
     if (userEmail) {
@@ -847,7 +875,7 @@ async function sendCreditDepletedNotifications({ user, previousBalance, newBalan
                 `Current balance: ${newBalance}`,
                 orderRef ? `Order: ${orderRef}` : '',
                 '',
-                'The user must purchase enough credits to reach 0, then manually reactivate the stores they want to run.'
+                'When a credit purchase brings the user to 0 or higher, the stores paused automatically for this credit limit will turn back on. Manually paused stores stay paused.'
             ].filter(Boolean).join('\n')
         });
     } catch (err) {
@@ -892,7 +920,8 @@ async function adjustUserCredits({ userId, delta, reason, note = "", metadata = 
     }
 
     const current = await ensureUserCreditBalance(userId);
-    const nextBalance = asSignedCredits(current.balance, 0) + amount;
+    const previousBalance = asSignedCredits(current.balance, 0);
+    const nextBalance = previousBalance + amount;
 
     const normalizedReason = String(reason || '').toLowerCase();
     const isRefund = amount > 0 && normalizedReason.includes('refund');
@@ -930,6 +959,13 @@ async function adjustUserCredits({ userId, delta, reason, note = "", metadata = 
             await pauseActiveStoresForCreditLimit(userId, nextBalance);
         } catch (pauseError) {
             console.error('Automatic credit-limit store pause failed:', pauseError.message || pauseError);
+        }
+    } else if (shouldRestoreAfterCreditPurchase(previousBalance, nextBalance, normalizedReason)) {
+        try {
+            await markCreditPurchaseRestorePending(supabase, userId, nextBalance);
+            await restoreCreditPausedStores(userId, nextBalance, { requirePending: true });
+        } catch (restoreError) {
+            console.error('Automatic credit-purchase store restoration failed:', restoreError.message || restoreError);
         }
     }
 
@@ -4807,7 +4843,7 @@ app.post("/webhooks/stripe", bodyParser.raw({ type: "application/json" }), async
 
                 console.log("Stripe credits added successfully:", {
                     creditsAdded: credits,
-                    balanceAfter: balance?.balance
+                    balanceAfter: balance
                 });
             }
         }
@@ -4823,7 +4859,7 @@ app.get("/credits/me", auth, async (req, res) => {
     try {
         const balanceRow = await ensureUserCreditBalance(req.user_id);
         const balance = asSignedCredits(balanceRow.balance, 0);
-        await pauseActiveStoresForCreditLimit(req.user_id, balance);
+        await reconcileCreditStoreLifecycle(req.user_id, balance);
         res.json({
             balance,
             free_starter_credits: DEFAULT_FREE_CREDITS,
@@ -4834,7 +4870,8 @@ app.get("/credits/me", auth, async (req, res) => {
             reactivation_minimum_balance: STORE_REACTIVATION_MINIMUM_BALANCE,
             can_enable_stores: canActivateStore(balance),
             credits_needed_for_reactivation: creditsNeededForReactivation(balance),
-            stores_auto_paused: shouldAutoPauseStores(balance)
+            stores_auto_paused: shouldAutoPauseStores(balance),
+            automatic_credit_purchase_restore: true
         });
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -5413,17 +5450,17 @@ app.get("/admin/credits/users", auth, admin, async (req, res) => {
         }
 
         const creditSummaryByUser = new Map();
+        const transactionsByUser = new Map();
         if (userIds.length) {
             const { data: transactions, error: transactionError } = await maybeMany("credit_transactions", (qb) =>
-                qb.select("user_id, amount_delta, reason").in("user_id", userIds)
+                qb.select("id,user_id,amount_delta,reason,balance_after,created_at").in("user_id", userIds)
             );
             if (transactionError) return res.status(500).json({ error: transactionError.message });
-            const grouped = new Map();
             for (const row of transactions || []) {
-                if (!grouped.has(row.user_id)) grouped.set(row.user_id, []);
-                grouped.get(row.user_id).push(row);
+                if (!transactionsByUser.has(row.user_id)) transactionsByUser.set(row.user_id, []);
+                transactionsByUser.get(row.user_id).push(row);
             }
-            for (const userId of userIds) creditSummaryByUser.set(userId, summarizeCreditTransactions(grouped.get(userId) || []));
+            for (const userId of userIds) creditSummaryByUser.set(userId, summarizeCreditTransactions(transactionsByUser.get(userId) || []));
         }
 
         const insufficientCounts = new Map();
@@ -5443,7 +5480,10 @@ app.get("/admin/credits/users", auth, admin, async (req, res) => {
         for (const user of users || []) {
             const balance = balancesByUser.get(user.id) || await ensureUserCreditBalance(user.id);
             const creditsBalance = asSignedCredits(balance.balance, 0);
-            await pauseActiveStoresForCreditLimit(user.id, creditsBalance);
+            const userTransactions = transactionsByUser.get(user.id) || [];
+            if (shouldAutoPauseStores(creditsBalance) || findLegacyRecoveryWindow(userTransactions)) {
+                await reconcileCreditStoreLifecycle(user.id, creditsBalance, userTransactions);
+            }
             items.push({
                 ...user,
                 user_display: formatDiscordDisplayName(user),
@@ -5522,7 +5562,7 @@ app.get("/admin/users/:id/credits/history", auth, admin, async (req, res) => {
         const decoratedOrders = await decorateOrderHistoryRows(orderRows);
 
         const balance = asSignedCredits(balanceRow.balance, 0);
-        await pauseActiveStoresForCreditLimit(targetUser.id, balance);
+        await reconcileCreditStoreLifecycle(targetUser.id, balance, txRows);
 
         res.json({
             user: { id: targetUser.id, email: targetUser.email, role: targetUser.role, discord_username: targetUser.discord_username || '', discord_display_name: targetUser.discord_display_name || '', user_display: formatDiscordDisplayName(targetUser) },
@@ -7713,7 +7753,7 @@ app.get("/user/activity", auth, async (req, res) => {
 
         const decoratedOrders = await decorateOrderHistoryRows(orderRows);
         const balance = asSignedCredits(balanceRow.balance, 0);
-        await pauseActiveStoresForCreditLimit(currentUser.id, balance);
+        await reconcileCreditStoreLifecycle(currentUser.id, balance, txRows);
 
         res.json({
             user: { id: currentUser.id, email: currentUser.email, role: currentUser.role },
@@ -8487,7 +8527,7 @@ app.get("/store-run-status", auth, async (req, res) => {
     try {
         await ensureUserNotRevoked(req.user_id);
         const balance = await getUserCreditBalance(req.user_id);
-        await pauseActiveStoresForCreditLimit(req.user_id, balance);
+        await reconcileCreditStoreLifecycle(req.user_id, balance);
         const statusMap = await loadStoreRunStatusForUsers([req.user_id]);
         const status = statusMap.get(String(req.user_id)) || Object.fromEntries(STORE_RUN_STATUS_SITES.map((site) => [site, false]));
         res.json({
@@ -8502,7 +8542,8 @@ app.get("/store-run-status", auth, async (req, res) => {
             reactivation_minimum_balance: STORE_REACTIVATION_MINIMUM_BALANCE,
             can_enable_stores: canActivateStore(balance),
             credits_needed_for_reactivation: creditsNeededForReactivation(balance),
-            stores_auto_paused: shouldAutoPauseStores(balance)
+            stores_auto_paused: shouldAutoPauseStores(balance),
+            automatic_credit_purchase_restore: true
         });
     } catch (err) {
         res.status(500).json({ error: err.message || "Could not load store run status" });
@@ -8537,6 +8578,10 @@ app.put("/store-run-status", auth, async (req, res) => {
             .from("user_store_run_status")
             .upsert({ user_id: req.user_id, site, is_enabled: isEnabled, updated_at: now }, { onConflict: "user_id,site" });
         if (error) return res.status(500).json({ error: error.message });
+
+        // Any explicit user toggle is a manual decision. Remove this store from
+        // the automatic-credit-pause list so a later purchase cannot override it.
+        await forgetAutomaticallyPausedStore(supabase, req.user_id, site);
 
         // Turning a store on means the admin must verify/export the currently assigned profiles,
         // even when no profile record itself changed.

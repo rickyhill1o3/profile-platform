@@ -2,6 +2,7 @@
 
 const { fetchAllSupabaseRows } = require('./supabase-pagination');
 const { shouldAutoPauseStores } = require('./credit-run-policy');
+const { pauseStoresForCreditLimit } = require('./credit-store-lifecycle');
 
 function productSelectionRunStatusSite(site = '') {
     const normalized = String(site || '').trim().toLowerCase();
@@ -49,13 +50,10 @@ async function loadActiveProductSelectionUserIds(supabase, site, scopedUserIds =
         .filter(Boolean));
 
     if (creditPausedUserIds.size) {
-        const blockedIds = [...creditPausedUserIds];
-        const { error: pauseError } = await supabase
-            .from('user_store_run_status')
-            .update({ is_enabled: false, updated_at: new Date().toISOString() })
-            .in('user_id', blockedIds)
-            .eq('is_enabled', true);
-        if (pauseError) throw new Error(pauseError.message || 'Could not pause credit-ineligible store accounts.');
+        for (const blockedId of creditPausedUserIds) {
+            await pauseStoresForCreditLimit(supabase, blockedId, (creditRows || [])
+                .find((row) => String(row.user_id || '') === blockedId)?.balance);
+        }
     }
 
     return new Set(activeUserIds.filter((userId) => !creditPausedUserIds.has(userId)));

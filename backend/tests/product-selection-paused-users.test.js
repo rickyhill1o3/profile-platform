@@ -8,11 +8,38 @@ const {
 } = require('../product-selection-run-status');
 
 function mockSupabase(runStatusRows, creditRows) {
+    const settingsRows = [];
     return {
         from(table) {
             const filters = [];
             let allowedIds = null;
             let updateValues = null;
+            let upsertValues = null;
+            const sourceForTable = () => {
+                if (table === 'user_store_run_status') return runStatusRows;
+                if (table === 'user_credit_balances') return creditRows;
+                if (table === 'app_settings') return settingsRows;
+                throw new Error(`Unexpected table ${table}`);
+            };
+            const filteredRows = () => sourceForTable()
+                .filter((row) => filters.every(([column, value]) => row[column] === value))
+                .filter((row) => !allowedIds || allowedIds.has(String(row.user_id)));
+            const applyMutation = () => {
+                if (table === 'user_store_run_status' && updateValues) {
+                    filteredRows().forEach((row) => Object.assign(row, updateValues));
+                }
+                if (upsertValues) {
+                    const values = Array.isArray(upsertValues) ? upsertValues : [upsertValues];
+                    const source = sourceForTable();
+                    values.forEach((value) => {
+                        const match = table === 'app_settings'
+                            ? source.find((row) => row.key === value.key)
+                            : source.find((row) => row.user_id === value.user_id && row.site === value.site);
+                        if (match) Object.assign(match, value);
+                        else source.push({ ...value });
+                    });
+                }
+            };
             const builder = {
                 select() { return builder; },
                 eq(column, value) { filters.push([column, value]); return builder; },
@@ -22,24 +49,18 @@ function mockSupabase(runStatusRows, creditRows) {
                     return builder;
                 },
                 update(values) { updateValues = values; return builder; },
+                upsert(values) { upsertValues = values; return builder; },
                 order() { return builder; },
+                async maybeSingle() {
+                    const rows = filteredRows();
+                    return { data: rows[0] || null, error: null };
+                },
                 async range(from, to) {
-                    const source = table === 'user_store_run_status' ? runStatusRows : creditRows;
-                    assert.ok(['user_store_run_status', 'user_credit_balances'].includes(table));
-                    const filtered = source.filter((row) => filters.every(([column, value]) => row[column] === value))
-                        .filter((row) => !allowedIds || allowedIds.has(String(row.user_id)));
-                    return { data: filtered.slice(from, to + 1), error: null };
+                    return { data: filteredRows().slice(from, to + 1), error: null };
                 },
                 then(resolve) {
-                    if (table === 'user_store_run_status' && updateValues) {
-                        runStatusRows.forEach((row) => {
-                            if (filters.every(([column, value]) => row[column] === value)
-                                && (!allowedIds || allowedIds.has(String(row.user_id)))) {
-                                Object.assign(row, updateValues);
-                            }
-                        });
-                    }
-                    return Promise.resolve({ data: null, error: null }).then(resolve);
+                    applyMutation();
+                    return Promise.resolve({ data: updateValues || upsertValues ? null : filteredRows(), error: null }).then(resolve);
                 }
             };
             return builder;
@@ -90,7 +111,7 @@ function mockSupabase(runStatusRows, creditRows) {
     const eligibilitySource = fs.readFileSync(path.join(__dirname, '..', 'product-selection-run-status.js'), 'utf8');
     assert.match(eligibilitySource, /from\('user_credit_balances'\)/, 'product exports must verify credit eligibility directly');
     assert.match(eligibilitySource, /shouldAutoPauseStores\(row\.balance\)/, 'the same below -15 policy must drive export exclusion');
-    assert.match(eligibilitySource, /update\(\{ is_enabled: false/, 'stale active run-status rows must be repaired');
+    assert.match(eligibilitySource, /pauseStoresForCreditLimit\(supabase, blockedId/, 'stale active run-status rows must be repaired with automatic-pause provenance');
 
     console.log('product selection paused-user tests passed');
 })().catch((error) => {

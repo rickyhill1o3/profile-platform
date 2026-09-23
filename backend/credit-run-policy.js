@@ -22,11 +22,18 @@ function creditsNeededForReactivation(balance) {
     return Math.max(0, STORE_REACTIVATION_MINIMUM_BALANCE - normalizeBalance(balance));
 }
 
+function shouldRestoreAfterCreditPurchase(previousBalance, newBalance, reason = '') {
+    return normalizeBalance(previousBalance) < STORE_REACTIVATION_MINIMUM_BALANCE
+        && canActivateStore(newBalance)
+        && String(reason || '').trim().toLowerCase() === 'stripe_purchase';
+}
+
 module.exports = {
     CREDIT_AUTO_PAUSE_THRESHOLD,
     STORE_REACTIVATION_MINIMUM_BALANCE,
     shouldAutoPauseStores,
     crossedAutoPauseThreshold,
     canActivateStore,
-    creditsNeededForReactivation
+    creditsNeededForReactivation,
+    shouldRestoreAfterCreditPurchase
 };

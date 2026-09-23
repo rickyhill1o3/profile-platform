@@ -3261,7 +3261,7 @@ async function loadCreditsBalance() {
         const help = document.getElementById('creditsBalanceHelp');
         if (help) {
             help.textContent = data.stores_auto_paused
-                ? `Stores paused — buy ${Number(data.credits_needed_for_reactivation || 0)} credits to reach 0`
+                ? `Stores paused — buy ${Number(data.credits_needed_for_reactivation || 0)} credits to reach 0; credit-paused stores restore automatically`
                 : balance < 0
                     ? 'Negative balance allowed through -15 credits'
                     : 'Available to spend';
@@ -4771,7 +4771,7 @@ async function loadUserActivity() {
         const data = await authJSON(API + '/user/activity');
         const balance = Number(data.balance || 0);
         const creditStatus = data.needs_removal
-            ? ` • Stores auto-paused — buy ${Number(data.credits_needed_for_reactivation || 0)} credits to reach 0, then reactivate stores manually`
+            ? ` • Stores auto-paused — buy ${Number(data.credits_needed_for_reactivation || 0)} credits to reach 0; only credit-paused stores restore automatically`
             : data.is_negative_allowance
                 ? ' • Active negative-credit allowance; stores pause below -15'
                 : '';
@@ -5495,7 +5495,7 @@ async function loadStoreRunStatusPanel() {
         const canEnableStores = data.can_enable_stores !== false;
         const creditsNeeded = Number(data.credits_needed_for_reactivation || 0);
         const creditPolicyBanner = data.stores_auto_paused
-            ? `<div class="credit-policy-banner credit-policy-banner--danger"><strong>Stores automatically paused</strong><p>Your balance is ${escapeHTML(String(balance))} credits, below the -15 active limit. Buy ${escapeHTML(String(creditsNeeded))} credits to reach 0, then manually turn back on each store you want to run.</p></div>`
+            ? `<div class="credit-policy-banner credit-policy-banner--danger"><strong>Stores automatically paused</strong><p>Your balance is ${escapeHTML(String(balance))} credits, below the -15 active limit. If a credit purchase brings you to 0 or higher, only the stores paused by this credit limit will turn back on automatically. Stores you paused yourself stay paused.</p></div>`
             : balance < 0
                 ? `<div class="credit-policy-banner credit-policy-banner--warning"><strong>Negative-credit allowance in use</strong><p>Your balance is ${escapeHTML(String(balance))} credits. Active stores may continue through -15. If you pause a store, your balance must reach 0 before you can turn it back on.</p></div>`
                 : '';
