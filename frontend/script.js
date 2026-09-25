@@ -5577,6 +5577,7 @@ async function initAdminStoreRunStatus() {
     const exportShikariProfilesButton = document.getElementById('adminRunStatusExportShikariProfilesButton');
     const exportPolarProfilesButton = document.getElementById('adminRunStatusExportPolarProfilesButton');
     const exportAccountsButton = document.getElementById('adminRunStatusExportAccountsButton');
+    const exportStellarAmazonAccountsButton = document.getElementById('adminRunStatusExportStellarAmazonAccountsButton');
     const exportCostcoAccountsButton = document.getElementById('adminRunStatusExportCostcoAccountsButton');
     const exportGmailButton = document.getElementById('adminRunStatusExportGmailButton');
     const summary = document.getElementById('adminRunStatusSummary');
@@ -5674,11 +5675,26 @@ async function initAdminStoreRunStatus() {
         }
     };
 
+    const exportActiveStellarAmazonAccounts = async () => {
+        try {
+            const params = new URLSearchParams({ active_only: '1' });
+            if (userFilter.value) params.set('user_id', userFilter.value);
+            const date = new Date().toISOString().slice(0, 10);
+            const filename = promptForExportFilename(`stellar-accounts-amazon-active-${date}`);
+            if (!filename) return;
+            params.set('filename', filename);
+            await downloadExportFile(API + '/admin/export/stellar-amazon-accounts-csv?' + params.toString(), filename + '.csv');
+        } catch (err) {
+            if (err.message) alert(err.message);
+        }
+    };
+
     if (exportProfilesButton) exportProfilesButton.addEventListener('click', () => exportActive('/admin/export/profiles-json', 'refract-profiles', '.json'));
     if (exportStellarProfilesButton) exportStellarProfilesButton.addEventListener('click', () => exportActive('/admin/export/profiles-stellar-json', 'stellar-profiles', '.json'));
     if (exportShikariProfilesButton) exportShikariProfilesButton.addEventListener('click', () => exportActive('/admin/export/profiles-shikari-csv', 'shikari-profiles', '.csv'));
     if (exportPolarProfilesButton) exportPolarProfilesButton.addEventListener('click', () => exportActive('/admin/export/profiles-polar-json', 'polar-profiles', '.json'));
     if (exportAccountsButton) exportAccountsButton.addEventListener('click', () => exportActive('/admin/export/accounts-txt', 'shikari-accounts', '.csv'));
+    if (exportStellarAmazonAccountsButton) exportStellarAmazonAccountsButton.addEventListener('click', exportActiveStellarAmazonAccounts);
     if (exportCostcoAccountsButton) exportCostcoAccountsButton.addEventListener('click', exportActiveCostcoAccounts);
     if (exportGmailButton) exportGmailButton.addEventListener('click', () => exportActive('/admin/export/gmail-imap-txt', 'shikari-imap', '.csv'));
 

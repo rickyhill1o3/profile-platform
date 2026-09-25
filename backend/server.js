@@ -96,6 +96,7 @@ const registerShopRoutes = require("./shop-routes");
 const registerSuccessNetwork = require("./success-network");
 const { registerOrderTracker, notifyCheckoutForOrderTracker } = require("./order-tracker");
 const { buildShikariAccountsCsv, buildShikariImapCsv } = require("./shikari-credential-exports");
+const { buildStellarAmazonAccountsCsv } = require("./stellar-amazon-account-export");
 const { registerMarketValueEngine } = require("./market-value-engine");
 const { registerMasterProductCatalog } = require("./master-product-catalog");
 const { fetchAllSupabaseRows, fetchAllSupabaseRowsInBatches } = require("./supabase-pagination");
@@ -11472,6 +11473,76 @@ app.get("/admin/export/accounts-txt", auth, admin, async (req, res) => {
 
         const output = buildShikariAccountsCsv(rows);
 
+        res.setHeader("Content-Type", "text/csv; charset=utf-8");
+        res.setHeader("Content-Disposition", `attachment; filename="${filename}.csv"`);
+        res.send(output);
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+
+app.get("/admin/export/stellar-amazon-accounts-csv", auth, admin, async (req, res) => {
+    try {
+        const currentUser = await getCurrentUser(req);
+        const { user_id } = req.query;
+        const filename = (req.query.filename || "stellar-amazon-accounts").replace(/[^a-zA-Z0-9-_]/g, "");
+        const activeOnly = String(req.query.active_only || "") === "1";
+
+        let query = supabase
+            .from("profiles")
+            .select(`
+                id,
+                user_id,
+                account_type,
+                created_at,
+                addresses(email),
+                payments(cvv_encrypted),
+                accounts(*)
+            `)
+            .order("created_at", { ascending: false });
+
+        if (currentUser.role === "super_admin") {
+            if (user_id) query = query.eq("user_id", user_id);
+        } else {
+            const ownedUserIds = await getScopeUserIdsForAdmin(currentUser);
+
+            if (user_id && !ownedUserIds.includes(user_id)) {
+                return res.status(403).json({ error: "Cannot export that account" });
+            }
+
+            query = query.in("user_id", safeIn(ownedUserIds));
+            if (user_id) query = query.eq("user_id", user_id);
+        }
+
+        const { data: profiles, error } = await query;
+        if (error) return res.status(500).json({ error: error.message });
+
+        let exportProfiles = await attachAndFilterProfilesByStore(profiles || [], "amazon");
+        exportProfiles = await filterProfilesByActiveRunStatus(exportProfiles, "amazon", activeOnly);
+
+        const rows = exportProfiles.map((profile) => {
+            const account = accountForExport(profile, "amazon");
+            const payment = profile.payments?.[0] || {};
+            let cardCvv = "";
+            try {
+                cardCvv = payment.cvv_encrypted ? decrypt(payment.cvv_encrypted) : "";
+            } catch { }
+
+            return {
+                email: account.login_email || profile.addresses?.[0]?.email || "",
+                password: account.login_password || "",
+                region: "US",
+                authenticatorKey: account.amazon_2fa_secret || account.two_fa_secret || "",
+                accountType: "",
+                cvv: cardCvv,
+                loginIp: "",
+                loginMethod: ""
+            };
+        });
+
+        const output = buildStellarAmazonAccountsCsv(rows);
         res.setHeader("Content-Type", "text/csv; charset=utf-8");
         res.setHeader("Content-Disposition", `attachment; filename="${filename}.csv"`);
         res.send(output);
