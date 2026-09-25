@@ -12,7 +12,35 @@ function money(n){return `$${Number(n||0).toFixed(2)}`}
 function orderHeadlineValue(o){const s=String(o.status||'').toLowerCase();if(s==='canceled')return 'Canceled';if(s==='refunded')return 'Refunded';return money(o.total)}
 function esc(v){return String(v||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 function initYears(){const s=$('yearFilter'),y=new Date().getFullYear();s.innerHTML='<option value="">All years</option>';for(let i=y;i>=y-7;i--)s.innerHTML+=`<option value="${i}">${i}</option>`}
-async function api(path,opt={}){const r=await fetch(API+path,{...opt,headers:{...headers,...(opt.headers||{})}});if(r.status===401){logout();return}const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.error||`Request failed (${r.status})`);return j}
+const wait=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+async function api(path,opt={}){
+  const {retryNetwork=false,timeoutMs=45000,...requestOptions}=opt;
+  const method=String(requestOptions.method||'GET').toUpperCase();
+  const maxAttempts=(retryNetwork||method==='GET')?3:1;
+  let lastError=null;
+  for(let attempt=1;attempt<=maxAttempts;attempt++){
+    const controller=new AbortController();
+    const timeout=setTimeout(()=>controller.abort(),Math.max(5000,Number(timeoutMs)||45000));
+    try{
+      const r=await fetch(API+path,{...requestOptions,signal:controller.signal,headers:{...headers,...(requestOptions.headers||{})}});
+      if(r.status===401){logout();return}
+      const j=await r.json().catch(()=>({}));
+      if(!r.ok){
+        const error=new Error(j.error||`Request failed (${r.status})`);
+        if([502,503,504].includes(r.status)&&attempt<maxAttempts){lastError=error;await wait(750*attempt);continue}
+        throw error;
+      }
+      return j;
+    }catch(error){
+      lastError=error;
+      const retryable=error?.name==='AbortError'||error instanceof TypeError||/failed to fetch|network/i.test(String(error?.message||''));
+      if(retryable&&attempt<maxAttempts){await wait(750*attempt);continue}
+      if(retryable)throw new Error(error?.name==='AbortError'?'The order-tracker server took too long to respond. The search may still be running; wait a moment and try again.':'The order-tracker server could not be reached. Your search was not discarded; wait a moment and try again.');
+      throw error;
+    }finally{clearTimeout(timeout)}
+  }
+  throw lastError||new Error('The order-tracker request could not be completed.');
+}
 function setProgress(percent,stage,detail=''){const p=Math.max(0,Math.min(100,Number(percent)||0));$('scanProgressBar').style.width=`${p}%`;$('scanPercent').textContent=`${Math.round(p)}%`;if(stage)$('scanStage').textContent=stage;if(detail)$('scanDetail').textContent=detail}
 function showWarning(text){$('scanWarning').hidden=!text;$('scanWarning').textContent=text||''}
 function renderAccounts(accounts=[]){const el=$('scanAccounts');el.innerHTML=accounts.length?accounts.map(a=>`<div class="mail-account"><div class="mail-ok">✓ ${esc(a.email)}</div><div>${esc(a.provider||'IMAP')} · ${a.last_success_at?'Last scan '+new Date(a.last_success_at).toLocaleString():'Ready for first scan'}</div>${a.scanned_through_at?`<div class="subtle-text">Scanned through ${new Date(a.scanned_through_at).toLocaleString()}</div>`:''}${a.last_error?`<div class="mail-error">${esc(a.last_error)}</div>`:''}</div>`).join(''):'<p class="subtle-text">No supported IMAP/app password was found in saved profiles.</p>'}
@@ -87,11 +115,13 @@ async function findOrderEmails(id,button){
   const original=button?.textContent||'Find order emails';
   if(button){button.disabled=true;button.textContent='Searching mailbox…'}
   try{
-    const start=await api(`/orders/tracked/${id}/find-emails`,{method:'POST',body:'{}'});
+    let start=await api(`/orders/tracked/${id}/find-emails`,{method:'POST',body:'{}',retryNetwork:true});
+    let jobId=start.job_id||'';
+    let restartCount=0;
     const started=Date.now();
     while(true){
-      await new Promise(resolve=>setTimeout(resolve,1500));
-      const status=await api(`/orders/tracked/${id}/find-emails/status?job_id=${encodeURIComponent(start.job_id||'')}`);
+      await wait(1500);
+      const status=await api(`/orders/tracked/${id}/find-emails/status?job_id=${encodeURIComponent(jobId)}`);
       const job=status?.job||{};
       if(job.status==='complete'){
         await loadOrders();
@@ -101,17 +131,24 @@ async function findOrderEmails(id,button){
         const messages={
           mailbox_not_connected:'The profile mailbox is no longer connected. Reconnect its IMAP/app password, then try again.',
           mailbox_connection_failed:'The mailbox is connected in the profile, but authentication or the IMAP connection failed. Re-test that mailbox connection and try again.',
-          no_live_message_found:'The connected mailbox was searched by order number, but no matching live message was returned.',
+          no_live_message_found:'The connected mailbox was searched by order number and the retailer checkout-time window, but no matching live message was returned.',
           imap_search_failed:'The mailbox connected, but its IMAP search failed. Check the diagnostic log and mailbox credentials.',
           archive_mime_processed:'A matching archived email was reprocessed, but it was not recognized as a confirmation. Export that email as EML for parser review.',
           live_message_found_not_linked:'A matching message was fetched, but it did not parse/link as a retailer email. Download the EML for parser review.',
           message_processing_failed:'A matching message was found, but parsing or saving it failed. Check the server log for this order number.'
         };
-        alert(messages[detail.result]||`Mailbox search completed, but no confirmation was linked (${detail.result||'no matching result'}).`);
+        const diagnostic=detail.error?`\n\nMailbox detail: ${detail.error}`:'';
+        alert((messages[detail.result]||`Mailbox search completed, but no confirmation was linked (${detail.result||'no matching result'}).`)+diagnostic);
         return;
       }
       if(job.status==='error')throw new Error(job.error||'Mailbox search failed');
-      if(job.status==='idle')throw new Error('The mailbox search job was lost after the server restarted. Please try again.');
+      if(job.status==='idle'&&restartCount<1){
+        restartCount++;
+        start=await api(`/orders/tracked/${id}/find-emails`,{method:'POST',body:'{}',retryNetwork:true});
+        jobId=start.job_id||'';
+        continue;
+      }
+      if(job.status==='idle')throw new Error('The mailbox search was interrupted by a server restart. Please run it once more.');
       if(Date.now()-started>10*60*1000)throw new Error('The mailbox search is still running. Refresh the page in a few minutes to see any linked email.');
     }
   }catch(error){alert(error.message||'Could not search this order mailbox')}
@@ -309,7 +346,7 @@ if($('downloadReconcileDiag')) $('downloadReconcileDiag').onclick=()=>{const tex
 
 if($('checkTracking')) $('checkTracking').onclick=async()=>{const b=$('checkTracking');const old=b.textContent;b.disabled=true;b.textContent='Checking tracking…';try{const j=await api('/orders/check-tracking',{method:'POST',body:'{}'});alert(j.disabled?'Tracking verification is not enabled yet. Add EASYPOST_API_KEY to Render, then this button and the automatic background checker will work.':`Tracking check complete. Checked ${j.checked||0} package(s); ${j.delivered_shipments||0} package(s) delivered; ${j.delivered_orders||0} order(s) marked delivered.`);await loadOrders()}catch(e){alert(e.message||'Tracking check failed')}finally{b.disabled=false;b.textContent=old}};
 
-$('reconcileRetailer').onclick=async()=>{const b=$('reconcileRetailer');const old=b.textContent;b.disabled=true;b.textContent='Reconciling…';try{let j=await api('/orders/reconcile-retailer-emails',{method:'POST',body:JSON.stringify({max_messages:2500,repair_orders:250})});if(j?.job){const started=Date.now();while(true){await new Promise(resolve=>setTimeout(resolve,2500));const status=await api('/orders/reconcile-retailer-emails/status');const job=status?.job||{};if(job.status==='complete'){j=job.result||{};break}if(job.status==='error')throw new Error(job.error||'Retailer reconciliation failed');if(job.status==='idle')throw new Error('Retailer reconciliation job was lost after the server restarted. Please run it again.');if(Date.now()-started>45*60*1000)throw new Error('Retailer reconciliation is still running after 45 minutes. Refresh the page and try again later.')}}const r=j.repair||{};const details=Array.isArray(r.details)?r.details:[];const priority=details.filter(x=>x.result!=='mailbox_not_connected');const detailText=priority.length?`
+$('reconcileRetailer').onclick=async()=>{const b=$('reconcileRetailer');const old=b.textContent;b.disabled=true;b.textContent='Reconciling…';try{let j=await api('/orders/reconcile-retailer-emails',{method:'POST',body:JSON.stringify({max_messages:600,repair_orders:100}),retryNetwork:true});if(j?.job){const started=Date.now();let restartCount=0;while(true){await wait(2500);const status=await api('/orders/reconcile-retailer-emails/status');const job=status?.job||{};if(job.status==='complete'){j=job.result||{};break}if(job.status==='error')throw new Error(job.error||'Retailer reconciliation failed');if(job.status==='idle'&&restartCount<1){restartCount++;j=await api('/orders/reconcile-retailer-emails',{method:'POST',body:JSON.stringify({max_messages:600,repair_orders:100}),retryNetwork:true});continue}if(job.status==='idle')throw new Error('Retailer reconciliation was interrupted by a server restart. Please run it once more.');if(Date.now()-started>45*60*1000)throw new Error('Retailer reconciliation is still running after 45 minutes. Refresh the page and try again later.')}}const r=j.repair||{};const details=Array.isArray(r.details)?r.details:[];const priority=details.filter(x=>x.result!=='mailbox_not_connected');const detailText=priority.length?`
 
 Live repair details:
 ${priority.map(x=>{const itemBits=[];if(x.main_item_status)itemBits.push(`main=${x.main_item_status}`);if(x.filler_item_status)itemBits.push(`filler=${x.filler_item_status}`);if(x.final_order_status)itemBits.push(`final=${x.final_order_status}`);return `${x.store||'retailer'} ${x.order_number||'-'} · ${x.mailbox||'-'} · found ${x.messages_found||0}, processed ${x.messages_processed||0}, saved ${x.saved_messages||0} · ${x.result||'-'}${itemBits.length?` · ${itemBits.join(', ')}`:''}`}).join('\n')}`:'';const missing=details.filter(x=>x.result==='mailbox_not_connected');const missingText=missing.length?`
@@ -370,6 +407,8 @@ Supreme order numbers parsed: ${j.supreme_rebuild?.parsed_order_numbers||0}
 Supreme webhook orders: ${j.supreme_rebuild?.supreme_webhook_orders||0}
 Supreme candidate pairs: ${j.supreme_rebuild?.candidate_pairs||0}
 Supreme assignments rebuilt: ${j.supreme_rebuild?.assigned||0}
+Amazon orders missing confirmation found: ${j.unresolved_amazon_orders||0}
+Amazon webhook-time searches prioritized: ${j.amazon_priority_orders||0}
 Target orders missing confirmation prioritized: ${j.target_priority_orders||j.damaged_target_orders||0}
 Live mailbox orders checked: ${r.checked_orders||0}
 Live MIME messages matched: ${r.matched_messages||0}

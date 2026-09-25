@@ -26,6 +26,18 @@ const MAX_MESSAGES_PER_SCAN = Math.max(25, Number(process.env.IMAP_MAX_MESSAGES_
 const MAX_ACCOUNTS_PER_CYCLE = Math.max(1, Number(process.env.IMAP_MAX_ACCOUNTS_PER_CYCLE || 50));
 const MIN_RESCAN_INTERVAL_MS = Math.max(0, Number(process.env.IMAP_MIN_RESCAN_INTERVAL_MS || 2 * 60 * 1000));
 const AMAZON_GHOST_GRACE_MS = Math.max(10 * 60 * 1000, Number(process.env.AMAZON_GHOST_GRACE_MS || 20 * 60 * 1000));
+// Amazon Fast/webhook IDs are not always the final Amazon order number. A recovery search therefore
+// also inspects genuine Amazon confirmation mail close to the webhook timestamp and assigns each
+// message to the nearest unused checkout for that exact mailbox. Keep the window bounded so two
+// unrelated drops on the same account cannot be joined merely because they happened on the same day.
+const AMAZON_EMAIL_MATCH_WINDOW_MS = Math.max(
+  15 * 60 * 1000,
+  Math.min(24 * 60 * 60 * 1000, Number(process.env.AMAZON_EMAIL_MATCH_WINDOW_MS || 2 * 60 * 60 * 1000))
+);
+const MACYS_EMAIL_MATCH_WINDOW_MS = Math.max(
+  30 * 60 * 1000,
+  Math.min(24 * 60 * 60 * 1000, Number(process.env.MACYS_EMAIL_MATCH_WINDOW_MS || 6 * 60 * 60 * 1000))
+);
 const ORDER_REPAIR_FALLBACK_MAX_MESSAGES = Math.max(50, Math.min(5000, Number(process.env.ORDER_REPAIR_FALLBACK_MAX_MESSAGES || 1000)));
 let backgroundAccountCursor = 0;
 const userScanJobs = new Map();
@@ -87,6 +99,35 @@ function rawMessageContainsOrderNumber(orderNumber, envelope = {}, source = null
     }
   }
   return false;
+}
+
+function rawMessageLooksLikeAmazonConfirmation(envelope = {}, source = null) {
+  const addresses = [];
+  for (const field of ['from','sender','replyTo']) {
+    const values = Array.isArray(envelope?.[field]) ? envelope[field] : [];
+    for (const value of values) addresses.push(`${value?.name || ''} ${value?.address || ''}`);
+  }
+  const subject = lower(envelope?.subject || '');
+  const raw = Buffer.isBuffer(source) ? source.toString('utf8') : String(source || '');
+  const header = lower(raw.slice(0, 40000));
+  const amazonIdentity = /(?:^|[.@\s-])amazon(?:\.com)?\b/.test(lower(addresses.join(' '))) ||
+    /(?:from|sender):[^\r\n]*@(?:[^\s>]+\.)?amazon\.(?:com|ca|co\.uk)\b/i.test(raw.slice(0, 20000));
+  const confirmationSubject = /\bordered:|order confirmation|your amazon(?:\.com)? order|thanks for your order|thank you for your order/.test(subject);
+  const confirmationBody = /\b(?:order|amazon order)\s*(?:number|#)|view or manage (?:your )?order|order total/.test(header);
+  return amazonIdentity && (confirmationSubject || confirmationBody);
+}
+
+function rawMessageLooksLikeMacysConfirmation(envelope = {}, source = null) {
+  const addresses = [];
+  for (const field of ['from','sender','replyTo']) {
+    const values = Array.isArray(envelope?.[field]) ? envelope[field] : [];
+    for (const value of values) addresses.push(`${value?.name || ''} ${value?.address || ''}`);
+  }
+  const subject = lower(envelope?.subject || '');
+  const raw = Buffer.isBuffer(source) ? source.toString('utf8') : String(source || '');
+  const macysIdentity = /macy'?s|@[^\s>]*macys\.com\b/i.test(`${addresses.join(' ')} ${raw.slice(0,20000)}`);
+  const confirmation = /order confirmation|thanks for your order|thank you for your order|we(?:'|’)ve received your order|order received/.test(subject);
+  return macysIdentity && confirmation;
 }
 function normalizeMailboxPassword(v, providerName = '') {
   const value = clean(v);
@@ -1002,6 +1043,7 @@ function detectStore(from, subject, text) {
   if (/walmart\.com|walmart order/.test(hay)) return 'walmart';
   if (/samsclub\.com|sam'?s club order/.test(hay)) return 'samsclub';
   if (/amazon\.com|amazon order|amazon\.com/.test(hay)) return 'amazon';
+  if (/macys\.com|macy'?s(?: order| customer service| online)/.test(hay)) return 'macys';
   if (/pokemoncenter\.com|pok[eé]mon center/.test(hay)) return 'pokemoncenter';
   if (/crunchyroll/.test(hay)) return 'crunchyroll';
   if (/supremenewyork\.com|us\.supreme\.com|\bsupreme\b/.test(hay)) return 'supreme';
@@ -1232,6 +1274,10 @@ function extractOrderNumber(store, subject, text) {
   const hay = `${subject}\n${text}`;
   const patterns = {
     amazon: [/\b(?:order(?: number| #)?\s*[:#]?\s*)(\d{3}-\d{7}-\d{7})\b/i, /\b(\d{3}-\d{7}-\d{7})\b/],
+    macys: [
+      /\b(?:order(?: number| no\.?| #)?\s*[:#]?\s*)([A-Z0-9-]{6,30})\b/i,
+      /\b(?:order|confirmation)\s*#\s*([A-Z0-9-]{6,30})\b/i
+    ],
     target: [/\b(?:order(?: number| #)?\s*[:#]?\s*)([A-Z0-9-]{8,30})\b/i, /\b(\d{10,20})\b/],
     walmart: [/\b(?:order(?: number| #)?\s*[:#]?\s*)([A-Z0-9-]{8,30})\b/i, /\b(\d{7,8}-\d{6,8})\b/],
     samsclub: [/\b(?:order(?: number| #)?\s*[:#]?\s*)([A-Z0-9-]{8,30})\b/i],
@@ -1369,7 +1415,7 @@ async function matchPendingAmazonOrder(supabase, account, parsed, orderNumber, a
     const createdMs = new Date(order.created_at || meta.waiting_for_confirmation_since || 0).getTime();
     // Permit delayed Amazon/AYCD delivery while keeping the match inside the
     // same checkout burst. The nearest unused webhook wins.
-    return Number.isFinite(createdMs) && Math.abs(eventMs - createdMs) <= 30 * 60 * 1000;
+    return Number.isFinite(createdMs) && Math.abs(eventMs - createdMs) <= AMAZON_EMAIL_MATCH_WINDOW_MS;
   }).map(order => {
     const createdMs = new Date(order.created_at || order.metadata?.waiting_for_confirmation_since || 0).getTime();
     const unitPrice = money(order.metadata?.purchase_price || findNamedPayloadValue(order.raw_payload || {}, ['price','unitprice'])) || 0;
@@ -1386,6 +1432,27 @@ async function matchPendingAmazonOrder(supabase, account, parsed, orderNumber, a
   }).sort((a, b) => (a.timeDiff - b.timeDiff) || (a.totalTieBreak - b.totalTieBreak) || String(a.order.id).localeCompare(String(b.order.id)));
 
   return candidates[0] ? { serviceOrder: candidates[0].order, emailQuantity } : null;
+}
+
+function matchServiceOrderByMailboxTime(serviceOrders, account, store, parsed, messageId, windowMs) {
+  const wantedStore = normalizeStoreKey(store);
+  const eventMs = new Date(parsed?.date || Date.now()).getTime();
+  if (!wantedStore || !Number.isFinite(eventMs)) return null;
+  const alreadyUsed = (serviceOrders || []).some(order => clean(order.metadata?.imap_last_message_id) === clean(messageId));
+  if (alreadyUsed) return null;
+  const candidates = (serviceOrders || []).filter(order => {
+    const metadata = order.metadata || {};
+    if (normalizeStoreKey(order.site || metadata.site || extractNamedPayloadValue(order.raw_payload || {}, ['site','store'])) !== wantedStore) return false;
+    if (metadata.confirmed_by_email_at || metadata.matched_email_message_id) return false;
+    const emails = findEmailValues(order.raw_payload || {});
+    if (emails.size && !emails.has(lower(account.email))) return false;
+    const createdMs = new Date(order.created_at || metadata.waiting_for_confirmation_since || 0).getTime();
+    return Number.isFinite(createdMs) && Math.abs(eventMs - createdMs) <= windowMs;
+  }).map(order => ({
+    order,
+    timeDiff:Math.abs(eventMs - new Date(order.created_at || order.metadata?.waiting_for_confirmation_since || 0).getTime())
+  })).sort((a,b) => a.timeDiff - b.timeDiff || String(a.order.id).localeCompare(String(b.order.id)));
+  return candidates[0]?.order || null;
 }
 
 function extractAmounts(text) {
@@ -1855,6 +1922,7 @@ function normalizeStoreKey(value) {
   if (compact.includes('supreme')) return 'supreme';
   if (compact.includes('target')) return 'target';
   if (compact.includes('amazon')) return 'amazon';
+  if (compact.includes('macys') || compact === 'macy') return 'macys';
   if (compact.includes('pokemoncenter') || compact === 'pokemon' || compact === 'pokmon' || compact === 'pokecenter' || compact === 'pc') return 'pokemoncenter';
   if (compact.includes('walmart')) return 'walmart';
   if (compact.includes('samsclub') || compact === 'sams') return 'samsclub';
@@ -3004,11 +3072,28 @@ async function saveParsedMessage(supabase, account, parsed, uid, adjustCredits =
   let amazonPendingMatch = null;
   if (store === 'amazon' && status === 'confirmed') {
     const direct = serviceOrders.find(o => collectOrderRefs(o).includes(normalizeOrderRef(primaryOrderNumber)));
-    if (direct) matchedServiceOrders = [direct];
-    else {
+    if (direct) {
+      matchedServiceOrders = [direct];
+      const directMetadata = direct.metadata || {};
+      // An exact retailer number proves ownership, but it must still pass through the Amazon
+      // email-verification finalizer. Older code treated the direct match as an ordinary receipt,
+      // which linked the email while silently skipping credits and the Discord success ping.
+      if (direct.status === 'pending_email_verification' || directMetadata.email_verification_required === true) {
+        amazonPendingMatch = { serviceOrder:direct, emailQuantity:extractAmazonItemQuantity(subject, text), match_method:'exact_order_number' };
+      }
+    } else {
       amazonPendingMatch = await matchPendingAmazonOrder(supabase, account, parsed, primaryOrderNumber, amounts, messageId);
-      if (amazonPendingMatch?.serviceOrder) matchedServiceOrders = [amazonPendingMatch.serviceOrder];
+      if (amazonPendingMatch?.serviceOrder) {
+        amazonPendingMatch.match_method = 'webhook_time_window';
+        matchedServiceOrders = [amazonPendingMatch.serviceOrder];
+      }
     }
+  } else if (store === 'macys' && status === 'confirmed') {
+    const direct = serviceOrders.find(o => collectOrderRefs(o).includes(normalizeOrderRef(primaryOrderNumber)));
+    const timeMatch = direct || matchServiceOrderByMailboxTime(
+      serviceOrders, account, 'macys', parsed, messageId, MACYS_EMAIL_MATCH_WINDOW_MS
+    );
+    if (timeMatch) matchedServiceOrders = [timeMatch];
   } else if (store === 'supreme') {
     // Confirmation emails are deliberately re-scored across the whole Supreme checkout batch.
     // Shipment emails then use the retailer order number learned from the confirmation.
@@ -3833,6 +3918,58 @@ async function targetOrdersMissingConfirmation(supabase, userId = null, limit = 
   }).slice(0, max);
 }
 
+async function amazonOrdersMissingConfirmation(supabase, userId = null, limit = 100) {
+  const rows = await fetchAllSupabaseRows(() => {
+    let query = supabase.from('tracked_orders')
+      .select('id,user_id,source_order_id,profile_id,source_email,store,order_number,order_date,status,total,receipt_html,receipt_text,raw_subject')
+      .eq('store','amazon')
+      .not('order_number','is',null)
+      .order('order_date',{ascending:false});
+    if (userId) query = query.eq('user_id', userId);
+    return query;
+  }, 500);
+  if (!rows.length) return [];
+
+  const confirmed = new Set(rows.filter(hasLegacyConfirmationReceipt).map(row => String(row.id)));
+  const pendingVerificationSources = new Set();
+  const ids = rows.map(row => row.id).filter(Boolean);
+  for (let i = 0; i < ids.length; i += 100) {
+    const chunk = ids.slice(i, i + 100);
+    try {
+      const junction = await supabase.from('tracked_order_emails')
+        .select('order_id').eq('event_type','confirmed').in('order_id', chunk);
+      if (!junction.error) for (const row of junction.data || []) if (row.order_id) confirmed.add(String(row.order_id));
+    } catch (_) {}
+    // Older installations may only have the legacy direct link. Include it so a completed order
+    // is not repeatedly searched after the many-to-many migration is installed.
+    try {
+      const legacy = await supabase.from('email_messages')
+        .select('linked_order_id').eq('email_type','confirmed').in('linked_order_id', chunk);
+      if (!legacy.error) for (const row of legacy.data || []) if (row.linked_order_id) confirmed.add(String(row.linked_order_id));
+    } catch (_) {}
+  }
+
+  // Repair older exact-number confirmations too. Before this update those messages could be linked
+  // to the tracker while the source checkout remained pending_email_verification, so the card no
+  // longer showed a Find button even though credits and the Discord success were never finalized.
+  const sourceIds = [...new Set(rows.map(row => clean(row.source_order_id)).filter(Boolean))];
+  for (let i = 0; i < sourceIds.length; i += 100) {
+    try {
+      const sources = await supabase.from('orders').select('id,status,credits_charged,metadata').in('id', sourceIds.slice(i,i+100));
+      if (sources.error) continue;
+      for (const source of sources.data || []) {
+        const metadata = source.metadata || {};
+        const stillPending = source.status === 'pending_email_verification' ||
+          (metadata.email_verification_required === true && !metadata.email_verified_at && Number(source.credits_charged || 0) <= 0);
+        if (stillPending) pendingVerificationSources.add(String(source.id));
+      }
+    } catch (_) {}
+  }
+
+  const max = Math.max(1, Math.min(500, Number(limit || 100)));
+  return rows.filter(order => !confirmed.has(String(order.id)) || pendingVerificationSources.has(String(order.source_order_id))).slice(0, max);
+}
+
 async function walmartOrdersNeedingRepair(supabase, userId = null, limit = 250) {
   const rows = await fetchAllSupabaseRows(() => {
     let query = supabase.from('tracked_orders')
@@ -4130,13 +4267,21 @@ async function repairHistoricalOrderEmails(supabase, userId = null, adjustCredit
                 searchErrors.push(clean(searchError.message || searchError).slice(0,500));
               }
             }
+            const normalizedRepairStore = normalizeStoreKey(order.store || '');
+            const amazonTimeRecovery = normalizedRepairStore === 'amazon';
+            const macysTimeRecovery = normalizedRepairStore === 'macys';
+            const retailerTimeRecovery = amazonTimeRecovery || macysTimeRecovery;
+            const retailerTimeWindow = amazonTimeRecovery ? AMAZON_EMAIL_MATCH_WINDOW_MS : MACYS_EMAIL_MATCH_WINDOW_MS;
             let method = uidSet.size ? 'imap_order_number' : 'imap_order_number_no_match';
             let fallbackSearchError = '';
-            if (!uidSet.size) {
+            // Amazon recovery always checks the webhook-time window, even when an exact search
+            // found a cancellation or shipment. A confirmation can use a retailer number that was
+            // not present in the original bot webhook, so exact-ID search alone is not sufficient.
+            if (!uidSet.size || retailerTimeRecovery) {
               const orderAt = new Date(order.order_date || '');
               if (Number.isFinite(orderAt.getTime())) {
-                const since = new Date(orderAt.getTime() - 24 * 60 * 60 * 1000);
-                const before = new Date(orderAt.getTime() + 2 * 24 * 60 * 60 * 1000);
+                const since = new Date(orderAt.getTime() - (retailerTimeRecovery ? retailerTimeWindow : 24 * 60 * 60 * 1000));
+                const before = new Date(orderAt.getTime() + (retailerTimeRecovery ? retailerTimeWindow : 2 * 24 * 60 * 60 * 1000));
                 detail.fallback_since = since.toISOString();
                 detail.fallback_before = before.toISOString();
                 try {
@@ -4149,10 +4294,19 @@ async function repairHistoricalOrderEmails(supabase, userId = null, adjustCredit
                     if (!fallbackUidRange) continue;
                     for await (const candidate of client.fetch(fallbackUidRange, { uid:true, source:true, envelope:true }, { uid:true })) {
                       detail.fallback_candidates_scanned++;
-                      if (rawMessageContainsOrderNumber(orderNumber, candidate.envelope, candidate.source, order.store)) uidSet.add(Number(candidate.uid));
+                      const exactOrderMatch = rawMessageContainsOrderNumber(orderNumber, candidate.envelope, candidate.source, order.store);
+                      const amazonConfirmation = amazonTimeRecovery && rawMessageLooksLikeAmazonConfirmation(candidate.envelope, candidate.source);
+                      const macysConfirmation = macysTimeRecovery && rawMessageLooksLikeMacysConfirmation(candidate.envelope, candidate.source);
+                      if (exactOrderMatch || amazonConfirmation || macysConfirmation) {
+                        uidSet.add(Number(candidate.uid));
+                        if (amazonConfirmation) detail.amazon_time_window_candidates = Number(detail.amazon_time_window_candidates || 0) + 1;
+                        if (macysConfirmation) detail.macys_time_window_candidates = Number(detail.macys_time_window_candidates || 0) + 1;
+                      }
                     }
                   }
-                  method = uidSet.size ? 'local_date_window' : 'local_date_window_no_match';
+                  if (amazonTimeRecovery) method = uidSet.size ? 'amazon_webhook_time_window' : 'amazon_webhook_time_window_no_match';
+                  else if (macysTimeRecovery) method = uidSet.size ? 'macys_webhook_time_window' : 'macys_webhook_time_window_no_match';
+                  else method = uidSet.size ? 'local_date_window' : 'local_date_window_no_match';
                 } catch (fallbackError) {
                   fallbackSearchError = clean(fallbackError.message || fallbackError).slice(0,500);
                 }
@@ -5355,6 +5509,7 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
     // browser eventually close the connection and surface a misleading "Failed to fetch" even
     // though the server is still working. The frontend polls the status endpoint below instead.
     res.status(202).json({ success:true, job:{ status:'running', started_at:reconcileJob.started_at } });
+    setImmediate(async () => {
     try {
       // Reprocess the already-indexed retailer archive across ALL of this user's connected
       // mailboxes. This intentionally ignores the webhook's previously guessed purchase email.
@@ -5627,15 +5782,22 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
       try {
         unresolvedTargetOrders = await targetOrdersMissingConfirmation(supabase, req.user_id, 250);
       } catch (e) { console.warn('[RECONCILE TARGET CONFIRMATION QUERY]', e.message || e); }
+      let unresolvedAmazonOrders = [];
+      try {
+        unresolvedAmazonOrders = await amazonOrdersMissingConfirmation(supabase, req.user_id, 250);
+      } catch (e) { console.warn('[RECONCILE AMAZON CONFIRMATION QUERY]', e.message || e); }
       const targetPriorityOrderIds = [...new Set([
         ...unresolvedTargetOrders.map(order => String(order.id)),
         ...damagedLinkedOrderIds.map(String)
       ])].slice(0, 100);
-      // Walmart comes first so every one of the 34 explicitly reported historical rows remains
-      // inside the 100-order live-repair ceiling even when the Target backlog is also large.
+      const amazonPriorityOrderIds = unresolvedAmazonOrders.map(order => String(order.id)).slice(0, 30);
+      // Reserve capacity for each active repair class. Amazon gets the first slots because its
+      // recovery may need a webhook-time search rather than an exact order number; Walmart and
+      // Target retain their existing historical repair capacity.
       const retailerPriorityOrderIds = [...new Set([
-        ...walmartProblemOrders.map(order => String(order.id)),
-        ...targetPriorityOrderIds
+        ...amazonPriorityOrderIds,
+        ...walmartProblemOrders.slice(0,35).map(order => String(order.id)),
+        ...targetPriorityOrderIds.slice(0,35)
       ])].slice(0, 100);
       let repair = null;
       try {
@@ -5651,12 +5813,13 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
       }
       // Now queue the ordinary catch-up scan for anything that was not part of the targeted set.
       try { startUserScanJob(supabase,req.user_id,adjustUserCredits,confirmPendingAmazonCheckout); } catch (_) {}
-      const result = {success:true,checked,matched,ignored,failed,walmart_problem_orders:walmartProblemOrders.length,walmart_archive_messages:walmartArchiveRows.length,walmart_linked_replay_messages:walmartLinkedReplayRows.length,walmart_targeted_archive_messages:repair?.walmart_archive_candidates||0,target_delivered_alias_replay_messages:targetDeliveredReplayRows.length,pokemon_archive_messages:pokemonArchiveRows.length,pokemon_live_discovery:pokemonLiveDiscovery,pokemon_stats:pokemonStats,pokemon_debug:pokemonDebug,supreme_rebuild:supremeRebuild,supreme_live:supremeLive,supreme_debug:[...(supremeLive?.debug||[]).slice(-120), ...serviceOrdersForSupreme.slice(0,40).map((o,i)=>`Service order ${i+1}: id=${o.id} site=${o.site||'-'} metadata.site=${o.metadata?.site||'-'} payload site/store=${extractNamedPayloadValue(o.raw_payload||{},['site','store'])||'-'} normalized=${normalizeStoreKey(o.site || o.metadata?.site || extractNamedPayloadValue(o.raw_payload||{},['site','store']))||'-'}`)],supreme_discovery:{metadata_scanned:supremeDiscovery?.metadata_scanned||0,candidates_found:supremeDiscovery?.candidates_found||0,windows:supremeDiscovery?.windows||0},damaged_target_orders:damagedLinkedOrderIds.length,unresolved_target_orders:unresolvedTargetOrders.length,target_priority_orders:targetPriorityOrderIds.length,retailer_priority_orders:retailerPriorityOrderIds.length,repair,message:`Replayed ${walmartLinkedReplayRows.length} already-linked Walmart message(s), recovered ${repair?.walmart_archive_candidates||0} exact previously-unlinked Walmart archive message(s), and searched all selectable folders for ${walmartProblemOrders.length} Walmart order(s); replayed ${targetDeliveredReplayRows.length} linked Target delivery message(s); searched ${pokemonLiveDiscovery.mailboxes_checked||0} live website mailbox(es), matched ${pokemonLiveDiscovery.messages_matched||0} exact Pokemon Center lifecycle message(s), and saved ${pokemonLiveDiscovery.payment_alerts_saved||0} payment warning(s); replayed ${pokemonArchiveRows.length} Pokemon Center archive message(s); rebuilt ${supremeRebuild?.assigned||0} Supreme confirmation assignment(s); then included ${targetPriorityOrderIds.length} Target order(s) in the live repair queue.`};
+      const result = {success:true,checked,matched,ignored,failed,walmart_problem_orders:walmartProblemOrders.length,walmart_archive_messages:walmartArchiveRows.length,walmart_linked_replay_messages:walmartLinkedReplayRows.length,walmart_targeted_archive_messages:repair?.walmart_archive_candidates||0,target_delivered_alias_replay_messages:targetDeliveredReplayRows.length,pokemon_archive_messages:pokemonArchiveRows.length,pokemon_live_discovery:pokemonLiveDiscovery,pokemon_stats:pokemonStats,pokemon_debug:pokemonDebug,supreme_rebuild:supremeRebuild,supreme_live:supremeLive,supreme_debug:[...(supremeLive?.debug||[]).slice(-120), ...serviceOrdersForSupreme.slice(0,40).map((o,i)=>`Service order ${i+1}: id=${o.id} site=${o.site||'-'} metadata.site=${o.metadata?.site||'-'} payload site/store=${extractNamedPayloadValue(o.raw_payload||{},['site','store'])||'-'} normalized=${normalizeStoreKey(o.site || o.metadata?.site || extractNamedPayloadValue(o.raw_payload||{},['site','store']))||'-'}`)],supreme_discovery:{metadata_scanned:supremeDiscovery?.metadata_scanned||0,candidates_found:supremeDiscovery?.candidates_found||0,windows:supremeDiscovery?.windows||0},damaged_target_orders:damagedLinkedOrderIds.length,unresolved_target_orders:unresolvedTargetOrders.length,target_priority_orders:targetPriorityOrderIds.length,unresolved_amazon_orders:unresolvedAmazonOrders.length,amazon_priority_orders:amazonPriorityOrderIds.length,retailer_priority_orders:retailerPriorityOrderIds.length,repair,message:`Searched ${amazonPriorityOrderIds.length} Amazon order(s) by exact order number plus their webhook-time window; replayed ${walmartLinkedReplayRows.length} already-linked Walmart message(s), recovered ${repair?.walmart_archive_candidates||0} exact previously-unlinked Walmart archive message(s), and prioritized ${Math.min(35,walmartProblemOrders.length)} Walmart order(s); replayed ${targetDeliveredReplayRows.length} linked Target delivery message(s); searched ${pokemonLiveDiscovery.mailboxes_checked||0} live website mailbox(es), matched ${pokemonLiveDiscovery.messages_matched||0} exact Pokemon Center lifecycle message(s), and saved ${pokemonLiveDiscovery.payment_alerts_saved||0} payment warning(s); replayed ${pokemonArchiveRows.length} Pokemon Center archive message(s); rebuilt ${supremeRebuild?.assigned||0} Supreme confirmation assignment(s); then included ${Math.min(35,targetPriorityOrderIds.length)} Target order(s) in the live repair queue.`};
       Object.assign(reconcileJob, { status:'complete', finished_at:new Date().toISOString(), result, error:null });
     } catch(error){
       console.error('[RECONCILE RETAILER EMAILS]', error.message || error);
       Object.assign(reconcileJob, { status:'error', finished_at:new Date().toISOString(), error:error.message || String(error) });
     }
+    });
   });
 
   app.get('/orders/reconcile-retailer-emails/status', auth, async (req, res) => {

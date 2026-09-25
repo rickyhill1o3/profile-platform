@@ -11715,6 +11715,8 @@ registerOrderTracker({
     confirmPendingAmazonCheckout: async ({ serviceOrder, amazonOrderNumber, messageId, eventAt, emailTotal, emailQuantity }) => {
         let metadata = { ...(serviceOrder.metadata || {}) };
         if (metadata.email_verified_at || Number(serviceOrder.credits_charged || 0) > 0) return { already_verified: true, order: serviceOrder };
+        const originalStatus = String(serviceOrder.status || 'pending_email_verification').toLowerCase();
+        const finalLifecycleStatus = ['canceled','refunded'].includes(originalStatus) ? originalStatus : 'confirmed';
 
         // Enforce one email -> one webhook even if two IMAP/AYCD scans overlap.
         const existingOrders = await supabase.from('orders').select('id,metadata').eq('user_id', serviceOrder.user_id).limit(1000);
@@ -11734,7 +11736,7 @@ registerOrderTracker({
         const reservation = await supabase.from('orders')
             .update({ status: 'confirming_email', metadata: reservationMetadata })
             .eq('id', serviceOrder.id)
-            .eq('status', 'pending_email_verification')
+            .eq('status', originalStatus)
             .select().maybeSingle();
         if (reservation.error) throw reservation.error;
         if (!reservation.data) return { already_verified: true, reservation_failed: true, order: serviceOrder };
@@ -11753,20 +11755,32 @@ registerOrderTracker({
             }
             const updatedMetadata = { ...metadata, confirmation_status: 'confirmed', email_verification_required: false,
                 email_verified_at: eventAt, matched_email_message_id: messageId, amazon_order_number: amazonOrderNumber,
-                email_total: emailTotal, email_quantity: emailQuantity, pending_credits_to_charge: 0 };
-            const updatedResult = await supabase.from('orders').update({ status: 'confirmed', external_order_id: amazonOrderNumber, credits_charged: credits, metadata: updatedMetadata }).eq('id', serviceOrder.id).eq('status', 'confirming_email').select().single();
+                email_total: emailTotal, email_quantity: emailQuantity, pending_credits_to_charge: 0,
+                ...(finalLifecycleStatus !== 'confirmed' ? { confirmed_before_final_status:true, final_lifecycle_status:finalLifecycleStatus } : {}) };
+            const updatedResult = await supabase.from('orders').update({ status: finalLifecycleStatus, external_order_id: amazonOrderNumber, credits_charged: credits, metadata: updatedMetadata }).eq('id', serviceOrder.id).eq('status', 'confirming_email').select().single();
             if (updatedResult.error) throw updatedResult.error;
             const updatedOrder = updatedResult.data;
             const userResult = await supabase.from('users').select('*').eq('id', serviceOrder.user_id).maybeSingle();
             const discordResults = await sendCheckoutDiscordNotificationsForPayload(serviceOrder.raw_payload || {}, userResult.data || null, {
-                status: 'processed', order: updatedOrder, credits_charged: credits, routingMode: 'public_and_admin_only'
+                status: 'processed', order: { ...updatedOrder, status:'confirmed' }, credits_charged: credits, routingMode: 'public_and_admin_only'
             }).catch(err => [{ success: false, error: err.message || String(err) }]);
+            if (finalLifecycleStatus !== 'confirmed' && credits > 0) {
+                balanceAfter = await adjustUserCredits({
+                    userId: serviceOrder.user_id, delta: credits, reason: 'amazon_late_confirmation_canceled_refund',
+                    note: `Credits refunded because Amazon order ${amazonOrderNumber} had already reached ${finalLifecycleStatus}`,
+                    metadata: { source_order_id:serviceOrder.id, amazon_order_number:amazonOrderNumber, matched_email_message_id:messageId },
+                    orderId: serviceOrder.id
+                });
+                await supabase.from('tracked_orders').update({
+                    credits_refunded:true, credits_refunded_at:new Date().toISOString(), updated_at:new Date().toISOString()
+                }).eq('source_order_id', serviceOrder.id);
+            }
             return { order: updatedOrder, credits_charged: credits, balance_after: balanceAfter, discord_results: discordResults };
         } catch (err) {
             // Release the reservation so a later scan can retry. If credit debit
             // succeeded but finalization failed, the ledger/order-idempotency
             // protections prevent a second debit for the same order.
-            await supabase.from('orders').update({ status: 'pending_email_verification', metadata: { ...metadata, confirmation_status: 'pending_email_verification', matched_email_message_id: null, email_confirmation_error: err.message || String(err) } }).eq('id', serviceOrder.id).eq('status', 'confirming_email');
+            await supabase.from('orders').update({ status: originalStatus, metadata: { ...metadata, confirmation_status: 'pending_email_verification', matched_email_message_id: null, email_confirmation_error: err.message || String(err) } }).eq('id', serviceOrder.id).eq('status', 'confirming_email');
             throw err;
         }
     }
