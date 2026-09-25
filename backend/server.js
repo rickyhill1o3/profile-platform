@@ -96,7 +96,7 @@ const registerShopRoutes = require("./shop-routes");
 const registerSuccessNetwork = require("./success-network");
 const { registerOrderTracker, notifyCheckoutForOrderTracker } = require("./order-tracker");
 const { buildShikariAccountsCsv, buildShikariImapCsv } = require("./shikari-credential-exports");
-const { buildStellarAmazonAccountsCsv } = require("./stellar-amazon-account-export");
+const { buildStellarAmazonAccountsText } = require("./stellar-amazon-account-export");
 const { registerMarketValueEngine } = require("./market-value-engine");
 const { registerMasterProductCatalog } = require("./master-product-catalog");
 const { fetchAllSupabaseRows, fetchAllSupabaseRowsInBatches } = require("./supabase-pagination");
@@ -11483,7 +11483,7 @@ app.get("/admin/export/accounts-txt", auth, admin, async (req, res) => {
 });
 
 
-app.get("/admin/export/stellar-amazon-accounts-csv", auth, admin, async (req, res) => {
+app.get("/admin/export/stellar-amazon-accounts-txt", auth, admin, async (req, res) => {
     try {
         const currentUser = await getCurrentUser(req);
         const { user_id } = req.query;
@@ -11535,16 +11535,16 @@ app.get("/admin/export/stellar-amazon-accounts-csv", auth, admin, async (req, re
                 password: account.login_password || "",
                 region: "US",
                 authenticatorKey: account.amazon_2fa_secret || account.two_fa_secret || "",
-                accountType: "",
+                accountType: "personal",
                 cvv: cardCvv,
                 loginIp: "",
-                loginMethod: ""
+                loginMethod: "request"
             };
         });
 
-        const output = buildStellarAmazonAccountsCsv(rows);
-        res.setHeader("Content-Type", "text/csv; charset=utf-8");
-        res.setHeader("Content-Disposition", `attachment; filename="${filename}.csv"`);
+        const output = buildStellarAmazonAccountsText(rows);
+        res.setHeader("Content-Type", "text/plain; charset=utf-8");
+        res.setHeader("Content-Disposition", `attachment; filename="${filename}.txt"`);
         res.send(output);
     } catch (err) {
         console.error(err);

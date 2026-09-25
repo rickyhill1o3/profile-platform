@@ -10,18 +10,7 @@ function semicolonCsvCell(value) {
     return text;
 }
 
-function buildStellarAmazonAccountsCsv(accounts = []) {
-    const headers = [
-        'email',
-        'password',
-        'region',
-        'authenticatorKey',
-        'accountType',
-        'cvv',
-        'loginIp',
-        'loginMethod'
-    ];
-
+function buildStellarAmazonAccountsText(accounts = []) {
     const rows = (accounts || [])
         .map((account) => {
             const email = clean(account?.email || account?.username);
@@ -31,19 +20,18 @@ function buildStellarAmazonAccountsCsv(accounts = []) {
                 password,
                 clean(account?.region) || 'US',
                 clean(account?.authenticatorKey || account?.authenticator_key).replace(/\s+/g, ''),
-                clean(account?.accountType || account?.account_type),
+                'personal',
                 clean(account?.cvv),
-                clean(account?.loginIp || account?.login_ip),
-                clean(account?.loginMethod || account?.login_method)
+                '',
+                'request'
             ];
         })
         .filter(([email, password]) => email && password);
 
-    return [headers, ...rows]
-        .map((row) => row.map(semicolonCsvCell).join(';'))
-        .join('\r\n') + '\r\n';
+    if (!rows.length) return '';
+    return rows.map((row) => row.map(semicolonCsvCell).join(';')).join('\r\n') + '\r\n';
 }
 
 module.exports = {
-    buildStellarAmazonAccountsCsv
+    buildStellarAmazonAccountsText
 };

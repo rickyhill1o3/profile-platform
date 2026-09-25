@@ -5683,7 +5683,7 @@ async function initAdminStoreRunStatus() {
             const filename = promptForExportFilename(`stellar-accounts-amazon-active-${date}`);
             if (!filename) return;
             params.set('filename', filename);
-            await downloadExportFile(API + '/admin/export/stellar-amazon-accounts-csv?' + params.toString(), filename + '.csv');
+            await downloadExportFile(API + '/admin/export/stellar-amazon-accounts-txt?' + params.toString(), filename + '.txt');
         } catch (err) {
             if (err.message) alert(err.message);
         }
