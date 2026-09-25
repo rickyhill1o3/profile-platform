@@ -7,7 +7,7 @@ function loadTestHooks() {
   const filename = path.join(__dirname, '..', 'order-tracker.js');
   const source = fs.readFileSync(filename, 'utf8').replace(
     /module\.exports = \{ registerOrderTracker, scanAll, notifyCheckoutForOrderTracker \};\s*$/,
-    'module.exports = { __test: { detectStatus, detectStore, readableEmailText, isPokemonCenterPaymentAlert, safePokemonPaymentUrl, extractPokemonPaymentActionUrl, extractPokemonPaymentActionUrlFromText, parsePokemonCenterPaymentAlert, saveParsedMessage, POKEMON_CENTER_LIVE_DISCOVERY_SUBJECTS } };'
+    'module.exports = { __test: { detectStatus, detectStore, readableEmailText, isPokemonCenterPaymentAlert, isTargetPaymentAlert, isRetailerPaymentAlert, safePokemonPaymentUrl, safeTargetPaymentUrl, extractPokemonPaymentActionUrl, extractPokemonPaymentActionUrlFromText, extractTargetPaymentActionUrl, extractTargetPaymentActionUrlFromText, parsePokemonCenterPaymentAlert, parseTargetPaymentAlert, saveParsedMessage, POKEMON_CENTER_LIVE_DISCOVERY_SUBJECTS } };'
   );
   const module = { exports:{} };
   const sandbox = {
@@ -103,5 +103,62 @@ function fakeSupabase(database) { return { from:table => new Query(database, tab
   assert.strictEqual(database.retailer_account_alerts[0].mailbox_email, 'stickydeliverydc@gmail.com');
   assert.strictEqual(database.retailer_account_alerts[0].action_url, actionUrl);
 
-  console.log('pokemon-payment-alert tests passed');
+  const targetActionUrl='https://click.oe.target.com/?qs=opaque-target-payment-token';
+  const targetSubject='Please update your payment soon. Order #912003761272167.';
+  const targetText=`
+    We’re holding your order for now
+    Thanks for placing order #912003761272167 on Fri, Sep 11, 2026.
+    Your order is temporarily on hold. Just update the payment method before it's auto-canceled on Sun, Sep 27, 2026.
+    ${targetActionUrl}
+    Update payment
+  `;
+  const targetHtml=`<html><body>
+    <p>Your order is temporarily on hold. Just update the payment method before it's auto-canceled on <strong>Sun, Sep 27, 2026</strong>.</p>
+    <a href="${targetActionUrl}">Update payment</a>
+  </body></html>`;
+  const targetParsed={
+    subject:targetSubject, from:{text:'Target <orders@oe.target.com>'}, to:{text:'sullycallahan1@gmail.com'},
+    text:targetText, html:targetHtml, date:new Date('2026-09-25T05:10:59.000Z'), messageId:'target-payment-test'
+  };
+  const targetReadable=hooks.readableEmailText(targetParsed);
+  assert.strictEqual(hooks.detectStore(targetParsed.from.text, targetSubject, targetReadable), 'target');
+  assert.strictEqual(hooks.detectStatus(targetSubject, targetReadable), 'payment_needed');
+  assert.strictEqual(hooks.isTargetPaymentAlert('target', targetSubject, targetReadable), true);
+  assert.strictEqual(hooks.isRetailerPaymentAlert('target', targetSubject, targetReadable), true);
+  assert.strictEqual(hooks.extractTargetPaymentActionUrl(targetHtml), targetActionUrl);
+  assert.strictEqual(hooks.extractTargetPaymentActionUrlFromText(targetText), targetActionUrl);
+  assert.strictEqual(hooks.safeTargetPaymentUrl('https://evil.example/payment'), '');
+
+  const targetDetails=hooks.parseTargetPaymentAlert(targetSubject, targetReadable, targetHtml);
+  assert.strictEqual(targetDetails.order_number, '912003761272167');
+  assert.strictEqual(targetDetails.product_hint, 'Target order #912003761272167');
+  assert.strictEqual(targetDetails.deadline_text, 'Sun, Sep 27, 2026');
+  assert.strictEqual(targetDetails.action_url, targetActionUrl);
+
+  const targetDatabase={ email_messages:[], retailer_account_alerts:[] };
+  const targetResult=await hooks.saveParsedMessage(fakeSupabase(targetDatabase), {
+    user_id:'user-2', profile_id:'profile-2', email:'sullycallahan1@gmail.com', provider:{name:'gmail'}
+  }, targetParsed, 84);
+  assert.strictEqual(targetResult.saved, true);
+  assert.strictEqual(targetResult.status, 'payment_needed');
+  assert.strictEqual(targetResult.store, 'target');
+  assert.strictEqual(targetResult.order_number, '912003761272167');
+  assert.strictEqual(targetDatabase.email_messages[0].keep_forever, true);
+  assert.strictEqual(targetDatabase.retailer_account_alerts[0].store, 'target');
+  assert.strictEqual(targetDatabase.retailer_account_alerts[0].deadline_text, 'Sun, Sep 27, 2026');
+  assert.strictEqual(targetDatabase.retailer_account_alerts[0].action_url, targetActionUrl);
+
+  const projectRoot=path.resolve(__dirname, '..', '..');
+  const trackerSource=fs.readFileSync(path.join(projectRoot, 'backend', 'order-tracker.js'), 'utf8');
+  const dashboardSource=fs.readFileSync(path.join(projectRoot, 'frontend', 'script.js'), 'utf8');
+  const dashboardHtml=fs.readFileSync(path.join(projectRoot, 'frontend', 'dashboard.html'), 'utf8');
+  const orderTrackerSource=fs.readFileSync(path.join(projectRoot, 'frontend', 'order-tracker.js'), 'utf8');
+  const orderTrackerHtml=fs.readFileSync(path.join(projectRoot, 'frontend', 'order-tracker.html'), 'utf8');
+  assert.match(trackerSource, /subject\.ilike\.%update your payment%/, 'archived Target payment warnings must be recovered');
+  assert.match(dashboardSource, /Update payment on \$\{escapeHTML\(dashboardPaymentAlertRetailer\(alert\)\)\}/);
+  assert.match(orderTrackerSource, /Update payment on \$\{esc\(paymentAlertRetailer\(a\)\)\}/);
+  assert.match(dashboardHtml, /script\.js\?v=20260925-target-payment-alert/);
+  assert.match(orderTrackerHtml, /order-tracker\.js\?v=20260925-target-payment-alert/);
+
+  console.log('Pokemon Center and Target payment-alert tests passed');
 })().catch(error => { console.error(error); process.exitCode=1; });

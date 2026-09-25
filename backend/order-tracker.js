@@ -1028,6 +1028,14 @@ function detectStatus(subject, text) {
       (/unable to (?:authorize|reauthorize) your credit card for your preorder/.test(body) &&
        /update your payment information/.test(body))) return 'payment_needed';
 
+  // Target places an order on hold when its saved card cannot be charged. This must be
+  // classified before cancellation because the email also warns that the order will be
+  // auto-canceled in the future if the customer misses the payment-update deadline.
+  if (/please update your payment soon/.test(subj) ||
+      (/order is temporarily on hold/.test(body) &&
+       /update (?:the )?payment method/.test(body) &&
+       /auto-cancel(?:ed|led)/.test(body))) return 'payment_needed';
+
   if (/cancel(?:led|ed|ation)|unable to fulfill|we had to cancel/.test(subj) ||
       /(?:your|this|the) order (?:has been|was|is) cancel(?:led|ed)|we had to cancel (?:your )?order|unable to fulfill (?:your )?order/.test(body)) return 'canceled';
   if (/refund(?:ed)?|refund issued/.test(subj) || /refund (?:has been|was|is) issued|we(?:'|’)ve refunded|your refund/.test(body)) return 'refunded';
@@ -1059,6 +1067,14 @@ function isPokemonCenterPaymentAlert(store, subject, text) {
   return normalizeStoreKey(store) === 'pokemoncenter' && detectStatus(subject, text) === 'payment_needed';
 }
 
+function isTargetPaymentAlert(store, subject, text) {
+  return normalizeStoreKey(store) === 'target' && detectStatus(subject, text) === 'payment_needed';
+}
+
+function isRetailerPaymentAlert(store, subject, text) {
+  return isPokemonCenterPaymentAlert(store, subject, text) || isTargetPaymentAlert(store, subject, text);
+}
+
 function safePokemonPaymentUrl(value) {
   const raw = clean(value);
   if (!raw) return '';
@@ -1069,6 +1085,24 @@ function safePokemonPaymentUrl(value) {
     if (host === 'click.em.pokemon.com' || host === 'pokemoncenter.com' || host.endsWith('.pokemoncenter.com')) return parsed.toString();
   } catch (_) {}
   return '';
+}
+
+function safeTargetPaymentUrl(value) {
+  const raw = clean(value);
+  if (!raw) return '';
+  try {
+    const parsed = new URL(raw);
+    const host = lower(parsed.hostname);
+    if (parsed.protocol !== 'https:') return '';
+    if (host === 'target.com' || host.endsWith('.target.com')) return parsed.toString();
+  } catch (_) {}
+  return '';
+}
+
+function safeRetailerPaymentUrl(value, store) {
+  return normalizeStoreKey(store) === 'target'
+    ? safeTargetPaymentUrl(value)
+    : safePokemonPaymentUrl(value);
 }
 
 function extractPokemonPaymentActionUrl(html) {
@@ -1123,9 +1157,64 @@ function parsePokemonCenterPaymentAlert(subject, text, html = '') {
   };
 }
 
+function extractTargetPaymentActionUrl(html) {
+  if (!clean(html)) return '';
+  try {
+    const $ = cheerio.load(String(html));
+    let found = '';
+    $('a[href]').each((_, anchor) => {
+      if (found) return;
+      const label = clean($(anchor).text()).replace(/\s+/g, ' ').toLowerCase();
+      if (label !== 'update payment' && !label.includes('update payment method')) return;
+      found = safeTargetPaymentUrl($(anchor).attr('href'));
+    });
+    return found;
+  } catch (_) { return ''; }
+}
+
+function extractTargetPaymentActionUrlFromText(text) {
+  const flat = clean(text).replace(/\s+/g, ' ');
+  const afterLabel = flat.match(/update payment(?: method)?\s+\[(https:\/\/[^\]\s]+)\]/i);
+  if (afterLabel?.[1]) return safeTargetPaymentUrl(afterLabel[1]);
+  const beforeLabel = flat.match(/(https:\/\/[^\s]+)\s+update payment(?: method)?\b/i);
+  return safeTargetPaymentUrl(clean(beforeLabel?.[1] || '').replace(/[\])>"']+$/, ''));
+}
+
+function parseTargetPaymentAlert(subject, text, html = '') {
+  const readable = clean(text).replace(/\r/g, '');
+  const flat = readable.replace(/\s+/g, ' ').trim();
+  const orderNumber = extractOrderNumber('target', subject, flat);
+  const deadlineMatch = flat.match(/auto-cancel(?:ed|led)\s+on\s+([A-Za-z]{3,9},?\s+[A-Za-z]{3,9}\s+\d{1,2},\s+\d{4})/i);
+  const deadlineText = clean(deadlineMatch?.[1] || '').replace(/\s+/g, ' ');
+  return {
+    alert_type:'payment_needed',
+    severity:'urgent',
+    subject:clean(subject),
+    order_number:orderNumber || null,
+    product_hint:orderNumber ? `Target order #${orderNumber}` : 'Target order payment needs attention',
+    deadline_text:deadlineText.slice(0,250),
+    action_url:extractTargetPaymentActionUrl(html) || extractTargetPaymentActionUrlFromText(readable),
+    body_excerpt:flat.slice(0,1200)
+  };
+}
+
+function parseRetailerPaymentAlert(store, subject, text, html = '') {
+  return normalizeStoreKey(store) === 'target'
+    ? parseTargetPaymentAlert(subject, text, html)
+    : parsePokemonCenterPaymentAlert(subject, text, html);
+}
+
 function pokemonPaymentAlertDedupeKey(mailboxEmail, productHint) {
   const normalizedProduct = lower(productHint).replace(/[^a-z0-9]+/g, ' ').trim();
   return crypto.createHash('sha256').update(`${lower(mailboxEmail)}|${normalizedProduct}`).digest('hex');
+}
+
+function retailerPaymentAlertDedupeKey(store, mailboxEmail, details = {}) {
+  if (normalizeStoreKey(store) === 'target') {
+    const orderKey = normalizeOrderRef(details.order_number || '') || lower(details.product_hint);
+    return crypto.createHash('sha256').update(`target|${lower(mailboxEmail)}|${orderKey}`).digest('hex');
+  }
+  return pokemonPaymentAlertDedupeKey(mailboxEmail, details.product_hint);
 }
 
 function hasLegacyConfirmationReceipt(order = {}) {
@@ -2361,13 +2450,13 @@ function optionalPaymentAlertSchemaMissing(error) {
   return /retailer_account_alerts|relation .* does not exist|schema cache|column .* does not exist/i.test(String(error?.message || error || ''));
 }
 
-async function upsertPokemonCenterPaymentAlert(supabase, account, parsed, archivedEmail = null) {
+async function upsertRetailerPaymentAlert(supabase, account, parsed, archivedEmail = null) {
   const subject = clean(parsed?.subject);
   const text = readableEmailText(parsed || {});
   const store = detectStore(parsed?.from?.text || parsed?.from || '', subject, text);
-  if (!isPokemonCenterPaymentAlert(store, subject, text)) return null;
+  if (!isRetailerPaymentAlert(store, subject, text)) return null;
 
-  const details = parsePokemonCenterPaymentAlert(subject, text, parsed?.html || '');
+  const details = parseRetailerPaymentAlert(store, subject, text, parsed?.html || '');
   const userId = account.archive_user_id || account.user_id;
   const mailboxEmail = lower(account.email);
   const messageId = clean(parsed?.messageId) || `${mailboxEmail}:${Number(archivedEmail?.imap_uid || 0)}`;
@@ -2377,8 +2466,8 @@ async function upsertPokemonCenterPaymentAlert(supabase, account, parsed, archiv
     profile_id:account.profile_id || null,
     email_id:archivedEmail?.id || null,
     message_id:messageId,
-    dedupe_key:pokemonPaymentAlertDedupeKey(mailboxEmail, details.product_hint),
-    store:'pokemoncenter',
+    dedupe_key:retailerPaymentAlertDedupeKey(store, mailboxEmail, details),
+    store:normalizeStoreKey(store),
     alert_type:details.alert_type,
     severity:details.severity,
     mailbox_email:mailboxEmail,
@@ -2397,28 +2486,28 @@ async function upsertPokemonCenterPaymentAlert(supabase, account, parsed, archiv
     return result.data || row;
   } catch (error) {
     if (optionalPaymentAlertSchemaMissing(error)) {
-      console.warn('[POKEMON PAYMENT ALERT] Run backend/sql/POKEMON_CENTER_PAYMENT_ALERTS.sql to enable the alert center.');
+      console.warn('[RETAILER PAYMENT ALERT] Run backend/sql/POKEMON_CENTER_PAYMENT_ALERTS.sql to enable the alert center.');
       return null;
     }
     throw error;
   }
 }
 
-async function syncPokemonCenterPaymentAlertsFromArchive(supabase, userId) {
+async function syncRetailerPaymentAlertsFromArchive(supabase, userId) {
   // A payment warning may already be behind the mailbox UID checkpoint because an older build
   // archived it as "unknown". Rehydrate those exact subjects from Email Center on each alert-list
   // load. The upsert is idempotent and does not change an alert the user already resolved.
   let result = await supabase.from('email_messages')
     .select('id,user_id,message_id,imap_uid,mailbox_email,from_text,to_text,subject,received_at,store,email_type,snippet,body_text,body_html,source_type')
     .eq('user_id', userId)
-    .ilike('subject', '%ACTION REQUIRED on Your Preorder%')
+    .or('subject.ilike.%ACTION REQUIRED on Your Preorder%,subject.ilike.%update your payment%')
     .order('received_at', { ascending:false })
     .limit(250);
   if (result.error && /body_text|body_html|source_type|column .* does not exist|schema cache/i.test(String(result.error.message || ''))) {
     result = await supabase.from('email_messages')
       .select('id,user_id,message_id,imap_uid,mailbox_email,from_text,to_text,subject,received_at,store,email_type,snippet')
       .eq('user_id', userId)
-      .ilike('subject', '%ACTION REQUIRED on Your Preorder%')
+      .or('subject.ilike.%ACTION REQUIRED on Your Preorder%,subject.ilike.%update your payment%')
       .order('received_at', { ascending:false })
       .limit(250);
   }
@@ -2431,7 +2520,7 @@ async function syncPokemonCenterPaymentAlertsFromArchive(supabase, userId) {
   for (const email of result.data || []) {
     const text = archivedRetailerReadableText(email);
     const store = detectStore(email.from_text || '', email.subject || '', text);
-    if (!isPokemonCenterPaymentAlert(store, email.subject || '', text)) continue;
+    if (!isRetailerPaymentAlert(store, email.subject || '', text)) continue;
     const account = {
       user_id:email.user_id || userId,
       archive_user_id:email.user_id || userId,
@@ -2443,12 +2532,12 @@ async function syncPokemonCenterPaymentAlertsFromArchive(supabase, userId) {
       subject:email.subject || '', from:{ text:email.from_text || '' }, to:{ text:email.to_text || '' },
       text, html:email.body_html || null, date:new Date(email.received_at || Date.now()), messageId:email.message_id
     };
-    const alert = await upsertPokemonCenterPaymentAlert(supabase, account, parsed, email);
+    const alert = await upsertRetailerPaymentAlert(supabase, account, parsed, email);
     if (alert) saved++;
     if (lower(email.email_type) !== 'payment_needed') {
       try {
         await supabase.from('email_messages').update({
-          store:'pokemoncenter', email_type:'payment_needed', keep_forever:true,
+          store:normalizeStoreKey(store), email_type:'payment_needed', keep_forever:true,
           is_order_related:true, updated_at:new Date().toISOString()
         }).eq('id', email.id);
       } catch (_) {}
@@ -2457,7 +2546,7 @@ async function syncPokemonCenterPaymentAlertsFromArchive(supabase, userId) {
   return { checked:(result.data || []).length, saved };
 }
 
-async function listOpenPokemonCenterPaymentAlerts(supabase, userId) {
+async function listOpenRetailerPaymentAlerts(supabase, userId) {
   try {
     const result = await supabase.from('retailer_account_alerts').select('*')
       .eq('user_id', userId).eq('state','open')
@@ -2467,7 +2556,7 @@ async function listOpenPokemonCenterPaymentAlerts(supabase, userId) {
     for (const alert of result.data || []) {
       const key = clean(alert.dedupe_key) || clean(alert.id);
       if (!key) continue;
-      if (!groups.has(key)) groups.set(key, { ...alert, action_url:safePokemonPaymentUrl(alert.action_url), reminder_count:1 });
+      if (!groups.has(key)) groups.set(key, { ...alert, action_url:safeRetailerPaymentUrl(alert.action_url, alert.store), reminder_count:1 });
       else groups.get(key).reminder_count += 1;
     }
     return { alerts:[...groups.values()], total_open:(result.data || []).length, migration_required:false };
@@ -2873,15 +2962,17 @@ async function saveParsedMessage(supabase, account, parsed, uid, adjustCredits =
   }
   const primaryOrderNumber = orderNumbers[0] || '';
   let archivedEmail = await archiveEmailMetadata(supabase, account, parsed, uid, { store, status, orderNumber: primaryOrderNumber || null });
-  if (isPokemonCenterPaymentAlert(store, subject, text)) {
-    const alert = await upsertPokemonCenterPaymentAlert(supabase, account, parsed, archivedEmail);
+  if (isRetailerPaymentAlert(store, subject, text)) {
+    const parsedAlert = parseRetailerPaymentAlert(store, subject, text, parsed.html || '');
+    const alert = await upsertRetailerPaymentAlert(supabase, account, parsed, archivedEmail);
     return {
       saved:true,
       alert_saved:Boolean(alert),
       status:'payment_needed',
+      store:normalizeStoreKey(store),
       mailbox_email:lower(account.email),
-      product_hint:alert?.product_hint || parsePokemonCenterPaymentAlert(subject, text, parsed.html || '').product_hint,
-      order_number:null,
+      product_hint:alert?.product_hint || parsedAlert.product_hint,
+      order_number:normalizeStoreKey(store) === 'target' ? (parsedAlert.order_number || primaryOrderNumber || null) : null,
       email_id:archivedEmail?.id || null,
       alert_id:alert?.id || null
     };
@@ -4915,11 +5006,10 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
 
   app.get('/orders/account-alerts', auth, async (req, res) => {
     try {
-      // Recover warnings archived by builds that predate the payment-alert classifier, then list
-      // the user's unresolved groups. A daily Pokemon reminder becomes another occurrence in the
-      // same mailbox/product group instead of another guessed order assignment.
-      const sync = await syncPokemonCenterPaymentAlertsFromArchive(supabase, req.user_id);
-      const list = await listOpenPokemonCenterPaymentAlerts(supabase, req.user_id);
+      // Recover Target and Pokemon Center warnings archived by older builds, then list the user's
+      // unresolved groups. Repeated reminders for one order/preorder stay grouped together.
+      const sync = await syncRetailerPaymentAlertsFromArchive(supabase, req.user_id);
+      const list = await listOpenRetailerPaymentAlerts(supabase, req.user_id);
       res.json({ success:true, ...list, archive_sync:sync });
     } catch (error) { res.status(500).json({ error:error.message || String(error) }); }
   });
@@ -4938,7 +5028,7 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
       if (result.error) throw result.error;
       res.json({ success:true, state:'resolved' });
     } catch (error) {
-      if (optionalPaymentAlertSchemaMissing(error)) return res.status(503).json({ error:'Run the Pokémon Center payment-alert database migration first.' });
+      if (optionalPaymentAlertSchemaMissing(error)) return res.status(503).json({ error:'Run the retailer payment-alert database migration first.' });
       res.status(500).json({ error:error.message || String(error) });
     }
   });
@@ -4959,10 +5049,15 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
       const body = email?.body_html
         ? sanitizeReceiptHtml(email.body_html)
         : `<pre>${htmlEscape(email?.body_text || email?.snippet || alert.body_excerpt || 'No stored email body is available.')}</pre>`;
-      const actionUrl = safePokemonPaymentUrl(alert.action_url);
-      res.type('html').send(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Pokémon Center payment action</title><style>body{font-family:Arial,sans-serif;max-width:980px;margin:28px auto;padding:18px;color:#172033}.notice{background:#fff1f2;border:2px solid #ef4444;border-radius:16px;padding:18px;margin-bottom:22px}.notice h1{margin:0 0 10px;color:#b91c1c}.meta{display:grid;gap:7px}.actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:15px}.action{display:inline-block;background:#b91c1c;color:white;text-decoration:none;border-radius:10px;padding:11px 15px;font-weight:700}.email{border-top:1px solid #cbd5e1;padding-top:20px;overflow-wrap:anywhere}pre{white-space:pre-wrap;font:14px/1.5 Arial,sans-serif}@media print{.actions{display:none}}</style></head><body><section class="notice"><h1>Payment action required</h1><div class="meta"><div><b>Mailbox:</b> ${htmlEscape(alert.mailbox_email)}</div><div><b>Product hint:</b> ${htmlEscape(alert.product_hint)}</div><div><b>Deadline:</b> ${htmlEscape(alert.deadline_text || 'Open the email for the deadline.')}</div><div><b>Received:</b> ${htmlEscape(alert.received_at || '')}</div></div><p>Pokémon Center did not include an order number in this email. The payment link can reveal the affected order on Pokémon Center.</p><div class="actions">${actionUrl ? `<a class="action" href="${htmlEscape(actionUrl)}" target="_blank" rel="noopener noreferrer">Update payment on Pokémon Center</a>` : ''}<button onclick="print()">Print email</button></div></section><main class="email">${body}</main></body></html>`);
+      const store = normalizeStoreKey(alert.store);
+      const retailerName = store === 'target' ? 'Target' : 'Pokémon Center';
+      const actionUrl = safeRetailerPaymentUrl(alert.action_url, store);
+      const helpText = store === 'target'
+        ? 'Target placed this order on hold. Update its payment method before the displayed auto-cancel date.'
+        : 'Pokémon Center did not include an order number in this email. The payment link can reveal the affected order.';
+      res.type('html').send(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${htmlEscape(retailerName)} payment action</title><style>body{font-family:Arial,sans-serif;max-width:980px;margin:28px auto;padding:18px;color:#172033}.notice{background:#fff1f2;border:2px solid #ef4444;border-radius:16px;padding:18px;margin-bottom:22px}.notice h1{margin:0 0 10px;color:#b91c1c}.meta{display:grid;gap:7px}.actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:15px}.action{display:inline-block;background:#b91c1c;color:white;text-decoration:none;border-radius:10px;padding:11px 15px;font-weight:700}.email{border-top:1px solid #cbd5e1;padding-top:20px;overflow-wrap:anywhere}pre{white-space:pre-wrap;font:14px/1.5 Arial,sans-serif}@media print{.actions{display:none}}</style></head><body><section class="notice"><h1>${htmlEscape(retailerName)} payment action required</h1><div class="meta"><div><b>Mailbox:</b> ${htmlEscape(alert.mailbox_email)}</div><div><b>Order / item:</b> ${htmlEscape(alert.product_hint)}</div><div><b>Update payment by:</b> ${htmlEscape(alert.deadline_text || 'Open the email for the deadline.')}</div><div><b>Warning received:</b> ${htmlEscape(alert.received_at || '')}</div></div><p>${htmlEscape(helpText)}</p><div class="actions">${actionUrl ? `<a class="action" href="${htmlEscape(actionUrl)}" target="_blank" rel="noopener noreferrer">Update payment on ${htmlEscape(retailerName)}</a>` : ''}<button onclick="print()">Print email</button></div></section><main class="email">${body}</main></body></html>`);
     } catch (error) {
-      if (optionalPaymentAlertSchemaMissing(error)) return res.status(503).send('Run the Pokémon Center payment-alert database migration first.');
+      if (optionalPaymentAlertSchemaMissing(error)) return res.status(503).send('Run the retailer payment-alert database migration first.');
       res.status(500).send(htmlEscape(error.message || String(error)));
     }
   });

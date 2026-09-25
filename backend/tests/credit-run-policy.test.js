@@ -82,7 +82,7 @@ assert.match(frontendSource, /Stores you paused yourself stay paused/);
 assert.match(frontendSource, /Super admin account — never auto-paused for credits/);
 assert.match(adminHtml, /<th>Run Status<\/th>/);
 assert.match(dashboardHtml, /id="creditsBalanceStat"[\s\S]*?href="buy-credits\.html">Buy credits →<\/a>/, 'the dashboard credit card must provide a direct purchase link');
-assert.match(dashboardHtml, /script\.js\?v=20260923-super-admin-credit-exempt/, 'the dashboard must request the super-admin credit-exemption frontend instead of a cached older script');
+assert.match(dashboardHtml, /script\.js\?v=20260925-target-payment-alert/, 'the dashboard must request the current frontend instead of a cached older script');
 
 assert.match(
     serverSource,

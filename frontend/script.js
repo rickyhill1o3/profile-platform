@@ -231,7 +231,16 @@ function token() {
 }
 
 let dashboardPaymentAlertTimer = null;
-async function loadDashboardPokemonPaymentAlerts() {
+function dashboardPaymentAlertRetailer(alert) {
+    return String(alert?.store || '').toLowerCase() === 'target' ? 'Target' : 'Pokémon Center';
+}
+function dashboardPaymentAlertHelp(alert) {
+    if (dashboardPaymentAlertRetailer(alert) === 'Target') {
+        return `Order payment must be updated before Target auto-cancels it${alert.deadline_text ? ` on ${escapeHTML(alert.deadline_text)}` : ''}.`;
+    }
+    return `<b>No order number was included.</b> Check every matching preorder in ${escapeHTML(alert.mailbox_email || 'this mailbox')}.`;
+}
+async function loadDashboardRetailerPaymentAlerts() {
     const center = document.getElementById('dashboardPaymentAlertCenter');
     const list = document.getElementById('dashboardPaymentAlertList');
     const count = document.getElementById('dashboardPaymentAlertCount');
@@ -244,18 +253,18 @@ async function loadDashboardPokemonPaymentAlerts() {
     center.hidden = alerts.length === 0;
     count.textContent = String(alerts.length);
     document.title = alerts.length ? `(${alerts.length}) Payment action required · User Dashboard` : 'User Dashboard';
-    list.innerHTML = alerts.map(alert => `<article class="account-payment-alert-item"><h3>${escapeHTML(alert.product_hint || 'Pokémon Center preorder')}</h3><div class="account-payment-alert-meta"><div><small>Received by mailbox</small><b>${escapeHTML(alert.mailbox_email || 'Unknown mailbox')}</b></div><div><small>Update by</small><b>${escapeHTML(alert.deadline_text || 'Open the email for the deadline')}</b></div><div><small>Warning received</small><b>${alert.received_at ? formatDateTime(alert.received_at) : '—'}</b>${Number(alert.reminder_count || 1) > 1 ? `<br><small>${Number(alert.reminder_count)} daily reminders received</small>` : ''}</div></div><p><b>No order number was included.</b> Check every matching preorder in ${escapeHTML(alert.mailbox_email || 'this mailbox')}.</p><div class="account-payment-alert-actions">${alert.action_url ? `<a class="btn account-payment-alert-action" href="${escapeHTML(alert.action_url)}" target="_blank" rel="noopener noreferrer">Update payment on Pokémon Center</a>` : ''}<button class="btn" type="button" onclick="openDashboardPaymentAlertEmail('${escapeHTML(alert.id)}')">View payment email</button><button class="btn" type="button" onclick="resolveDashboardPaymentAlert('${escapeHTML(alert.id)}')">Mark fixed — payment updated</button></div></article>`).join('');
+    list.innerHTML = alerts.map(alert => `<article class="account-payment-alert-item"><p class="eyebrow">${escapeHTML(dashboardPaymentAlertRetailer(alert))}</p><h3>${escapeHTML(alert.product_hint || 'Order payment needs attention')}</h3><div class="account-payment-alert-meta"><div><small>Received by mailbox</small><b>${escapeHTML(alert.mailbox_email || 'Unknown mailbox')}</b></div><div><small>Update payment by</small><b>${escapeHTML(alert.deadline_text || 'Open the email for the deadline')}</b></div><div><small>Warning received</small><b>${alert.received_at ? formatDateTime(alert.received_at) : '—'}</b>${Number(alert.reminder_count || 1) > 1 ? `<br><small>${Number(alert.reminder_count)} reminders received</small>` : ''}</div></div><p>${dashboardPaymentAlertHelp(alert)}</p><div class="account-payment-alert-actions">${alert.action_url ? `<a class="btn account-payment-alert-action" href="${escapeHTML(alert.action_url)}" target="_blank" rel="noopener noreferrer">Update payment on ${escapeHTML(dashboardPaymentAlertRetailer(alert))}</a>` : ''}<button class="btn" type="button" onclick="openDashboardPaymentAlertEmail('${escapeHTML(alert.id)}')">View payment email</button><button class="btn" type="button" onclick="resolveDashboardPaymentAlert('${escapeHTML(alert.id)}')">Mark fixed — payment updated</button></div></article>`).join('');
     if (wasHidden && alerts.length) requestAnimationFrame(() => center.focus({ preventScroll:false }));
 
     let seen = [];
-    try { seen = JSON.parse(sessionStorage.getItem('pokemonPaymentAlertIds') || '[]'); } catch (_) { }
+    try { seen = JSON.parse(sessionStorage.getItem('retailerPaymentAlertIds') || '[]'); } catch (_) { }
     const known = new Set(Array.isArray(seen) ? seen : []);
     const fresh = alerts.filter(alert => alert?.id && !known.has(String(alert.id)));
     if (fresh.length && typeof Notification !== 'undefined' && Notification.permission === 'granted') {
         const first = fresh[0];
-        new Notification('Pokémon Center payment action required', { body:`${first.mailbox_email || 'Mailbox'} · ${first.product_hint || 'Preorder payment needs attention'}` });
+        new Notification(`${dashboardPaymentAlertRetailer(first)} payment action required`, { body:`${first.mailbox_email || 'Mailbox'} · ${first.product_hint || 'Order payment needs attention'}` });
     }
-    try { sessionStorage.setItem('pokemonPaymentAlertIds', JSON.stringify(alerts.map(alert => String(alert.id)).filter(Boolean))); } catch (_) { }
+    try { sessionStorage.setItem('retailerPaymentAlertIds', JSON.stringify(alerts.map(alert => String(alert.id)).filter(Boolean))); } catch (_) { }
 }
 
 window.openDashboardPaymentAlertEmail = async function (id) {
@@ -267,13 +276,13 @@ window.openDashboardPaymentAlertEmail = async function (id) {
 };
 
 window.resolveDashboardPaymentAlert = async function (id) {
-    if (!confirm('Only dismiss this warning after the payment information has been updated or the preorder has been canceled. Continue?')) return;
+    if (!confirm('Only dismiss this warning after the payment information has been updated or the retailer order has been canceled. Continue?')) return;
     const response = await fetch(API + `/orders/account-alerts/${encodeURIComponent(id)}/resolve`, {
         method:'POST', headers:{ 'Content-Type':'application/json', Authorization:'Bearer ' + token() }, body:'{}'
     });
     const data = await response.json().catch(() => ({}));
     if (!response.ok) return alert(data.error || 'The payment warning could not be resolved.');
-    await loadDashboardPokemonPaymentAlerts();
+    await loadDashboardRetailerPaymentAlerts();
 };
 
 function currentUser() {
@@ -5861,8 +5870,8 @@ document.addEventListener("DOMContentLoaded", async () => {
         document.getElementById("generalProfilesPanel") ||
         document.getElementById("raffleProfilesPanel")
     ) {
-        try { await loadDashboardPokemonPaymentAlerts(); } catch (err) { console.error('Pokemon payment alerts failed:', err); }
-        if (!dashboardPaymentAlertTimer) dashboardPaymentAlertTimer = setInterval(() => loadDashboardPokemonPaymentAlerts().catch(() => {}), 60000);
+        try { await loadDashboardRetailerPaymentAlerts(); } catch (err) { console.error('Retailer payment alerts failed:', err); }
+        if (!dashboardPaymentAlertTimer) dashboardPaymentAlertTimer = setInterval(() => loadDashboardRetailerPaymentAlerts().catch(() => {}), 60000);
         initUserDashboardNavigation();
         await loadProfiles();
         try { await loadStoreRunStatusPanel(); } catch (err) { console.error("Store run status failed:", err); }
