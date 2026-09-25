@@ -192,6 +192,11 @@ function fakeSupabase(database) {
   assert(serverSource.includes('order.metadata?.email_quantity'), 'verified Discord success must prefer the email quantity');
   assert(serverSource.includes('order.metadata?.amazon_order_number'), 'verified Discord success must prefer the real Amazon order number');
   assert(serverSource.includes("routingMode: 'public_and_admin_only'"), 'verified success must go to the user/admin checkout destinations after the private early alert');
+  assert(serverSource.includes('async function resolveVerifiedAmazonCreditCharge'), 'Amazon verification must have a fresh catalog credit resolver');
+  assert(serverSource.includes("source: hasCurrentWebsiteRule ? 'website_catalog_at_email_verification' : 'webhook_provisional_fallback'"), 'the current website catalog must override provisional webhook credits');
+  assert(serverSource.includes('const verifiedCreditRule = await resolveVerifiedAmazonCreditCharge(serviceOrder);'), 'the email-verification finalizer must recalculate the credit rule before charging');
+  assert(serverSource.includes('provisional_credits_before_email_verification'), 'the original provisional charge must remain in metadata for audit');
+  assert(serverSource.includes('Quantity is intentionally not multiplied'), 'Amazon checkout quantity must not multiply the configured per-checkout credit rule');
   console.log('Amazon and Macy\'s email recovery tests passed');
 })().catch(error => {
   console.error(error);

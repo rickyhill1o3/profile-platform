@@ -1284,6 +1284,46 @@ async function resolveOrderCreditCost(payload) {
     return { credits: 0, productMatch, countdownMatch, pokemonMultiItemMatch };
 }
 
+async function resolveVerifiedAmazonCreditCharge(serviceOrder = {}) {
+    const rawPayload = serviceOrder.raw_payload && typeof serviceOrder.raw_payload === 'object'
+        ? serviceOrder.raw_payload
+        : {};
+    const normalized = normalizeIncomingOrderPayload(rawPayload);
+    const lookup = {
+        ...rawPayload,
+        ...normalized,
+        // The saved order columns are the normalized values captured from the checkout webhook.
+        // Prefer them over a later re-parse of the raw Discord payload so the current catalog is
+        // queried by the exact retailer and SKU that were stored with this checkout.
+        site: String(serviceOrder.site || normalized.site || 'amazon').trim().toLowerCase(),
+        sku: String(serviceOrder.sku || normalized.sku || '').trim(),
+        product_name: String(serviceOrder.product_name || normalized.product_name || '').trim(),
+        countdown_id: serviceOrder.countdown_id || normalized.countdown_id || null
+    };
+    const resolved = await resolveOrderCreditCost(lookup);
+    const storedPendingCredits = asWholeCredits(
+        serviceOrder.metadata?.pending_credits_to_charge ?? serviceOrder.metadata?.requested_credits,
+        0
+    );
+    const currentCatalogCredits = asWholeCredits(resolved.credits, 0);
+    const hasCurrentWebsiteRule = Boolean(
+        resolved.productMatch?.product?.id ||
+        resolved.countdownMatch?.countdownProduct?.id ||
+        resolved.countdownMatch?.countdown?.id ||
+        (resolved.pokemonMultiItemMatch?.items || []).some(item => item?.matched_product_id)
+    );
+
+    return {
+        credits: hasCurrentWebsiteRule ? currentCatalogCredits : storedPendingCredits,
+        current_catalog_credits: hasCurrentWebsiteRule ? currentCatalogCredits : null,
+        provisional_credits: storedPendingCredits,
+        source: hasCurrentWebsiteRule ? 'website_catalog_at_email_verification' : 'webhook_provisional_fallback',
+        matched_product_id: resolved.productMatch?.product?.id || null,
+        matched_product_sku: resolved.productMatch?.product?.sku || lookup.sku || null,
+        matched_product_name: resolved.productMatch?.product?.product_name || lookup.product_name || null
+    };
+}
+
 function normalizeFieldLabel(value = "") {
     return String(value || "")
         .toLowerCase()
@@ -11754,20 +11794,41 @@ registerOrderTracker({
         if (!reservation.data) return { already_verified: true, reservation_failed: true, order: serviceOrder };
 
         metadata = reservationMetadata;
-        const credits = asWholeCredits(metadata.pending_credits_to_charge ?? metadata.requested_credits, 0);
-        let balanceAfter = await getUserCreditBalance(serviceOrder.user_id);
         try {
+            // Amazon's webhook is only provisional. Re-read the website catalog after a real
+            // confirmation email has been matched so a stale webhook value (for example 10
+            // credits) cannot override the exact Amazon SKU's current rule (for example 4
+            // credits). Quantity is intentionally not multiplied: catalog credit_cost is the
+            // charge for this checkout.
+            const verifiedCreditRule = await resolveVerifiedAmazonCreditCharge(serviceOrder);
+            const credits = verifiedCreditRule.credits;
+            let balanceAfter = await getUserCreditBalance(serviceOrder.user_id);
             if (credits > 0) {
                 balanceAfter = await adjustUserCredits({
                     userId: serviceOrder.user_id, delta: -credits, reason: 'amazon_email_verified_checkout',
                     note: `Credits charged after Amazon email verification ${amazonOrderNumber}`,
-                    metadata: { source_order_id: serviceOrder.id, amazon_order_number: amazonOrderNumber, matched_email_message_id: messageId },
+                    metadata: {
+                        source_order_id: serviceOrder.id,
+                        amazon_order_number: amazonOrderNumber,
+                        matched_email_message_id: messageId,
+                        credit_rule_source: verifiedCreditRule.source,
+                        provisional_credits: verifiedCreditRule.provisional_credits,
+                        current_catalog_credits: verifiedCreditRule.current_catalog_credits,
+                        matched_product_id: verifiedCreditRule.matched_product_id,
+                        matched_product_sku: verifiedCreditRule.matched_product_sku
+                    },
                     orderId: serviceOrder.id
                 });
             }
             const updatedMetadata = { ...metadata, confirmation_status: 'confirmed', email_verification_required: false,
                 email_verified_at: eventAt, matched_email_message_id: messageId, amazon_order_number: amazonOrderNumber,
                 email_total: emailTotal, email_quantity: emailQuantity, pending_credits_to_charge: 0,
+                provisional_credits_before_email_verification: verifiedCreditRule.provisional_credits,
+                verified_catalog_credits: verifiedCreditRule.current_catalog_credits,
+                verified_credit_rule_source: verifiedCreditRule.source,
+                verified_catalog_product_id: verifiedCreditRule.matched_product_id,
+                verified_catalog_sku: verifiedCreditRule.matched_product_sku,
+                verified_catalog_product_name: verifiedCreditRule.matched_product_name,
                 amazon_webhook_reference: serviceOrder.external_order_id || null,
                 amazon_webhook_quantity: metadata.quantity || null,
                 ...(finalLifecycleStatus !== 'confirmed' ? { confirmed_before_final_status:true, final_lifecycle_status:finalLifecycleStatus } : {}) };
