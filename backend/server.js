@@ -4291,9 +4291,16 @@ async function sendDiscordWebhookToTarget({
     }
 
     const checkoutItems = extractCheckoutLineItems(payload);
-    const totalQuantity = checkoutItems.length
+    let totalQuantity = checkoutItems.length
         ? checkoutItems.reduce((sum, item) => sum + (Number.isFinite(Number(item.quantity)) ? Math.max(1, Math.round(Number(item.quantity))) : 1), 0)
         : (Number(normalized.quantity) || 1);
+    // Stellar's Amazon webhook quantity is the attempted/task quantity and can be different
+    // from what Amazon actually accepted. Once IMAP verifies the receipt, the email quantity
+    // is authoritative for the user-facing confirmation message.
+    const verifiedAmazonQuantity = Number(order.metadata?.email_quantity);
+    if (order.metadata?.email_verified_at && Number.isFinite(verifiedAmazonQuantity) && verifiedAmazonQuantity > 0) {
+        totalQuantity = Math.max(1, Math.round(verifiedAmazonQuantity));
+    }
     const totalPriceNumber = checkoutItems.reduce((sum, item) => {
         const price = Number(item.priceNumber);
         const qty = Number.isFinite(Number(item.quantity)) ? Math.max(1, Math.round(Number(item.quantity))) : 1;
@@ -4366,8 +4373,13 @@ async function sendDiscordWebhookToTarget({
     if (normalized.sku) {
         embed.fields.push({ name: 'SKU', value: spoilerDiscordValue(normalized.sku), inline: true });
     }
-    if (includeSensitive && (normalized.order_number || normalized.external_order_id || order.external_order_id)) {
-        embed.fields.push({ name: 'Order ID', value: spoilerDiscordValue(normalized.order_number || normalized.external_order_id || order.external_order_id), inline: true });
+    const verifiedAmazonOrderId = String(order.metadata?.amazon_order_number || '').trim();
+    const displayedOrderId = verifiedAmazonOrderId || normalized.order_number || normalized.external_order_id || order.external_order_id;
+    // A verified Amazon number belongs to the receipt that triggered this user notification,
+    // so show it (behind a Discord spoiler) even though ordinary non-super-admin messages hide
+    // webhook order references. The provisional Stellar ID is never shown as the final order ID.
+    if ((includeSensitive || (order.metadata?.email_verified_at && verifiedAmazonOrderId)) && displayedOrderId) {
+        embed.fields.push({ name: 'Order ID', value: spoilerDiscordValue(displayedOrderId), inline: true });
     }
     if (fraudStatus) {
         embed.fields.push({ name: 'Fraud Status', value: fraudStatus, inline: true });
@@ -11756,6 +11768,8 @@ registerOrderTracker({
             const updatedMetadata = { ...metadata, confirmation_status: 'confirmed', email_verification_required: false,
                 email_verified_at: eventAt, matched_email_message_id: messageId, amazon_order_number: amazonOrderNumber,
                 email_total: emailTotal, email_quantity: emailQuantity, pending_credits_to_charge: 0,
+                amazon_webhook_reference: serviceOrder.external_order_id || null,
+                amazon_webhook_quantity: metadata.quantity || null,
                 ...(finalLifecycleStatus !== 'confirmed' ? { confirmed_before_final_status:true, final_lifecycle_status:finalLifecycleStatus } : {}) };
             const updatedResult = await supabase.from('orders').update({ status: finalLifecycleStatus, external_order_id: amazonOrderNumber, credits_charged: credits, metadata: updatedMetadata }).eq('id', serviceOrder.id).eq('status', 'confirming_email').select().single();
             if (updatedResult.error) throw updatedResult.error;

@@ -31,8 +31,8 @@ const AMAZON_GHOST_GRACE_MS = Math.max(10 * 60 * 1000, Number(process.env.AMAZON
 // message to the nearest unused checkout for that exact mailbox. Keep the window bounded so two
 // unrelated drops on the same account cannot be joined merely because they happened on the same day.
 const AMAZON_EMAIL_MATCH_WINDOW_MS = Math.max(
-  15 * 60 * 1000,
-  Math.min(24 * 60 * 60 * 1000, Number(process.env.AMAZON_EMAIL_MATCH_WINDOW_MS || 2 * 60 * 60 * 1000))
+  30 * 60 * 1000,
+  Math.min(24 * 60 * 60 * 1000, Number(process.env.AMAZON_EMAIL_MATCH_WINDOW_MS || 6 * 60 * 60 * 1000))
 );
 const MACYS_EMAIL_MATCH_WINDOW_MS = Math.max(
   30 * 60 * 1000,
@@ -112,7 +112,9 @@ function rawMessageLooksLikeAmazonConfirmation(envelope = {}, source = null) {
   const header = lower(raw.slice(0, 40000));
   const amazonIdentity = /(?:^|[.@\s-])amazon(?:\.com)?\b/.test(lower(addresses.join(' '))) ||
     /(?:from|sender):[^\r\n]*@(?:[^\s>]+\.)?amazon\.(?:com|ca|co\.uk)\b/i.test(raw.slice(0, 20000));
-  const confirmationSubject = /\bordered:|order confirmation|your amazon(?:\.com)? order|thanks for your order|thank you for your order/.test(subject);
+  // Amazon's current receipt subject can be "Ordered 3 items: Toys & Games" instead of
+  // the older "Ordered: Product" form. Both are real confirmation messages.
+  const confirmationSubject = /\bordered(?::|\s+\d+\s+items?\b)|order confirmation|your amazon(?:\.com)? order|thanks for your order|thank you for your order/.test(subject);
   const confirmationBody = /\b(?:order|amazon order)\s*(?:number|#)|view or manage (?:your )?order|order total/.test(header);
   return amazonIdentity && (confirmationSubject || confirmationBody);
 }
@@ -1089,7 +1091,7 @@ function detectStatus(subject, text) {
   // so classify it explicitly before falling through to the generic rules.
   if (/thank you for shopping at pokemoncenter\.com/i.test(subj)) return 'confirmed';
 
-  if (/order confirmation|order confirmed|ordered:|thanks for your (?:delivery )?order|thanks for shopping with us|order received|order placed|order summary|^online shop order$/.test(subj)) return 'confirmed';
+  if (/order confirmation|order confirmed|ordered(?::|\s+\d+\s+items?\b)|thanks for your (?:delivery )?order|thanks for shopping with us|order received|order placed|order summary|^online shop order$/.test(subj)) return 'confirmed';
 
   if (/\bdelivered\b|delivery complete|items? (?:has|have) arrived|^arrived:/.test(subj) ||
       /(?:your|the|this) (?:package|order|shipment) (?:has been|was|is) delivered|your package arrived|delivery (?:is )?complete|items? (?:has|have) arrived from order/.test(body)) return 'delivered';

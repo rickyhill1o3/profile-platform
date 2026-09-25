@@ -8,7 +8,7 @@ function loadTestHooks() {
   const original = fs.readFileSync(filename, 'utf8');
   const source = original.replace(
     /module\.exports = \{ registerOrderTracker, scanAll, notifyCheckoutForOrderTracker \};\s*$/,
-    'module.exports = { __test: { rawMessageLooksLikeAmazonConfirmation, rawMessageLooksLikeMacysConfirmation, matchPendingAmazonOrder, matchServiceOrderByMailboxTime, amazonOrdersMissingConfirmation, detectStore } };'
+    'module.exports = { __test: { rawMessageLooksLikeAmazonConfirmation, rawMessageLooksLikeMacysConfirmation, matchPendingAmazonOrder, matchServiceOrderByMailboxTime, amazonOrdersMissingConfirmation, detectStore, detectStatus, extractAmazonItemQuantity } };'
   );
   const module = { exports:{} };
   const sandbox = {
@@ -74,13 +74,21 @@ function fakeSupabase(database) {
     matchPendingAmazonOrder,
     matchServiceOrderByMailboxTime,
     amazonOrdersMissingConfirmation,
-    detectStore
+    detectStore,
+    detectStatus,
+    extractAmazonItemQuantity
   } = hooks;
 
   assert.strictEqual(rawMessageLooksLikeAmazonConfirmation({
     subject:'Ordered: Pokémon TCG Booster Bundle',
     from:[{ name:'Amazon.com', address:'auto-confirm@amazon.com' }]
   }, Buffer.from('Order number 111-2222222-3333333')), true);
+  assert.strictEqual(rawMessageLooksLikeAmazonConfirmation({
+    subject:'Ordered 3 items: Toys & Games',
+    from:[{ name:'Amazon.com', address:'auto-confirm@amazon.com' }]
+  }, Buffer.from('Order # 113-3310987-8970605')), true);
+  assert.strictEqual(detectStatus('Ordered 3 items: Toys & Games', ''), 'confirmed');
+  assert.strictEqual(extractAmazonItemQuantity('Ordered 3 items: Toys & Games', ''), 3);
   assert.strictEqual(rawMessageLooksLikeAmazonConfirmation({
     subject:'Package delivered', from:[{ address:'shipment-tracking@amazon.com' }]
   }, Buffer.from('Your package was delivered')), false);
@@ -128,6 +136,39 @@ function fakeSupabase(database) {
   );
   assert.strictEqual(pending.serviceOrder.id, 'nearest', 'nearest unused webhook for the exact mailbox must win');
 
+  const dropDatabase = {
+    orders:[
+      {
+        id:'bina-319', user_id:'owner', site:'amazon', status:'canceled',
+        created_at:'2026-09-24T19:19:00.000Z', credits_charged:0,
+        raw_payload:{ account:'bina.enid0794@hotmail.com' },
+        metadata:{ email_verification_required:true, quantity:3 }
+      },
+      {
+        id:'ricky-459', user_id:'owner', site:'amazon', status:'canceled',
+        created_at:'2026-09-24T20:59:00.000Z', credits_charged:0,
+        raw_payload:{ account:'bina.enid0794@hotmail.com' },
+        metadata:{ email_verification_required:true, quantity:12 }
+      }
+    ]
+  };
+  const binaMatch = await matchPendingAmazonOrder(
+    fakeSupabase(dropDatabase),
+    { user_id:'owner', email:'bina.enid0794@hotmail.com' },
+    { date:new Date('2026-09-24T19:21:27.000Z'), subject:'Ordered 3 items: Toys & Games', text:'Order # 113-3310987-8970605', html:'' },
+    '113-3310987-8970605', { total:138.77 }, '<bina-confirmation@example>'
+  );
+  assert.strictEqual(binaMatch.serviceOrder.id, 'bina-319', 'the 3:21 receipt must link to the nearest 3:19 webhook');
+  assert.strictEqual(binaMatch.emailQuantity, 3, 'the accepted quantity must come from the Amazon receipt');
+  dropDatabase.orders[0].metadata.matched_email_message_id = '<bina-confirmation@example>';
+  const rickyMatch = await matchPendingAmazonOrder(
+    fakeSupabase(dropDatabase),
+    { user_id:'owner', email:'bina.enid0794@hotmail.com' },
+    { date:new Date('2026-09-24T21:14:00.000Z'), subject:'Ordered 2 items: Toys & Games', text:'Order # 114-2222222-3333333', html:'' },
+    '114-2222222-3333333', { total:90 }, '<ricky-confirmation@example>'
+  );
+  assert.strictEqual(rickyMatch.serviceOrder.id, 'ricky-459', 'the 5:14 receipt must still link to the 4:59 webhook');
+
   const missing = await amazonOrdersMissingConfirmation(fakeSupabase(database), 'owner', 100);
   assert.deepStrictEqual(
     Array.from(missing, row => row.id),
@@ -147,6 +188,10 @@ function fakeSupabase(database) {
 
   assert(source.includes("amazonPendingMatch = { serviceOrder:direct"), 'exact Amazon confirmations must use the verified-checkout finalizer');
   assert(source.includes("method = uidSet.size ? 'amazon_webhook_time_window'"), 'historical repair must expose Amazon time-window matching');
+  const serverSource = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  assert(serverSource.includes('order.metadata?.email_quantity'), 'verified Discord success must prefer the email quantity');
+  assert(serverSource.includes('order.metadata?.amazon_order_number'), 'verified Discord success must prefer the real Amazon order number');
+  assert(serverSource.includes("routingMode: 'public_and_admin_only'"), 'verified success must go to the user/admin checkout destinations after the private early alert');
   console.log('Amazon and Macy\'s email recovery tests passed');
 })().catch(error => {
   console.error(error);
