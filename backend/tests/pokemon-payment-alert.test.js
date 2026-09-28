@@ -92,7 +92,7 @@ function fakeSupabase(database) { return { from:table => new Query(database, tab
 
   const database={ email_messages:[], retailer_account_alerts:[] };
   const result=await hooks.saveParsedMessage(fakeSupabase(database), {
-    user_id:'user-1', profile_id:'profile-1', email:'stickydeliverydc@gmail.com', provider:{name:'gmail'}
+    user_id:'user-1', archive_user_id:'super-admin-importer', profile_id:'profile-1', email:'stickydeliverydc@gmail.com', provider:{name:'gmail'}
   }, parsed, 42);
   assert.strictEqual(result.saved, true);
   assert.strictEqual(result.status, 'payment_needed');
@@ -100,8 +100,19 @@ function fakeSupabase(database) { return { from:table => new Query(database, tab
   assert.strictEqual(database.email_messages.length, 1);
   assert.strictEqual(database.email_messages[0].keep_forever, true);
   assert.strictEqual(database.retailer_account_alerts.length, 1);
+  assert.strictEqual(database.retailer_account_alerts[0].user_id, 'user-1', 'payment warnings must belong to the matched website user, not the importing super admin');
   assert.strictEqual(database.retailer_account_alerts[0].mailbox_email, 'stickydeliverydc@gmail.com');
   assert.strictEqual(database.retailer_account_alerts[0].action_url, actionUrl);
+
+  const currentPokemonText=`
+    We’re unable to authorize your credit card for your preorder from PokemonCenter.com.
+    We recently attempted to reauthorize your credit card in preparation for the upcoming shipment of your preorder Pokémon TCG: 30th Celebration Booster Bundle (6 Packs). However, we ran into an issue with your payment card.
+    Please update your payment information before September 30, 2026 by 11:59 p.m. PT.
+    If we cannot charge your current or new payment card within this time, your preorder will be cancelled.
+  `;
+  const currentPokemonDetails=hooks.parsePokemonCenterPaymentAlert(subject, currentPokemonText, `<a href="${actionUrl}">update your payment information</a>`);
+  assert.strictEqual(currentPokemonDetails.product_hint, 'Pokémon TCG: 30th Celebration Booster Bundle (6 Packs)');
+  assert.strictEqual(currentPokemonDetails.deadline_text, 'September 30, 2026 by 11:59 p.m. PT');
 
   const targetActionUrl='https://click.oe.target.com/?qs=opaque-target-payment-token';
   const targetSubject='Please update your payment soon. Order #912003761272167.';
@@ -157,8 +168,13 @@ function fakeSupabase(database) { return { from:table => new Query(database, tab
   assert.match(trackerSource, /subject\.ilike\.%update your payment%/, 'archived Target payment warnings must be recovered');
   assert.match(dashboardSource, /Update payment on \$\{escapeHTML\(dashboardPaymentAlertRetailer\(alert\)\)\}/);
   assert.match(orderTrackerSource, /Update payment on \$\{esc\(paymentAlertRetailer\(a\)\)\}/);
-  assert.match(dashboardHtml, /script\.js\?v=20260925-target-payment-alert/);
-  assert.match(orderTrackerHtml, /order-tracker\.js\?v=20260925-target-payment-alert/);
+  assert.match(trackerSource, /const userId = account\.user_id \|\| account\.archive_user_id/);
+  assert.match(trackerSource, /buildRetailerPaymentAlertOwnerMap/);
+  assert.match(trackerSource, /const includeAll = req\.role === 'super_admin'/);
+  assert.match(dashboardSource, /showDashboardPaymentAlertFailure/);
+  assert.match(orderTrackerSource, /showRetailerPaymentAlertFailure/);
+  assert.match(dashboardHtml, /script\.js\?v=20260928-payment-alert-repair/);
+  assert.match(orderTrackerHtml, /order-tracker\.js\?v=20260928-payment-alert-repair/);
 
   console.log('Pokemon Center and Target payment-alert tests passed');
 })().catch(error => { console.error(error); process.exitCode=1; });

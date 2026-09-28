@@ -240,6 +240,17 @@ function dashboardPaymentAlertHelp(alert) {
     }
     return `<b>No order number was included.</b> Check every matching preorder in ${escapeHTML(alert.mailbox_email || 'this mailbox')}.`;
 }
+function showDashboardPaymentAlertFailure(message) {
+    const center = document.getElementById('dashboardPaymentAlertCenter');
+    const list = document.getElementById('dashboardPaymentAlertList');
+    const count = document.getElementById('dashboardPaymentAlertCount');
+    const heading = document.getElementById('dashboardPaymentAlertHeading');
+    if (!center || !list || !count) return;
+    center.hidden = false;
+    count.textContent = '!';
+    if (heading) heading.textContent = 'Payment alerts need attention';
+    list.innerHTML = `<article class="account-payment-alert-item"><h3>The payment-warning feed could not load</h3><p>${escapeHTML(message || 'Refresh the page or contact the website administrator.')}</p></article>`;
+}
 async function loadDashboardRetailerPaymentAlerts() {
     const center = document.getElementById('dashboardPaymentAlertCenter');
     const list = document.getElementById('dashboardPaymentAlertList');
@@ -247,11 +258,21 @@ async function loadDashboardRetailerPaymentAlerts() {
     if (!center || !list || !count || !token()) return;
     const response = await fetch(API + '/orders/account-alerts', { headers:{ Authorization:'Bearer ' + token() } });
     const data = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(data.error || 'Payment alerts could not be loaded.');
+    if (!response.ok) {
+        const message = data.error || 'Payment alerts could not be loaded.';
+        showDashboardPaymentAlertFailure(message);
+        throw new Error(message);
+    }
+    if (data.migration_required) {
+        showDashboardPaymentAlertFailure('The retailer payment-alert database migration must be installed before warnings can be displayed.');
+        return;
+    }
     const alerts = Array.isArray(data.alerts) ? data.alerts : [];
     const wasHidden = center.hidden;
     center.hidden = alerts.length === 0;
     count.textContent = String(alerts.length);
+    const heading = document.getElementById('dashboardPaymentAlertHeading');
+    if (heading) heading.textContent = 'Payment information needs attention';
     document.title = alerts.length ? `(${alerts.length}) Payment action required · User Dashboard` : 'User Dashboard';
     list.innerHTML = alerts.map(alert => `<article class="account-payment-alert-item"><p class="eyebrow">${escapeHTML(dashboardPaymentAlertRetailer(alert))}</p><h3>${escapeHTML(alert.product_hint || 'Order payment needs attention')}</h3><div class="account-payment-alert-meta"><div><small>Received by mailbox</small><b>${escapeHTML(alert.mailbox_email || 'Unknown mailbox')}</b></div><div><small>Update payment by</small><b>${escapeHTML(alert.deadline_text || 'Open the email for the deadline')}</b></div><div><small>Warning received</small><b>${alert.received_at ? formatDateTime(alert.received_at) : '—'}</b>${Number(alert.reminder_count || 1) > 1 ? `<br><small>${Number(alert.reminder_count)} reminders received</small>` : ''}</div></div><p>${dashboardPaymentAlertHelp(alert)}</p><div class="account-payment-alert-actions">${alert.action_url ? `<a class="btn account-payment-alert-action" href="${escapeHTML(alert.action_url)}" target="_blank" rel="noopener noreferrer">Update payment on ${escapeHTML(dashboardPaymentAlertRetailer(alert))}</a>` : ''}<button class="btn" type="button" onclick="openDashboardPaymentAlertEmail('${escapeHTML(alert.id)}')">View payment email</button><button class="btn" type="button" onclick="resolveDashboardPaymentAlert('${escapeHTML(alert.id)}')">Mark fixed — payment updated</button></div></article>`).join('');
     if (wasHidden && alerts.length) requestAnimationFrame(() => center.focus({ preventScroll:false }));
@@ -5871,7 +5892,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         document.getElementById("raffleProfilesPanel")
     ) {
         try { await loadDashboardRetailerPaymentAlerts(); } catch (err) { console.error('Retailer payment alerts failed:', err); }
-        if (!dashboardPaymentAlertTimer) dashboardPaymentAlertTimer = setInterval(() => loadDashboardRetailerPaymentAlerts().catch(() => {}), 60000);
+        if (!dashboardPaymentAlertTimer) dashboardPaymentAlertTimer = setInterval(() => loadDashboardRetailerPaymentAlerts().catch(err => showDashboardPaymentAlertFailure(err.message)), 60000);
         initUserDashboardNavigation();
         await loadProfiles();
         try { await loadStoreRunStatusPanel(); } catch (err) { console.error("Store run status failed:", err); }

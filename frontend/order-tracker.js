@@ -51,12 +51,20 @@ function showWarning(text){$('scanWarning').hidden=!text;$('scanWarning').textCo
 function renderAccounts(accounts=[]){const el=$('scanAccounts');el.innerHTML=accounts.length?accounts.map(a=>`<div class="mail-account"><div class="mail-ok">✓ ${esc(a.email)}</div><div>${esc(a.provider||'IMAP')} · ${a.last_success_at?'Last scan '+new Date(a.last_success_at).toLocaleString():'Ready for first scan'}</div>${a.scanned_through_at?`<div class="subtle-text">Scanned through ${new Date(a.scanned_through_at).toLocaleString()}</div>`:''}${a.last_error?`<div class="mail-error">${esc(a.last_error)}</div>`:''}</div>`).join(''):'<p class="subtle-text">No supported IMAP/app password was found in saved profiles.</p>'}
 function paymentAlertRetailer(a){return String(a?.store||'').toLowerCase()==='target'?'Target':'Pokémon Center'}
 function paymentAlertHelp(a){return paymentAlertRetailer(a)==='Target'?`Order payment must be updated before Target auto-cancels it${a.deadline_text?` on ${esc(a.deadline_text)}`:''}.`:`<b>No order number was included.</b> If you placed more than one matching preorder, check every order in ${esc(a.mailbox_email||'this mailbox')}.`}
+function showRetailerPaymentAlertFailure(message){
+  const center=$('pokemonPaymentAlertCenter'),list=$('pokemonPaymentAlertList'),count=$('pokemonPaymentAlertCount'),heading=$('pokemonPaymentAlertHeading');
+  if(!center||!list||!count)return;
+  center.hidden=false;count.textContent='!';
+  if(heading)heading.textContent='Payment alerts need attention';
+  list.innerHTML=`<article class="payment-alert-card"><h3>The payment-warning feed could not load</h3><p class="payment-alert-help">${esc(message||'Refresh the page or contact the website administrator.')}</p></article>`;
+}
 function renderRetailerPaymentAlerts(){
   const center=$('pokemonPaymentAlertCenter'),list=$('pokemonPaymentAlertList'),count=$('pokemonPaymentAlertCount');
   if(!center||!list||!count)return;
   const wasHidden=center.hidden;
   center.hidden=!retailerPaymentAlerts.length;
   count.textContent=String(retailerPaymentAlerts.length);
+  const heading=$('pokemonPaymentAlertHeading');if(heading)heading.textContent='Payment information needs attention';
   document.title=retailerPaymentAlerts.length?`(${retailerPaymentAlerts.length}) Payment action required · Order Tracker`:'Order Tracker';
   list.innerHTML=retailerPaymentAlerts.map(a=>`<article class="payment-alert-card"><p class="eyebrow">${esc(paymentAlertRetailer(a))}</p><h3>${esc(a.product_hint||'Order payment needs attention')}</h3><div class="payment-alert-meta"><div><small>Received by mailbox</small><b>${esc(a.mailbox_email||'Unknown mailbox')}</b></div><div><small>Update payment by</small><b>${esc(a.deadline_text||'Open the email for the deadline')}</b></div><div><small>Warning received</small><b>${a.received_at?new Date(a.received_at).toLocaleString():'—'}</b>${Number(a.reminder_count||1)>1?`<br><small>${Number(a.reminder_count)} reminders received</small>`:''}</div></div><p class="payment-alert-help">${paymentAlertHelp(a)}</p><div class="payment-alert-actions">${a.action_url?`<a class="btn payment-alert-primary" href="${esc(a.action_url)}" target="_blank" rel="noopener noreferrer">Update payment on ${esc(paymentAlertRetailer(a))}</a>`:''}<button class="btn" onclick="openPaymentAlertEmail('${esc(a.id)}')">View payment email</button><button class="btn" onclick="resolvePaymentAlert('${esc(a.id)}')">Mark fixed — payment updated</button></div></article>`).join('');
   if(wasHidden&&retailerPaymentAlerts.length)requestAnimationFrame(()=>center.focus({preventScroll:false}));
@@ -72,12 +80,20 @@ function notifyNewRetailerPaymentAlerts(alerts=[]){
   try{sessionStorage.setItem('retailerPaymentAlertIds',JSON.stringify(alerts.map(a=>String(a.id)).filter(Boolean)))}catch(_){}
 }
 async function loadRetailerPaymentAlerts(){
-  const j=await api('/orders/account-alerts');
-  retailerPaymentAlerts=Array.isArray(j.alerts)?j.alerts:[];
-  notifyNewRetailerPaymentAlerts(retailerPaymentAlerts);
-  renderRetailerPaymentAlerts();
-  if(j.migration_required)showWarning('Retailer payment alerts need the included Supabase migration before they can be displayed.');
-  return j;
+  try{
+    const j=await api('/orders/account-alerts');
+    if(j.migration_required){
+      const message='The retailer payment-alert database migration must be installed before warnings can be displayed.';
+      showRetailerPaymentAlertFailure(message);showWarning(message);return j;
+    }
+    retailerPaymentAlerts=Array.isArray(j.alerts)?j.alerts:[];
+    notifyNewRetailerPaymentAlerts(retailerPaymentAlerts);
+    renderRetailerPaymentAlerts();
+    return j;
+  }catch(error){
+    showRetailerPaymentAlertFailure(error.message);
+    throw error;
+  }
 }
 async function openPaymentAlertEmail(id){
   const r=await fetch(`${API}/orders/account-alerts/${encodeURIComponent(id)}/email`,{headers:{Authorization:`Bearer ${token}`}});
