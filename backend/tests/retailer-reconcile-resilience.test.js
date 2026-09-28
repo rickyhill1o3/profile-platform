@@ -7,7 +7,8 @@ const frontendSource = fs.readFileSync(path.join(__dirname, '..', '..', 'fronten
 
 assert(backendSource.includes("app.get('/orders/reconcile-retailer-emails/status'"), 'bulk reconcile must expose a pollable status endpoint');
 assert(backendSource.includes('retailerReconcileJobView(existingReconcile)'), 'a second click must reconnect to the running job');
-assert(backendSource.includes("req.role === 'super_admin'"), 'bulk reconcile must let the super admin rebuild payment alerts across imported mailboxes');
+assert(backendSource.includes("syncRetailerPaymentAlertsFromArchive(supabase, req.user_id, false)"), 'bulk reconcile must rebuild only the signed-in user\'s Target and Pokemon Center payment alerts');
+assert(backendSource.includes("'Please update your payment soon'"), 'live reconciliation must search Target payment-warning subjects');
 assert(backendSource.includes("stage:'payment_alerts'") || backendSource.includes("'payment_alerts', 20"), 'payment alert recovery must report progress');
 assert(backendSource.includes('walmartOrdersNeedingRepair'), 'bulk reconcile must include Walmart order repair');
 assert(backendSource.includes('targetOrdersMissingConfirmation'), 'bulk reconcile must include Target order repair');

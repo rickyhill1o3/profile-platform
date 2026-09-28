@@ -72,6 +72,10 @@ function fakeSupabase(database) { return { from:table => new Query(database, tab
     hooks.POKEMON_CENTER_LIVE_DISCOVERY_SUBJECTS.includes('ACTION REQUIRED on Your Preorder'),
     'manual live reconciliation must search for orderless payment-warning subjects'
   );
+  assert.ok(
+    hooks.POKEMON_CENTER_LIVE_DISCOVERY_SUBJECTS.includes('Please update your payment soon'),
+    'manual live reconciliation must search Target payment-warning subjects'
+  );
   assert.strictEqual(hooks.extractPokemonPaymentActionUrl(html), actionUrl);
   assert.strictEqual(hooks.safePokemonPaymentUrl('https://evil.example/payment'), '');
 
@@ -170,7 +174,12 @@ function fakeSupabase(database) { return { from:table => new Query(database, tab
   assert.match(orderTrackerSource, /Update payment on \$\{esc\(paymentAlertRetailer\(a\)\)\}/);
   assert.match(trackerSource, /const userId = account\.user_id \|\| account\.archive_user_id/);
   assert.match(trackerSource, /buildRetailerPaymentAlertOwnerMap/);
-  assert.match(trackerSource, /const includeAll = req\.role === 'super_admin'/);
+  assert.match(trackerSource, /including the super admin, sees only warnings owned by that website user/);
+  assert.match(trackerSource, /syncRetailerPaymentAlertsFromArchive\(supabase, req\.user_id, false\)/);
+  assert.match(trackerSource, /select\('id,user_id,dedupe_key'\)\.eq\('id', req\.params\.id\)\.eq\('user_id', req\.user_id\)/);
+  assert.match(trackerSource, /const foundQuery = supabase\.from\('retailer_account_alerts'\)\.select\('\*'\)[\s\S]*?\.eq\('id', req\.params\.id\)\.eq\('user_id', req\.user_id\)/);
+  assert.match(trackerSource, /Clean up rows that an older build assigned to the archive\/import owner/);
+  assert.match(trackerSource, /if \(isRetailerPaymentAlert\(store, parsed\.subject \|\| '', text\)\)/);
   assert.match(dashboardSource, /showDashboardPaymentAlertFailure/);
   assert.match(orderTrackerSource, /showRetailerPaymentAlertFailure/);
   assert.match(dashboardHtml, /script\.js\?v=20260928-payment-alert-repair/);

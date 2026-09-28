@@ -2668,6 +2668,16 @@ async function syncRetailerPaymentAlertsFromArchive(supabase, userId, includeAll
     const store = detectStore(email.from_text || '', email.subject || '', text);
     if (!isRetailerPaymentAlert(store, email.subject || '', text)) continue;
     const owner = archivedRetailerPaymentAlertOwner(email, ownerMap);
+    // Clean up rows that an older build assigned to the archive/import owner. This happens before
+    // the current-user filter so the super admin does not keep seeing somebody else's stale alert.
+    if (owner.user_id && email.user_id && String(email.user_id) !== String(owner.user_id)) {
+      try {
+        await supabase.from('retailer_account_alerts').update({
+          state:'resolved', resolved_at:new Date().toISOString(), updated_at:new Date().toISOString()
+        }).eq('message_id', email.message_id).eq('mailbox_email', lower(email.mailbox_email))
+          .eq('user_id', email.user_id);
+      } catch (_) {}
+    }
     if (!owner.user_id || (!includeAll && String(owner.user_id) !== String(userId))) continue;
     const account = {
       user_id:owner.user_id,
@@ -2681,19 +2691,7 @@ async function syncRetailerPaymentAlertsFromArchive(supabase, userId, includeAll
       text, html:email.body_html || null, date:new Date(email.received_at || Date.now()), messageId:email.message_id
     };
     const alert = await upsertRetailerPaymentAlert(supabase, account, parsed, email);
-    if (alert) {
-      saved++;
-      // Resolve the stale copy created by the former archive-owner bug so the super-admin view
-      // does not show the same payment warning twice.
-      if (email.user_id && String(email.user_id) !== String(owner.user_id)) {
-        try {
-          await supabase.from('retailer_account_alerts').update({
-            state:'resolved', resolved_at:new Date().toISOString(), updated_at:new Date().toISOString()
-          }).eq('message_id', email.message_id).eq('mailbox_email', lower(email.mailbox_email))
-            .eq('user_id', email.user_id);
-        } catch (_) {}
-      }
-    }
+    if (alert) saved++;
     if (lower(email.email_type) !== 'payment_needed') {
       try {
         await supabase.from('email_messages').update({
@@ -3618,7 +3616,9 @@ const POKEMON_CENTER_LIVE_DISCOVERY_SUBJECTS = Object.freeze([
   'package will arrive soon',
   'package has been delivered',
   'running a little behind',
-  'ACTION REQUIRED on Your Preorder'
+  'ACTION REQUIRED on Your Preorder',
+  'Please update your payment soon',
+  'update your payment'
 ]);
 
 async function discoverPokemonCenterConfirmationsGlobally(
@@ -3736,13 +3736,11 @@ async function discoverPokemonCenterConfirmationsGlobally(
               const parsed = await simpleParser(msg.source);
               const text = readableEmailText(parsed);
               const store = detectStore(parsed.from?.text || '', parsed.subject || '', text);
-              if (store !== 'pokemoncenter') continue;
 
-              // Payment-reauthorization warnings deliberately contain no P-order number. Process
-              // them as standalone account alerts before the exact-order lifecycle gate below.
-              // This is the manual Reconcile path, so it must not depend on the normal UID scan
-              // having already archived today's message.
-              if (isPokemonCenterPaymentAlert(store, parsed.subject || '', text)) {
+              // Target and Pokemon Center payment warnings must be recoverable even if an older
+              // UID checkpoint passed them before the alert feature was installed. Process them
+              // before Pokemon Center's exact P-order lifecycle gate.
+              if (isRetailerPaymentAlert(store, parsed.subject || '', text)) {
                 paymentAlertsFound++;
                 paymentAlertMailboxes.add(lower(account.email));
                 const result = await saveParsedMessage(
@@ -3750,10 +3748,11 @@ async function discoverPokemonCenterConfirmationsGlobally(
                 );
                 if (result?.alert_saved) paymentAlertsSaved++;
                 if (debug.length < 240) debug.push(
-                  `Live Pokemon payment alert: receiving_mailbox=${account.email} uid=${msg.uid} result=${result?.alert_saved ? 'SAVED' : `NOT_SAVED:${result?.reason || 'alert table unavailable'}`} subject=${JSON.stringify(clean(parsed.subject || '').slice(0,160))}`
+                  `Live retailer payment alert: store=${store} receiving_mailbox=${account.email} uid=${msg.uid} result=${result?.alert_saved ? 'SAVED' : `NOT_SAVED:${result?.reason || 'alert table unavailable'}`} subject=${JSON.stringify(clean(parsed.subject || '').slice(0,160))}`
                 );
                 continue;
               }
+              if (store !== 'pokemoncenter') continue;
 
               const rawSource = Buffer.isBuffer(msg.source) ? msg.source.toString('utf8') : String(msg.source || '');
               const parsedRefs = extractOrderNumbers('pokemoncenter', parsed.subject || '', `${text}\n${String(parsed.html || '')}`)
@@ -5256,18 +5255,18 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
     try {
       // Recover Target and Pokemon Center warnings archived by older builds, then list the user's
       // unresolved groups. Repeated reminders for one order/preorder stay grouped together.
-      const includeAll = req.role === 'super_admin';
-      const sync = await syncRetailerPaymentAlertsFromArchive(supabase, req.user_id, includeAll);
-      const list = await listOpenRetailerPaymentAlerts(supabase, req.user_id, includeAll);
+      // Payment warnings follow the same privacy rule as tracked orders: every signed-in account,
+      // including the super admin, sees only warnings owned by that website user.
+      const sync = await syncRetailerPaymentAlertsFromArchive(supabase, req.user_id, false);
+      const list = await listOpenRetailerPaymentAlerts(supabase, req.user_id, false);
       res.json({ success:true, ...list, archive_sync:sync });
     } catch (error) { res.status(500).json({ error:error.message || String(error) }); }
   });
 
   app.post('/orders/account-alerts/:id/resolve', auth, async (req, res) => {
     try {
-      let foundQuery = supabase.from('retailer_account_alerts')
-        .select('id,user_id,dedupe_key').eq('id', req.params.id);
-      if (req.role !== 'super_admin') foundQuery = foundQuery.eq('user_id', req.user_id);
+      const foundQuery = supabase.from('retailer_account_alerts')
+        .select('id,user_id,dedupe_key').eq('id', req.params.id).eq('user_id', req.user_id);
       const found = await foundQuery.maybeSingle();
       if (found.error) throw found.error;
       if (!found.data) return res.status(404).json({ error:'Payment alert not found.' });
@@ -5286,8 +5285,8 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
 
   app.get('/orders/account-alerts/:id/email', auth, async (req, res) => {
     try {
-      let foundQuery = supabase.from('retailer_account_alerts').select('*').eq('id', req.params.id);
-      if (req.role !== 'super_admin') foundQuery = foundQuery.eq('user_id', req.user_id);
+      const foundQuery = supabase.from('retailer_account_alerts').select('*')
+        .eq('id', req.params.id).eq('user_id', req.user_id);
       const found = await foundQuery.maybeSingle();
       if (found.error) throw found.error;
       const alert = found.data;
@@ -5669,9 +5668,7 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
       // search begins, so a later retailer failure cannot hide an already-received urgent warning.
       let paymentAlertSync = { checked:0, saved:0 };
       try {
-        paymentAlertSync = await syncRetailerPaymentAlertsFromArchive(
-          supabase, req.user_id, req.role === 'super_admin'
-        );
+        paymentAlertSync = await syncRetailerPaymentAlertsFromArchive(supabase, req.user_id, false);
       } catch (e) {
         console.warn('[RECONCILE PAYMENT ALERTS]', e.message || e);
         recordStageError('payment_alerts', e);
