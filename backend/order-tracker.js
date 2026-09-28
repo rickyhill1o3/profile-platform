@@ -2,6 +2,7 @@ const { ImapFlow } = require('imapflow');
 const { simpleParser } = require('mailparser');
 const crypto = require('crypto');
 const cheerio = require('cheerio');
+const zlib = require('zlib');
 const { encrypt, decrypt } = require('./encryption');
 const { parseRetailEmail, expectedWebhookItems, matchScore, mainItemMatch, targetSingleLineDeliveryAlias, deriveOverallStatus, parseSupremeWebhookCheckoutAt, norm: reconcileNorm } = require('./retailer-reconciliation');
 const { registerDiscordHistoryImport } = require('./discord-history-import');
@@ -5249,6 +5250,147 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
       aycd: { configured: req.role === 'super_admin', mode: 'local_unified_imap_bridge' },
       is_super_admin: req.role === 'super_admin'
     });
+  });
+
+  app.get('/orders/email-database-export', auth, async (req, res) => {
+    if (req.role !== 'super_admin') return res.status(403).json({ error:'Super admin only.' });
+
+    // Imported mailbox archives are intentionally stored under the importing super admin so the
+    // scanner can maintain one durable copy. That archive can contain mailboxes owned by several
+    // website users, so user_id alone is not a sufficient privacy boundary for this export. Resolve
+    // every mailbox back to its website profile owner and include only the signed-in owner's mail.
+    let ownerMap;
+    try {
+      ownerMap = await buildRetailerPaymentAlertOwnerMap(supabase);
+    } catch (error) {
+      return res.status(500).json({ error:`Mailbox ownership could not be verified: ${error.message}` });
+    }
+    const ownedMailboxes = new Set();
+    for (const [mailbox, owner] of ownerMap.entries()) {
+      if (owner?.match_status === 'matched' && String(owner.matched_user_id) === String(req.user_id)) {
+        ownedMailboxes.add(lower(mailbox));
+      }
+    }
+    if (!ownedMailboxes.size) {
+      return res.status(409).json({ error:'No verified profile mailboxes belong to this super-admin account yet.' });
+    }
+
+    const pageSize = 200;
+    const fetchPage = from => supabase.from('email_messages').select('*')
+      .eq('user_id', req.user_id)
+      .order('received_at', { ascending:true })
+      .order('id', { ascending:true })
+      .range(from, from + pageSize - 1);
+
+    // Fetch once before sending download headers so a database/schema failure is returned as a
+    // useful JSON error instead of a corrupt gzip file.
+    let firstPage;
+    try {
+      const result = await fetchPage(0);
+      if (result.error) throw result.error;
+      firstPage = result.data || [];
+    } catch (error) {
+      return res.status(500).json({ error:`The collected email archive could not be exported: ${error.message}` });
+    }
+
+    const exportedAt = new Date().toISOString();
+    const filename = `shore-shack-email-database-${exportedAt.replace(/[:.]/g, '-')}.jsonl.gz`;
+    res.status(200);
+    res.setHeader('Content-Type', 'application/gzip');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.setHeader('Cache-Control', 'no-store, private');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+
+    const gzip = zlib.createGzip({ level:zlib.constants.Z_BEST_COMPRESSION });
+    gzip.on('error', error => {
+      console.error('[EMAIL DATABASE EXPORT]', error.message || error);
+      if (!res.destroyed) res.destroy(error);
+    });
+    req.on('aborted', () => gzip.destroy());
+    gzip.pipe(res);
+
+    const writeJsonLine = async value => {
+      if (!gzip.write(`${JSON.stringify(value)}\n`)) {
+        await new Promise((resolve, reject) => {
+          const onDrain = () => { gzip.off('error', onError); resolve(); };
+          const onError = error => { gzip.off('drain', onDrain); reject(error); };
+          gzip.once('drain', onDrain);
+          gzip.once('error', onError);
+        });
+      }
+    };
+    const safeEmailRecord = row => ({
+      record_type:'email',
+      id:row.id || null,
+      message_id:row.message_id || null,
+      imap_uid:row.imap_uid ?? null,
+      mailbox_email:lower(row.mailbox_email) || null,
+      from_text:row.from_text || null,
+      to_text:row.to_text || null,
+      cc_text:row.cc_text || null,
+      subject:row.subject || null,
+      received_at:row.received_at || null,
+      store:row.store || null,
+      email_type:row.email_type || null,
+      order_number:row.order_number || null,
+      source_type:row.source_type || null,
+      snippet:row.snippet || null,
+      keep_forever:Boolean(row.keep_forever),
+      is_order_related:Boolean(row.is_order_related),
+      linked_order_id:row.linked_order_id || null,
+      body_text:row.body_text || null,
+      body_html:row.body_html || null,
+      has_attachments:Boolean(row.has_attachments),
+      attachment_count:Number(row.attachment_count || 0),
+      created_at:row.created_at || null,
+      updated_at:row.updated_at || null
+    });
+
+    let totalArchiveRows = 0;
+    let exportedEmails = 0;
+    let skippedUnowned = 0;
+    const exportedMailboxes = new Set();
+    try {
+      await writeJsonLine({
+        record_type:'export_manifest',
+        format:'shore_shack_collected_email_jsonl',
+        format_version:1,
+        exported_at:exportedAt,
+        scope:'signed_in_super_admin_owned_profile_mailboxes_only',
+        includes:['message metadata','stored text body','stored HTML body','parsed retailer fields'],
+        excludes:['attachment files','mailbox passwords','OAuth tokens','other users mailboxes']
+      });
+
+      let from = 0;
+      let batch = firstPage;
+      for (;;) {
+        totalArchiveRows += batch.length;
+        for (const row of batch) {
+          const mailbox = lower(row.mailbox_email);
+          if (!mailbox || !ownedMailboxes.has(mailbox)) { skippedUnowned++; continue; }
+          await writeJsonLine(safeEmailRecord(row));
+          exportedEmails++;
+          exportedMailboxes.add(mailbox);
+        }
+        if (batch.length < pageSize) break;
+        from += pageSize;
+        const next = await fetchPage(from);
+        if (next.error) throw next.error;
+        batch = next.data || [];
+      }
+      await writeJsonLine({
+        record_type:'export_complete',
+        exported_at:new Date().toISOString(),
+        exported_emails:exportedEmails,
+        exported_mailboxes:exportedMailboxes.size,
+        scanned_archive_rows:totalArchiveRows,
+        skipped_rows_not_owned_by_signed_in_user:skippedUnowned
+      });
+      gzip.end();
+    } catch (error) {
+      console.error('[EMAIL DATABASE EXPORT]', error.message || error);
+      gzip.destroy(error);
+    }
   });
 
   app.get('/orders/account-alerts', auth, async (req, res) => {
