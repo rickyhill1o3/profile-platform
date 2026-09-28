@@ -394,6 +394,16 @@ ${missing.map(x=>`${x.order_number||'-'} · ${x.mailbox||'-'}`).join('\n')}`:'';
 Archive matched: ${j.matched}
 Archive ignored: ${j.ignored}
 Failed: ${j.failed}
+Connected mailboxes selected for full scan: ${j.all_email_scan?.accounts||0}
+Mailbox scans completed: ${j.all_email_scan?.completed||0}
+Mailbox scans successful: ${j.all_email_scan?.successful||0}
+Mailbox scan failures: ${j.all_email_scan?.failed||0}
+New messages inspected: ${j.all_email_scan?.checked||0}
+All messages archived (recognized and unrecognized): ${j.all_email_scan?.archived||0}
+Order/lifecycle messages linked: ${j.all_email_scan?.saved||0}
+Mailboxes still carrying backlog after four passes: ${j.all_email_scan?.backlog_mailboxes||0}
+Failed mailbox list:
+${(j.all_email_scan?.results||[]).filter(x=>x.error).map(x=>`${x.email||'-'} · ${x.error}`).join('\n')||'None'}
 Saved Target/Pokemon Center payment alerts rebuilt: ${j.payment_alert_sync?.saved||0}
 Recoverable stage errors: ${(j.stage_errors||[]).length}
 ${(j.stage_errors||[]).map(x=>`${x.stage||'stage'} · ${x.error||'unknown error'}`).join('\n')||'None'}
@@ -404,9 +414,9 @@ Supreme live messages saved: ${j.supreme_live?.messages_saved||0}
 Supreme live mailbox failures: ${j.supreme_live?.failures||0}
 Supreme metadata scanned: ${j.supreme_discovery?.metadata_scanned||0}
 Pokemon Center archive messages replayed: ${j.pokemon_archive_messages||0}
-Pokemon Center live mailboxes selected: ${j.pokemon_live_discovery?.mailboxes_selected||0}
-Pokemon Center live mailboxes checked: ${j.pokemon_live_discovery?.mailboxes_checked||0}
-Pokemon Center live mailbox failures: ${j.pokemon_live_discovery?.mailbox_failures||0}
+Pokemon Center source scan mailboxes selected: ${j.pokemon_live_discovery?.mailboxes_selected||0}
+Pokemon Center source scan mailboxes completed: ${j.pokemon_live_discovery?.mailboxes_checked||0}
+Pokemon Center source scan mailbox failures: ${j.pokemon_live_discovery?.mailbox_failures||0}
 Pokemon Center global loader scope: ${j.pokemon_live_discovery?.loader_diagnostics?.scope||'-'}
 Website profiles loaded across all pages: ${j.pokemon_live_discovery?.loader_diagnostics?.profiles_loaded??'-'}
 Verified mailbox states loaded across all pages: ${j.pokemon_live_discovery?.loader_diagnostics?.verified_states_loaded??'-'}
@@ -465,7 +475,7 @@ ${(j.pokemon_debug||[]).join('\n') || 'No Pokemon Center diagnostic lines return
 ${(j.supreme_debug||[]).join('\n') || 'No Supreme diagnostic lines returned.'}
 ========== END SUPREME DIAGNOSTIC LOG ==========
 ${r.concurrent_with_background_repair?`\nManual repair ran alongside an existing background repair.`:''}${r.skipped?`
-Repair skipped: ${r.reason||'no candidates'}`:''}${detailText}${missingText}\n\nYour collected-email export is ready. Close this log, then click “Export my collected emails.”`);if(exportButton){exportButton.textContent='Export reconciled email database';exportButton.classList.add('btn-primary')}await loadOrders()}catch(e){alert(e.message)}finally{b.disabled=false;b.textContent=old;if(exportButton)exportButton.disabled=false}};
+Repair skipped: ${r.reason||'no candidates'}`:''}${detailText}${missingText}\n\nYour complete collected-email export is ready. Close this log, then click “Export all collected emails.”`);if(exportButton){exportButton.textContent='Export complete email database';exportButton.classList.add('btn-primary')}await loadOrders()}catch(e){alert(e.message)}finally{b.disabled=false;b.textContent=old;if(exportButton)exportButton.disabled=false}};
 $('refreshOrders').onclick=loadOrders;$('statusFilter').onchange=()=>{render();loadOrders().catch(e=>showWarning(e.message));};$('yearFilter').onchange=()=>{render();loadOrders().catch(e=>showWarning(e.message));};$('searchOrders').oninput=render;
 initYears();
 runAutomaticScan().catch(async e=>{showWarning(e.message);try{await bootstrap()}catch(_){}setProgress(100,'Order tracker loaded with saved data','The automatic mailbox scan could not finish, but your existing orders are available.')}).finally(()=>{setTimeout(()=>{$('scanOverlay').hidden=true;$('trackerApp').hidden=false},350)});
