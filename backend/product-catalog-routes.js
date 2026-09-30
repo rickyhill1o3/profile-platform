@@ -46,6 +46,11 @@ const {
     loadActiveProductSelectionUserIds,
     filterRowsToActiveUsers
 } = require('./product-selection-run-status');
+const {
+    normalizePokemonComparisonSkus,
+    productSkus,
+    groupPokemonUsersByComparedSkus
+} = require('./pokemon-sku-user-groups');
 
 const SUPPORTED_SITES = new Set(["amazon", "target", "walmart", "samsclub", "crunchyroll", "general", "supreme", "pokemon"]);
 const REQUESTABLE_SITES = new Set(["amazon", "target", "walmart", "samsclub", "crunchyroll", "general", "supreme", "pokemon"]);
@@ -1808,6 +1813,108 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
             });
 
             res.json({ site, users });
+        } catch (err) {
+            res.status(500).json({ error: err.message });
+        }
+    });
+
+    app.get('/admin/product-selections/pokemon-sku-groups', auth, admin, async (req, res) => {
+        try {
+            const currentUser = await getCurrentUser(req);
+            const requestedSkus = normalizePokemonComparisonSkus(
+                String(req.query.skus || '').split(/[\n,]+/)
+            );
+
+            if (requestedSkus.length !== 3) {
+                return res.status(400).json({ error: 'Enter exactly 3 different Pokémon Center SKUs.' });
+            }
+
+            const rawScopedUserIds = await getScopedUserIds(supabase, currentUser);
+            const scopedUserIds = rawScopedUserIds === null
+                ? null
+                : [...new Set([...(rawScopedUserIds || []), currentUser?.id].filter(Boolean))];
+            const activeUserIds = await loadActiveProductSelectionUserIds(supabase, 'pokemon', scopedUserIds);
+
+            const buildSelectionQuery = () => {
+                let query = supabase
+                    .from('user_product_preferences')
+                    .select(`id, user_id, selected, catalog_products!inner ( id, site, sku, product_name )`)
+                    .eq('selected', true)
+                    .eq('catalog_products.site', 'pokemon')
+                    .order('id', { ascending: true });
+                if (scopedUserIds && scopedUserIds.length) query = query.in('user_id', scopedUserIds);
+                return query;
+            };
+
+            const { data: selectionRows, error: selectionError } = await fetchAllSupabaseRows(buildSelectionQuery);
+            if (selectionError) return res.status(500).json({ error: selectionError.message });
+
+            const activeSelectionRows = filterRowsToActiveUsers(selectionRows, activeUserIds);
+            const groupedSelections = groupPokemonUsersByComparedSkus(activeSelectionRows, requestedSkus);
+            const matchedUserIds = [...new Set(groupedSelections.flatMap((group) => group.user_ids))];
+
+            let userMap = new Map();
+            if (matchedUserIds.length) {
+                const { data: userRows, error: userError } = await supabase
+                    .from('users')
+                    .select('id, email, owner_admin_id, discord_username, discord_display_name')
+                    .in('id', matchedUserIds);
+                if (userError) return res.status(500).json({ error: userError.message });
+                userMap = new Map((userRows || []).map((user) => [String(user.id), user]));
+            }
+
+            const { data: catalogRows, error: catalogError } = await fetchAllSupabaseRows(() => supabase
+                .from('catalog_products')
+                .select('id, sku, product_name')
+                .eq('site', 'pokemon')
+                .order('id', { ascending: true }));
+            if (catalogError) return res.status(500).json({ error: catalogError.message });
+
+            const productNameBySku = new Map();
+            (catalogRows || []).forEach((product) => {
+                productSkus(product.sku).forEach((sku) => {
+                    if (requestedSkus.includes(sku) && !productNameBySku.has(sku)) {
+                        productNameBySku.set(sku, product.product_name || sku);
+                    }
+                });
+            });
+
+            const products = requestedSkus.map((sku) => ({
+                sku,
+                product_name: productNameBySku.get(sku) || sku
+            }));
+            const productIndexBySku = new Map(products.map((product, index) => [product.sku, index]));
+
+            const groups = groupedSelections.map((group) => {
+                const users = group.user_ids
+                    .map((userId) => userMap.get(String(userId)))
+                    .filter(Boolean)
+                    .map((user) => ({
+                        user_id: user.id,
+                        user_email: user.email || user.id,
+                        discord_username: user.discord_username || '',
+                        discord_display_name: user.discord_display_name || '',
+                        user_display: formatDiscordDisplayName(user)
+                    }))
+                    .sort((a, b) => String(a.user_display || '').localeCompare(String(b.user_display || '')));
+
+                return {
+                    id: group.id,
+                    match_count: group.match_count,
+                    product_indexes: group.skus.map((sku) => productIndexBySku.get(sku)),
+                    skus: group.skus,
+                    user_count: users.length,
+                    users
+                };
+            });
+
+            res.json({
+                site: 'pokemon',
+                active_only: true,
+                products,
+                groups,
+                total_matched_users: groups.reduce((sum, group) => sum + group.user_count, 0)
+            });
         } catch (err) {
             res.status(500).json({ error: err.message });
         }

@@ -37,6 +37,7 @@ function countEffectiveSkus(product) {
         products: [],
         dirtyMap: new Map()
     };
+    let pokemonSkuComparisonData = null;
 
     function token() { return localStorage.getItem("token"); }
     function authHeaders() { return { "Content-Type": "application/json", Authorization: "Bearer " + token() }; }
@@ -324,6 +325,168 @@ function countEffectiveSkus(product) {
         await loadProducts();
     }
 
+    function pokemonSkuComparisonInputs() {
+        return [1, 2, 3].map((index) => String(
+            document.getElementById(`pokemonSkuComparisonInput${index}`)?.value || ""
+        ).trim());
+    }
+
+    function pokemonSkuGroupTitle(group, products) {
+        const selectedProducts = (group.product_indexes || [])
+            .map((index) => products[index])
+            .filter(Boolean);
+        if (group.match_count === products.length) return `All ${products.length} products`;
+        if (group.match_count === 1) return `${selectedProducts[0]?.product_name || selectedProducts[0]?.sku || "Product"} only`;
+        return `${group.match_count} of ${products.length}: ${selectedProducts.map((product) => product.product_name || product.sku).join(" + ")}`;
+    }
+
+    function pokemonSkuComparisonText(data, requestedGroupId = "") {
+        const products = Array.isArray(data?.products) ? data.products : [];
+        const groups = (Array.isArray(data?.groups) ? data.groups : [])
+            .filter((group) => !requestedGroupId || group.id === requestedGroupId);
+        const lines = [
+            "Pokémon Center SKU user comparison",
+            ...products.map((product, index) => `${index + 1}. ${product.product_name || product.sku} — ${product.sku}`),
+            ""
+        ];
+
+        groups.forEach((group, groupIndex) => {
+            lines.push(`${pokemonSkuGroupTitle(group, products)} (${Number(group.user_count || 0)} users)`);
+            if (Array.isArray(group.users) && group.users.length) {
+                group.users.forEach((user) => lines.push(user.user_display || user.user_email || user.user_id));
+            } else {
+                lines.push("No users");
+            }
+            if (groupIndex < groups.length - 1) lines.push("");
+        });
+
+        return lines.join("\n");
+    }
+
+    async function copyPlainText(value) {
+        if (navigator.clipboard?.writeText) {
+            await navigator.clipboard.writeText(value);
+            return;
+        }
+        const textarea = document.createElement("textarea");
+        textarea.value = value;
+        textarea.style.position = "fixed";
+        textarea.style.opacity = "0";
+        document.body.appendChild(textarea);
+        textarea.select();
+        document.execCommand("copy");
+        textarea.remove();
+    }
+
+    function renderPokemonSkuComparison(data) {
+        const results = document.getElementById("pokemonSkuComparisonResults");
+        const copyAllButton = document.getElementById("copyPokemonSkuComparisonButton");
+        if (!results) return;
+
+        const products = Array.isArray(data?.products) ? data.products : [];
+        const groups = Array.isArray(data?.groups) ? data.groups : [];
+        results.innerHTML = groups.map((group) => {
+            const selectedProducts = (group.product_indexes || [])
+                .map((index) => products[index])
+                .filter(Boolean);
+            const users = Array.isArray(group.users) ? group.users : [];
+            return `
+                <article class="pokemon-sku-group ${group.match_count === products.length ? "pokemon-sku-group--all" : ""}">
+                    <div class="pokemon-sku-group__header">
+                        <h4>${escapeHTML(pokemonSkuGroupTitle(group, products))}</h4>
+                        <span class="badge">${Number(group.user_count || 0)}</span>
+                    </div>
+                    <div class="pokemon-sku-group__products">
+                        ${selectedProducts.map((product) => `<div>${escapeHTML(product.product_name || product.sku)} • <code>${escapeHTML(product.sku)}</code></div>`).join("")}
+                    </div>
+                    <div class="pokemon-sku-group__users">
+                        ${users.length
+                            ? users.map((user) => `<div class="pokemon-sku-group__user"><strong>${escapeHTML(user.user_display || user.user_email || user.user_id)}</strong></div>`).join("")
+                            : `<div class="pokemon-sku-group__empty">No active users selected this combination.</div>`}
+                    </div>
+                    <button class="btn pokemon-sku-group__copy" type="button" data-copy-pokemon-sku-group="${escapeHTML(group.id)}" ${users.length ? "" : "disabled"}>Copy Users</button>
+                </article>
+            `;
+        }).join("");
+
+        results.querySelectorAll("[data-copy-pokemon-sku-group]").forEach((button) => {
+            button.addEventListener("click", async () => {
+                const message = document.getElementById("pokemonSkuComparisonMessage");
+                const groupId = button.getAttribute("data-copy-pokemon-sku-group") || "";
+                try {
+                    await copyPlainText(pokemonSkuComparisonText(data, groupId));
+                    if (message) message.textContent = "Copied this user group.";
+                } catch (err) {
+                    if (message) message.textContent = err.message || "Could not copy this group.";
+                }
+            });
+        });
+        if (copyAllButton) copyAllButton.disabled = !groups.length;
+    }
+
+    async function comparePokemonSkuUsers() {
+        const button = document.getElementById("comparePokemonSkuUsersButton");
+        const results = document.getElementById("pokemonSkuComparisonResults");
+        const message = document.getElementById("pokemonSkuComparisonMessage");
+        const copyAllButton = document.getElementById("copyPokemonSkuComparisonButton");
+        const skus = pokemonSkuComparisonInputs();
+        const uniqueSkus = new Set(skus.map((sku) => sku.toUpperCase()).filter(Boolean));
+
+        if (uniqueSkus.size !== 3) {
+            if (message) message.textContent = "Enter exactly 3 different Pokémon Center SKUs.";
+            return;
+        }
+
+        if (button) button.disabled = true;
+        if (copyAllButton) copyAllButton.disabled = true;
+        if (message) message.textContent = "Comparing active Pokémon Center users...";
+        if (results) results.innerHTML = `<div class="profile-account-summary__empty">Loading user groups...</div>`;
+
+        try {
+            const data = await fetchJSON(
+                API + "/admin/product-selections/pokemon-sku-groups?skus=" + encodeURIComponent(skus.join(",")),
+                { headers: authHeaders() }
+            );
+            pokemonSkuComparisonData = data;
+            renderPokemonSkuComparison(data);
+            if (message) {
+                const count = Number(data.total_matched_users || 0);
+                message.textContent = `Found ${count} active user${count === 1 ? "" : "s"}. Paused Pokémon Center users are excluded.`;
+            }
+        } catch (err) {
+            pokemonSkuComparisonData = null;
+            if (results) results.innerHTML = `<div class="error-text">${escapeHTML(err.message)}</div>`;
+            if (message) message.textContent = err.message;
+        } finally {
+            if (button) button.disabled = false;
+        }
+    }
+
+    function bindPokemonSkuComparison() {
+        const compareButton = document.getElementById("comparePokemonSkuUsersButton");
+        const copyAllButton = document.getElementById("copyPokemonSkuComparisonButton");
+        if (!compareButton) return;
+
+        compareButton.addEventListener("click", comparePokemonSkuUsers);
+        [1, 2, 3].forEach((index) => {
+            document.getElementById(`pokemonSkuComparisonInput${index}`)?.addEventListener("keydown", (event) => {
+                if (event.key === "Enter") comparePokemonSkuUsers();
+            });
+        });
+        if (copyAllButton) {
+            copyAllButton.addEventListener("click", async () => {
+                const message = document.getElementById("pokemonSkuComparisonMessage");
+                if (!pokemonSkuComparisonData) return;
+                try {
+                    await copyPlainText(pokemonSkuComparisonText(pokemonSkuComparisonData));
+                    if (message) message.textContent = "Copied all Pokémon Center SKU groups.";
+                } catch (err) {
+                    if (message) message.textContent = err.message || "Could not copy the groups.";
+                }
+            });
+        }
+    }
+
     async function loadAdminSelections() {
         const section = document.getElementById("adminProductSelectionsSection");
         const userSelect = document.getElementById("adminProductUserSelect");
@@ -482,6 +645,7 @@ function countEffectiveSkus(product) {
                 await loadProducts();
             }
             if (document.getElementById("adminProductSelectionsSection")) {
+                bindPokemonSkuComparison();
                 await loadAdminSelections();
                 await loadCountdownUserList();
             }
