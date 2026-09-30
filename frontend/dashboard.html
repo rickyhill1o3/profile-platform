@@ -122,8 +122,9 @@
               </div>
               <div class="toolbar-row" style="margin-top:8px;">
                 <button class="btn btn-primary" type="button" id="profileImportButton">Import Profiles</button>
+                <button class="btn" type="button" id="downloadMyStellarPokemonCenterButton">Download My Current Stellar PKC File</button>
               </div>
-              <p class="subtle-text">Choose the store first, then upload a JSON profile export or Shikari CSV. Imported profiles will be assigned to the selected store.</p>
+              <p class="subtle-text">Choose the destination store first, then upload a JSON profile export or Shikari CSV. The profiles are assigned only to that selected store. When Pokémon Center is selected for a Shikari CSV, a Stellar-compatible Pokémon Center file also downloads automatically.</p>
               <div class="form-help" id="profileImportMessage"></div>
             </div>
           </section>
@@ -561,6 +562,6 @@
     </section>
   </div>
 
-  <script src="script.js?v=20260928-payment-alert-repair" defer></script>
+  <script src="script.js?v=20260930-shikari-selectable-store" defer></script>
 </body>
 </html>

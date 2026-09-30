@@ -1408,6 +1408,7 @@ function bindProfileImportControls() {
     const fileInput = document.getElementById('profileImportFile');
     const typeSelect = document.getElementById('profileImportType');
     const message = document.getElementById('profileImportMessage');
+    const downloadPokemonButton = document.getElementById('downloadMyStellarPokemonCenterButton');
     let reportBox = document.getElementById('profileImportReport');
     if (!reportBox && message?.parentElement) {
         reportBox = document.createElement('textarea');
@@ -1540,6 +1541,47 @@ function bindProfileImportControls() {
         return profiles.map((profile) => ({ ...profile, import_source: profile.import_source || detected }));
     };
 
+    const downloadPokemonCenterStellarProfiles = async (convertedRows = null) => {
+        const date = new Date().toISOString().slice(0, 10);
+        const filename = `stellar-pokemon-center-profiles-${date}`;
+        if (Array.isArray(convertedRows)) {
+            if (!convertedRows.length) throw new Error('No valid Shikari profiles were available for the Stellar file.');
+            const blob = new Blob([JSON.stringify(convertedRows, null, 2)], { type: 'application/json' });
+            const downloadUrl = window.URL.createObjectURL(blob);
+            const anchor = document.createElement('a');
+            anchor.href = downloadUrl;
+            anchor.download = filename + '.json';
+            document.body.appendChild(anchor);
+            anchor.click();
+            anchor.remove();
+            window.URL.revokeObjectURL(downloadUrl);
+            return;
+        }
+        const params = new URLSearchParams({ filename });
+        await downloadExportFile(
+            API + '/profiles/export/stellar-pokemon-center?' + params.toString(),
+            filename + '.json'
+        );
+    };
+
+    if (downloadPokemonButton) {
+        downloadPokemonButton.addEventListener('click', async () => {
+            const originalText = downloadPokemonButton.textContent;
+            downloadPokemonButton.disabled = true;
+            downloadPokemonButton.textContent = 'Building Stellar file...';
+            message.textContent = '';
+            try {
+                await downloadPokemonCenterStellarProfiles();
+                message.textContent = 'Your current Pokémon Center profiles were downloaded in Stellar JSON format.';
+            } catch (error) {
+                message.textContent = error.message || 'Could not build the Stellar Pokémon Center file.';
+            } finally {
+                downloadPokemonButton.disabled = false;
+                downloadPokemonButton.textContent = originalText || 'Download My Current Stellar PKC File';
+            }
+        });
+    }
+
     const runProfileImport = async () => {
         message.textContent = '';
         clearImportReport();
@@ -1549,6 +1591,7 @@ function bindProfileImportControls() {
             return;
         }
         importButton.disabled = true;
+        if (downloadPokemonButton) downloadPokemonButton.disabled = true;
         const originalText = importButton.textContent;
         importButton.textContent = 'Importing...';
         try {
@@ -1556,10 +1599,19 @@ function bindProfileImportControls() {
             const parsed = normalizeImportText(text, file.name);
             const profiles = extractProfilesFromImport(parsed);
             const importSource = profiles[0]?.import_source || 'auto';
+            const destinationStore = typeSelect.value;
+            const destinationLabel = typeSelect.options[typeSelect.selectedIndex]?.textContent?.trim() || destinationStore;
+            const isShikariPokemonCenterConversion = destinationStore === 'pokemoncenter' && importSource === 'shikari_csv';
+            const effectiveImportSource = isShikariPokemonCenterConversion ? 'shikari_target_csv' : importSource;
             const res = await fetch(API + '/profiles/import', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token() },
-                body: JSON.stringify({ account_type: typeSelect.value, assigned_stores: [typeSelect.value], import_source: importSource, profiles })
+                body: JSON.stringify({
+                    account_type: destinationStore,
+                    assigned_stores: [destinationStore],
+                    import_source: effectiveImportSource,
+                    profiles
+                })
             });
             const responseText = await res.text();
             let data = {};
@@ -1575,14 +1627,26 @@ function bindProfileImportControls() {
             const skippedCount = Number(data.skipped_count || 0);
             const errorCount = Number(data.error_count || 0);
             const detailText = skippedCount || errorCount ? ' Review the skipped/error details below.' : '';
-            message.textContent = `Import complete. Imported ${data.imported_count || 0}, skipped ${skippedCount}, errors ${errorCount}.${detailText}`;
             renderImportReport(data);
             fileInput.value = '';
             await loadProfiles();
+
+            let stellarText = '';
+            if (isShikariPokemonCenterConversion) {
+                importButton.textContent = 'Downloading Stellar file...';
+                try {
+                    await downloadPokemonCenterStellarProfiles(data.stellar_profiles);
+                    stellarText = ' The Stellar Pokémon Center JSON file was also downloaded.';
+                } catch (downloadError) {
+                    stellarText = ` The profiles were imported, but the Stellar download failed: ${downloadError.message || 'try the current PKC download button again'}.`;
+                }
+            }
+            message.textContent = `Import complete for ${destinationLabel}. Imported ${data.imported_count || 0}, skipped ${skippedCount}, errors ${errorCount}.${stellarText}${detailText}`;
         } catch (error) {
             message.textContent = error.message || 'Could not import profiles.';
         } finally {
             importButton.disabled = false;
+            if (downloadPokemonButton) downloadPokemonButton.disabled = false;
             importButton.textContent = originalText || 'Import Profiles';
         }
     };

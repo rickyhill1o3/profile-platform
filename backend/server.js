@@ -97,6 +97,7 @@ const registerSuccessNetwork = require("./success-network");
 const { registerOrderTracker, notifyCheckoutForOrderTracker } = require("./order-tracker");
 const { buildShikariAccountsCsv, buildShikariImapCsv } = require("./shikari-credential-exports");
 const { buildStellarAmazonAccountsText } = require("./stellar-amazon-account-export");
+const { buildStellarRowsFromImportedProfiles } = require("./shikari-pokemoncenter-stellar");
 const { registerMarketValueEngine } = require("./market-value-engine");
 const { registerMasterProductCatalog } = require("./master-product-catalog");
 const { fetchAllSupabaseRows, fetchAllSupabaseRowsInBatches } = require("./supabase-pagination");
@@ -7998,10 +7999,21 @@ function normalizeImportedProfilePayload(entry = {}, accountType = "walmart") {
         city: valueFrom(entry.shipping_city, shipping.city, entry.billing_city, billing.city),
         state: valueFrom(entry.shipping_state, shipping.province, shipping.state, entry.billing_state, billing.province, billing.state),
         zip: valueFrom(entry.shipping_zip_code, shipping.postalCode, shipping.zip, shipping.zipcode, entry.billing_zip_code, billing.postalCode, billing.zip, billing.zipcode),
+        country: valueFrom(entry.shipping_country, shipping.country, entry.billing_country, billing.country, "US"),
+        billing_first_name: valueFrom(entry.billing_first_name, billing.firstName, billing.first_name),
+        billing_last_name: valueFrom(entry.billing_last_name, billing.lastName, billing.last_name),
+        billing_address1: valueFrom(entry.billing_street, billing.address1, billing.address_1, billing.address),
+        billing_address2: valueFrom(entry.billing_street_2, billing.address2, billing.address_2),
+        billing_city: valueFrom(entry.billing_city, billing.city),
+        billing_state: valueFrom(entry.billing_state, billing.province, billing.state),
+        billing_zip: valueFrom(entry.billing_zip_code, billing.postalCode, billing.zip, billing.zipcode),
+        billing_country: valueFrom(entry.billing_country, billing.country),
+        billing_phone: digitsOnly(valueFrom(entry.billing_phone, billing.phone)).slice(-10),
         card,
         exp_month: valueFrom(entry.cc_exp_month, payment.month, payment.exp_month, payment.cardMonth).padStart(2, '0').slice(-2),
         exp_year: normalizeYear(valueFrom(entry.cc_exp_year, payment.year, payment.exp_year, payment.cardYear)),
         cvv: digitsOnly(valueFrom(entry.cc_cvv, payment.cvv, payment.cardCvv, payment.card_cvv)),
+        card_name: valueFrom(entry.card_name, payment.name, payment.cardName, `${valueFrom(entry.billing_first_name, billing.firstName, entry.first_name, shipping.firstName)} ${valueFrom(entry.billing_last_name, billing.lastName, entry.last_name, shipping.lastName)}`),
         account_login_email: email,
         account_login_password: valueFrom(entry.password, entry.account_password, entry.login_password),
         gmail_app_password: valueFrom(entry.gmail_app_password, entry.app_password, entry.imap_password),
@@ -9638,10 +9650,27 @@ app.post("/profiles/import", auth, async (req, res) => {
         const requestedType = normalizeProfileAccountType(req.body?.account_type || 'general');
         const assignedStores = restrictAssignedStoresForRole(normalizeAssignedStores(req.body?.assigned_stores || [requestedType], requestedType), importUser.role);
         const accountType = assignedStores[0] || 'general';
+        const importSource = String(req.body?.import_source || '').trim().toLowerCase();
+        const isShikariTargetToPokemonCenter = accountType === 'pokemoncenter' && importSource === 'shikari_target_csv';
         const rawProfiles = Array.isArray(req.body?.profiles) ? req.body.profiles : [];
         if (!rawProfiles.length) {
             return res.status(400).json({ error: "No profiles were provided" });
         }
+
+        const stellarPokemonCenterRows = (() => {
+            if (!isShikariTargetToPokemonCenter) return null;
+            const seenRows = new Set();
+            const normalizedRows = rawProfiles
+                .map((entry) => normalizeImportedProfilePayload(entry, 'pokemoncenter'))
+                .filter((profile) => {
+                    if (!profile.profile_name || !profile.email || !phoneRegex.test(profile.phone || '')) return false;
+                    const key = `${profile.profile_name}|${profile.email}`.toLowerCase();
+                    if (seenRows.has(key)) return false;
+                    seenRows.add(key);
+                    return true;
+                });
+            return buildStellarRowsFromImportedProfiles(normalizedRows);
+        })();
 
         const currentUser = await getCurrentUser(req);
         if (accountType !== "raffle") {
@@ -9657,7 +9686,9 @@ app.post("/profiles/import", auth, async (req, res) => {
         for (const entry of rawProfiles) {
             const payload = { ...normalizeImportedProfilePayload(entry, accountType), assigned_stores: assignedStores };
             const skipDuplicateProtection = normalizeProfileAccountType(payload.account_type) === 'bandai';
-            const dedupeKey = [payload.account_type, payload.profile_name, payload.email, payload.phone, (payload.card || '').slice(-4)].join('|').toLowerCase();
+            const dedupeKey = isShikariTargetToPokemonCenter
+                ? [payload.account_type, payload.profile_name, payload.email].join('|').toLowerCase()
+                : [payload.account_type, payload.profile_name, payload.email, payload.phone, (payload.card || '').slice(-4)].join('|').toLowerCase();
             if (!skipDuplicateProtection && seen.has(dedupeKey)) {
                 skipped.push({ profile_name: payload.profile_name, reason: 'Duplicate in upload' });
                 continue;
@@ -9674,15 +9705,21 @@ app.post("/profiles/import", auth, async (req, res) => {
                 continue;
             }
 
-            const duplicateError = findDuplicateInSameGroup(
-                existingProfiles,
-                null,
-                payload.account_type,
-                payload.profile_name,
-                payload.email,
-                payload.phone,
-                (payload.card || '').slice(-4)
-            );
+            const duplicateError = isShikariTargetToPokemonCenter
+                ? existingProfiles.some((profile) => (
+                    normalizeProfileAccountType(profile.account_type) === 'pokemoncenter' &&
+                    String(profile.profile_name || '').trim().toLowerCase() === String(payload.profile_name || '').trim().toLowerCase() &&
+                    String(profile.addresses?.[0]?.email || '').trim().toLowerCase() === String(payload.email || '').trim().toLowerCase()
+                )) ? 'This Shikari profile is already imported for Pokémon Center' : null
+                : findDuplicateInSameGroup(
+                    existingProfiles,
+                    null,
+                    payload.account_type,
+                    payload.profile_name,
+                    payload.email,
+                    payload.phone,
+                    (payload.card || '').slice(-4)
+                );
 
             if (duplicateError) {
                 skipped.push({ profile_name: payload.profile_name, reason: duplicateError });
@@ -9734,7 +9771,8 @@ app.post("/profiles/import", auth, async (req, res) => {
             error_count: errors.length,
             imported,
             skipped,
-            errors
+            errors,
+            ...(stellarPokemonCenterRows ? { stellar_profiles: stellarPokemonCenterRows } : {})
         });
     } catch (err) {
         const status = err.message === "This account has been revoked" ? 403 : 500;
@@ -11072,6 +11110,75 @@ function cardTypeForNumber(cardNumber) {
     return "";
 }
 
+function buildStellarProfileRows(profiles = []) {
+    return (Array.isArray(profiles) ? profiles : []).map((profile) => {
+        const address = profile.addresses?.[0] || {};
+        const payment = profile.payments?.[0] || {};
+
+        let cardNumber = "";
+        let cardCvv = "";
+
+        try {
+            cardNumber = payment.card_encrypted ? decrypt(payment.card_encrypted) : "";
+        } catch { }
+
+        try {
+            cardCvv = payment.cvv_encrypted ? decrypt(payment.cvv_encrypted) : "";
+        } catch { }
+
+        const billingSameAsShipping = !(
+            address.billing_first_name ||
+            address.billing_last_name ||
+            address.billing_address1 ||
+            address.billing_address2 ||
+            address.billing_city ||
+            address.billing_state ||
+            address.billing_zip ||
+            address.billing_country ||
+            address.billing_phone
+        );
+
+        const ship = {
+            firstName: address.first_name || "",
+            lastName: address.last_name || "",
+            country: countryForStellar(address.country),
+            address: address.address1 || "",
+            address2: address.address2 || "",
+            state: stateForStellar(address.state),
+            city: address.city || "",
+            zipcode: address.zip || ""
+        };
+
+        const bill = billingSameAsShipping ? { ...ship } : {
+            firstName: address.billing_first_name || "",
+            lastName: address.billing_last_name || "",
+            country: countryForStellar(address.billing_country || address.country),
+            address: address.billing_address1 || "",
+            address2: address.billing_address2 || "",
+            state: stateForStellar(address.billing_state),
+            city: address.billing_city || "",
+            zipcode: address.billing_zip || ""
+        };
+
+        return {
+            profileName: profile.profile_name || "",
+            email: address.email || "",
+            phone: address.phone || "",
+            shipping: ship,
+            billingAsShipping: billingSameAsShipping,
+            oneCheckoutPerProfile: false,
+            billing: bill,
+            payment: {
+                cardName: payment.card_name || `${address.first_name || ""} ${address.last_name || ""}`.trim(),
+                cardType: cardTypeForNumber(cardNumber),
+                cardNumber,
+                cardMonth: twoDigitMonth(payment.exp_month),
+                cardYear: twoDigitYear(payment.exp_year),
+                cardCvv
+            }
+        };
+    });
+}
 
 function fourDigitYear(value) {
     const text = String(value || "").trim();
@@ -11251,6 +11358,38 @@ app.get("/admin/export/profiles-polar-json", auth, admin, async (req, res) => {
     }
 });
 
+app.get("/profiles/export/stellar-pokemon-center", auth, async (req, res) => {
+    try {
+        await ensureUserNotRevoked(req.user_id);
+        const filename = (req.query.filename || "stellar-pokemon-center-profiles").replace(/[^a-zA-Z0-9-_]/g, "");
+        const { data: profiles, error } = await supabase
+            .from("profiles")
+            .select(`
+                *,
+                addresses(*),
+                payments(*),
+                accounts(*)
+            `)
+            .eq("user_id", req.user_id)
+            .order("created_at", { ascending: false });
+
+        if (error) return res.status(500).json({ error: error.message });
+
+        const exportProfiles = await attachAndFilterProfilesByStore(profiles || [], "pokemoncenter");
+        if (!exportProfiles.length) {
+            return res.status(404).json({ error: "No Pokémon Center profiles were found. Import a Shikari Target profile CSV first." });
+        }
+
+        const rows = buildStellarProfileRows(exportProfiles);
+        res.setHeader("Content-Type", "application/json");
+        res.setHeader("Content-Disposition", `attachment; filename="${filename}.json"`);
+        res.send(JSON.stringify(rows, null, 2));
+    } catch (err) {
+        const status = err.message === "This account has been revoked" ? 403 : 500;
+        res.status(status).json({ error: err.message });
+    }
+});
+
 app.get("/admin/export/profiles-stellar-json", auth, admin, async (req, res) => {
     try {
         const currentUser = await getCurrentUser(req);
@@ -11291,70 +11430,7 @@ app.get("/admin/export/profiles-stellar-json", auth, admin, async (req, res) => 
         let exportProfiles = await attachAndFilterProfilesByStore(profiles || [], group || "");
         exportProfiles = await filterProfilesByActiveRunStatus(exportProfiles, group || "", activeOnly);
 
-        const rows = exportProfiles.map((profile) => {
-            const address = profile.addresses?.[0] || {};
-            const payment = profile.payments?.[0] || {};
-
-            let cardNumber = "";
-            let cardCvv = "";
-
-            try {
-                cardNumber = payment.card_encrypted ? decrypt(payment.card_encrypted) : "";
-            } catch { }
-
-            try {
-                cardCvv = payment.cvv_encrypted ? decrypt(payment.cvv_encrypted) : "";
-            } catch { }
-
-            const billingSameAsShipping =
-                !address.billing_first_name &&
-                !address.billing_last_name &&
-                !address.billing_address1 &&
-                !address.billing_city &&
-                !address.billing_state &&
-                !address.billing_zip &&
-                !address.billing_phone;
-
-            const ship = {
-                firstName: address.first_name || "",
-                lastName: address.last_name || "",
-                country: countryForStellar(address.country),
-                address: address.address1 || "",
-                address2: address.address2 || "",
-                state: stateForStellar(address.state),
-                city: address.city || "",
-                zipcode: address.zip || ""
-            };
-
-            const bill = billingSameAsShipping ? { ...ship } : {
-                firstName: address.billing_first_name || "",
-                lastName: address.billing_last_name || "",
-                country: countryForStellar(address.billing_country || address.country),
-                address: address.billing_address1 || "",
-                address2: address.billing_address2 || "",
-                state: stateForStellar(address.billing_state),
-                city: address.billing_city || "",
-                zipcode: address.billing_zip || ""
-            };
-
-            return {
-                profileName: profile.profile_name || "",
-                email: address.email || "",
-                phone: address.phone || "",
-                shipping: ship,
-                billingAsShipping: billingSameAsShipping,
-                oneCheckoutPerProfile: false,
-                billing: bill,
-                payment: {
-                    cardName: payment.card_name || `${address.first_name || ""} ${address.last_name || ""}`.trim(),
-                    cardType: cardTypeForNumber(cardNumber),
-                    cardNumber,
-                    cardMonth: twoDigitMonth(payment.exp_month),
-                    cardYear: twoDigitYear(payment.exp_year),
-                    cardCvv
-                }
-            };
-        });
+        const rows = buildStellarProfileRows(exportProfiles);
 
         res.setHeader("Content-Type", "application/json");
         res.setHeader("Content-Disposition", `attachment; filename="${filename}.json"`);
