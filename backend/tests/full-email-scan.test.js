@@ -27,10 +27,12 @@ const reconcileStart = backend.indexOf("app.post('/orders/reconcile-retailer-ema
 const reconcileEnd = backend.indexOf("app.get('/orders/reconcile-retailer-emails/status'", reconcileStart);
 const reconcile = backend.slice(reconcileStart, reconcileEnd);
 assert.match(reconcile, /force:true/, 'manual reconciliation must force a current scan instead of accepting stale last-scan timestamps');
-assert.match(reconcile, /drainBacklog:true/, 'manual reconciliation must keep draining mailbox backlog in bounded passes');
-assert.match(reconcile, /maxPassesPerMailbox:4/, 'backlog draining must remain bounded');
+assert.match(reconcile, /drainBacklog:false/, 'manual reconciliation must make one low-memory pass per mailbox');
+assert.match(reconcile, /maxPassesPerMailbox:1/, 'one click must not repeatedly hydrate the same large mailbox');
+assert.doesNotMatch(reconcile, /startUserScanJob\(/, 'reconciliation must not immediately overlap itself with another all-mailbox scan');
 assert.match(reconcile, /all_email_scan:allEmailScan|result\.all_email_scan = allEmailScan/, 'full scan totals must be returned to diagnostics');
 assert.doesNotMatch(reconcile, /discoverPokemonCenterConfirmationsGlobally\(/, 'Pokemon Center must replay from the fresh archive instead of rescanning every mailbox');
 assert.match(frontend, /All messages archived \(recognized and unrecognized\)/, 'admin diagnostics must report complete archive coverage');
+assert.match(frontend, /Mailboxes with more messages saved for the next reconcile pass/, 'admin diagnostics must explain resumable mailbox backlog');
 
 console.log('Full collected-email scan tests passed');

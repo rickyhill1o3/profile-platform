@@ -8,7 +8,7 @@ const frontend = fs.readFileSync(path.join(projectRoot, 'frontend', 'order-track
 const html = fs.readFileSync(path.join(projectRoot, 'frontend', 'order-tracker.html'), 'utf8');
 
 const routeStart = backend.indexOf("app.get('/orders/email-database-export'");
-const routeEnd = backend.indexOf("app.get('/orders/account-alerts'", routeStart);
+const routeEnd = backend.indexOf("app.get('/orders/email-index-export'", routeStart);
 assert(routeStart >= 0 && routeEnd > routeStart, 'email export route must be registered');
 const route = backend.slice(routeStart, routeEnd);
 
@@ -25,11 +25,25 @@ assert.match(route, /body_html:row\.body_html/, 'stored HTML must be included fo
 assert.match(route, /excludes:\['attachment files','mailbox passwords','OAuth tokens'\]/, 'credentials and attachment files must be expressly excluded');
 assert.doesNotMatch(route.slice(route.indexOf('const safeEmailRecord'), route.indexOf('let totalArchiveRows')), /password_enc|app_password_enc|refresh_token_enc|client_secret_enc/, 'credential fields must never enter an email record');
 
-assert.match(html, /id="exportEmailDatabase" hidden>Export all collected emails</, 'the complete export button must be hidden until super-admin bootstrap');
-assert.match(html, /order-tracker\.js\?v=20260928-all-email-scan-export/, 'the browser must receive the new script version');
+assert.match(html, /id="exportEmailDatabase" hidden>Export full parser archive</, 'the complete export button must be hidden until super-admin bootstrap');
+assert.match(html, /id="exportEmailIndex" hidden>Export readable email list</, 'the readable CSV button must be hidden until super-admin bootstrap');
+assert.match(html, /order-tracker\.js\?v=20260929-reconcile-readable-export/, 'the browser must receive the new script version');
 assert.match(frontend, /\$\('exportEmailDatabase'\)\.hidden=false/, 'bootstrap must reveal the button only to super admins');
+assert.match(frontend, /\$\('exportEmailIndex'\)\.hidden=false/, 'bootstrap must reveal the readable export only to super admins');
 assert.match(frontend, /fetch\(`\$\{API\}\/orders\/email-database-export`,\{headers:\{Authorization:`Bearer \$\{token\}`\}\}\)/, 'the browser download must send the signed-in bearer token');
 assert.match(frontend, /response\.blob\(\)/, 'the compressed response must download as a file');
-assert.match(frontend, /Your complete collected-email export is ready/, 'successful reconciliation must tell the admin that the complete snapshot is ready');
+assert.match(frontend, /Your readable email list and complete collected-email parser archive are ready/, 'successful reconciliation must explain both export choices');
+
+const indexStart = backend.indexOf("app.get('/orders/email-index-export'");
+const indexEnd = backend.indexOf("app.get('/orders/account-alerts'", indexStart);
+assert(indexStart >= 0 && indexEnd > indexStart, 'readable email index route must be registered');
+const indexRoute = backend.slice(indexStart, indexEnd);
+assert.match(indexRoute, /req\.role !== 'super_admin'/, 'the readable export must be super-admin only');
+assert.match(indexRoute, /\.eq\('user_id', req\.user_id\)/, 'the readable export must remain user scoped');
+assert.match(indexRoute, /text\/csv; charset=utf-8/, 'the readable export must download as CSV');
+assert.match(indexRoute, /large stored bodies/, 'route documentation must explain that large bodies are omitted');
+assert.doesNotMatch(indexRoute.match(/const columns = ([^;]+);/)?.[1] || '', /body_text|body_html/, 'readable rows must not include large MIME bodies');
+assert.match(indexRoute, /Prevent spreadsheet formula injection/, 'sender-controlled cells must be safe to open in Excel');
+assert.match(frontend, /fetch\(`\$\{API\}\/orders\/email-index-export`/, 'the readable export button must call the CSV endpoint');
 
 console.log('Collected email database export tests passed');

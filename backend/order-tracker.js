@@ -41,9 +41,25 @@ const MACYS_EMAIL_MATCH_WINDOW_MS = Math.max(
 );
 const ORDER_REPAIR_FALLBACK_MAX_MESSAGES = Math.max(50, Math.min(5000, Number(process.env.ORDER_REPAIR_FALLBACK_MAX_MESSAGES || 1000)));
 const RECONCILE_IMAP_CONCURRENCY = Math.max(1, Math.min(4, Number(process.env.RECONCILE_IMAP_CONCURRENCY || 2)));
-const FULL_EMAIL_SCAN_CONCURRENCY = Math.max(2, Math.min(12, Number(process.env.FULL_EMAIL_SCAN_CONCURRENCY || 8)));
+// Keep full-account scans inside Render's memory budget. Retailer messages can contain very large
+// HTML/MIME bodies, so eight simultaneous parsers can restart the service before the browser sees
+// a completed job. Three workers still cover the whole mailbox inventory without the memory spike.
+const FULL_EMAIL_SCAN_CONCURRENCY = Math.max(1, Math.min(6, Number(process.env.FULL_EMAIL_SCAN_CONCURRENCY || 3)));
 const IMAP_ACCOUNT_SCAN_DEADLINE_MS = Math.max(30000, Math.min(10 * 60 * 1000, Number(process.env.IMAP_ACCOUNT_SCAN_DEADLINE_MS || 120000)));
-const RECONCILE_MAX_MESSAGES_PER_MAILBOX = Math.max(250, Math.min(5000, Number(process.env.RECONCILE_MAX_MESSAGES_PER_MAILBOX || 1500)));
+// Manual reconcile is an incremental catch-up pass, not a request to hydrate years of mail into
+// one process. Every connected mailbox is visited, while at most this many new messages are parsed
+// from each mailbox per click. Checkpoints preserve progress and the next click resumes the backlog.
+const RECONCILE_MAX_MESSAGES_PER_MAILBOX = Math.max(25, Math.min(500, Number(process.env.RECONCILE_MAX_MESSAGES_PER_MAILBOX || 100)));
+// These retailers were found in the full saved-email export or are explicitly supported by the
+// checkout webhooks. Reconciliation pages lightweight metadata for the complete archive, then
+// hydrates only lifecycle-looking messages for these stores. This lets a newly improved parser
+// repair old `unknown` rows without loading tens of thousands of large marketing-email bodies.
+const ARCHIVE_RETAILER_REPLAY_STORES = new Set([
+  'amazon','macys','samsclub','boxlunch','booksamillion','crunchyroll',
+  'shopifyhazbinhotel','shopifytaylorswift','bestbuy','hottopic','fivebelow','costco',
+  'barnesnoble','homedepot','gamestop','premiumbandai','tcgplayer','usmint','temu',
+  'lego','fye','autozone','whatnot'
+]);
 let backgroundAccountCursor = 0;
 const userScanJobs = new Map();
 const retailerReconcileJobs = new Map();
@@ -372,6 +388,36 @@ async function fetchRecentEmailArchiveByStore(supabase, userId, store, columns, 
   const rank = new Map((meta.data || []).map((x,i)=>[String(x.id),i]));
   rows.sort((a,b)=>(rank.get(String(a.id)) ?? Number.MAX_SAFE_INTEGER)-(rank.get(String(b.id)) ?? Number.MAX_SAFE_INTEGER));
   return rows;
+}
+
+function archiveRetailerReplayClassification(row = {}) {
+  const subject = clean(row.subject || '');
+  const preview = clean(row.snippet || '');
+  const storedStore = normalizeStoreKey(row.store || '');
+  const inferredStore = normalizeStoreKey(detectStore(row.from_text || '', subject, preview));
+  const store = ARCHIVE_RETAILER_REPLAY_STORES.has(storedStore) ? storedStore : inferredStore;
+  if (!ARCHIVE_RETAILER_REPLAY_STORES.has(store)) return null;
+  const status = detectStatus(subject, preview);
+  if (!['confirmed','processing','shipped','delivered','canceled','refunded','payment_needed'].includes(status)) return null;
+  return { store, status };
+}
+
+async function fetchGeneralRetailerArchiveCandidates(supabase, userId, columns) {
+  // The saved-email export proved that valid Macy's, Costco, Barnes & Noble, Home Depot, and other
+  // retailer messages were already in the database as store=unknown. Scan the complete lightweight
+  // metadata index so age and inbox volume cannot push those rows outside a newest-N window. Only
+  // hydrate messages whose sender/subject/snippet looks like an actual lifecycle event.
+  const metadata = await fetchAllSupabaseRows(() => {
+    let query = supabase.from('email_messages')
+      .select('id,user_id,received_at,subject,from_text,mailbox_email,store,email_type,order_number,snippet,is_order_related')
+      .order('received_at', { ascending:false });
+    if (userId) query = query.eq('user_id', userId);
+    return query;
+  }, 750);
+  const relevant = metadata.filter(row => row?.id && archiveRetailerReplayClassification(row));
+  const rows = await fetchEmailArchiveRowsByIds(supabase, userId, relevant.map(row => row.id), columns, 50);
+  rows.sort((a,b) => new Date(a.received_at || 0) - new Date(b.received_at || 0));
+  return { rows, metadata_scanned:metadata.length, candidates_found:relevant.length };
 }
 
 async function fetchTargetDeliveredArchiveForStuckOrders(supabase, userId, columns, limit = 250) {
@@ -1090,6 +1136,21 @@ function detectStore(from, subject, text) {
   if (/supremenewyork\.com|us\.supreme\.com|\bsupreme\b/.test(hay)) return 'supreme';
   if (/books\s*-?\s*a\s*-?\s*million|booksamillion(?:\.com)?|\bbam!?(?:\s|$)/i.test(hay)) return 'booksamillion';
   if (/boxlunch(?:\.com)?|box lunch/.test(hay)) return 'boxlunch';
+  if (/(?:^|[.@\s])bestbuy\.com\b|\bbest buy (?:order|purchase|shipment|delivery|pickup|receipt)/.test(hay)) return 'bestbuy';
+  if (/(?:^|[.@\s])hottopic\.com\b|\bhot topic (?:order|purchase|shipment|delivery|receipt)/.test(hay)) return 'hottopic';
+  if (/(?:^|[.@\s])fivebelow\.com\b|\bfive below (?:order|purchase|shipment|delivery|receipt)/.test(hay)) return 'fivebelow';
+  if (/(?:^|[.@\s])costco\.com\b|\bcostco(?:\.com)? order\b/.test(hay)) return 'costco';
+  if (/(?:^|[.@\s])barnesandnoble\.com\b|\bbarnes\s*(?:&|and)\s*noble (?:order|shipping|package)/.test(hay)) return 'barnesnoble';
+  if (/(?:^|[.@\s])homedepot\.com\b|\bhome depot (?:order|purchase|shipment|delivery|receipt)/.test(hay)) return 'homedepot';
+  if (/(?:^|[.@\s])gamestop\.com\b|\bgamestop (?:order|purchase|shipment|delivery|receipt)/.test(hay)) return 'gamestop';
+  if (/(?:^|[.@\s])p-bandai\.com\b|\bpremium bandai\b/.test(hay)) return 'premiumbandai';
+  if (/(?:^|[.@\s])tcgplayer\.com\b|\btcgplayer(?:\.com)? order\b/.test(hay)) return 'tcgplayer';
+  if (/(?:^|[.@\s])email\.usmint\.gov\b|\bu\.?s\.? mint order\b/.test(hay)) return 'usmint';
+  if (/(?:^|[.@\s])(?:transaction\.)?temu\.com\b|\btemu order\b/.test(hay)) return 'temu';
+  if (/(?:^|[.@\s])(?:m\.|t\.crm\.)?lego\.com\b|\blego(?:®)? order\b/.test(hay)) return 'lego';
+  if (/(?:^|[.@\s])fye\.com\b|\bfye order\b/.test(hay)) return 'fye';
+  if (/(?:^|[.@\s])(?:em\.)?autozone\.com\b|\bautozone order\b/.test(hay)) return 'autozone';
+  if (/(?:^|[.@\s])whatnot\.com\b|\bwhatnot order\b/.test(hay)) return 'whatnot';
   if (/hazbinhotel\.com|hazbin hotel(?: official)? store/.test(hay)) return 'shopifyhazbinhotel';
   if (/store\.taylorswift\.com|taylorswift\.com|taylor swift(?: official)? store/.test(hay)) return 'shopifytaylorswift';
   return '';
@@ -1119,9 +1180,9 @@ function detectStatus(subject, text) {
        /update (?:the )?payment method/.test(body) &&
        /auto-cancel(?:ed|led)/.test(body))) return 'payment_needed';
 
-  if (/cancel(?:led|ed|ation)|unable to fulfill|we had to cancel/.test(subj) ||
+  if (/^cancellation confirmation$|(?:order|delivery|item|purchase|shipment|preorder).{0,80}cancel(?:led|ed|ation)|cancel(?:led|ed|ation).{0,80}(?:order|delivery|item|purchase|shipment|preorder)|unable to fulfill|we had to cancel/.test(subj) ||
       /(?:your|this|the) order (?:has been|was|is) cancel(?:led|ed)|we had to cancel (?:your )?order|unable to fulfill (?:your )?order/.test(body)) return 'canceled';
-  if (/refund(?:ed)?|refund issued/.test(subj) || /refund (?:has been|was|is) issued|we(?:'|’)ve refunded|your refund/.test(body)) return 'refunded';
+  if (/(?:order|item|purchase).{0,80}refund(?:ed)?|refund(?:ed)?.{0,80}(?:order|item|purchase)|refund issued/.test(subj) || /refund (?:has been|was|is) issued|we(?:'|’)ve refunded|your refund/.test(body)) return 'refunded';
 
   // A retailer confirmation/summary subject is authoritative. This prevents phrases such as
   // "we will email you as soon as your order has shipped" from being mistaken for a shipment.
@@ -1130,15 +1191,15 @@ function detectStatus(subject, text) {
   // so classify it explicitly before falling through to the generic rules.
   if (/thank you for shopping at pokemoncenter\.com/i.test(subj)) return 'confirmed';
 
-  if (/order confirmation|order confirmed|ordered(?::|\s+\d+\s+items?\b)|thanks for your (?:delivery )?order|thanks for shopping with us|order received|order placed|order summary|^online shop order$/.test(subj)) return 'confirmed';
+  if (/order confirmation|order confirmed|order (?:is )?confirmed|\border #?[a-z0-9-]{6,30} (?:is confirmed|received)\b|ordered(?::|\s+\d+\s+items?\b)|thanks for your (?:delivery )?order|thanks for your (?:best buy|hot topic|five below|costco|macy'?s|gamestop|fye|whatnot) order|thank you for your order|thanks for shopping with us|order received|order placed|order summary|we(?:'|’)ve (?:received|got) your .* order|billing summary for your recent .* order|receipt for #|^online shop order$/.test(subj)) return 'confirmed';
 
-  if (/\bdelivered\b|delivery complete|items? (?:has|have) arrived|^arrived:/.test(subj) ||
+  if (/\bdelivered\b|delivery complete|items? (?:has|have) arrived|^arrived:|knock,? knock: your order is here|thank you for your pickup order/.test(subj) ||
       /(?:your|the|this) (?:package|order|shipment) (?:has been|was|is) delivered|your package arrived|delivery (?:is )?complete|items? (?:has|have) arrived from order/.test(body)) return 'delivered';
 
-  if (/\bshipped\b|has shipped|on (?:the|its) way|package will arrive soon|package .*arrive soon|about to ship|getting ready to ship|arrives today|out for delivery/.test(subj) ||
+  if (/\bshipped\b|has shipped|on (?:the|its) way|package will arrive soon|package .*arrive soon|about to ship|getting ready to ship|arrives today|out for delivery|tomorrow is the day/.test(subj) ||
       /(?:your|the|this) (?:package|order|shipment) (?:has|have) shipped|we(?:'|’)ve shipped|was shipped|tracking number\s*[:#]|about to ship|getting ready to ship|shipping label has been created|arrives today|out for delivery/.test(body)) return 'shipped';
 
-  if (/processing|preparing your order|getting your order ready|running a little behind|order (?:is )?delayed/.test(subj)) return 'processing';
+  if (/processing|preparing your order|getting your order ready|running a little behind|order (?:is )?delayed|order(?:'s| is) ready|ready for pickup|scheduled: it(?:'|’)ll be out for delivery/.test(subj)) return 'processing';
 
   if (/order confirmation|thanks for your order|thanks for shopping with us|here(?:'|’)s your order|we(?:'|’)ve got your order|order placed/.test(body)) return 'confirmed';
 
@@ -1317,7 +1378,9 @@ function extractOrderNumber(store, subject, text) {
     amazon: [/\b(?:order(?: number| #)?\s*[:#]?\s*)(\d{3}-\d{7}-\d{7})\b/i, /\b(\d{3}-\d{7}-\d{7})\b/],
     macys: [
       /\b(?:order(?: number| no\.?| #)?\s*[:#]?\s*)([A-Z0-9-]{6,30})\b/i,
-      /\b(?:order|confirmation)\s*#\s*([A-Z0-9-]{6,30})\b/i
+      /\b(?:order|confirmation)\s*#\s*([A-Z0-9-]{6,30})\b/i,
+      /\bthank you for your order!\s*#\s*([A-Z0-9-]{6,30})\b/i,
+      /\bMacy'?s\s+order\s+([A-Z0-9-]{6,30})\b/i
     ],
     target: [/\b(?:order(?: number| #)?\s*[:#]?\s*)([A-Z0-9-]{8,30})\b/i, /\b(\d{10,20})\b/],
     walmart: [/\b(?:order(?: number| #)?\s*[:#]?\s*)([A-Z0-9-]{8,30})\b/i, /\b(\d{7,8}-\d{6,8})\b/],
@@ -1348,6 +1411,57 @@ function extractOrderNumber(store, subject, text) {
       /\b(?:order\s*(?:number|no\.?|#)?\s*[:#-]?\s*)(\d{8,20})\b/i,
       /\b(?:delivery\s+orders?\s*)?(?:order\s*)?#\s*[:#-]?\s*(\d{8,20})\b/i,
       /\b(\d{12,16})\b/
+    ],
+    bestbuy: [
+      /\b(BBY[A-Z0-9-]{6,30})\b/i,
+      /\b(?:order|purchase)\s*(?:number|no\.?|id|#)?\s*[:#-]?\s*([A-Z0-9-]{6,30})\b/i
+    ],
+    hottopic: [
+      /\b(?:order|purchase)\s*(?:number|no\.?|id|#)?\s*[:#-]?\s*([A-Z0-9-]{6,30})\b/i
+    ],
+    fivebelow: [
+      /\b(?:order|purchase)\s*(?:number|no\.?|id|#)?\s*[:#-]?\s*([A-Z0-9-]{6,30})\b/i
+    ],
+    costco: [
+      /\bCostco(?:\.com)?\s+order\s+([A-Z0-9-]{6,30})\b/i,
+      /\border\s*(?:number|no\.?|id|#)?\s*[:#-]?\s*([A-Z0-9-]{6,30})\b/i
+    ],
+    barnesnoble: [
+      /\b(?:order|shipping)\s+confirmation\s*#\s*([A-Z0-9-]{6,30})\b/i,
+      /\border\s*(?:number|no\.?|id|#)?\s*[:#-]?\s*([A-Z0-9-]{6,30})\b/i
+    ],
+    homedepot: [
+      /\border\s*#?\s*([A-Z]{1,4}\d{6,20})\b/i,
+      /\border\s*(?:number|no\.?|id|#)?\s*[:#-]?\s*([A-Z0-9-]{6,30})\b/i
+    ],
+    gamestop: [
+      /\border\s*(?:number|no\.?|id|#)?\s*[:#-]?\s*([A-Z0-9-]{6,30})\b/i
+    ],
+    premiumbandai: [
+      /\border\s*(?:number|no\.?|id|#)?\s*[:#-]?\s*([A-Z0-9-]{6,30})\b/i
+    ],
+    tcgplayer: [
+      /\border\s*(?:number|no\.?|id|#)?\s*[:#-]?\s*([A-Z0-9-]{6,30})\b/i
+    ],
+    usmint: [
+      /\b(?:order\s*)#?\s*(USM\d{6,20})\b/i,
+      /\border\s*(?:number|no\.?|id|#)?\s*[:#-]?\s*([A-Z0-9-]{6,30})\b/i
+    ],
+    temu: [
+      /\b(PO-\d{3}-\d{10,20})\b/i,
+      /\border\s*(?:number|no\.?|id|#)?\s*[:#-]?\s*([A-Z0-9-]{6,30})\b/i
+    ],
+    lego: [
+      /\border\s*(?:number|no\.?|id|#)?\s*[:#-]?\s*([A-Z0-9-]{6,30})\b/i
+    ],
+    fye: [
+      /\border\s*(?:number|no\.?|id|#)?\s*[:#-]?\s*([A-Z0-9-]{6,30})\b/i
+    ],
+    autozone: [
+      /\border\s*(?:number|no\.?|id|#)?\s*[:#-]?\s*([A-Z0-9-]{6,30})\b/i
+    ],
+    whatnot: [
+      /\border\s*(?:number|no\.?|id|#)?\s*[:#-]?\s*([A-Z0-9-]{6,30})\b/i
     ]
   };
   for (const re of patterns[store] || patterns.target) {
@@ -1968,6 +2082,21 @@ function normalizeStoreKey(value) {
   if (compact.includes('walmart')) return 'walmart';
   if (compact.includes('samsclub') || compact === 'sams') return 'samsclub';
   if (compact.includes('boxlunch')) return 'boxlunch';
+  if (compact.includes('bestbuy')) return 'bestbuy';
+  if (compact.includes('hottopic')) return 'hottopic';
+  if (compact.includes('fivebelow')) return 'fivebelow';
+  if (compact.includes('costco')) return 'costco';
+  if (compact.includes('barnesandnoble') || compact === 'bn') return 'barnesnoble';
+  if (compact.includes('homedepot')) return 'homedepot';
+  if (compact.includes('gamestop')) return 'gamestop';
+  if (compact.includes('premiumbandai') || compact.includes('pbandai')) return 'premiumbandai';
+  if (compact.includes('tcgplayer')) return 'tcgplayer';
+  if (compact.includes('usmint') || compact.includes('unitedstatesmint')) return 'usmint';
+  if (compact.includes('temu')) return 'temu';
+  if (compact === 'lego' || compact.includes('legoshop')) return 'lego';
+  if (compact === 'fye') return 'fye';
+  if (compact.includes('autozone')) return 'autozone';
+  if (compact.includes('whatnot')) return 'whatnot';
   if (compact.includes('hazbinhotel')) return 'shopifyhazbinhotel';
   if (compact.includes('taylorswift')) return 'shopifytaylorswift';
   return compact;
@@ -5442,6 +5571,76 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
     }
   });
 
+  app.get('/orders/email-index-export', auth, async (req, res) => {
+    if (req.role !== 'super_admin') return res.status(403).json({ error:'Super admin only.' });
+
+    // Human-readable companion to the complete JSONL.GZ parser archive. This deliberately omits
+    // the large stored bodies so Excel can open and filter all collected messages on an ordinary
+    // computer. The raw export above remains the complete source for parser development.
+    const columns = 'received_at,mailbox_email,from_text,to_text,subject,store,email_type,order_number,linked_order_id,source_type,snippet,is_order_related,has_attachments,attachment_count';
+    const pageSize = 500;
+    const fetchPage = from => supabase.from('email_messages').select(columns)
+      .eq('user_id', req.user_id)
+      .order('received_at', { ascending:true })
+      .order('id', { ascending:true })
+      .range(from, from + pageSize - 1);
+
+    let firstPage;
+    try {
+      const result = await fetchPage(0);
+      if (result.error) throw result.error;
+      firstPage = result.data || [];
+    } catch (error) {
+      return res.status(500).json({ error:`The readable email list could not be exported: ${error.message}` });
+    }
+
+    const exportedAt = new Date().toISOString();
+    const filename = `shore-shack-email-list-${exportedAt.replace(/[:.]/g, '-')}.csv`;
+    res.status(200);
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.setHeader('Cache-Control', 'no-store, private');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+
+    const csvCell = value => {
+      let text = value == null ? '' : String(value).replace(/\u0000/g, '');
+      // Prevent spreadsheet formula injection from sender-controlled subjects or addresses.
+      if (/^[=+\-@]/.test(text)) text = `'${text}`;
+      return `"${text.replace(/"/g, '""')}"`;
+    };
+    const writeCsv = async line => {
+      if (!res.write(line)) await new Promise(resolve => res.once('drain', resolve));
+    };
+    const headers = [
+      'Received','Mailbox','From','To','Subject','Store','Email type','Order number',
+      'Linked order ID','Source','Snippet','Order related','Has attachments','Attachment count'
+    ];
+    const rowValues = row => [
+      row.received_at,row.mailbox_email,row.from_text,row.to_text,row.subject,row.store,
+      row.email_type,row.order_number,row.linked_order_id,row.source_type,row.snippet,
+      Boolean(row.is_order_related),Boolean(row.has_attachments),Number(row.attachment_count || 0)
+    ];
+
+    try {
+      // UTF-8 BOM lets Windows Excel recognize addresses and subject characters correctly.
+      await writeCsv(`\uFEFF${headers.map(csvCell).join(',')}\r\n`);
+      let from = 0;
+      let batch = firstPage;
+      for (;;) {
+        for (const row of batch) await writeCsv(`${rowValues(row).map(csvCell).join(',')}\r\n`);
+        if (batch.length < pageSize) break;
+        from += pageSize;
+        const next = await fetchPage(from);
+        if (next.error) throw next.error;
+        batch = next.data || [];
+      }
+      res.end();
+    } catch (error) {
+      console.error('[EMAIL INDEX EXPORT]', error.message || error);
+      if (!res.destroyed) res.destroy(error);
+    }
+  });
+
   app.get('/orders/account-alerts', auth, async (req, res) => {
     try {
       // Recover Target and Pokemon Center warnings archived by older builds, then list the user's
@@ -5821,8 +6020,8 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
       const archiveColumns='id,user_id,mailbox_email,source_type,subject,from_text,to_text,cc_text,body_text,body_html,snippet,received_at,message_id,imap_uid,store,linked_order_id,email_type,order_number';
 
       // Collect new mail from every connected account before retailer-specific replay begins.
-      // Workers run concurrently, each mailbox has a hard deadline, and failures are recorded per
-      // mailbox so one stale OAuth token or slow IMAP server cannot strand the entire job at 25%.
+      // Workers run in a small pool, each mailbox has a hard deadline, and this click performs one
+      // bounded pass per mailbox. Saved UID checkpoints make another click resume any backlog.
       // saveParsedMessage archives unknown/unrecognized messages too, which makes the subsequent
       // super-admin export a complete parser-development snapshot rather than a retailer allowlist.
       let allEmailScan = { accounts:0, completed:0, successful:0, failed:0, checked:0, archived:0, saved:0, backlog_mailboxes:0, results:[] };
@@ -5849,8 +6048,8 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
             concurrency:FULL_EMAIL_SCAN_CONCURRENCY,
             maxMessagesPerMailbox:RECONCILE_MAX_MESSAGES_PER_MAILBOX,
             mailboxDeadlineMs:IMAP_ACCOUNT_SCAN_DEADLINE_MS,
-            drainBacklog:true,
-            maxPassesPerMailbox:4
+            drainBacklog:false,
+            maxPassesPerMailbox:1
           }
         );
       } catch (e) {
@@ -5892,6 +6091,17 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
           supabase, req.user_id, archiveColumns, 250
         );
       } catch (e) { console.warn('[TARGET DELIVERED ALIAS REPLAY]', e.message || e); recordStageError('target_delivery_replay', e); }
+
+      let generalArchiveDiscovery = { rows:[], metadata_scanned:0, candidates_found:0 };
+      try {
+        updateRetailerReconcileJob(reconcileJob, 'archive_discovery', 53, 'Finding previously unknown retailer orders across the complete saved-email index…');
+        generalArchiveDiscovery = await fetchGeneralRetailerArchiveCandidates(
+          supabase, req.user_id, archiveColumns
+        );
+      } catch (e) {
+        console.warn('[GENERAL RETAILER ARCHIVE DISCOVERY]', e.message || e);
+        recordStageError('archive_discovery', e);
+      }
 
       // Payment warnings are not always linked to an order. Rebuild both Target and Pokemon Center
       // payment-adjustment alerts directly from the durable archive before any long live-mailbox
@@ -5995,7 +6205,7 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
       await yieldReconcileTurn();
 
       const merged = new Map();
-      for (const email of [...walmartArchiveRows, ...walmartLinkedReplayRows, ...targetArchiveRows, ...targetDeliveredReplayRows, ...pokemonArchiveRows, ...supremeArchiveRows, ...(supremeDiscovery.rows || [])]) {
+      for (const email of [...walmartArchiveRows, ...walmartLinkedReplayRows, ...targetArchiveRows, ...targetDeliveredReplayRows, ...pokemonArchiveRows, ...supremeArchiveRows, ...(supremeDiscovery.rows || []), ...(generalArchiveDiscovery.rows || [])]) {
         merged.set(String(email.id||email.message_id), email);
       }
       let checked=0,matched=0,ignored=0,failed=0;
@@ -6014,8 +6224,12 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
         const storedStore = normalizeStoreKey(email.store || '');
         const detectedStore = normalizeStoreKey(detectStore(email.from_text||'',email.subject||'',text));
         return ['walmart','target','supreme','pokemoncenter'].includes(storedStore) ||
-          ['walmart','target','supreme','pokemoncenter'].includes(detectedStore);
+          ['walmart','target','supreme','pokemoncenter'].includes(detectedStore) ||
+          ARCHIVE_RETAILER_REPLAY_STORES.has(storedStore) || ARCHIVE_RETAILER_REPLAY_STORES.has(detectedStore);
       }).sort((a,b)=>new Date(a.received_at||0)-new Date(b.received_at||0));
+      let archiveOwnerMap = new Map();
+      try { archiveOwnerMap = await buildRetailerPaymentAlertOwnerMap(supabase); }
+      catch (e) { console.warn('[ARCHIVE RETAILER OWNER MAP]', e.message || e); recordStageError('archive_owner_map', e); }
       let supremeRebuild = null;
       try { supremeRebuild = await rebuildSupremeBatchAssignments(supabase, req.user_id, retailerEmails); }
       catch (e) { console.warn('[SUPREME BATCH REBUILD]', e.message || e); supremeRebuild = { error:e.message || String(e) }; recordStageError('supreme_assignments', e); }
@@ -6050,7 +6264,7 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
         const archivedText = archivedRetailerReadableText(email);
         const storedStore = normalizeStoreKey(email.store || '');
         const inferredStore = normalizeStoreKey(detectStore(email.from_text||'', email.subject||'', archivedText));
-        const detectedStore = ['walmart','target','supreme','pokemoncenter'].includes(storedStore) ? storedStore : inferredStore;
+        const detectedStore = ['walmart','target','supreme','pokemoncenter'].includes(storedStore) || ARCHIVE_RETAILER_REPLAY_STORES.has(storedStore) ? storedStore : inferredStore;
         const isPokemon = detectedStore === 'pokemoncenter' || detectedStore === 'pokemon';
         let pokemonContext = null;
         if (isPokemon) {
@@ -6073,7 +6287,10 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
           // message to that webhook/profile owner. Using req.user_id here would hide the original
           // cross-user delivery and could create a duplicate under the clicking admin instead.
           const archiveOwnerUserId = email.user_id || req.user_id;
-          const account={ user_id:archiveOwnerUserId, archive_user_id:archiveOwnerUserId, profile_id:null, email:lower(email.mailbox_email), provider:providerForEmail(email.mailbox_email)||{name:'archive'}, ingestion_source:email.source_type||'archive_reconcile' };
+          const resolvedOwner = archivedRetailerPaymentAlertOwner(email, archiveOwnerMap);
+          const canUseResolvedOwner = req.role === 'super_admin' || String(resolvedOwner.user_id || '') === String(req.user_id);
+          const effectiveOwnerUserId = canUseResolvedOwner && resolvedOwner.user_id ? resolvedOwner.user_id : archiveOwnerUserId;
+          const account={ user_id:effectiveOwnerUserId, archive_user_id:archiveOwnerUserId, profile_id:canUseResolvedOwner ? resolvedOwner.profile_id : null, email:lower(email.mailbox_email), provider:providerForEmail(email.mailbox_email)||{name:'archive'}, ingestion_source:email.source_type||'archive_reconcile' };
           const parsed={ subject:email.subject||'', from:{text:email.from_text||''}, to:{text:email.to_text||''}, cc:{text:email.cc_text||''}, text:archivedText, html:email.body_html||null, date:new Date(email.received_at||Date.now()), messageId:email.message_id };
           if (isPokemon && /^P\d{8,12}$/i.test(clean(email.order_number || ''))) parsed._pokemonCenterOrderNumber = clean(email.order_number).toUpperCase();
           const result=await saveParsedMessage(supabase,account,parsed,email.imap_uid||0,adjustUserCredits,confirmPendingAmazonCheckout);
@@ -6219,11 +6436,12 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
         console.warn('[RECONCILE TARGETED REPAIR]', repairError.message || repairError);
         recordStageError('live_order_repair', repairError);
       }
-      // Now queue the ordinary catch-up scan for anything that was not part of the targeted set.
-      updateRetailerReconcileJob(reconcileJob, 'finishing', 96, 'Saving results and queueing the normal background mailbox catch-up scan…');
+      // Do not immediately launch a second full-account scan. It would overlap with the retailer
+      // repairs and recreate the same memory spike that caused Render to restart during reconcile.
+      // The scheduled scanner continues from the saved checkpoints normally after this job.
+      updateRetailerReconcileJob(reconcileJob, 'finishing', 96, 'Saving reconciliation results and mailbox checkpoints…');
       await yieldReconcileTurn();
-      try { startUserScanJob(supabase,req.user_id,adjustUserCredits,confirmPendingAmazonCheckout); } catch (_) {}
-      const result = {success:true,checked,matched,ignored,failed,payment_alert_sync:paymentAlertSync,walmart_problem_orders:walmartProblemOrders.length,walmart_archive_messages:walmartArchiveRows.length,walmart_linked_replay_messages:walmartLinkedReplayRows.length,walmart_targeted_archive_messages:repair?.walmart_archive_candidates||0,target_delivered_alias_replay_messages:targetDeliveredReplayRows.length,pokemon_archive_messages:pokemonArchiveRows.length,pokemon_live_discovery:pokemonLiveDiscovery,pokemon_stats:pokemonStats,pokemon_debug:pokemonDebug,supreme_rebuild:supremeRebuild,supreme_live:supremeLive,supreme_debug:[...(supremeLive?.debug||[]).slice(-120), ...serviceOrdersForSupreme.slice(0,40).map((o,i)=>`Service order ${i+1}: id=${o.id} site=${o.site||'-'} metadata.site=${o.metadata?.site||'-'} payload site/store=${extractNamedPayloadValue(o.raw_payload||{},['site','store'])||'-'} normalized=${normalizeStoreKey(o.site || o.metadata?.site || extractNamedPayloadValue(o.raw_payload||{},['site','store']))||'-'}`)],supreme_discovery:{metadata_scanned:supremeDiscovery?.metadata_scanned||0,candidates_found:supremeDiscovery?.candidates_found||0,windows:supremeDiscovery?.windows||0},damaged_target_orders:damagedLinkedOrderIds.length,unresolved_target_orders:unresolvedTargetOrders.length,target_priority_orders:targetPriorityOrderIds.length,unresolved_amazon_orders:unresolvedAmazonOrders.length,amazon_priority_orders:amazonPriorityOrderIds.length,other_retailer_priority_orders:otherRetailerOrders.length,retailer_priority_orders:retailerPriorityOrderIds.length,repair,message:`Searched ${amazonPriorityOrderIds.length} Amazon order(s) by exact order number plus their webhook-time window; replayed ${walmartLinkedReplayRows.length} already-linked Walmart message(s), recovered ${repair?.walmart_archive_candidates||0} exact previously-unlinked Walmart archive message(s), and prioritized ${Math.min(30,walmartProblemOrders.length)} Walmart order(s); replayed ${targetDeliveredReplayRows.length} linked Target delivery message(s); restored ${paymentAlertSync.saved||0} Target/Pokemon Center payment warning(s) from saved email; searched ${pokemonLiveDiscovery.mailboxes_checked||0} live website mailbox(es), matched ${pokemonLiveDiscovery.messages_matched||0} exact Pokemon Center lifecycle message(s), and saved ${pokemonLiveDiscovery.payment_alerts_saved||0} payment warning(s); replayed ${pokemonArchiveRows.length} Pokemon Center archive message(s); rebuilt ${supremeRebuild?.assigned||0} Supreme confirmation assignment(s); included ${otherRetailerOrders.length} other waiting retailer order(s); then included ${Math.min(30,targetPriorityOrderIds.length)} Target order(s) in the live repair queue.`};
+      const result = {success:true,checked,matched,ignored,failed,payment_alert_sync:paymentAlertSync,walmart_problem_orders:walmartProblemOrders.length,walmart_archive_messages:walmartArchiveRows.length,walmart_linked_replay_messages:walmartLinkedReplayRows.length,walmart_targeted_archive_messages:repair?.walmart_archive_candidates||0,target_delivered_alias_replay_messages:targetDeliveredReplayRows.length,general_archive_discovery:{metadata_scanned:generalArchiveDiscovery.metadata_scanned||0,candidates_found:generalArchiveDiscovery.candidates_found||0},pokemon_archive_messages:pokemonArchiveRows.length,pokemon_live_discovery:pokemonLiveDiscovery,pokemon_stats:pokemonStats,pokemon_debug:pokemonDebug,supreme_rebuild:supremeRebuild,supreme_live:supremeLive,supreme_debug:[...(supremeLive?.debug||[]).slice(-120), ...serviceOrdersForSupreme.slice(0,40).map((o,i)=>`Service order ${i+1}: id=${o.id} site=${o.site||'-'} metadata.site=${o.metadata?.site||'-'} payload site/store=${extractNamedPayloadValue(o.raw_payload||{},['site','store'])||'-'} normalized=${normalizeStoreKey(o.site || o.metadata?.site || extractNamedPayloadValue(o.raw_payload||{},['site','store']))||'-'}`)],supreme_discovery:{metadata_scanned:supremeDiscovery?.metadata_scanned||0,candidates_found:supremeDiscovery?.candidates_found||0,windows:supremeDiscovery?.windows||0},damaged_target_orders:damagedLinkedOrderIds.length,unresolved_target_orders:unresolvedTargetOrders.length,target_priority_orders:targetPriorityOrderIds.length,unresolved_amazon_orders:unresolvedAmazonOrders.length,amazon_priority_orders:amazonPriorityOrderIds.length,other_retailer_priority_orders:otherRetailerOrders.length,retailer_priority_orders:retailerPriorityOrderIds.length,repair,message:`Scanned ${generalArchiveDiscovery.metadata_scanned||0} saved email metadata row(s) and replayed ${generalArchiveDiscovery.candidates_found||0} additional retailer lifecycle candidate(s). Searched ${amazonPriorityOrderIds.length} Amazon order(s) by exact order number plus their webhook-time window; replayed ${walmartLinkedReplayRows.length} already-linked Walmart message(s), recovered ${repair?.walmart_archive_candidates||0} exact previously-unlinked Walmart archive message(s), and prioritized ${Math.min(30,walmartProblemOrders.length)} Walmart order(s); replayed ${targetDeliveredReplayRows.length} linked Target delivery message(s); restored ${paymentAlertSync.saved||0} Target/Pokemon Center payment warning(s) from saved email; searched ${pokemonLiveDiscovery.mailboxes_checked||0} live website mailbox(es), matched ${pokemonLiveDiscovery.messages_matched||0} exact Pokemon Center lifecycle message(s), and saved ${pokemonLiveDiscovery.payment_alerts_saved||0} payment warning(s); replayed ${pokemonArchiveRows.length} Pokemon Center archive message(s); rebuilt ${supremeRebuild?.assigned||0} Supreme confirmation assignment(s); included ${otherRetailerOrders.length} other waiting retailer order(s); then included ${Math.min(30,targetPriorityOrderIds.length)} Target order(s) in the live repair queue.`};
       result.all_email_scan = allEmailScan;
       result.message = `Completed ${allEmailScan.completed || 0} of ${allEmailScan.accounts || 0} connected mailbox scans, archived ${allEmailScan.archived || 0} collected message(s), and recorded ${allEmailScan.failed || 0} mailbox failure(s) without stopping the run. ${result.message}`;
       Object.assign(result, { stage_errors:reconcileJob.stage_errors.slice() });

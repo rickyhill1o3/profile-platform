@@ -26,7 +26,8 @@ assert(backendSource.includes('stage_errors:reconcileJob.stage_errors.slice()'),
 
 assert(frontendSource.includes('const isRetailerReconcile='), 'frontend must recognize long-running reconcile requests');
 assert(frontendSource.includes('maxAttempts=isRetailerReconcile?12'), 'frontend must reconnect through a temporary backend outage');
-assert(frontendSource.includes("restartCount<3"), 'frontend must recover from more than one server restart');
+assert(frontendSource.includes("restartCount<1"), 'frontend may resume once from saved mailbox checkpoints without creating an endless restart loop');
+assert(frontendSource.includes('Saved mailbox checkpoints were preserved'), 'a second restart must give a clear manual-resume instruction');
 assert(frontendSource.includes('job.percent'), 'frontend must display backend reconcile progress');
 assert(frontendSource.includes('Recoverable stage errors:'), 'completed reconciliation diagnostics must expose partial retailer failures');
 assert(frontendSource.includes('Connected mailboxes selected for full scan:'), 'completed diagnostics must show the full mailbox inventory');

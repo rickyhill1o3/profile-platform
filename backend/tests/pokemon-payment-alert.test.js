@@ -183,7 +183,7 @@ function fakeSupabase(database) { return { from:table => new Query(database, tab
   assert.match(dashboardSource, /showDashboardPaymentAlertFailure/);
   assert.match(orderTrackerSource, /showRetailerPaymentAlertFailure/);
   assert.match(dashboardHtml, /script\.js\?v=20260928-payment-alert-repair/);
-  assert.match(orderTrackerHtml, /order-tracker\.js\?v=20260928-all-email-scan-export/);
+  assert.match(orderTrackerHtml, /order-tracker\.js\?v=20260929-reconcile-readable-export/);
 
   console.log('Pokemon Center and Target payment-alert tests passed');
 })().catch(error => { console.error(error); process.exitCode=1; });
