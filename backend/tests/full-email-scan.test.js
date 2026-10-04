@@ -17,7 +17,7 @@ const scanStart = backend.indexOf('async function scanAll(');
 const scanEnd = backend.indexOf('function scanJobView', scanStart);
 assert(scanStart >= 0 && scanEnd > scanStart, 'complete mailbox scanner must exist');
 const scan = backend.slice(scanStart, scanEnd);
-assert.match(scan, /Promise\.all\(Array\.from\(\{ length:concurrency \}/, 'full scan must use a bounded worker pool');
+assert.match(scan, /Promise\.all\(Array\.from\(\{ length:Math\.min\(concurrency, batchEntries\.length\) \}/, 'full scan must use a bounded worker pool inside each memory-safe batch');
 assert.match(scan, /failed:completeResults\.filter/, 'a failed mailbox must be reported without aborting other workers');
 assert.match(scan, /archived:completeResults\.reduce/, 'full scan must report all archived messages, not only linked retailer messages');
 assert.match(backend, /Mailbox scan exceeded/, 'each mailbox must have a hard deadline');

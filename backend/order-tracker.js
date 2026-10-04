@@ -20,6 +20,13 @@ function createGuardedImapFlow(options = {}, label = 'IMAP') {
   return client;
 }
 
+async function disposeImapClient(client) {
+  if (!client) return;
+  try { await client.logout(); }
+  catch (_) { try { client.close(); } catch (_) {} }
+  try { client.close(); } catch (_) {}
+}
+
 const SCAN_INTERVAL_MS = Math.max(60 * 1000, Number(process.env.IMAP_SCAN_INTERVAL_MS || 5 * 60 * 1000));
 const INITIAL_LOOKBACK_DAYS = Math.max(7, Number(process.env.IMAP_INITIAL_LOOKBACK_DAYS || 365));
 const INITIAL_SCAN_START = process.env.IMAP_INITIAL_SCAN_START || '2026-01-01T00:00:00.000Z';
@@ -50,6 +57,14 @@ const IMAP_ACCOUNT_SCAN_DEADLINE_MS = Math.max(30000, Math.min(10 * 60 * 1000, N
 // one process. Every connected mailbox is visited, while at most this many new messages are parsed
 // from each mailbox per click. Checkpoints preserve progress and the next click resumes the backlog.
 const RECONCILE_MAX_MESSAGES_PER_MAILBOX = Math.max(25, Math.min(500, Number(process.env.RECONCILE_MAX_MESSAGES_PER_MAILBOX || 100)));
+// A complete super-admin pass can touch 600+ inboxes. Keep each worker pool short-lived so
+// ImapFlow/mailparser objects from earlier mailboxes become collectible before the next group.
+// With --expose-gc (see package.json), the explicit collection prevents a long scan from slowly
+// filling a small Render instance even when most inboxes contain only one new message.
+const RECONCILE_MEMORY_BATCH_SIZE = Math.max(
+  5,
+  Math.min(100, Number(process.env.RECONCILE_MEMORY_BATCH_SIZE || 20))
+);
 // Render can restart a long reconciliation while hundreds of mailboxes are being scanned. Keep
 // the mailbox-completion cursor in the existing durable app_settings table so a new process (or a
 // later button click) resumes the same run instead of presenting mailbox 1 again. A checkpoint is
@@ -179,6 +194,32 @@ function notifyCheckoutForOrderTracker(userId) {
 
 function clean(v) { return String(v || '').trim(); }
 function lower(v) { return clean(v).toLowerCase(); }
+
+async function parseMailboxMessage(source) {
+  const parsed = await simpleParser(source);
+  // The tracker never stores attachment bytes. simpleParser does, however, materialize every
+  // attachment as a Buffer. Drop those buffers immediately while retaining the attachment count
+  // used by Email Center metadata. The original RFC822 source is also released by each caller
+  // before the database work starts.
+  const attachments = Array.isArray(parsed.attachments) ? parsed.attachments : [];
+  parsed._attachmentCount = attachments.length;
+  for (const attachment of attachments) {
+    if (attachment && typeof attachment === 'object') attachment.content = null;
+  }
+  parsed.attachments = [];
+  return parsed;
+}
+
+async function releaseMailboxBatchMemory() {
+  await yieldReconcileTurn();
+  if (typeof global.gc !== 'function') return false;
+  try {
+    global.gc();
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
 function walmartOrderNumberVariants(value) {
   const raw = clean(value).replace(/^#+/, '').replace(/[.,)\]]+$/, '');
   const compact = normalizeOrderRef(raw);
@@ -2728,7 +2769,8 @@ async function archiveEmailMetadata(supabase, account, parsed, uid, classificati
     snippet: bodyText.replace(/\s+/g,' ').slice(0,600), keep_forever: keepForever, is_order_related: keepForever,
     body_text: bodyText.slice(0,250000),
     body_html: parsed.html ? sanitizeReceiptHtml(String(parsed.html).slice(0,250000)) : null,
-    has_attachments: Array.isArray(parsed.attachments) && parsed.attachments.length > 0, attachment_count: Array.isArray(parsed.attachments) ? parsed.attachments.length : 0,
+    has_attachments: Number(parsed._attachmentCount ?? (Array.isArray(parsed.attachments) ? parsed.attachments.length : 0)) > 0,
+    attachment_count: Number(parsed._attachmentCount ?? (Array.isArray(parsed.attachments) ? parsed.attachments.length : 0)),
     updated_at: new Date().toISOString()
   };
   let { data, error } = await supabase.from('email_messages').upsert(row, { onConflict:'user_id,message_id' }).select().single();
@@ -3729,7 +3771,16 @@ async function scanImportedAccount(supabase, account, adjustCredits = null, onPr
         // a generic "Command failed" for perfectly valid UID values.
         for await (const msg of client.fetch(uidRange,{uid:true,source:true,envelope:true},{uid:true})) {
           checked++; highestUid=Math.max(highestUid,Number(msg.uid||0));
-          try{const parsed=await simpleParser(msg.source);const result=await saveParsedMessage(supabase,account,parsed,msg.uid,adjustCredits,confirmPendingAmazonCheckout);if(result?.email_id)archived++;if(result?.saved)saved++;}catch(e){console.error('Imported IMAP parse failed',account.email,mailboxName,msg.uid,e.message)}
+          try {
+            const parsed=await parseMailboxMessage(msg.source);
+            msg.source=null;
+            const result=await saveParsedMessage(supabase,account,parsed,msg.uid,adjustCredits,confirmPendingAmazonCheckout);
+            if(result?.email_id)archived++;
+            if(result?.saved)saved++;
+          } catch(e) {
+            msg.source=null;
+            console.error('Imported IMAP parse failed',account.email,mailboxName,msg.uid,e.message);
+          }
           if(onProgress)onProgress({checked,total,saved,archived,folder:mailboxName});
         }
         folderState[key]={last_seen_uid:highestUid,updated_at:new Date().toISOString()};
@@ -3747,7 +3798,10 @@ async function scanImportedAccount(supabase, account, adjustCredits = null, onPr
     const now=new Date().toISOString();
     try{await supabase.from('imported_mail_accounts').update({last_scan_at:now,last_error:String(effectiveError.message||effectiveError).slice(0,1000),status:'error',updated_at:now}).eq('id',account.imported_account_id);}catch(_){}
     throw effectiveError;
-  } finally {clearTimeout(deadlineTimer);try{await client.logout();}catch(_){}}
+  } finally {
+    clearTimeout(deadlineTimer);
+    await disposeImapClient(client);
+  }
 }
 
 async function scanAccount(supabase, account, adjustCredits = null, onProgress = null, confirmPendingAmazonCheckout = null, options = {}) {
@@ -3813,11 +3867,15 @@ async function scanAccount(supabase, account, adjustCredits = null, onProgress =
         checked += 1;
         highestUid = Math.max(highestUid, Number(msg.uid || 0));
         try {
-          const parsed = await simpleParser(msg.source);
+          const parsed = await parseMailboxMessage(msg.source);
+          msg.source = null;
           const result = await saveParsedMessage(supabase, account, parsed, msg.uid, adjustCredits, confirmPendingAmazonCheckout);
           if (result?.email_id) archived += 1;
           if (result?.saved) saved += 1;
-        } catch (e) { console.error('IMAP message parse failed', account.email, msg.uid, e.message); }
+        } catch (e) {
+          msg.source = null;
+          console.error('IMAP message parse failed', account.email, msg.uid, e.message);
+        }
         if (onProgress) onProgress({ checked, total, saved, archived });
       }
     } finally { lock.release(); }
@@ -3830,7 +3888,10 @@ async function scanAccount(supabase, account, adjustCredits = null, onProgress =
     console.error(`[DIRECT IMAP] FAILED ${account.email}: ${describeImapError(effectiveError, 'INBOX')}`);
     await upsertScanState(supabase, account, { last_scan_at: new Date().toISOString(), last_error: describeImapError(effectiveError, 'INBOX').slice(0, 1000), last_seen_uid: highestUid, scan_started_at: scanStartedAt });
     throw effectiveError;
-  } finally { clearTimeout(deadlineTimer); try { await client.logout(); } catch (_) {} }
+  } finally {
+    clearTimeout(deadlineTimer);
+    await disposeImapClient(client);
+  }
 }
 
 
@@ -4814,62 +4875,75 @@ async function scanAll(supabase, userId = null, adjustCredits = null, onProgress
     }
     console.log(`[ORDER TRACKER] ${userId ? 'User/manual' : 'Background'} IMAP cycle: ${accounts.length} mailbox(es), ${pendingEmails.size} pending-checkout email(s) prioritized.`);
     if (onProgress) onProgress({ phase:'scanning', accountIndex:completed, accountTotal:accounts.length, checked:0, total:0, resumed:completed });
-    let nextIndex = 0;
     const concurrency = Math.max(1, Math.min(
       pendingEntries.length || 1,
       Number(options.concurrency || (userId ? FULL_EMAIL_SCAN_CONCURRENCY : Math.min(4, FULL_EMAIL_SCAN_CONCURRENCY)))
     ));
-    const scanWorker = async () => {
-      for (;;) {
-        const entry = pendingEntries[nextIndex++];
-        if (!entry) return;
-        const { account, index, checkpointKey } = entry;
-        let passes = 0;
-        let aggregate = { checked:0, total:0, saved:0, archived:0, more_pending:false };
-        let scanSucceeded = false;
-        try {
-          do {
-            passes++;
-            const result = await scanAccount(supabase, account, adjustCredits, detail => {
-              if (onProgress) onProgress({ phase:'scanning', accountIndex:completed, accountTotal:accounts.length, email:account.email, pass:passes, ...detail });
-            }, confirmPendingAmazonCheckout, options);
-            aggregate = {
-              ...aggregate,
-              ...result,
-              checked:Number(aggregate.checked || 0) + Number(result.checked || 0),
-              total:Number(aggregate.total || 0) + Number(result.total || 0),
-              saved:Number(aggregate.saved || 0) + Number(result.saved || 0),
-              archived:Number(aggregate.archived || 0) + Number(result.archived || 0),
-              more_pending:Boolean(result.more_pending),
-              passes
-            };
-          } while (options.drainBacklog && aggregate.more_pending && passes < Math.max(1, Number(options.maxPassesPerMailbox || 4)));
-          results[index] = { email:account.email, checkpoint_key:checkpointKey, ...aggregate };
-          scanSucceeded = true;
-        } catch (err) {
-          results[index] = { email:account.email, checkpoint_key:checkpointKey, ...aggregate, error:err.message || String(err), passes };
-        }
-        completed++;
-        if (scanSucceeded && typeof options.onCheckpoint === 'function') {
-          try {
-            await options.onCheckpoint({
-              checkpointKey,
-              account,
-              result:{ ...results[index] },
-              accountIndex:completed,
-              accountTotal:accounts.length
-            });
-          } catch (checkpointError) {
-            // The mailbox UID itself is already durable. Mark the job checkpoint failure so a
-            // restarted process safely revisits this mailbox instead of falsely claiming it was
-            // persisted; the repeat scan will be a quick no-new-UID check.
-            results[index].checkpoint_error = checkpointError.message || String(checkpointError);
-          }
-        }
-        if (onProgress) onProgress({ phase:'scanning', accountIndex:completed, accountTotal:accounts.length, email:account.email, accountComplete:true, checked:aggregate.checked, total:aggregate.total, saved:aggregate.saved, archived:aggregate.archived });
+    const scanEntry = async entry => {
+      const { account, index, checkpointKey } = entry;
+      let passes = 0;
+      let aggregate = { checked:0, total:0, saved:0, archived:0, more_pending:false };
+      try {
+        do {
+          passes++;
+          const result = await scanAccount(supabase, account, adjustCredits, detail => {
+            if (onProgress) onProgress({ phase:'scanning', accountIndex:completed, accountTotal:accounts.length, email:account.email, pass:passes, ...detail });
+          }, confirmPendingAmazonCheckout, options);
+          aggregate = {
+            ...aggregate,
+            ...result,
+            checked:Number(aggregate.checked || 0) + Number(result.checked || 0),
+            total:Number(aggregate.total || 0) + Number(result.total || 0),
+            saved:Number(aggregate.saved || 0) + Number(result.saved || 0),
+            archived:Number(aggregate.archived || 0) + Number(result.archived || 0),
+            more_pending:Boolean(result.more_pending),
+            passes
+          };
+        } while (options.drainBacklog && aggregate.more_pending && passes < Math.max(1, Number(options.maxPassesPerMailbox || 4)));
+        results[index] = { email:account.email, checkpoint_key:checkpointKey, ...aggregate };
+      } catch (err) {
+        results[index] = { email:account.email, checkpoint_key:checkpointKey, ...aggregate, error:err.message || String(err), passes };
       }
+      completed++;
+      if (typeof options.onCheckpoint === 'function') {
+        try {
+          // A bad password or disabled mailbox is complete for this reconciliation run too. Save
+          // that failed attempt so a restart does not repeatedly hammer the same broken credential.
+          // The short resume TTL ensures a later new run will try the account again.
+          await options.onCheckpoint({
+            checkpointKey,
+            account,
+            result:{ ...results[index] },
+            accountIndex:completed,
+            accountTotal:accounts.length
+          });
+        } catch (checkpointError) {
+          // The mailbox UID itself may already be durable. If the job checkpoint write failed, a
+          // restarted process safely revisits this mailbox instead of falsely claiming completion.
+          results[index].checkpoint_error = checkpointError.message || String(checkpointError);
+        }
+      }
+      if (onProgress) onProgress({ phase:'scanning', accountIndex:completed, accountTotal:accounts.length, email:account.email, accountComplete:true, checked:aggregate.checked, total:aggregate.total, saved:aggregate.saved, archived:aggregate.archived });
     };
-    await Promise.all(Array.from({ length:concurrency }, () => scanWorker()));
+    const memoryBatchSize = options.memorySafeBatches === false
+      ? Math.max(1, pendingEntries.length)
+      : RECONCILE_MEMORY_BATCH_SIZE;
+    for (let batchStart = 0; batchStart < pendingEntries.length; batchStart += memoryBatchSize) {
+      const batchEntries = pendingEntries.slice(batchStart, batchStart + memoryBatchSize);
+      let nextBatchIndex = 0;
+      const scanWorker = async () => {
+        for (;;) {
+          const entry = batchEntries[nextBatchIndex++];
+          if (!entry) return;
+          await scanEntry(entry);
+        }
+      };
+      await Promise.all(Array.from({ length:Math.min(concurrency, batchEntries.length) }, () => scanWorker()));
+      if (typeof options.onMemoryBatch === 'function') {
+        await options.onMemoryBatch({ completed, accountTotal:accounts.length, batchSize:batchEntries.length });
+      }
+      await releaseMailboxBatchMemory();
+    }
     const completeResults = results.filter(Boolean);
     return {
       accounts:accounts.length,
@@ -6181,7 +6255,17 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
       let allEmailScan = { accounts:0, completed:0, successful:0, failed:0, checked:0, archived:0, saved:0, backlog_mailboxes:0, results:[] };
       try {
         const checkpointResults = reconcileJob.scan_checkpoint.results_by_key || {};
-        let checkpointWrite = Promise.resolve();
+        let checkpointWriteLocked = false;
+        const checkpointWriteWaiters = [];
+        const acquireCheckpointWrite = async () => {
+          if (checkpointWriteLocked) await new Promise(resolve => checkpointWriteWaiters.push(resolve));
+          checkpointWriteLocked = true;
+          return () => {
+            const next = checkpointWriteWaiters.shift();
+            if (next) next();
+            else checkpointWriteLocked = false;
+          };
+        };
         const saveMailboxCheckpoint = async checkpoint => {
           const row = checkpoint.result || {};
           checkpointResults[checkpoint.checkpointKey] = {
@@ -6191,7 +6275,8 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
             saved:Number(row.saved || 0),
             archived:Number(row.archived || 0),
             more_pending:Boolean(row.more_pending),
-            passes:Number(row.passes || 1)
+            passes:Number(row.passes || 1),
+            error:row.error ? clean(row.error).slice(0,1000) : null
           };
           reconcileJob.scan_checkpoint = {
             ...reconcileJob.scan_checkpoint,
@@ -6201,10 +6286,12 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
             updated_at:new Date().toISOString(),
             scan_complete:false
           };
-          checkpointWrite = checkpointWrite.catch(() => {}).then(() =>
-            persistRetailerReconcileJob(supabase, req.user_id, reconcileJob)
-          );
-          await checkpointWrite;
+          const releaseCheckpointWrite = await acquireCheckpointWrite();
+          try {
+            await persistRetailerReconcileJob(supabase, req.user_id, reconcileJob);
+          } finally {
+            releaseCheckpointWrite();
+          }
         };
         const resumedCount = Object.keys(checkpointResults).length;
         updateRetailerReconcileJob(
@@ -6220,6 +6307,16 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
           req.role === 'super_admin' ? null : req.user_id,
           adjustUserCredits,
           progress => {
+            if (progress.phase === 'waiting_for_global_scan') {
+              const saved = Object.keys(checkpointResults).length;
+              updateRetailerReconcileJob(
+                reconcileJob,
+                'waiting_for_mailbox_scanner',
+                Math.max(5, Number(reconcileJob.percent || 5)),
+                `Waiting for the server's current mailbox scan to release the scanner · ${saved} mailbox checkpoint${saved === 1 ? '' : 's'} safely saved…`
+              );
+              return;
+            }
             const total = Number(progress.accountTotal || 0);
             const done = Number(progress.accountIndex || 0);
             const percent = 5 + Math.round((done / Math.max(1, total)) * 40);
@@ -6240,6 +6337,7 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
             maxPassesPerMailbox:1,
             allAccounts:req.role === 'super_admin',
             waitForGlobalScan:req.role === 'super_admin',
+            memorySafeBatches:true,
             resumeCompletedKeys:Object.keys(checkpointResults),
             resumeResultsByKey:checkpointResults,
             onCheckpoint:saveMailboxCheckpoint
