@@ -50,6 +50,15 @@ const IMAP_ACCOUNT_SCAN_DEADLINE_MS = Math.max(30000, Math.min(10 * 60 * 1000, N
 // one process. Every connected mailbox is visited, while at most this many new messages are parsed
 // from each mailbox per click. Checkpoints preserve progress and the next click resumes the backlog.
 const RECONCILE_MAX_MESSAGES_PER_MAILBOX = Math.max(25, Math.min(500, Number(process.env.RECONCILE_MAX_MESSAGES_PER_MAILBOX || 100)));
+// Render can restart a long reconciliation while hundreds of mailboxes are being scanned. Keep
+// the mailbox-completion cursor in the existing durable app_settings table so a new process (or a
+// later button click) resumes the same run instead of presenting mailbox 1 again. A checkpoint is
+// intentionally short-lived: after twelve hours a new run should revisit every mailbox for mail
+// that may have arrived since the abandoned job.
+const RECONCILE_RESUME_TTL_MS = Math.max(
+  60 * 60 * 1000,
+  Math.min(7 * 24 * 60 * 60 * 1000, Number(process.env.RECONCILE_RESUME_TTL_MS || 12 * 60 * 60 * 1000))
+);
 // These retailers were found in the full saved-email export or are explicitly supported by the
 // checkout webhooks. Reconciliation pages lightweight metadata for the complete archive, then
 // hydrates only lifecycle-looking messages for these stores. This lets a newly improved parser
@@ -92,8 +101,66 @@ function retailerReconcileJobView(job) {
     finished_at:job.finished_at,
     error:job.error,
     stage_errors:Array.isArray(job.stage_errors) ? job.stage_errors : [],
+    resumed_from_checkpoint:Boolean(job.resumed_from_checkpoint),
+    resumed_mailboxes:Number(job.scan_checkpoint?.completed_count || 0),
+    total_mailboxes:Number(job.scan_checkpoint?.total_accounts || 0),
     result:job.status === 'complete' ? job.result : null
   };
+}
+
+function retailerReconcileSettingKey(userId) {
+  return `order_tracker_reconcile_job:${String(userId || '')}`;
+}
+
+function mailboxCheckpointKey(account = {}) {
+  // Use the effective website owner rather than the importer/archive owner. An imported mailbox
+  // can later become directly attached to the same user profile; the physical mailbox should
+  // still map to the same resume cursor across that representation change.
+  return `${String(account.user_id || account.archive_user_id || '')}:${lower(account.email)}`;
+}
+
+function serializableRetailerReconcileJob(job = {}) {
+  return {
+    id:job.id,
+    status:job.status,
+    stage:job.stage,
+    percent:Number(job.percent || 0),
+    message:job.message || '',
+    started_at:job.started_at,
+    heartbeat_at:job.heartbeat_at,
+    finished_at:job.finished_at || null,
+    error:job.error || null,
+    stage_errors:Array.isArray(job.stage_errors) ? job.stage_errors.slice(-100) : [],
+    resumed_from_checkpoint:Boolean(job.resumed_from_checkpoint),
+    scan_checkpoint:job.scan_checkpoint || null,
+    result:job.status === 'complete' ? (job.result || null) : null
+  };
+}
+
+async function loadDurableRetailerReconcileJob(supabase, userId) {
+  const response = await supabase.from('app_settings')
+    .select('value_json')
+    .eq('key', retailerReconcileSettingKey(userId))
+    .maybeSingle();
+  if (response.error) throw response.error;
+  return response.data?.value_json || null;
+}
+
+async function persistRetailerReconcileJob(supabase, userId, job) {
+  const payload = {
+    key:retailerReconcileSettingKey(userId),
+    value_json:serializableRetailerReconcileJob(job),
+    updated_at:new Date().toISOString()
+  };
+  const response = await supabase.from('app_settings').upsert(payload, { onConflict:'key' });
+  if (response.error) throw response.error;
+  return payload.value_json;
+}
+
+function durableRetailerJobCanResume(job) {
+  if (!job?.id || job.status === 'complete') return false;
+  const heartbeat = new Date(job.heartbeat_at || job.started_at || 0).getTime();
+  return Number.isFinite(heartbeat) && heartbeat > 0 && Date.now() - heartbeat <= RECONCILE_RESUME_TTL_MS;
 }
 
 const yieldReconcileTurn = () => new Promise(resolve => setImmediate(resolve));
@@ -4677,10 +4744,20 @@ async function syncRecentServiceOrdersForBackground(supabase, accounts = []) {
 
 let scanRunning = false;
 async function scanAll(supabase, userId = null, adjustCredits = null, onProgress = null, confirmPendingAmazonCheckout = null, options = {}) {
-  if (scanRunning && !userId) return { skipped: true };
+  if (scanRunning && !userId) {
+    if (!options.waitForGlobalScan) return { skipped:true, reason:'global_scan_running' };
+    const waitStartedAt = Date.now();
+    const maxWaitMs = Math.max(60 * 1000, Number(options.globalScanWaitMs || 30 * 60 * 1000));
+    while (scanRunning && Date.now() - waitStartedAt < maxWaitMs) {
+      if (onProgress) onProgress({ phase:'waiting_for_global_scan', accountIndex:0, accountTotal:0, checked:0, total:0 });
+      await new Promise(resolve => setTimeout(resolve, 1000));
+    }
+    if (scanRunning) throw new Error('The scheduled global mailbox scan is still running. This reconciliation checkpoint was preserved; retry to continue.');
+  }
   if (!userId) scanRunning = true;
   try {
     let accounts = await loadScanAccounts(supabase, userId);
+    const loaderDiagnostics = accounts.loaderDiagnostics || {};
     if (userId) await syncServiceOrders(supabase, userId, accounts);
     else await syncRecentServiceOrdersForBackground(supabase, accounts);
     // Mailboxes referenced by pending checkouts are always scanned first so a 500-account
@@ -4700,7 +4777,7 @@ async function scanAll(supabase, userId = null, adjustCredits = null, onProgress
       }
     } catch (_) {}
     accounts.sort((a,b) => Number(pendingEmails.has(b.email)) - Number(pendingEmails.has(a.email)));
-    if (!userId && accounts.length > MAX_ACCOUNTS_PER_CYCLE) {
+    if (!userId && !options.allAccounts && accounts.length > MAX_ACCOUNTS_PER_CYCLE) {
       const priority = accounts.filter(a => pendingEmails.has(a.email));
       const regular = accounts.filter(a => !pendingEmails.has(a.email));
       const prioritySlice = priority.slice(0, MAX_ACCOUNTS_PER_CYCLE);
@@ -4710,22 +4787,46 @@ async function scanAll(supabase, userId = null, adjustCredits = null, onProgress
       accounts = [...prioritySlice, ...rotated.slice(0, remainingSlots)];
       if (regular.length && remainingSlots) backgroundAccountCursor = (start + remainingSlots) % regular.length;
     }
+    const resumeResultsByKey = options.resumeResultsByKey && typeof options.resumeResultsByKey === 'object'
+      ? options.resumeResultsByKey
+      : {};
+    const resumeCompletedKeys = new Set(
+      (Array.isArray(options.resumeCompletedKeys) ? options.resumeCompletedKeys : Object.keys(resumeResultsByKey))
+        .map(String)
+    );
     const results = new Array(accounts.length);
-    console.log(`[ORDER TRACKER] ${userId ? 'User/manual' : 'Background'} IMAP cycle: ${accounts.length} mailbox(es), ${pendingEmails.size} pending-checkout email(s) prioritized.`);
-    if (onProgress) onProgress({ phase: 'scanning', accountIndex: 0, accountTotal: accounts.length, checked: 0, total: 0 });
-    let nextIndex = 0;
     let completed = 0;
+    const pendingEntries = [];
+    for (let index = 0; index < accounts.length; index++) {
+      const account = accounts[index];
+      const checkpointKey = mailboxCheckpointKey(account);
+      if (resumeCompletedKeys.has(checkpointKey)) {
+        results[index] = {
+          email:account.email,
+          checkpoint_key:checkpointKey,
+          ...(resumeResultsByKey[checkpointKey] || {}),
+          resumed:true
+        };
+        completed++;
+      } else {
+        pendingEntries.push({ account, index, checkpointKey });
+      }
+    }
+    console.log(`[ORDER TRACKER] ${userId ? 'User/manual' : 'Background'} IMAP cycle: ${accounts.length} mailbox(es), ${pendingEmails.size} pending-checkout email(s) prioritized.`);
+    if (onProgress) onProgress({ phase:'scanning', accountIndex:completed, accountTotal:accounts.length, checked:0, total:0, resumed:completed });
+    let nextIndex = 0;
     const concurrency = Math.max(1, Math.min(
-      accounts.length || 1,
+      pendingEntries.length || 1,
       Number(options.concurrency || (userId ? FULL_EMAIL_SCAN_CONCURRENCY : Math.min(4, FULL_EMAIL_SCAN_CONCURRENCY)))
     ));
     const scanWorker = async () => {
       for (;;) {
-        const index = nextIndex++;
-        if (index >= accounts.length) return;
-        const account = accounts[index];
+        const entry = pendingEntries[nextIndex++];
+        if (!entry) return;
+        const { account, index, checkpointKey } = entry;
         let passes = 0;
         let aggregate = { checked:0, total:0, saved:0, archived:0, more_pending:false };
+        let scanSucceeded = false;
         try {
           do {
             passes++;
@@ -4743,11 +4844,28 @@ async function scanAll(supabase, userId = null, adjustCredits = null, onProgress
               passes
             };
           } while (options.drainBacklog && aggregate.more_pending && passes < Math.max(1, Number(options.maxPassesPerMailbox || 4)));
-          results[index] = { email:account.email, ...aggregate };
+          results[index] = { email:account.email, checkpoint_key:checkpointKey, ...aggregate };
+          scanSucceeded = true;
         } catch (err) {
-          results[index] = { email:account.email, ...aggregate, error:err.message || String(err), passes };
+          results[index] = { email:account.email, checkpoint_key:checkpointKey, ...aggregate, error:err.message || String(err), passes };
         }
         completed++;
+        if (scanSucceeded && typeof options.onCheckpoint === 'function') {
+          try {
+            await options.onCheckpoint({
+              checkpointKey,
+              account,
+              result:{ ...results[index] },
+              accountIndex:completed,
+              accountTotal:accounts.length
+            });
+          } catch (checkpointError) {
+            // The mailbox UID itself is already durable. Mark the job checkpoint failure so a
+            // restarted process safely revisits this mailbox instead of falsely claiming it was
+            // persisted; the repeat scan will be a quick no-new-UID check.
+            results[index].checkpoint_error = checkpointError.message || String(checkpointError);
+          }
+        }
         if (onProgress) onProgress({ phase:'scanning', accountIndex:completed, accountTotal:accounts.length, email:account.email, accountComplete:true, checked:aggregate.checked, total:aggregate.total, saved:aggregate.saved, archived:aggregate.archived });
       }
     };
@@ -4762,6 +4880,8 @@ async function scanAll(supabase, userId = null, adjustCredits = null, onProgress
       saved:completeResults.reduce((sum,result) => sum + Number(result.saved || 0), 0),
       archived:completeResults.reduce((sum,result) => sum + Number(result.archived || 0), 0),
       backlog_mailboxes:completeResults.filter(result => result.more_pending).length,
+      resumed_mailboxes:completeResults.filter(result => result.resumed).length,
+      loader_diagnostics:loaderDiagnostics,
       results:completeResults
     };
   } finally { if (!userId) scanRunning = false; }
@@ -5989,13 +6109,47 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
     if (existingReconcile?.status === 'running') {
       return res.status(202).json({ success:true, job:retailerReconcileJobView(existingReconcile) });
     }
+    let durableReconcile = null;
+    let durableLoadError = null;
+    try {
+      durableReconcile = await loadDurableRetailerReconcileJob(supabase, req.user_id);
+    } catch (error) {
+      durableLoadError = error;
+      console.warn('[RECONCILE CHECKPOINT LOAD]', error.message || error);
+    }
+    const resumeDurable = durableRetailerJobCanResume(durableReconcile);
+    const priorCheckpoint = resumeDurable && durableReconcile.scan_checkpoint
+      ? durableReconcile.scan_checkpoint
+      : { completed_count:0, total_accounts:0, results_by_key:{} };
     const reconcileJob = {
-      id:crypto.randomUUID(), status:'running', stage:'starting', percent:1,
-      message:'Preparing the complete retailer reconciliation…',
-      started_at:new Date().toISOString(), heartbeat_at:new Date().toISOString(),
-      finished_at:null, result:null, error:null, stage_errors:[]
+      id:resumeDurable ? durableReconcile.id : crypto.randomUUID(),
+      status:'running', stage:'starting', percent:resumeDurable ? Math.max(1, Number(durableReconcile.percent || 1)) : 1,
+      message:resumeDurable
+        ? `Resuming the saved reconciliation after ${Number(priorCheckpoint.completed_count || 0)} completed mailbox(es)…`
+        : 'Preparing the complete retailer reconciliation…',
+      started_at:resumeDurable ? durableReconcile.started_at : new Date().toISOString(),
+      heartbeat_at:new Date().toISOString(),
+      finished_at:null, result:null, error:null,
+      stage_errors:Array.isArray(durableReconcile?.stage_errors) ? durableReconcile.stage_errors.slice(-100) : [],
+      resumed_from_checkpoint:resumeDurable,
+      scan_checkpoint:{
+        completed_count:Number(priorCheckpoint.completed_count || 0),
+        total_accounts:Number(priorCheckpoint.total_accounts || 0),
+        results_by_key:priorCheckpoint.results_by_key && typeof priorCheckpoint.results_by_key === 'object'
+          ? { ...priorCheckpoint.results_by_key }
+          : {},
+        updated_at:priorCheckpoint.updated_at || null,
+        scan_complete:false
+      }
     };
+    if (durableLoadError) reconcileJob.stage_errors.push({ stage:'checkpoint_load', error:clean(durableLoadError.message || durableLoadError).slice(0,1000) });
     retailerReconcileJobs.set(reconcileKey, reconcileJob);
+    try {
+      await persistRetailerReconcileJob(supabase, req.user_id, reconcileJob);
+    } catch (error) {
+      reconcileJob.stage_errors.push({ stage:'checkpoint_start', error:clean(error.message || error).slice(0,1000) });
+      console.warn('[RECONCILE CHECKPOINT START]', error.message || error);
+    }
     // Return immediately. A full reconciliation can inspect hundreds of connected mailboxes and
     // legitimately run for several minutes; keeping the browser request open makes Render/the
     // browser eventually close the connection and surface a misleading "Failed to fetch" even
@@ -6026,10 +6180,44 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
       // super-admin export a complete parser-development snapshot rather than a retailer allowlist.
       let allEmailScan = { accounts:0, completed:0, successful:0, failed:0, checked:0, archived:0, saved:0, backlog_mailboxes:0, results:[] };
       try {
-        updateRetailerReconcileJob(reconcileJob, 'all_email_scan', 5, 'Collecting every new email from all connected mailboxes…');
+        const checkpointResults = reconcileJob.scan_checkpoint.results_by_key || {};
+        let checkpointWrite = Promise.resolve();
+        const saveMailboxCheckpoint = async checkpoint => {
+          const row = checkpoint.result || {};
+          checkpointResults[checkpoint.checkpointKey] = {
+            email:lower(row.email || checkpoint.account?.email),
+            checked:Number(row.checked || 0),
+            total:Number(row.total || 0),
+            saved:Number(row.saved || 0),
+            archived:Number(row.archived || 0),
+            more_pending:Boolean(row.more_pending),
+            passes:Number(row.passes || 1)
+          };
+          reconcileJob.scan_checkpoint = {
+            ...reconcileJob.scan_checkpoint,
+            completed_count:Object.keys(checkpointResults).length,
+            total_accounts:Number(checkpoint.accountTotal || reconcileJob.scan_checkpoint.total_accounts || 0),
+            results_by_key:checkpointResults,
+            updated_at:new Date().toISOString(),
+            scan_complete:false
+          };
+          checkpointWrite = checkpointWrite.catch(() => {}).then(() =>
+            persistRetailerReconcileJob(supabase, req.user_id, reconcileJob)
+          );
+          await checkpointWrite;
+        };
+        const resumedCount = Object.keys(checkpointResults).length;
+        updateRetailerReconcileJob(
+          reconcileJob,
+          'all_email_scan',
+          resumedCount ? Math.max(5, Number(reconcileJob.percent || 5)) : 5,
+          resumedCount
+            ? `Resuming the complete mailbox scan after ${resumedCount} saved mailbox checkpoint(s)…`
+            : 'Collecting every new email from all connected mailboxes…'
+        );
         allEmailScan = await scanAll(
           supabase,
-          req.user_id,
+          req.role === 'super_admin' ? null : req.user_id,
           adjustUserCredits,
           progress => {
             const total = Number(progress.accountTotal || 0);
@@ -6038,7 +6226,7 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
             updateRetailerReconcileJob(
               reconcileJob,
               'all_email_scan',
-              Math.min(45, percent),
+              Math.min(45, Math.max(Number(reconcileJob.percent || 0), percent)),
               `Collecting every new email · mailbox ${Math.min(done + (progress.accountComplete ? 0 : 1), total || done + 1)} of ${total || '?'}${progress.email ? ` · ${progress.email}` : ''}…`
             );
           },
@@ -6049,9 +6237,32 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
             maxMessagesPerMailbox:RECONCILE_MAX_MESSAGES_PER_MAILBOX,
             mailboxDeadlineMs:IMAP_ACCOUNT_SCAN_DEADLINE_MS,
             drainBacklog:false,
-            maxPassesPerMailbox:1
+            maxPassesPerMailbox:1,
+            allAccounts:req.role === 'super_admin',
+            waitForGlobalScan:req.role === 'super_admin',
+            resumeCompletedKeys:Object.keys(checkpointResults),
+            resumeResultsByKey:checkpointResults,
+            onCheckpoint:saveMailboxCheckpoint
           }
         );
+        reconcileJob.scan_checkpoint = {
+          ...reconcileJob.scan_checkpoint,
+          completed_count:Object.keys(checkpointResults).length,
+          total_accounts:Number(allEmailScan.accounts || reconcileJob.scan_checkpoint.total_accounts || 0),
+          results_by_key:checkpointResults,
+          updated_at:new Date().toISOString(),
+          scan_complete:true,
+          summary:{
+            completed:Number(allEmailScan.completed || 0),
+            successful:Number(allEmailScan.successful || 0),
+            failed:Number(allEmailScan.failed || 0),
+            checked:Number(allEmailScan.checked || 0),
+            archived:Number(allEmailScan.archived || 0),
+            saved:Number(allEmailScan.saved || 0),
+            backlog_mailboxes:Number(allEmailScan.backlog_mailboxes || 0)
+          }
+        };
+        await persistRetailerReconcileJob(supabase, req.user_id, reconcileJob);
       } catch (e) {
         console.warn('[RECONCILE ALL EMAIL SCAN]', e.message || e);
         recordStageError('all_email_scan', e);
@@ -6137,6 +6348,7 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
         matched_order_numbers:[],
         selected_mailboxes:(allEmailScan.results || []).map(row => row.email).filter(Boolean),
         mailbox_failure_details:(allEmailScan.results || []).filter(row => row.error).map(row => ({ email:row.email, error:row.error })),
+        loader_diagnostics:allEmailScan.loader_diagnostics || {},
         debug:['Interactive reconcile uses the completed all-email mailbox scan; Pokemon Center messages are replayed from the resulting archive.']
       };
       try {
@@ -6147,7 +6359,7 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
           .order('order_date',{ascending:false}).limit(2000);
         if (pokemonTrackerMeta.error) throw pokemonTrackerMeta.error;
         pokemonArchiveDiscovery = await fetchPokemonCenterArchiveCandidates(
-          supabase, req.user_id, archiveColumns, pokemonTrackerMeta.data || []
+          supabase, req.role === 'super_admin' ? null : req.user_id, archiveColumns, pokemonTrackerMeta.data || []
         );
         pokemonArchiveRows = pokemonArchiveDiscovery.rows || [];
       } catch (e) { console.warn('[POKEMON CENTER CLASSIFIED ARCHIVE]', e.message || e); recordStageError('pokemon_center', e); }
@@ -6447,17 +6659,35 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
       Object.assign(result, { stage_errors:reconcileJob.stage_errors.slice() });
       updateRetailerReconcileJob(reconcileJob, 'complete', 100, 'Retailer email reconciliation complete.');
       Object.assign(reconcileJob, { status:'complete', finished_at:new Date().toISOString(), result, error:null });
+      await persistRetailerReconcileJob(supabase, req.user_id, reconcileJob);
     } catch(error){
       console.error('[RECONCILE RETAILER EMAILS]', error.message || error);
       updateRetailerReconcileJob(reconcileJob, 'error', 100, 'Retailer email reconciliation stopped because of a server error.');
       Object.assign(reconcileJob, { status:'error', finished_at:new Date().toISOString(), error:error.message || String(error) });
+      try { await persistRetailerReconcileJob(supabase, req.user_id, reconcileJob); }
+      catch (checkpointError) { console.warn('[RECONCILE CHECKPOINT ERROR]', checkpointError.message || checkpointError); }
     }
     });
   });
 
   app.get('/orders/reconcile-retailer-emails/status', auth, async (req, res) => {
     const job = retailerReconcileJobs.get(String(req.user_id));
-    res.json({ job:retailerReconcileJobView(job) });
+    if (job) return res.json({ job:retailerReconcileJobView(job) });
+    try {
+      const durable = await loadDurableRetailerReconcileJob(supabase, req.user_id);
+      if (!durable) return res.json({ job:{ status:'idle' } });
+      if (durable.status === 'running' && durableRetailerJobCanResume(durable)) {
+        return res.json({ job:{
+          ...retailerReconcileJobView(durable),
+          status:'interrupted',
+          message:`The server restarted after ${Number(durable.scan_checkpoint?.completed_count || 0)} mailbox(es). Reconnecting will continue from that checkpoint.`
+        } });
+      }
+      return res.json({ job:retailerReconcileJobView(durable) });
+    } catch (error) {
+      console.warn('[RECONCILE CHECKPOINT STATUS]', error.message || error);
+      return res.json({ job:{ status:'idle', checkpoint_error:error.message || String(error) } });
+    }
   });
 
   app.post('/orders/check-tracking', auth, async (req,res)=>{
