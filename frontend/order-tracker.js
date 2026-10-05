@@ -134,7 +134,8 @@ function render(){const q=$('searchOrders').value.toLowerCase();const selectedSt
 async function openOrderEmails(id,type='all'){const r=await fetch(`${API}/orders/emails/${id}?type=${encodeURIComponent(type)}`,{headers:{Authorization:`Bearer ${token}`}});if(!r.ok){alert('Order emails could not be opened');return}const html=await r.text();const w=window.open('','_blank');w.document.open();w.document.write(html);w.document.close()}
 async function findOrderEmails(id,button){
   const original=button?.textContent||'Find order emails';
-  if(button){button.disabled=true;button.textContent='Searching mailbox…'}
+  const selectedOrder=allOrders.find(order=>String(order.id)===String(id));
+  if(button){button.disabled=true;button.textContent=isPokemonCenterOrder(selectedOrder||{})?'Searching all mailboxes…':'Searching mailbox…'}
   try{
     let start=await api(`/orders/tracked/${id}/find-emails`,{method:'POST',body:'{}',retryNetwork:true});
     let jobId=start.job_id||'';
@@ -147,7 +148,13 @@ async function findOrderEmails(id,button){
       if(job.status==='complete'){
         await loadOrders();
         const result=job.result||{};
-        if(result.confirmation_linked){alert('The confirmation email was found and linked to this order.');return}
+        if(result.confirmation_linked){
+          const receiving=(result.receiving_mailboxes||[]).filter(Boolean);
+          alert(receiving.length
+            ? `The confirmation email was found in ${receiving.join(', ')} and linked to the correct website order owner.`
+            : 'The confirmation email was found and linked to this order.');
+          return
+        }
         const detail=(result.details||[]).find(item=>String(item.tracked_order_id)===String(id))||(result.details||[])[0]||{};
         const messages={
           mailbox_not_connected:'The profile mailbox is no longer connected. Reconnect its IMAP/app password, then try again.',
@@ -156,9 +163,13 @@ async function findOrderEmails(id,button){
           imap_search_failed:'The mailbox connected, but its IMAP search failed. Check the diagnostic log and mailbox credentials.',
           archive_mime_processed:'A matching archived email was reprocessed, but it was not recognized as a confirmation. Export that email as EML for parser review.',
           live_message_found_not_linked:'A matching message was fetched, but it did not parse/link as a retailer email. Download the EML for parser review.',
-          message_processing_failed:'A matching message was found, but parsing or saving it failed. Check the server log for this order number.'
+          message_processing_failed:'A matching message was found, but parsing or saving it failed. Check the server log for this order number.',
+          global_no_exact_match:'Every connected website mailbox was searched for this exact Pokémon Center order number, but no matching confirmation email was found.',
+          global_partial_no_exact_match:'Every reachable website mailbox was searched for this exact Pokémon Center order number, but no matching confirmation email was found. Some mailboxes could not be reached.',
+          global_mailbox_search_failed:'The website-wide Pokémon Center search could not connect to any mailbox. Check the mailbox failure details and credentials.'
         };
-        const diagnostic=detail.error?`\n\nMailbox detail: ${detail.error}`:'';
+        const failureCount=Number(detail.mailbox_failures||0);
+        const diagnostic=detail.error?`\n\nMailbox detail: ${detail.error}`:(failureCount?`\n\n${failureCount} mailbox${failureCount===1?'':'es'} could not be searched because of connection or credential errors.`:'');
         alert((messages[detail.result]||`Mailbox search completed, but no confirmation was linked (${detail.result||'no matching result'}).`)+diagnostic);
         return;
       }

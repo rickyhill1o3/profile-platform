@@ -4115,6 +4115,225 @@ async function discoverPokemonCenterConfirmationsGlobally(
   };
 }
 
+async function replayPokemonCenterArchiveForOrder(
+  supabase,
+  order,
+  adjustCredits = null,
+  confirmPendingAmazonCheckout = null
+) {
+  // Pokemon Center can deliver a later queue entry to a completely different user's inbox. The
+  // P-number is therefore the only ownership key here: search the website-wide archive for that
+  // exact reference, then let saveParsedMessage() resolve the original webhook owner globally.
+  const orderRef = normalizeOrderRef(order?.order_number);
+  if (!/^P\d{6,}$/i.test(orderRef)) {
+    return { metadata_scanned:0, candidates_found:0, messages_processed:0, messages_saved:0, receiving_mailboxes:[] };
+  }
+  const columns = 'id,user_id,mailbox_email,source_type,subject,from_text,to_text,cc_text,body_text,body_html,snippet,received_at,message_id,imap_uid,store,linked_order_id,email_type,order_number';
+  const discovery = await fetchPokemonCenterArchiveCandidates(supabase, null, columns, [order]);
+  let processed = 0;
+  let saved = 0;
+  const receivingMailboxes = new Set();
+  for (const email of discovery.rows || []) {
+    const archivedText = archivedRetailerReadableText(email);
+    const refs = new Set([
+      normalizeOrderRef(email.order_number),
+      ...extractOrderNumbers('pokemoncenter', email.subject || '', `${archivedText}\n${String(email.body_html || '')}`)
+        .map(normalizeOrderRef)
+    ].filter(Boolean));
+    if (!refs.has(orderRef)) continue;
+    processed++;
+    const receivingMailbox = lower(email.mailbox_email);
+    if (receivingMailbox) receivingMailboxes.add(receivingMailbox);
+    const account = {
+      // This is the archive row's receiving owner, not the checkout owner. saveParsedMessage()
+      // deliberately replaces it with the exact P-number's service-order owner before linking.
+      user_id:email.user_id || order.user_id,
+      archive_user_id:email.user_id || order.user_id,
+      profile_id:null,
+      email:receivingMailbox,
+      provider:providerForEmail(receivingMailbox) || { name:'archive' },
+      ingestion_source:email.source_type || 'pokemon_global_archive_find'
+    };
+    const parsed = {
+      subject:email.subject || '',
+      from:{ text:email.from_text || '' },
+      to:{ text:email.to_text || '' },
+      cc:{ text:email.cc_text || '' },
+      text:archivedText,
+      html:email.body_html || null,
+      date:new Date(email.received_at || Date.now()),
+      messageId:email.message_id,
+      _pokemonCenterOrderNumber:clean(order.order_number).toUpperCase()
+    };
+    const result = await saveParsedMessage(
+      supabase, account, parsed, email.imap_uid || 0, adjustCredits, confirmPendingAmazonCheckout
+    );
+    if (result?.saved) saved++;
+  }
+  return {
+    metadata_scanned:discovery.metadata_scanned || 0,
+    candidates_found:discovery.candidates_found || 0,
+    messages_processed:processed,
+    messages_saved:saved,
+    receiving_mailboxes:[...receivingMailboxes].sort()
+  };
+}
+
+async function findPokemonCenterOrderAcrossAllMailboxes(
+  supabase,
+  order,
+  adjustCredits = null,
+  confirmPendingAmazonCheckout = null
+) {
+  const orderNumber = clean(order?.order_number).toUpperCase();
+  const orderRef = normalizeOrderRef(orderNumber);
+  if (!/^P\d{6,}$/i.test(orderRef)) throw new Error('A valid Pokemon Center P-order number is required.');
+
+  const loadedAccounts = await loadScanAccounts(supabase, null);
+  const accountByEmail = new Map();
+  for (const account of loadedAccounts || []) {
+    const key = lower(account.email);
+    if (!key) continue;
+    const prior = accountByEmail.get(key);
+    if (!prior || (prior.imported_account_id && !account.imported_account_id)) accountByEmail.set(key, account);
+  }
+  const accounts = [...accountByEmail.values()];
+  const loaderDiagnostics = loadedAccounts.loaderDiagnostics || {};
+  let mailboxesChecked = 0;
+  let mailboxFailures = 0;
+  let messagesFound = 0;
+  let messagesProcessed = 0;
+  let messagesMatched = 0;
+  let messagesSaved = 0;
+  let confirmationFound = false;
+  const receivingMailboxes = new Set();
+  const mailboxFailuresDetail = [];
+  const mailboxMatches = new Map();
+
+  const worker = async account => {
+    let client = null;
+    let activeFolder = 'INBOX';
+    try {
+      const auth = await imapAuthForAccount(supabase, account);
+      client = createGuardedImapFlow({
+        host:account.provider.host, port:account.provider.port, secure:account.provider.secure,
+        auth, logger:false,
+        connectionTimeout:30000, greetingTimeout:30000, socketTimeout:120000
+      }, 'POKEMON EXACT GLOBAL IMAP');
+      await client.connect();
+      let boxes = [];
+      try { boxes = await client.list(); } catch (_) {}
+      const folders = historicalRepairMailboxNames(account, boxes);
+      mailboxesChecked++;
+      const processedKeys = new Set();
+
+      for (const folder of folders) {
+        activeFolder = folder;
+        let lock = null;
+        try {
+          lock = await client.getMailboxLock(folder);
+          const uidSet = new Set();
+          // Do not use a date window here. The exact P-number is authoritative and some inboxes
+          // receive the confirmation long after the webhook or move it into an archive folder.
+          for (const criteria of [{ text:orderNumber }, { subject:orderNumber }]) {
+            try {
+              const hits = await client.search(criteria, { uid:true }) || [];
+              for (const uid of hits) if (Number(uid) > 0) uidSet.add(Number(uid));
+            } catch (_) {}
+          }
+          const uids = [...uidSet].sort((a,b) => a-b).slice(-100);
+          messagesFound += uids.length;
+          const fresh = uids.filter(uid => !processedKeys.has(`${lower(folder)}:${uid}`));
+          for (const uid of fresh) processedKeys.add(`${lower(folder)}:${uid}`);
+          const uidRange = imapUidSet(fresh);
+          if (!uidRange) continue;
+          for await (const msg of client.fetch(uidRange, { uid:true, source:true, envelope:true }, { uid:true })) {
+            messagesProcessed++;
+            try {
+              const rawSource = Buffer.isBuffer(msg.source) ? msg.source.toString('utf8') : String(msg.source || '');
+              const parsed = await parseMailboxMessage(msg.source);
+              msg.source = null;
+              const text = readableEmailText(parsed);
+              const store = normalizeStoreKey(detectStore(parsed.from?.text || '', parsed.subject || '', text));
+              const refs = new Set([
+                ...extractOrderNumbers('pokemoncenter', parsed.subject || '', `${text}\n${String(parsed.html || '')}`),
+                ...[...rawSource.matchAll(/\b(P\d{6,12})\b/gi)].map(match => match[1])
+              ].map(normalizeOrderRef).filter(Boolean));
+              if (store !== 'pokemoncenter' || !refs.has(orderRef)) continue;
+              parsed._pokemonCenterOrderNumber = orderNumber;
+              messagesMatched++;
+              const receivingMailbox = lower(account.email);
+              receivingMailboxes.add(receivingMailbox);
+              const status = detectStatus(parsed.subject || '', text);
+              const result = await saveParsedMessage(
+                supabase, account, parsed, msg.uid, adjustCredits, confirmPendingAmazonCheckout
+              );
+              if (result?.saved) messagesSaved++;
+              if (status === 'confirmed') {
+                confirmationFound = !!result?.saved || await trackedOrderHasConfirmation(supabase, order.id);
+              }
+              mailboxMatches.set(`${orderRef}|${status}|${receivingMailbox}`, {
+                order_number:orderNumber,
+                event_type:status,
+                receiving_mailbox:receivingMailbox,
+                subject:clean(parsed.subject || '').slice(0,180),
+                saved:!!result?.saved
+              });
+            } catch (messageError) {
+              msg.source = null;
+              console.warn(`[POKEMON EXACT GLOBAL IMAP] Parse/link failed ${account.email} folder=${folder} uid=${msg.uid}: ${messageError.message || messageError}`);
+            }
+          }
+        } catch (folderError) {
+          console.warn(`[POKEMON EXACT GLOBAL IMAP] Folder search failed ${account.email} ${folder}: ${folderError.message || folderError}`);
+        } finally {
+          if (lock) lock.release();
+        }
+        if (confirmationFound) break;
+      }
+    } catch (mailboxError) {
+      mailboxFailures++;
+      const errorText = describeImapError(mailboxError, activeFolder);
+      mailboxFailuresDetail.push({ email:lower(account.email), error:errorText.slice(0,500) });
+      console.warn(`[POKEMON EXACT GLOBAL IMAP] ${account.email}: ${errorText}`);
+    } finally {
+      if (client) await disposeImapClient(client);
+    }
+  };
+
+  // Stop opening new batches once the exact confirmation has been found and linked. Every batch
+  // remains bounded, while a no-match still proves that every connected physical mailbox ran.
+  for (let index = 0; index < accounts.length && !confirmationFound; index += RECONCILE_IMAP_CONCURRENCY) {
+    await Promise.all(accounts.slice(index, index + RECONCILE_IMAP_CONCURRENCY).map(worker));
+    await releaseMailboxBatchMemory();
+  }
+
+  return {
+    mailboxes_selected:accounts.length,
+    mailboxes_checked:mailboxesChecked,
+    mailbox_failures:mailboxFailures,
+    mailbox_failure_details:mailboxFailuresDetail.sort((a,b) => a.email.localeCompare(b.email)),
+    loader_diagnostics:loaderDiagnostics,
+    messages_found:messagesFound,
+    messages_processed:messagesProcessed,
+    messages_matched:messagesMatched,
+    messages_saved:messagesSaved,
+    matched_order_numbers:messagesMatched ? [orderNumber] : [],
+    receiving_mailboxes:[...receivingMailboxes].sort(),
+    mailbox_matches:[...mailboxMatches.values()],
+    confirmation_found:confirmationFound
+  };
+}
+
+async function trackedOrderHasConfirmation(supabase, orderId) {
+  const junction = await supabase.from('tracked_order_emails')
+    .select('order_id').eq('order_id', orderId).eq('event_type','confirmed').limit(1);
+  if (!junction.error && (junction.data || []).length) return true;
+  const legacy = await supabase.from('email_messages')
+    .select('id').eq('linked_order_id', orderId).eq('email_type','confirmed').limit(1);
+  return !legacy.error && (legacy.data || []).length > 0;
+}
+
 
 function requestedPokemonCenterOrderNumbers(value) {
   const raw = Array.isArray(value) ? value.join(' ') : String(value || '');
@@ -6894,7 +7113,7 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
 
   app.post('/orders/tracked/:id/find-emails', auth, async (req, res) => {
     const orderResult = await supabase.from('tracked_orders')
-      .select('id,user_id,source_email,store,order_number')
+      .select('id,user_id,profile_id,source_email,store,order_number,order_date,created_at')
       .eq('id', req.params.id)
       .eq('user_id', req.user_id)
       .maybeSingle();
@@ -6902,7 +7121,12 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
     const order = orderResult.data;
     if (!order) return res.status(404).json({ error:'Order not found.' });
     if (!clean(order.order_number)) return res.status(400).json({ error:'This order does not have a retailer order number to search.' });
-    if (!lower(order.source_email).includes('@')) return res.status(400).json({ error:'This order is not connected to a profile mailbox.' });
+    const globalPokemonCenterSearch = req.role === 'super_admin' &&
+      normalizeStoreKey(order.store || '') === 'pokemoncenter' &&
+      /^P\d{6,}$/i.test(normalizeOrderRef(order.order_number));
+    if (!globalPokemonCenterSearch && !lower(order.source_email).includes('@')) {
+      return res.status(400).json({ error:'This order is not connected to a profile mailbox.' });
+    }
 
     const key = `${req.user_id}:${order.id}`;
     const existing = orderEmailRepairJobs.get(key);
@@ -6919,25 +7143,67 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
 
     setImmediate(async () => {
       try {
-        const repair = await runHistoricalOrderEmailRepair(
-          supabase, req.user_id, adjustUserCredits, confirmPendingAmazonCheckout,
-          { maxOrders:1, forceLinked:true, priorityOrderIds:[order.id], allowConcurrent:true }
-        );
-        let confirmationLinked = false;
-        const junction = await supabase.from('tracked_order_emails')
-          .select('order_id')
-          .eq('order_id', order.id)
-          .eq('event_type','confirmed')
-          .limit(1);
-        if (!junction.error && (junction.data || []).length) confirmationLinked = true;
-        if (!confirmationLinked) {
-          const legacy = await supabase.from('email_messages')
-            .select('id')
-            .eq('linked_order_id', order.id)
-            .eq('email_type','confirmed')
-            .limit(1);
-          if (!legacy.error && (legacy.data || []).length) confirmationLinked = true;
+        let repair;
+        if (globalPokemonCenterSearch) {
+          const archive = await replayPokemonCenterArchiveForOrder(
+            supabase, order, adjustUserCredits, confirmPendingAmazonCheckout
+          );
+          let confirmationLinked = await trackedOrderHasConfirmation(supabase, order.id);
+          let live = {
+            mailboxes_selected:0, mailboxes_checked:0, mailbox_failures:0,
+            messages_found:0, messages_processed:0, messages_matched:0, messages_saved:0,
+            matched_order_numbers:[], mailbox_matches:[], mailbox_failure_details:[]
+          };
+          if (!confirmationLinked) {
+            // This call is restricted by the role gate above. It loads every website user's
+            // connected mailbox, searches every relevant folder for this exact P-number, and
+            // assigns a match to the webhook owner rather than the receiving mailbox owner.
+            live = await findPokemonCenterOrderAcrossAllMailboxes(
+              supabase, order, adjustUserCredits, confirmPendingAmazonCheckout
+            );
+            confirmationLinked = await trackedOrderHasConfirmation(supabase, order.id);
+          }
+          const receivingMailboxes = [...new Set([
+            ...(archive.receiving_mailboxes || []),
+            ...(live.receiving_mailboxes || []),
+            ...(live.mailbox_matches || []).map(item => lower(item.receiving_mailbox)).filter(Boolean)
+          ])].sort();
+          const searchResult = confirmationLinked
+            ? 'global_confirmation_linked'
+            : (live.mailboxes_checked > 0
+              ? (live.mailbox_failures > 0 ? 'global_partial_no_exact_match' : 'global_no_exact_match')
+              : 'global_mailbox_search_failed');
+          repair = {
+            checked_orders:1,
+            matched_messages:Number(archive.messages_saved || 0) + Number(live.messages_saved || 0),
+            repaired_orders:confirmationLinked ? 1 : 0,
+            global_search:true,
+            exact_order_number:clean(order.order_number).toUpperCase(),
+            archive,
+            live,
+            receiving_mailboxes:receivingMailboxes,
+            details:[{
+              tracked_order_id:order.id,
+              order_number:clean(order.order_number).toUpperCase(),
+              store:'pokemoncenter',
+              result:searchResult,
+              mailbox:'all connected website mailboxes',
+              mailboxes_selected:live.mailboxes_selected || 0,
+              mailboxes_checked:live.mailboxes_checked || 0,
+              mailbox_failures:live.mailbox_failures || 0,
+              receiving_mailboxes:receivingMailboxes,
+              messages_found:Number(archive.messages_processed || 0) + Number(live.messages_found || 0),
+              messages_processed:Number(archive.messages_processed || 0) + Number(live.messages_processed || 0),
+              saved_messages:Number(archive.messages_saved || 0) + Number(live.messages_saved || 0)
+            }]
+          };
+        } else {
+          repair = await runHistoricalOrderEmailRepair(
+            supabase, req.user_id, adjustUserCredits, confirmPendingAmazonCheckout,
+            { maxOrders:1, forceLinked:true, priorityOrderIds:[order.id], allowConcurrent:true }
+          );
         }
+        const confirmationLinked = await trackedOrderHasConfirmation(supabase, order.id);
         Object.assign(job, {
           status:'complete', finished_at:new Date().toISOString(),
           result:{ ...repair, confirmation_linked:confirmationLinked }, error:null
