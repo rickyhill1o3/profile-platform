@@ -4,6 +4,7 @@ if(!token) location.href='login.html';
 const headers={'Authorization':`Bearer ${token}`,'Content-Type':'application/json'};
 let allOrders=[];
 let retailerPaymentAlerts=[];
+let isSuperAdmin=false;
 let discordHistoryJobId='';
 let discordHistoryPreview=null;
 const $=id=>document.getElementById(id);
@@ -32,6 +33,8 @@ async function api(path,opt={}){
       const j=await r.json().catch(()=>({}));
       if(!r.ok){
         const error=new Error(j.error||`Request failed (${r.status})`);
+        error.status=r.status;
+        error.details=j;
         if([502,503,504].includes(r.status)&&attempt<maxAttempts){lastError=error;await wait(Math.min(10000,750*attempt));continue}
         throw error;
       }
@@ -105,13 +108,13 @@ async function resolvePaymentAlert(id){
   try{await api(`/orders/account-alerts/${encodeURIComponent(id)}/resolve`,{method:'POST',body:'{}'});await loadRetailerPaymentAlerts()}catch(error){alert(error.message||'The payment warning could not be resolved.')}
 }
 function applyOrders(orders=[],summary={}){allOrders=orders;render();$('countAll').textContent=allOrders.length;$('countActive').textContent=(summary.confirmed||0)+(summary.processing||0);$('countSuccess').textContent=(summary.shipped||0)+(summary.delivered||0);$('countCanceled').textContent=(summary.canceled||0)+(summary.refunded||0);$('successRate').textContent=`${Number(summary.success_rate||0).toFixed(1)}%`}
-async function bootstrap(){const j=await api('/orders/bootstrap');renderAccounts(j.accounts||[]);applyOrders(j.orders||[],j.summary||{});try{await loadRetailerPaymentAlerts()}catch(error){showWarning(error.message)}$('scanMessage').textContent=`${j.connected_count||0} connected mailbox${Number(j.connected_count||0)===1?'':'es'}. Scans continue from the last saved IMAP UID, so previously checked messages are not searched again.`;if(Array.isArray(j.warnings)&&j.warnings.length)showWarning(`Some optional data could not be refreshed: ${j.warnings.join(' | ')}`);if(j.is_super_admin){$('aycdPanel').hidden=false;$('oneTimePokemonPanel').hidden=false;$('discordHistoryPanel').hidden=false;$('exportEmailIndex').hidden=false;$('exportEmailDatabase').hidden=false;refreshAycdStatus();loadDiscordHistoryConfig()}return j}
+async function bootstrap(){const j=await api('/orders/bootstrap');isSuperAdmin=Boolean(j.is_super_admin);renderAccounts(j.accounts||[]);applyOrders(j.orders||[],j.summary||{});try{await loadRetailerPaymentAlerts()}catch(error){showWarning(error.message)}$('scanMessage').textContent=`${j.connected_count||0} connected mailbox${Number(j.connected_count||0)===1?'':'es'}. Scans continue from the last saved IMAP UID, so previously checked messages are not searched again.`;if(Array.isArray(j.warnings)&&j.warnings.length)showWarning(`Some optional data could not be refreshed: ${j.warnings.join(' | ')}`);if(j.is_super_admin){$('aycdPanel').hidden=false;$('oneTimePokemonPanel').hidden=false;$('discordHistoryPanel').hidden=false;$('exportEmailIndex').hidden=false;$('exportEmailDatabase').hidden=false;refreshAycdStatus();loadDiscordHistoryConfig()}return j}
 async function loadOrders(){const qs=new URLSearchParams();if($('statusFilter').value)qs.set('status',$('statusFilter').value);if($('yearFilter').value)qs.set('year',$('yearFilter').value);const [j]=await Promise.all([api('/orders/tracked?'+qs),loadRetailerPaymentAlerts().catch(()=>null)]);applyOrders(j.orders||[],j.summary||{})}
 function isPokemonCenterOrder(o){const store=String(o.store||'').toLowerCase().replace(/[^a-z0-9]/g,'');return store==='pokemon'||store==='pokemoncenter'}
-function hasPokemonConfirmationEmail(o){const c=o.email_counts||{};return Boolean(o.has_confirmation_email)||Number(c.confirmed||0)>0}
+function hasPokemonConfirmationEmail(o){const c=o.email_counts||{};return Boolean(o.has_confirmation_email)||Number(c.confirmed||0)>0||(String(o.last_message_id||'').startsWith('manual-pdf:')&&Boolean(o.receipt_html||o.receipt_text))}
 function displayOrderStatus(o){const s=String(o.status||'waiting_confirmation').toLowerCase();if(isPokemonCenterOrder(o)&&['confirmed','processing','waiting_confirmation'].includes(s)&&!hasPokemonConfirmationEmail(o))return 'waiting_confirmation';return s}
 function statusCardClass(o){const s=displayOrderStatus(o);if(s==='canceled'||s==='refunded')return 'order-canceled';if(s==='delivered')return 'order-delivered';if(s==='shipped')return 'order-shipped';if(s==='confirmed'||s==='processing')return 'order-confirmed';return 'order-waiting'}
-function emailButtons(o){const c=o.email_counts||{};const buttons=[];const hasConfirmation=hasPokemonConfirmationEmail(o)||(!isPokemonCenterOrder(o)&&Boolean(o.receipt_html||o.receipt_text));const total=Math.max(Number(c.total||0),hasConfirmation?1:0);if(hasConfirmation)buttons.push(`<button class="btn" onclick="openOrderEmails('${o.id}','confirmed')">View confirmed receipt</button>`);if(Number(c.shipped||0)>0)buttons.push(`<button class="btn" onclick="openOrderEmails('${o.id}','shipped')">View tracking confirmation</button>`);if(Number(c.delivered||0)>0)buttons.push(`<button class="btn" onclick="openOrderEmails('${o.id}','delivered')">View delivered confirmation</button>`);if(Number(c.canceled||0)>0)buttons.push(`<button class="btn" onclick="openOrderEmails('${o.id}','canceled')">View cancellation</button>`);else if(Number(c.refunded||0)>0)buttons.push(`<button class="btn" onclick="openOrderEmails('${o.id}','refunded')">View refund confirmation</button>`);if(total>0)buttons.push(`<button class="btn" onclick="openOrderEmails('${o.id}','all')">View all order emails (${total})</button>`);if(!hasConfirmation)buttons.push(`<button class="btn" onclick="findOrderEmails('${o.id}',this)">Find confirmation email</button>`);return buttons.join('')}
+function emailButtons(o){const c=o.email_counts||{};const buttons=[];const hasConfirmation=hasPokemonConfirmationEmail(o)||(!isPokemonCenterOrder(o)&&Boolean(o.receipt_html||o.receipt_text));const total=Math.max(Number(c.total||0),hasConfirmation?1:0);if(hasConfirmation)buttons.push(`<button class="btn" onclick="openOrderEmails('${o.id}','confirmed')">View confirmed receipt</button>`);if(Number(c.shipped||0)>0)buttons.push(`<button class="btn" onclick="openOrderEmails('${o.id}','shipped')">View tracking confirmation</button>`);if(Number(c.delivered||0)>0)buttons.push(`<button class="btn" onclick="openOrderEmails('${o.id}','delivered')">View delivered confirmation</button>`);if(Number(c.canceled||0)>0)buttons.push(`<button class="btn" onclick="openOrderEmails('${o.id}','canceled')">View cancellation</button>`);else if(Number(c.refunded||0)>0)buttons.push(`<button class="btn" onclick="openOrderEmails('${o.id}','refunded')">View refund confirmation</button>`);if(total>0)buttons.push(`<button class="btn" onclick="openOrderEmails('${o.id}','all')">View all order emails (${total})</button>`);if(!hasConfirmation){buttons.push(`<button class="btn" onclick="findOrderEmails('${o.id}',this)">Find confirmation email</button>`);if(isSuperAdmin&&isPokemonCenterOrder(o))buttons.push(`<button class="btn" onclick="choosePokemonReceiptPdf('${o.id}',this)">Upload order receipt PDF</button>`)}return buttons.join('')}
 
 function renderItems(o){
   const items=Array.isArray(o.items)?o.items:[]; if(!items.length)return '';
@@ -185,6 +188,47 @@ async function findOrderEmails(id,button){
     }
   }catch(error){alert(error.message||'Could not search this order mailbox')}
   finally{if(button?.isConnected){button.disabled=false;button.textContent=original}}
+}
+async function receiptPdfBase64(file){
+  const bytes=new Uint8Array(await file.arrayBuffer());
+  let binary='';
+  for(let offset=0;offset<bytes.length;offset+=0x8000)binary+=String.fromCharCode(...bytes.subarray(offset,offset+0x8000));
+  return btoa(binary)
+}
+function choosePokemonReceiptPdf(id,button){
+  const order=allOrders.find(item=>String(item.id)===String(id));
+  if(!order||!isPokemonCenterOrder(order))return;
+  const input=document.createElement('input');
+  input.type='file';
+  input.accept='.pdf,application/pdf';
+  input.hidden=true;
+  document.body.appendChild(input);
+  input.onchange=async()=>{
+    const file=input.files?.[0];
+    input.remove();
+    if(!file)return;
+    if(!/\.pdf$/i.test(file.name)&&file.type!=='application/pdf'){alert('Choose the Pokemon Center order-details PDF.');return}
+    if(file.size>5*1024*1024){alert('The receipt PDF is too large. The maximum upload size is 5 MB.');return}
+    const original=button?.textContent||'Upload order receipt PDF';
+    if(button){button.disabled=true;button.textContent='Reading receipt PDF…'}
+    try{
+      const result=await api(`/orders/tracked/${encodeURIComponent(id)}/upload-confirmation-pdf`,{
+        method:'POST',timeoutMs:90000,
+        body:JSON.stringify({filename:file.name,pdf_base64:await receiptPdfBase64(file)})
+      });
+      await loadOrders();
+      const receipt=result.receipt||{};
+      alert(result.message||`Receipt attached. ${receipt.order_number||order.order_number} is confirmed with a total of ${money(receipt.total)}.`)
+    }catch(error){
+      if(error.details?.code==='order_number_mismatch'){
+        alert(`This PDF is for ${error.details.receipt_order_number}, but the selected order is ${error.details.selected_order_number}. Nothing was changed.`)
+      }else alert(error.message||'The Pokemon Center receipt PDF could not be attached.')
+    }finally{
+      if(button?.isConnected){button.disabled=false;button.textContent=original}
+    }
+  };
+  input.oncancel=()=>input.remove();
+  input.click()
 }
 async function openReceipt(id){return openOrderEmails(id,'confirmed')}
 async function editOrder(id){const o=allOrders.find(x=>x.id===id);const status=prompt('Status: waiting_confirmation, confirmed, processing, shipped, delivered, canceled, refunded',o.status);if(!status)return;const credits=prompt('Credits spent for this order',o.credits_spent||0);await api('/orders/tracked/'+id,{method:'PATCH',body:JSON.stringify({status,credits_spent:Number(credits||0)})});loadOrders()}

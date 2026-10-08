@@ -27,7 +27,7 @@ assert.doesNotMatch(route.slice(route.indexOf('const safeEmailRecord'), route.in
 
 assert.match(html, /id="exportEmailDatabase" hidden>Export full parser archive</, 'the complete export button must be hidden until super-admin bootstrap');
 assert.match(html, /id="exportEmailIndex" hidden>Export readable email list</, 'the readable CSV button must be hidden until super-admin bootstrap');
-assert.match(html, /order-tracker\.js\?v=20261004-resumable-global-reconcile/, 'the browser must receive the resumable reconciliation script');
+assert.match(html, /order-tracker\.js\?v=20261008-manual-pokemon-receipt-pdf/, 'the browser must receive the current reconciliation and manual receipt script');
 assert.match(frontend, /\$\('exportEmailDatabase'\)\.hidden=false/, 'bootstrap must reveal the button only to super admins');
 assert.match(frontend, /\$\('exportEmailIndex'\)\.hidden=false/, 'bootstrap must reveal the readable export only to super admins');
 assert.match(frontend, /fetch\(`\$\{API\}\/orders\/email-database-export`,\{headers:\{Authorization:`Bearer \$\{token\}`\}\}\)/, 'the browser download must send the signed-in bearer token');

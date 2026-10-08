@@ -1,5 +1,6 @@
 const { ImapFlow } = require('imapflow');
 const { simpleParser } = require('mailparser');
+const { PDFParse } = require('pdf-parse');
 const crypto = require('crypto');
 const cheerio = require('cheerio');
 const zlib = require('zlib');
@@ -1743,6 +1744,108 @@ function extractAmounts(text) {
   };
 }
 
+function parsePokemonCenterReceiptPdfText(rawText) {
+  const text = String(rawText || '').replace(/\r/g, '');
+  if (!/Order Details\s*\|\s*Pok[eé]mon Center Official Site|Pok[eé]mon Center[\s\S]{0,500}\bOrder Details\b/i.test(text)) {
+    throw new Error('This PDF does not look like a Pokemon Center order-details receipt.');
+  }
+
+  const orderNumber = clean(text.match(/\bOrder\s*#\s*:\s*(P\d{8,12})\b/i)?.[1]).toUpperCase();
+  if (!orderNumber) throw new Error('The Pokemon Center P-order number could not be read from this PDF.');
+
+  const dateText = clean(text.match(/(?:^|\n)Date\s*:\s*([^\n]+)/i)?.[1]);
+  const statusText = clean(text.match(/(?:^|\n)Status\s*:\s*([^\n]+)/i)?.[1]);
+  if (/cancel|refund/i.test(statusText)) {
+    throw new Error(`This PDF shows the retailer status as ${statusText}; it cannot be used as a confirmation receipt.`);
+  }
+
+  const lines = text.split('\n').map(line => clean(line));
+  const nextValue = (start, maxOffset = 6) => {
+    if (!Number.isInteger(start) || start < 0) return '';
+    for (let offset = 1; offset <= maxOffset; offset++) {
+      const value = clean(lines[start + offset]);
+      if (value) return value;
+    }
+    return '';
+  };
+  const boundary = value => !value || /^(?:--\s*\d+\s+of\s+\d+\s*--|https?:\/\/|Order Details|Shipping Information|Billing Information|Payment Method|Qty|Price|Subtotal|Tax|Total)$/i.test(value) || /Order Details\s*\|\s*Pok[eé]mon Center/i.test(value);
+  const items = [];
+  for (let i = 0; i < lines.length; i++) {
+    const skuMatch = lines[i].match(/^SKU\s*:\s*([A-Z0-9-]{5,40})$/i);
+    if (!skuMatch) continue;
+
+    const nameParts = [];
+    for (let j = i - 1; j >= 0 && i - j <= 6; j--) {
+      const value = lines[j];
+      if (boundary(value)) {
+        if (nameParts.length) break;
+        continue;
+      }
+      if (/^\d{1,2}\/\d{1,2}\/\d{2,4},|^The official Pok[eé]mon store/i.test(value)) break;
+      nameParts.unshift(value);
+    }
+
+    const fieldIndex = label => {
+      for (let j = i + 1; j < Math.min(lines.length, i + 24); j++) {
+        if (new RegExp(`^${label}$`, 'i').test(lines[j])) return j;
+        if (j > i + 1 && /^SKU\s*:/i.test(lines[j])) break;
+      }
+      return -1;
+    };
+    const qtyIndex = fieldIndex('Qty');
+    const priceIndex = fieldIndex('Price');
+    const subtotalIndex = fieldIndex('Subtotal');
+    const quantity = Math.max(1, Number(nextValue(qtyIndex)) || 1);
+    const priceValue = nextValue(priceIndex);
+    const subtotalValue = nextValue(subtotalIndex);
+    const price = priceValue ? money(priceValue) : null;
+    const itemSubtotal = subtotalValue ? money(subtotalValue) : null;
+    items.push({
+      product_name: clean(nameParts.join(' ')) || `Pokemon Center item ${skuMatch[1]}`,
+      sku: skuMatch[1].toUpperCase(),
+      quantity,
+      price,
+      subtotal: itemSubtotal ?? (price == null ? null : Math.round(price * quantity * 100) / 100)
+    });
+  }
+  if (!items.length) throw new Error('No Pokemon Center product lines could be read from this PDF.');
+
+  // Chrome's printed Pokemon Center page extracts the summary headings first, followed by their
+  // four values. Parse that stable block instead of letting an item-level "Subtotal" win.
+  const summary = text.match(/(?:^|\n)Subtotal\s*\n\s*Shipping\s*\n\s*Tax\s*\n\s*Total\s*\n\s*\$?([0-9,]+(?:\.\d{2})?)\s*\n\s*\$?([0-9,]+(?:\.\d{2})?)\s*\n\s*\$?([0-9,]+(?:\.\d{2})?)\s*\n\s*\$?([0-9,]+(?:\.\d{2})?)/i);
+  const itemSubtotal = Math.round(items.reduce((sum, item) => sum + Number(item.subtotal || 0), 0) * 100) / 100;
+  const subtotal = summary ? money(summary[1]) : itemSubtotal;
+  const shipping = summary ? money(summary[2]) : null;
+  const tax = summary ? money(summary[3]) : null;
+  const amountMatch = text.match(/(?:^|\n)Amount\s*:\s*\$?([0-9,]+(?:\.\d{2})?)/i);
+  const amountTotal = amountMatch?.[1] ? money(amountMatch[1]) : null;
+  const total = summary ? money(summary[4]) : amountTotal;
+  if (total == null) throw new Error('The order total could not be read from this PDF.');
+
+  let orderDate = null;
+  if (dateText) {
+    const parsedDate = new Date(dateText.replace(/\s+at\s+/i, ' '));
+    if (!Number.isNaN(parsedDate.getTime())) orderDate = parsedDate.toISOString();
+  }
+  return {
+    order_number:orderNumber,
+    order_date:orderDate,
+    order_date_text:dateText,
+    retailer_status:statusText,
+    items,
+    subtotal,
+    shipping,
+    tax,
+    total,
+    text:text.slice(0, 250000)
+  };
+}
+
+function pokemonCenterManualReceiptHtml(receipt, filename = '') {
+  const rows = (receipt.items || []).map(item => `<tr><td>${htmlEscape(item.product_name)}</td><td>${htmlEscape(item.sku)}</td><td>${Number(item.quantity || 1)}</td><td>$${Number(item.price || 0).toFixed(2)}</td><td>$${Number(item.subtotal || 0).toFixed(2)}</td></tr>`).join('');
+  return `<section><h2>Pokemon Center order confirmation</h2><p><b>Order:</b> ${htmlEscape(receipt.order_number)}<br><b>Retailer status:</b> ${htmlEscape(receipt.retailer_status || 'Received')}<br><b>Order date:</b> ${htmlEscape(receipt.order_date_text || receipt.order_date || '')}</p><table style="width:100%;border-collapse:collapse"><thead><tr><th style="text-align:left">Product</th><th style="text-align:left">SKU</th><th>Qty</th><th>Price</th><th>Subtotal</th></tr></thead><tbody>${rows}</tbody></table><div style="margin-top:18px;line-height:1.7"><div><b>Subtotal:</b> $${Number(receipt.subtotal || 0).toFixed(2)}</div><div><b>Shipping:</b> $${Number(receipt.shipping || 0).toFixed(2)}</div><div><b>Tax:</b> $${Number(receipt.tax || 0).toFixed(2)}</div><div><b>Total:</b> $${Number(receipt.total || 0).toFixed(2)}</div></div><p style="margin-top:18px;color:#475569">Confirmation source: manually uploaded Pokemon Center order-details PDF${filename ? ` (${htmlEscape(filename)})` : ''}.</p></section>`;
+}
+
 function extractTracking(text) {
   const patterns = [
     /tracking_numbers?=([A-Z0-9% -]{8,60})/ig,
@@ -2466,6 +2569,38 @@ async function syncPokemonCenterWebhookItems(supabase, trackedOrder, serviceOrde
     return inserted.data || [];
   } catch (error) {
     if (/tracked_order_items|relation .* does not exist|schema cache/i.test(String(error?.message || ''))) return null;
+    throw error;
+  }
+}
+
+async function replacePokemonCenterItemsFromManualReceipt(supabase, trackedOrder, receipt) {
+  if (!trackedOrder?.id || !Array.isArray(receipt?.items) || !receipt.items.length) return [];
+  try {
+    const existing = await supabase.from('tracked_order_items').select('id').eq('order_id', trackedOrder.id);
+    if (existing.error) throw existing.error;
+    const ids = (existing.data || []).map(row => row.id).filter(Boolean);
+    if (ids.length) {
+      const deleted = await supabase.from('tracked_order_items').delete().in('id', ids);
+      if (deleted.error) throw deleted.error;
+    }
+    const now = new Date().toISOString();
+    const rows = receipt.items.map(item => ({
+      order_id:trackedOrder.id,
+      retailer_order_number:receipt.order_number,
+      product_name:clean(item.product_name || item.sku || 'Pokemon Center item').slice(0, 500),
+      sku:clean(item.sku) || null,
+      quantity:Math.max(1, Number(item.quantity || 1) || 1),
+      price:item.price == null ? null : Number(item.price),
+      role:'normal',
+      status:'confirmed',
+      last_event_at:now,
+      updated_at:now
+    }));
+    const inserted = await supabase.from('tracked_order_items').insert(rows).select('*');
+    if (inserted.error) throw inserted.error;
+    return inserted.data || [];
+  } catch (error) {
+    if (/tracked_order_items|relation .* does not exist|schema cache/i.test(String(error?.message || ''))) return [];
     throw error;
   }
 }
@@ -5669,8 +5804,9 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
       const c = counts.get(id);
       if (!c) return;
       const t = lower(eventType || email.email_type || 'unknown');
-      const mailbox = lower(email.mailbox_email || '');
-      const messageKey = clean(email.message_id) || clean(email.id) || `${t}|${mailbox}|${clean(email.order_number)}`;
+      const candidateMailbox = lower(email.mailbox_email || '');
+      const messageKey = clean(email.message_id) || clean(email.id) || `${t}|${candidateMailbox}|${clean(email.order_number)}`;
+      const mailbox = messageKey.startsWith('manual-pdf:') ? '' : candidateMailbox;
       if (seenMessages.get(id).has(messageKey)) return;
       seenMessages.get(id).add(messageKey);
       c.total += 1;
@@ -7111,6 +7247,150 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
     res.json({ orders, summary, background_scanning: process.env.IMAP_ORDER_TRACKER_ENABLED !== 'false' });
   });
 
+  app.post('/orders/tracked/:id/upload-confirmation-pdf', auth, async (req, res) => {
+    if (req.role !== 'super_admin') return res.status(403).json({ error:'Super admin only.' });
+    let parser = null;
+    try {
+      const orderResult = await supabase.from('tracked_orders').select('*')
+        .eq('id', req.params.id).eq('user_id', req.user_id).maybeSingle();
+      if (orderResult.error) throw orderResult.error;
+      const existing = orderResult.data;
+      if (!existing) return res.status(404).json({ error:'Order not found.' });
+      if (normalizeStoreKey(existing.store || '') !== 'pokemoncenter') {
+        return res.status(400).json({ error:'Manual receipt PDF upload is currently available only for Pokemon Center orders.' });
+      }
+      const selectedOrderNumber = clean(existing.order_number).toUpperCase();
+      if (!/^P\d{8,12}$/.test(selectedOrderNumber)) {
+        return res.status(400).json({ error:'The selected order does not have a valid Pokemon Center P-order number.' });
+      }
+
+      const filename = clean(req.body?.filename || 'pokemon-center-order-details.pdf').slice(0, 240);
+      const encoded = clean(req.body?.pdf_base64 || '').replace(/^data:application\/pdf;base64,/i, '');
+      if (!encoded) return res.status(400).json({ error:'Choose a Pokemon Center order-details PDF first.' });
+      const pdf = Buffer.from(encoded, 'base64');
+      if (!pdf.length || pdf.subarray(0, 5).toString('ascii') !== '%PDF-') {
+        return res.status(400).json({ error:'The selected file is not a valid PDF.' });
+      }
+      if (pdf.length > 5 * 1024 * 1024) {
+        return res.status(413).json({ error:'The receipt PDF is too large. The maximum upload size is 5 MB.' });
+      }
+
+      parser = new PDFParse({ data:pdf });
+      const extracted = await parser.getText();
+      const receipt = parsePokemonCenterReceiptPdfText(extracted?.text || '');
+      if (normalizeOrderRef(receipt.order_number) !== normalizeOrderRef(selectedOrderNumber)) {
+        return res.status(409).json({
+          error:`This PDF is for ${receipt.order_number}, but the selected order is ${selectedOrderNumber}. Nothing was changed.`,
+          code:'order_number_mismatch',
+          selected_order_number:selectedOrderNumber,
+          receipt_order_number:receipt.order_number
+        });
+      }
+
+      const now = new Date().toISOString();
+      const messageId = `manual-pdf:${existing.id}`;
+      const fingerprint = crypto.createHash('sha256').update(pdf).digest('hex');
+      const productSummary = receipt.items.length === 1
+        ? receipt.items[0].product_name
+        : `${receipt.items[0].product_name} + ${receipt.items.length - 1} more`;
+      const currentStatus = lower(existing.status || 'waiting_confirmation');
+      const effectiveStatus = statusRank(currentStatus) > statusRank('confirmed') ? currentStatus : 'confirmed';
+      const receiptText = `Pokemon Center order confirmation receipt (manually uploaded PDF)\n\n${receipt.text}`.slice(0, 250000);
+      const patch = {
+        status:effectiveStatus,
+        order_number:receipt.order_number,
+        order_date:receipt.order_date || existing.order_date || now,
+        last_status_at:now,
+        subtotal:receipt.subtotal,
+        shipping:receipt.shipping,
+        tax:receipt.tax,
+        total:receipt.total,
+        product_summary:clean(productSummary).slice(0, 500),
+        receipt_text:receiptText,
+        receipt_html:pokemonCenterManualReceiptHtml(receipt, filename),
+        raw_subject:'Manually uploaded Pokemon Center order confirmation PDF',
+        last_message_id:messageId,
+        reconciliation_status:'matched',
+        reconciliation_note:'Confirmed from a manually uploaded Pokemon Center order-details PDF.',
+        updated_at:now
+      };
+      const updatedResult = await supabase.from('tracked_orders').update(patch)
+        .eq('id', existing.id).eq('user_id', req.user_id).select().single();
+      if (updatedResult.error) throw updatedResult.error;
+      let updated = updatedResult.data;
+      const items = await replacePokemonCenterItemsFromManualReceipt(supabase, updated, receipt);
+
+      let serviceOrder = null;
+      if (existing.source_order_id) {
+        const sourceResult = await supabase.from('orders').select('*')
+          .eq('id', existing.source_order_id).eq('user_id', req.user_id).maybeSingle();
+        if (sourceResult.error) throw sourceResult.error;
+        serviceOrder = sourceResult.data;
+        if (serviceOrder) {
+          const metadata = {
+            ...(serviceOrder.metadata || {}),
+            purchase_id:receipt.order_number,
+            order_number:receipt.order_number,
+            confirmation_status:'confirmed',
+            imap_status:effectiveStatus,
+            manual_confirmation_pdf:true,
+            manual_confirmation_pdf_filename:filename,
+            manual_confirmation_pdf_sha256:fingerprint,
+            manual_confirmation_pdf_uploaded_at:now
+          };
+          const sourceUpdate = await supabase.from('orders').update({
+            status:effectiveStatus,
+            external_order_id:receipt.order_number,
+            metadata
+          }).eq('id', serviceOrder.id).eq('user_id', req.user_id).select().single();
+          if (sourceUpdate.error) throw sourceUpdate.error;
+          serviceOrder = sourceUpdate.data;
+          await ensureInvestmentRow(supabase, updated, serviceOrder, !['canceled','refunded'].includes(effectiveStatus));
+        }
+      }
+
+      const eventResult = await supabase.from('tracked_order_events').upsert({
+        order_id:updated.id,
+        user_id:req.user_id,
+        status:'confirmed',
+        event_at:now,
+        subject:'Manually uploaded Pokemon Center order confirmation PDF',
+        message_id:messageId,
+        // Keep the database's ordinary event shape for installations where source_email is
+        // required. Read-time decorators suppress this value for manual-pdf events so the UI does
+        // not pretend the PDF was physically received by an inbox.
+        source_email:existing.source_email || 'manual-pdf-upload@local',
+        body_excerpt:`Manual PDF receipt for ${receipt.order_number}: ${productSummary}; total $${Number(receipt.total).toFixed(2)}.`
+      }, { onConflict:'user_id,message_id' });
+      if (eventResult.error) throw eventResult.error;
+
+      const decorated = await decorateTrackedOrdersWithEmails(req.user_id, [updated], true);
+      updated = decorated[0] || updated;
+      return res.json({
+        success:true,
+        message:`Receipt attached. ${receipt.order_number} is confirmed with a total of $${Number(receipt.total).toFixed(2)}.`,
+        order:updated,
+        receipt:{
+          order_number:receipt.order_number,
+          retailer_status:receipt.retailer_status,
+          subtotal:receipt.subtotal,
+          shipping:receipt.shipping,
+          tax:receipt.tax,
+          total:receipt.total,
+          items:items.length ? items : receipt.items,
+          filename
+        }
+      });
+    } catch (error) {
+      console.error('[MANUAL POKEMON RECEIPT PDF]', error);
+      return res.status(400).json({ error:error.message || 'The Pokemon Center receipt PDF could not be processed.' });
+    } finally {
+      if (parser) {
+        try { await parser.destroy(); } catch (_) {}
+      }
+    }
+  });
+
   app.post('/orders/tracked/:id/find-emails', auth, async (req, res) => {
     const orderResult = await supabase.from('tracked_orders')
       .select('id,user_id,profile_id,source_email,store,order_number,order_date,created_at')
@@ -7432,7 +7712,7 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
             received_at:event.event_at,
             event_at:event.event_at,
             subject:event.subject || `${order.store} order update`,
-            mailbox_email:lower(event.source_email),
+            mailbox_email:clean(event.message_id).startsWith('manual-pdf:') ? null : lower(event.source_email),
             body_html:confirmationBodyAvailable ? order.receipt_html : null,
             body_text:confirmationBodyAvailable ? order.receipt_text : event.body_excerpt,
             snippet:event.body_excerpt,
