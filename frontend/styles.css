@@ -1379,7 +1379,26 @@ h1,h2,h3,h4,p{margin:0}
 .target-checkout-history__item--success{border-color:#9bd4ad;background:#f3fbf5}
 .target-balance-select{display:block;margin-top:5px;padding:3px 7px;font-size:.68rem}
 .target-address-pool-remove{display:block;margin-top:5px;padding:2px 6px;font-size:.65rem}
-@media(max-width:640px){.target-address-filter-active{align-items:stretch;flex-direction:column}.target-address-filter-active .btn{width:100%}}
+.target-zip-balance-dialog{width:min(1040px,calc(100vw - 28px))}
+.target-balance-destinations-header{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:4px}
+.target-balance-destinations-header>div{display:flex;flex-direction:column;gap:2px}
+.target-balance-destinations-header strong{font-size:.9rem;color:#17233a}
+.target-balance-destinations-header span{font-size:.73rem;color:#68717d}
+.target-balance-address-rows{display:grid;gap:8px;margin-top:8px}
+.target-balance-address-row{display:grid;grid-template-columns:30px minmax(190px,1.3fr) minmax(120px,.8fr) minmax(130px,.8fr) minmax(90px,.45fr) auto;gap:8px;align-items:end;padding:9px;border:1px solid #dce3ec;border-radius:10px;background:#f8fafc}
+.target-balance-address-row__number{display:grid;width:26px;height:26px;place-items:center;align-self:center;border-radius:50%;background:#1d4ed8;color:#fff;font-size:.72rem;font-weight:800}
+.target-balance-address-row label{display:flex;min-width:0;flex-direction:column;gap:3px}
+.target-balance-address-row label>span{font-size:.65rem;font-weight:750;color:#526073}
+.target-balance-address-row .input{min-width:0}
+.target-balance-preview{margin-top:10px;padding:11px;border:1px solid #8eb9ee;border-radius:11px;background:#f2f7ff}
+.target-balance-preview__summary{display:flex;flex-wrap:wrap;justify-content:space-between;gap:4px 12px;margin-bottom:8px;color:#173f8a}
+.target-balance-preview__summary span{font-size:.76rem}
+.target-balance-preview__grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:7px}
+.target-balance-preview__grid>div{display:flex;min-width:0;flex-direction:column;gap:2px;padding:8px;border:1px solid #d4e1f2;border-radius:8px;background:#fff}
+.target-balance-preview__grid strong{font-size:.76rem;color:#173f8a}.target-balance-preview__grid span{font-size:.7rem;overflow-wrap:anywhere}.target-balance-preview__grid small{font-size:.65rem;color:#64748b}
+.target-balance-footer{flex-wrap:wrap}
+@media(max-width:900px){.target-balance-address-row{grid-template-columns:30px 1fr 1fr}.target-balance-address-row .btn{grid-column:3}.target-balance-preview__grid{grid-template-columns:1fr}}
+@media(max-width:640px){.target-address-filter-active{align-items:stretch;flex-direction:column}.target-address-filter-active .btn{width:100%}.target-balance-destinations-header{align-items:stretch;flex-direction:column}.target-balance-address-row{grid-template-columns:28px 1fr}.target-balance-address-row label,.target-balance-address-row .btn{grid-column:2}.target-balance-footer .btn{width:100%}}
 
 /* Storefront retail-price raffle */
 .shop-raffle-banner{display:flex;align-items:center;gap:14px;margin:6px 0 18px;padding:16px 18px;border:1px solid #f3c46b;border-radius:16px;background:linear-gradient(135deg,#fff9e8,#fff2c7);color:#5b3900;text-decoration:none;box-shadow:0 10px 28px rgba(119,75,0,.09)}

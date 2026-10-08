@@ -905,7 +905,7 @@ async function loadProfiles() {
                                 if (!groups.length) return '';
                                 const next = targetProfileHealth.next_underfilled_address || null;
                                 return `<div class="target-address-distribution">
-                                    <div class="target-address-patterns__title"><strong>Physical address distribution</strong><span>Unit/floor/apt and trailing house-letter variations are grouped under the same physical street address; base house numbers stay separate.</span><button class="btn btn-small" type="button" data-target-address-pool-add>Add physical address</button></div>
+                                    <div class="target-address-patterns__title"><strong>Physical address distribution</strong><span>Each five-digit ZIP is balanced separately. Unit/floor/apt and trailing house-letter variations are grouped under the same physical street address; base house numbers stay separate.</span><button class="btn btn-small" type="button" data-target-address-pool-add>Add physical address</button><button class="btn btn-small btn-primary" type="button" data-target-address-balance-open>Balance one ZIP</button></div>
                                     ${next ? `<div class="target-address-balance-next"><b>Most underfilled:</b> ${escapeHTML(next.label || '')} — ${Number(next.actual_count || 0)} profiles, target ${Number(next.ideal_count || 0)}</div>` : `<div class="target-address-balance-next is-balanced">Address distribution is currently balanced.</div>`}
                                     <div class="target-address-patterns__table-wrap"><table class="target-address-patterns__table target-address-distribution__table"><thead><tr><th>Physical address</th><th>Profiles</th><th>Even target</th><th>Balance</th><th>Address variants currently used</th></tr></thead><tbody>
                                     ${groups.map((row) => {
@@ -916,7 +916,7 @@ async function loadProfiles() {
                                         return `<tr class="${isActive ? 'is-filtered' : ''}"><td><button class="target-address-filter-button ${isActive ? 'is-active' : ''}" type="button" data-target-address-filter="${escapeHTML(row.group_key || '')}" aria-pressed="${isActive ? 'true' : 'false'}"><strong>${escapeHTML(row.label || 'Unknown')}</strong><span>View ${Number(row.actual_count || 0)} profile${Number(row.actual_count || 0) === 1 ? '' : 's'}</span></button>${row.is_saved_pool && row.pool_id ? `<button class="btn btn-small target-address-pool-remove" type="button" data-target-address-pool-remove="${escapeHTML(row.pool_id)}">Remove</button>` : ''}</td><td>${Number(row.actual_count || 0)}</td><td>${Number(row.ideal_count || 0)}</td><td><span class="target-address-balance ${delta === 0 ? 'is-even' : delta > 0 ? 'is-over' : 'is-under'}">${escapeHTML(balance)}</span>${delta > 0 ? `<button class="btn btn-small target-balance-select" type="button" data-target-balance-select="${escapeHTML(row.group_key || '')}" data-target-balance-excess="${delta}">Select ${delta} excess</button>` : ''}</td><td>${variants.length ? variants.slice(0,4).map(v => `${escapeHTML(v.address || '')} <b>×${Number(v.count || 0)}</b>`).join('<br>') : '<span class="subtle-text">No profiles assigned yet</span>'}${variants.length > 4 ? `<br><span class="subtle-text">+${variants.length - 4} more variants</span>` : ''}</td></tr>`;
                                     }).join('')}
                                     </tbody></table></div>
-                                    <div class="subtle-text">The even target recalculates automatically as profiles are added or removed. For example, 103 profiles across 5 physical addresses produces targets of 21, 21, 21, 20 and 20.</div>
+                                    <div class="subtle-text">The even target recalculates independently inside each five-digit ZIP. Profiles in 27916 are never mixed with profiles in 27965 or any other ZIP.</div>
                                 </div>`;
                             })()}
                             ${targetProfileHealth.address_history_available === false ? `<div class="target-address-history-warning">Address history database is not enabled yet. Run backend/sql/TARGET_ADDRESS_HISTORY_AND_OUTCOMES.sql in Supabase.</div>` : (() => {
@@ -1201,6 +1201,210 @@ function openBulkProfileEdit(group, ids) {
     };
 }
 
+function targetBalanceZipChoices() {
+    const rows = Array.isArray(targetProfileHealthCache.data?.address_distribution)
+        ? targetProfileHealthCache.data.address_distribution
+        : [];
+    const byZip = new Map();
+    rows.forEach((row) => {
+        const zip = String(row.zip || row.sample_address?.zip || '').match(/\d{5}/)?.[0] || '';
+        if (!zip) return;
+        const current = byZip.get(zip) || { zip, profileCount: 0, sample: null };
+        current.profileCount = Math.max(current.profileCount, Number(row.zip_profile_count || 0));
+        if (!current.sample && row.sample_address) current.sample = row.sample_address;
+        byZip.set(zip, current);
+    });
+    return [...byZip.values()].sort((a, b) => a.zip.localeCompare(b.zip));
+}
+
+function ensureTargetZipBalanceModal() {
+    let modal = document.getElementById('targetZipBalanceModal');
+    if (modal) return modal;
+    modal = document.createElement('div');
+    modal.id = 'targetZipBalanceModal';
+    modal.className = 'bulk-edit-modal';
+    modal.innerHTML = `
+        <div class="bulk-edit-backdrop" data-target-balance-close></div>
+        <section class="bulk-edit-dialog target-zip-balance-dialog" role="dialog" aria-modal="true" aria-labelledby="targetZipBalanceTitle">
+            <div class="bulk-edit-header">
+                <div>
+                    <div class="eyebrow">TARGET ADDRESS BALANCER</div>
+                    <h3 id="targetZipBalanceTitle">Evenly distribute one ZIP</h3>
+                    <p class="subtle-text">Only your Target profiles already using the selected ZIP are included. Other ZIPs and separate billing-address fields stay unchanged.</p>
+                </div>
+                <button class="btn" type="button" data-target-balance-close>Close</button>
+            </div>
+            <div class="bulk-edit-body">
+                <label class="field">
+                    <span>ZIP code to balance</span>
+                    <select class="input" id="targetBalanceZip"></select>
+                    <small id="targetBalanceZipHelp"></small>
+                </label>
+                <div class="target-balance-destinations-header">
+                    <div><strong>Addresses to use</strong><span>Enter the exact addresses that should share this ZIP's profiles.</span></div>
+                    <button class="btn btn-small" type="button" id="targetBalanceAddAddress">Add address</button>
+                </div>
+                <div id="targetBalanceAddressRows" class="target-balance-address-rows"></div>
+                <div id="targetBalanceMessage" class="form-help"></div>
+                <div id="targetBalancePreview" class="target-balance-preview" hidden></div>
+            </div>
+            <div class="bulk-edit-footer target-balance-footer">
+                <button class="btn" type="button" data-target-balance-close>Cancel</button>
+                <button class="btn" type="button" id="targetBalancePreviewButton">Preview distribution</button>
+                <button class="btn btn-primary" type="button" id="targetBalanceApplyButton" disabled>Apply balanced addresses</button>
+            </div>
+        </section>`;
+    document.body.appendChild(modal);
+    modal.querySelectorAll('[data-target-balance-close]').forEach((element) => element.addEventListener('click', () => modal.classList.remove('is-open')));
+    return modal;
+}
+
+function renderTargetBalanceAddressRows(modal, addresses) {
+    const container = modal.querySelector('#targetBalanceAddressRows');
+    container.innerHTML = (addresses || []).map((address, index) => `
+        <div class="target-balance-address-row" data-target-balance-address-row>
+            <div class="target-balance-address-row__number">${index + 1}</div>
+            <label><span>Address Line 1</span><input class="input" data-target-balance-field="address1" value="${escapeHTML(address.address1 || '')}" placeholder="194 Tabernacle Lane" /></label>
+            <label><span>Address Line 2</span><input class="input" data-target-balance-field="address2" value="${escapeHTML(address.address2 || '')}" placeholder="Optional" /></label>
+            <label><span>City</span><input class="input" data-target-balance-field="city" value="${escapeHTML(address.city || '')}" /></label>
+            <label><span>State</span><input class="input" data-target-balance-field="state" value="${escapeHTML(address.state || '')}" maxlength="30" /></label>
+            <button class="btn btn-small btn-danger" type="button" data-target-balance-remove aria-label="Remove address ${index + 1}">Remove</button>
+        </div>`).join('');
+
+    const invalidatePreview = () => {
+        modal.dataset.previewPayload = '';
+        modal.querySelector('#targetBalanceApplyButton').disabled = true;
+        modal.querySelector('#targetBalancePreview').hidden = true;
+    };
+    container.querySelectorAll('input').forEach((input) => input.addEventListener('input', invalidatePreview));
+    container.querySelectorAll('[data-target-balance-remove]').forEach((button) => button.addEventListener('click', () => {
+        const values = collectTargetBalanceAddresses(modal);
+        const index = [...container.querySelectorAll('[data-target-balance-address-row]')].indexOf(button.closest('[data-target-balance-address-row]'));
+        values.splice(index, 1);
+        renderTargetBalanceAddressRows(modal, values.length ? values : [{}]);
+        invalidatePreview();
+    }));
+}
+
+function collectTargetBalanceAddresses(modal) {
+    return [...modal.querySelectorAll('[data-target-balance-address-row]')].map((row) => {
+        const value = (name) => row.querySelector(`[data-target-balance-field="${name}"]`)?.value.trim() || '';
+        return { address1: value('address1'), address2: value('address2'), city: value('city'), state: value('state') };
+    }).filter((address) => address.address1 || address.address2 || address.city || address.state);
+}
+
+function renderTargetBalancePreview(modal, data) {
+    const preview = modal.querySelector('#targetBalancePreview');
+    preview.hidden = false;
+    preview.innerHTML = `
+        <div class="target-balance-preview__summary"><strong>${Number(data.eligible_count || 0)} profiles in ZIP ${escapeHTML(data.zip || '')}</strong><span>${Number(data.changed_count || 0)} address changes · ${Number(data.unchanged_count || 0)} already in a balanced spot</span></div>
+        <div class="target-balance-preview__grid">${(data.distribution || []).map((row) => {
+            const address = row.address || {};
+            const label = [address.address1, address.address2, [address.city, address.state, address.zip].filter(Boolean).join(', ')].filter(Boolean).join(' · ');
+            return `<div><strong>${Number(row.profile_count || 0)} profiles</strong><span>${escapeHTML(label)}</span><small>${Number(row.changed_count || 0)} will move here</small></div>`;
+        }).join('')}</div>`;
+}
+
+function openTargetZipBalance() {
+    const modal = ensureTargetZipBalanceModal();
+    const choices = targetBalanceZipChoices();
+    const zipSelect = modal.querySelector('#targetBalanceZip');
+    const message = modal.querySelector('#targetBalanceMessage');
+    const previewButton = modal.querySelector('#targetBalancePreviewButton');
+    const applyButton = modal.querySelector('#targetBalanceApplyButton');
+    const addButton = modal.querySelector('#targetBalanceAddAddress');
+    const activeZip = String(targetProfileHealthCache.data?.address_distribution?.find((row) => String(row.group_key || '') === targetPhysicalAddressFilter)?.zip || '');
+
+    zipSelect.innerHTML = choices.map((choice) => `<option value="${escapeHTML(choice.zip)}" ${choice.zip === activeZip ? 'selected' : ''}>${escapeHTML(choice.zip)} — ${Number(choice.profileCount || 0)} Target profiles</option>`).join('');
+    modal.dataset.previewPayload = '';
+    message.textContent = '';
+    message.className = 'form-help';
+    modal.querySelector('#targetBalancePreview').hidden = true;
+    applyButton.disabled = true;
+
+    const resetRowsForZip = () => {
+        const choice = choices.find((item) => item.zip === zipSelect.value) || choices[0] || {};
+        modal.querySelector('#targetBalanceZipHelp').textContent = `${Number(choice.profileCount || 0)} profiles currently use this ZIP. Only these profiles can be changed.`;
+        const sample = choice.sample || {};
+        renderTargetBalanceAddressRows(modal, Array.from({ length: 5 }, () => ({ city: sample.city || '', state: sample.state || '' })));
+        modal.dataset.previewPayload = '';
+        modal.querySelector('#targetBalancePreview').hidden = true;
+        applyButton.disabled = true;
+    };
+    resetRowsForZip();
+    zipSelect.onchange = resetRowsForZip;
+    addButton.onclick = () => {
+        const values = collectTargetBalanceAddresses(modal);
+        const choice = choices.find((item) => item.zip === zipSelect.value) || {};
+        const sample = choice.sample || {};
+        values.push({ city: sample.city || '', state: sample.state || '' });
+        renderTargetBalanceAddressRows(modal, values);
+        modal.dataset.previewPayload = '';
+        applyButton.disabled = true;
+    };
+
+    previewButton.onclick = async () => {
+        const payload = { zip: zipSelect.value, addresses: collectTargetBalanceAddresses(modal), preview: true };
+        previewButton.disabled = true;
+        previewButton.textContent = 'Building preview...';
+        message.textContent = '';
+        try {
+            const response = await fetch(API + '/target-address-balance', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token() },
+                body: JSON.stringify(payload)
+            });
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok || data.error) throw new Error(data.error || 'Could not preview the address balance.');
+            modal.dataset.previewPayload = JSON.stringify(payload);
+            renderTargetBalancePreview(modal, data);
+            applyButton.disabled = false;
+            message.textContent = 'Preview ready. Review each address count before applying.';
+            message.className = 'form-help success';
+        } catch (error) {
+            modal.dataset.previewPayload = '';
+            applyButton.disabled = true;
+            message.textContent = error.message || 'Could not preview the address balance.';
+            message.className = 'form-help error';
+        } finally {
+            previewButton.disabled = false;
+            previewButton.textContent = 'Preview distribution';
+        }
+    };
+
+    applyButton.onclick = async () => {
+        const previewPayload = JSON.parse(modal.dataset.previewPayload || 'null');
+        if (!previewPayload) return;
+        const previewText = modal.querySelector('.target-balance-preview__summary')?.textContent || '';
+        if (!confirm(`Apply this balance to ${previewPayload.zip}?\n\n${previewText}\n\nProfiles in every other ZIP will remain unchanged.`)) return;
+        applyButton.disabled = true;
+        applyButton.textContent = 'Applying...';
+        try {
+            const response = await fetch(API + '/target-address-balance', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token() },
+                body: JSON.stringify({ ...previewPayload, preview: false, confirm_zip: previewPayload.zip })
+            });
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok || data.error) throw new Error(data.error || 'Could not apply the address balance.');
+            renderTargetBalancePreview(modal, data);
+            message.textContent = `Balanced ${Number(data.eligible_count || 0)} Target profiles in ZIP ${data.zip}. ${Number(data.updated_count || 0)} shipping addresses were changed.`;
+            message.className = 'form-help success';
+            modal.dataset.previewPayload = '';
+            targetPhysicalAddressFilter = '';
+            targetProfileHealthCache = { data: null, loadedAt: 0 };
+            await loadProfiles();
+        } catch (error) {
+            message.textContent = error.message || 'Could not apply the address balance.';
+            message.className = 'form-help error';
+            applyButton.disabled = false;
+        } finally {
+            applyButton.textContent = 'Apply balanced addresses';
+        }
+    };
+    modal.classList.add('is-open');
+}
+
 function bindProfileDashboardControls() {
     document.querySelectorAll('[data-profile-search]').forEach((input) => {
         input.addEventListener('input', () => {
@@ -1249,6 +1453,9 @@ function bindProfileDashboardControls() {
                 await loadProfiles();
             } catch (error) { alert(error.message || 'Could not add address.'); }
         });
+    });
+    document.querySelectorAll('[data-target-address-balance-open]').forEach((button) => {
+        button.addEventListener('click', openTargetZipBalance);
     });
     document.querySelectorAll('[data-target-address-pool-remove]').forEach((button) => {
         button.addEventListener('click', async () => {

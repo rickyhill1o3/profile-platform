@@ -110,6 +110,12 @@ const {
 const { deriveTargetProfileHealthState, targetAddressVersionChangeTime } = require("./target-profile-health-state");
 const { normalizeBulkProfileState } = require("./profile-bulk-update");
 const {
+    normalizeFiveDigitZip,
+    normalizedAddressKey,
+    buildZipAddressBalancePlan,
+    addZipScopedIdealCounts
+} = require("./target-address-zip-balancer");
+const {
     CREDIT_AUTO_PAUSE_THRESHOLD,
     STORE_REACTIVATION_MINIMUM_BALANCE,
     shouldAutoPauseStores,
@@ -9274,6 +9280,116 @@ app.delete('/target-address-pool/:id', auth, async (req, res) => {
     } catch (err) { res.status(500).json({ error: err.message || String(err) }); }
 });
 
+function targetAddressBalanceResponse(plan = {}, applied = false) {
+    return {
+        success: true,
+        applied,
+        zip: plan.zip,
+        eligible_count: plan.eligible_count,
+        destination_count: plan.destination_count,
+        changed_count: plan.changed_count,
+        unchanged_count: plan.unchanged_count,
+        distribution: (plan.distribution || []).map((row) => ({
+            index: row.index,
+            address: row.address,
+            profile_count: row.profile_count,
+            changed_count: row.changed_count
+        }))
+    };
+}
+
+// Build and apply a shipping-address distribution for exactly one five-digit ZIP at a time.
+// The action is always scoped to the signed-in user's own Target profiles. Separate billing fields,
+// identity/contact fields, payment data, credentials, and profiles in every other ZIP stay untouched.
+app.post('/target-address-balance', auth, async (req, res) => {
+    try {
+        await ensureUserNotRevoked(req.user_id);
+        const selectedZip = normalizeFiveDigitZip(req.body?.zip || '');
+        if (!selectedZip) return res.status(400).json({ error: 'Choose a valid five-digit ZIP code.' });
+
+        const allProfiles = await getUserProfilesWithRelations(req.user_id);
+        const targetProfiles = (allProfiles || []).filter((profile) =>
+            profileAssignedStores(profile).map(normalizeProfileAccountType).includes('target')
+        );
+        const plan = buildZipAddressBalancePlan({
+            profiles: targetProfiles,
+            addresses: req.body?.addresses,
+            zip: selectedZip
+        });
+
+        const previewOnly = req.body?.preview !== false;
+        if (previewOnly) return res.json(targetAddressBalanceResponse(plan, false));
+        if (normalizeFiveDigitZip(req.body?.confirm_zip || '') !== selectedZip) {
+            return res.status(400).json({ error: `Confirm ZIP ${selectedZip} before applying this address change.` });
+        }
+
+        const changedAssignments = plan.assignments.filter((assignment) => assignment.changed);
+        const byDestination = new Map();
+        for (const assignment of changedAssignments) {
+            if (!byDestination.has(assignment.destination_index)) byDestination.set(assignment.destination_index, []);
+            byDestination.get(assignment.destination_index).push(String(assignment.profile_id));
+        }
+
+        let updatedCount = 0;
+        for (const [destinationIndex, profileIds] of byDestination.entries()) {
+            const address = plan.destinations[destinationIndex];
+            for (let i = 0; i < profileIds.length; i += 75) {
+                const { data, error } = await supabase
+                    .from('addresses')
+                    .update({
+                        address1: address.address1,
+                        address2: address.address2,
+                        city: address.city,
+                        state: address.state,
+                        zip: address.zip
+                    })
+                    .in('profile_id', profileIds.slice(i, i + 75))
+                    .select('profile_id');
+                if (error) throw error;
+                updatedCount += (data || []).length;
+            }
+        }
+        if (updatedCount !== changedAssignments.length) {
+            throw new Error(`Updated ${updatedCount} of ${changedAssignments.length} planned Target profiles. Run the same ZIP balance again to finish safely.`);
+        }
+
+        for (let i = 0; i < changedAssignments.length; i += 10) {
+            await Promise.all(changedAssignments.slice(i, i + 10).map((assignment) =>
+                syncTargetAddressVersion({
+                    userId: req.user_id,
+                    profileId: assignment.profile_id,
+                    address: assignment.address
+                }).catch((error) => {
+                    console.error('Target address version capture failed after ZIP balance:', error.message || error);
+                })
+            ));
+        }
+
+        // Make the entered addresses the planning pool for this ZIP while preserving every other ZIP.
+        const settingKey = targetAddressPoolSettingKey(req.user_id);
+        const currentPoolRaw = await getAppSetting(settingKey, []).catch(() => []);
+        const currentPool = Array.isArray(currentPoolRaw) ? currentPoolRaw : [];
+        const selectedZipPool = currentPool.filter((item) => normalizeFiveDigitZip(item?.zip || '') === selectedZip);
+        const otherZipPool = currentPool.filter((item) => normalizeFiveDigitZip(item?.zip || '') !== selectedZip);
+        const replacementPool = plan.destinations.map((address) => {
+            const existing = selectedZipPool.find((item) => normalizedAddressKey(item || {}) === normalizedAddressKey(address));
+            return {
+                id: existing?.id || crypto.randomUUID(),
+                label: existing?.label || '',
+                ...address
+            };
+        });
+        await setAppSetting(settingKey, [...otherZipPool, ...replacementPool].slice(0, 100));
+
+        if (updatedCount) await markProfileSyncChanged(req.user_id, ['target'], 'target_zip_addresses_balanced');
+        return res.json({ ...targetAddressBalanceResponse(plan, true), updated_count: updatedCount });
+    } catch (err) {
+        const message = err.message || String(err);
+        const status = /choose|enter|unique|destination|no target profiles|confirm zip/i.test(message) ? 400 : 500;
+        res.status(status).json({ error: message });
+    }
+});
+
 // Target Profile Health is deliberately available to every authenticated role. Each request is
 // scoped to req.user_id, so users/admins/super-admins see health only for their own Target profiles.
 app.get('/target-profile-health', auth, async (req, res) => {
@@ -9542,22 +9658,19 @@ app.get('/target-profile-health', auth, async (req, res) => {
             const variant = [cleanFieldValue(address.address1 || ''), cleanFieldValue(address.address2 || '')].filter(Boolean).join(' | ') || '(blank)';
             group.variants.set(variant, (group.variants.get(variant) || 0) + 1);
         }
-        physicalGroups.sort((a, b) => a.label.localeCompare(b.label));
-        const groupCount = physicalGroups.length;
-        const basePerAddress = groupCount ? Math.floor(targetProfiles.length / groupCount) : 0;
-        const remainder = groupCount ? targetProfiles.length % groupCount : 0;
-        const addressDistribution = physicalGroups.map((group, index) => {
-            const ideal = basePerAddress + (index < remainder ? 1 : 0);
-            const actual = group.profile_ids.length;
+        const addressDistribution = addZipScopedIdealCounts(physicalGroups).map((group) => {
             return {
                 group_key: group.group_key,
                 pool_id: group.pool_id || '',
                 is_saved_pool: Boolean(group.is_saved_pool),
                 label: group.label,
                 sample_address: group.sample_address,
-                actual_count: actual,
-                ideal_count: ideal,
-                delta: actual - ideal,
+                zip: group.zip || normalizeFiveDigitZip(group.sample_address?.zip || ''),
+                zip_profile_count: Number(group.zip_profile_count || 0),
+                zip_address_count: Number(group.zip_address_count || 0),
+                actual_count: Number(group.actual_count || 0),
+                ideal_count: Number(group.ideal_count || 0),
+                delta: Number(group.delta || 0),
                 profile_ids: group.profile_ids,
                 profile_names: group.profile_names,
                 variants: [...group.variants.entries()].map(([address, count]) => ({ address, count })).sort((a,b) => b.count - a.count || a.address.localeCompare(b.address))
