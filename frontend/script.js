@@ -933,7 +933,7 @@ async function loadProfiles() {
                         <div class="target-health-overview">
                             <div class="target-health-overview__intro">
                                 <strong>Target Account Health</strong>
-                                <span>Last ${escapeHTML(String(targetProfileHealth.days || 30))} days of Target checkout webhooks. Reseller is the highest-priority account warning; an address change moves that profile to standby until its next attempt.</span>
+                                <span>Last ${escapeHTML(String(targetProfileHealth.days || 30))} days of Target checkout webhooks. Saving a changed profile moves it to standby until its next attempt, no matter what its previous checkout result was.</span>
                             </div>
                             <div class="target-health-summary-grid">
                                 <div class="target-health-summary target-health-summary--success"><span>Successful now</span><strong>${Number(totals.success || 0)}</strong></div>
@@ -943,7 +943,7 @@ async function loadProfiles() {
                                 <div class="target-health-summary target-health-summary--other"><span>Other errors</span><strong>${Number(totals.other || 0)}</strong></div>
                                 <div class="target-health-summary"><span>No recent activity</span><strong>${Number(totals.no_activity || 0)}</strong></div>
                             </div>
-                            <div class="subtle-text">Change the address once after a reseller cancellation. The profile then stays in standby—so you know it was already changed—until a newer checkout tests that address and replaces standby with the new result.</div>
+                            <div class="subtle-text">After you change a profile from Successful, Reseller, Order ID, or Other, it stays in standby—so you know the new details are waiting to be tested—until a newer checkout replaces standby with its result.</div>
                             ${(() => {
                                 const groups = targetAddressGroups;
                                 if (!groups.length) return '';
@@ -986,7 +986,7 @@ async function loadProfiles() {
                         ${groupKey === 'target' ? `<select class="input" data-target-health-filter aria-label="Filter Target account health">
                             <option value="all" ${targetProfileHealthFilter === 'all' ? 'selected' : ''}>All health statuses</option>
                             <option value="reseller" ${targetProfileHealthFilter === 'reseller' ? 'selected' : ''}>Reseller attention</option>
-                            <option value="standby" ${targetProfileHealthFilter === 'standby' ? 'selected' : ''}>Standby — address changed</option>
+                            <option value="standby" ${targetProfileHealthFilter === 'standby' ? 'selected' : ''}>Standby — profile changed</option>
                             <option value="order_id" ${targetProfileHealthFilter === 'order_id' ? 'selected' : ''}>Order ID</option>
                             <option value="other" ${targetProfileHealthFilter === 'other' ? 'selected' : ''}>Other errors</option>
                             <option value="success" ${targetProfileHealthFilter === 'success' ? 'selected' : ''}>Successful</option>
@@ -1032,12 +1032,12 @@ async function loadProfiles() {
                             ${groupKey === "target" ? (() => {
                                 const health = targetHealthByProfile.get(String(p.id));
                                 const current = String(health?.current_status || "no_activity");
-                                const labels = { success: "Successful", reseller: "Reseller", standby: "Standby — address changed", order_id: "Order ID", other: "Other error", no_activity: "No recent activity" };
+                                const labels = { success: "Successful", reseller: "Reseller", standby: "Standby — profile changed", order_id: "Order ID", other: "Other error", no_activity: "No recent activity" };
                                 const latest = health?.latest_event || null;
                                 const counts = health?.counts || {};
                                 const standbySince = health?.standby_since || null;
                                 const when = current === 'standby' && standbySince
-                                    ? `Address changed ${new Date(standbySince).toLocaleString()} · waiting for the next checkout attempt`
+                                    ? `Profile changed ${new Date(standbySince).toLocaleString()} · waiting for the next checkout attempt`
                                     : (latest?.created_at ? new Date(latest.created_at).toLocaleString() : "No checkout webhook in the last 30 days");
                                 const latestReason = current !== 'standby' && latest?.reason ? ` · ${escapeHTML(latest.reason)}` : "";
                                 const orderRef = current !== 'standby' && latest?.order_id ? ` · Order ${escapeHTML(latest.order_id)}` : "";
@@ -1045,9 +1045,9 @@ async function loadProfiles() {
                                 const recentEvents = Array.isArray(health?.recent_events) ? health.recent_events : [];
                                 const lastReseller = health?.last_reseller_event || null;
                                 const resellerNotice = current === 'reseller' && lastReseller ? `<div class="target-reseller-review"><b>Reseller review needed</b><span>${escapeHTML(new Date(lastReseller.created_at).toLocaleString())}${lastReseller.order_id ? ` · Order ${escapeHTML(lastReseller.order_id)}` : ''}</span></div>` : '';
-                                const standbyNotice = current === 'standby' ? `<div class="target-standby-review"><b>Address change recorded — do not change it again yet</b><span>This profile will leave standby automatically after its next checkout attempt.${lastReseller?.created_at ? ` Previous reseller cancellation: ${escapeHTML(new Date(lastReseller.created_at).toLocaleString())}${lastReseller.order_id ? ` · Order ${escapeHTML(lastReseller.order_id)}` : ''}.` : ''}</span></div>` : '';
+                                const standbyNotice = current === 'standby' ? `<div class="target-standby-review"><b>Profile change recorded — waiting for a checkout</b><span>This profile will leave standby automatically after its next checkout attempt.${lastReseller?.created_at ? ` Previous reseller cancellation: ${escapeHTML(new Date(lastReseller.created_at).toLocaleString())}${lastReseller.order_id ? ` · Order ${escapeHTML(lastReseller.order_id)}` : ''}.` : ''}</span></div>` : '';
                                 const eventHistoryHtml = recentEvents.length ? `<details class="target-checkout-history"><summary>Recent checkout results (${recentEvents.length})</summary><div class="target-checkout-history__list">${recentEvents.map(event => `<div class="target-checkout-history__item target-checkout-history__item--${escapeHTML(event.category || 'other')}"><b>${escapeHTML(labels[event.category] || event.category || 'Event')}</b><span>${escapeHTML(new Date(event.created_at).toLocaleString())}</span>${event.order_id ? `<span>Order ${escapeHTML(event.order_id)}</span>` : ''}${event.reason ? `<span>${escapeHTML(event.reason)}</span>` : ''}</div>`).join('')}</div></details>` : '';
-                                const historyHtml = addressHistory.length ? `<details class="target-address-history"><summary>Address history (${addressHistory.length})</summary><div class="target-address-history__list">${addressHistory.map((version, index) => {
+                                const historyHtml = addressHistory.length ? `<details class="target-address-history"><summary>Profile/address history (${addressHistory.length})</summary><div class="target-address-history__list">${addressHistory.map((version, index) => {
                                     const vc = version.counts || {};
                                     const currentSince = version.change_detected_at || version.valid_from;
                                     const range = version.is_current ? `Current since ${new Date(currentSince).toLocaleString()}` : `${new Date(version.valid_from).toLocaleString()} – ${new Date(version.valid_to).toLocaleString()}`;
@@ -1145,6 +1145,11 @@ function ensureBulkProfileEditModal() {
                 <button class="btn" type="button" data-bulk-edit-close>Close</button>
             </div>
             <div class="bulk-edit-body">
+                <label class="field">
+                    <span>Profile name</span>
+                    <input id="bulkProfileName" class="input" type="text" autocomplete="off" placeholder="Leave blank to keep existing profile names" />
+                    <small>If entered, every selected profile will receive this exact same name. Matching profile names are allowed.</small>
+                </label>
                 <label class="field" data-bulk-account-password>
                     <span>Account password</span>
                     <input id="bulkProfileLoginPassword" class="input" type="password" autocomplete="new-password" placeholder="Leave blank to keep existing passwords" />
@@ -1189,9 +1194,10 @@ function openBulkProfileEdit(group, ids) {
     modal.dataset.group = group;
     modal.dataset.ids = JSON.stringify(ids);
     modal.querySelector('#bulkProfileEditTitle').textContent = `Edit ${ids.length} selected ${group} profile${ids.length === 1 ? '' : 's'}`;
-    modal.querySelector('#bulkProfileEditSummary').textContent = 'Only fields selected or entered below will be changed. Existing emails, cards, profile names, and other shipping details stay untouched.';
+    modal.querySelector('#bulkProfileEditSummary').textContent = 'Only fields selected or entered below will be changed. Existing emails, cards, and other shipping details stay untouched.';
     const accountPasswordField = modal.querySelector('[data-bulk-account-password]');
     if (accountPasswordField) accountPasswordField.style.display = group === 'pokemoncenter' ? 'none' : '';
+    modal.querySelector('#bulkProfileName').value = '';
     modal.querySelector('#bulkProfileLoginPassword').value = '';
     modal.querySelector('#bulkProfileGmailAppPassword').value = '';
     modal.querySelector('#bulkProfileAycdAction').value = 'keep';
@@ -1203,11 +1209,12 @@ function openBulkProfileEdit(group, ids) {
 
     const saveButton = modal.querySelector('#bulkProfileEditSave');
     saveButton.onclick = async () => {
+        const profileName = modal.querySelector('#bulkProfileName').value.trim();
         const loginPassword = group === 'pokemoncenter' ? '' : modal.querySelector('#bulkProfileLoginPassword').value;
         const gmailAppPassword = modal.querySelector('#bulkProfileGmailAppPassword').value.replace(/\s+/g, '');
         const aycdAction = modal.querySelector('#bulkProfileAycdAction').value;
         const state = modal.querySelector('#bulkProfileState').value;
-        if (!loginPassword && !gmailAppPassword && aycdAction === 'keep' && !state) {
+        if (!profileName && !loginPassword && !gmailAppPassword && aycdAction === 'keep' && !state) {
             message.textContent = 'Choose at least one change.';
             return;
         }
@@ -1220,6 +1227,7 @@ function openBulkProfileEdit(group, ids) {
                 body: JSON.stringify({
                     ids,
                     store: group,
+                    profile_name: profileName || undefined,
                     login_password: loginPassword || undefined,
                     gmail_app_password: gmailAppPassword || undefined,
                     use_aycd_inbox: aycdAction === 'keep' ? undefined : aycdAction === 'enable',
@@ -1229,10 +1237,10 @@ function openBulkProfileEdit(group, ids) {
             const data = await response.json().catch(() => ({}));
             if (!response.ok || data.error) throw new Error(data.error || 'Could not update selected profiles.');
             const updatedCount = data.updated_count || ids.length;
-            message.textContent = `Updated ${updatedCount} profile${updatedCount === 1 ? '' : 's'}.${data.state ? ` Shipping state set to ${data.state}.` : ''}`;
+            message.textContent = `Updated ${updatedCount} profile${updatedCount === 1 ? '' : 's'}.${data.profile_name ? ` Profile name set to ${data.profile_name}.` : ''}${data.state ? ` Shipping state set to ${data.state}.` : ''}`;
             message.className = 'form-help success';
             ids.forEach((id) => selectedProfileIds.delete(String(id)));
-            if (group === 'target' && state) targetProfileHealthCache = { data: null, loadedAt: 0 };
+            if (profileName || state || group === 'target') targetProfileHealthCache = { data: null, loadedAt: 0 };
             await loadProfiles();
             setTimeout(() => modal.classList.remove('is-open'), 500);
         } catch (error) {

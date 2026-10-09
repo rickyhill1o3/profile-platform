@@ -9,6 +9,10 @@ function targetHealthStatusFromEvent(event) {
         : 'no_activity';
 }
 
+function targetHealthEventTime(event = null) {
+    return targetHealthTimestamp(event?.event_at || event?.created_at);
+}
+
 function targetAddressVersionChangeTime(version = null, addressVersions = []) {
     if (!version) return { timestamp: 0, iso: null };
     const validFromMs = targetHealthTimestamp(version.valid_from);
@@ -31,12 +35,13 @@ function targetAddressVersionChangeTime(version = null, addressVersions = []) {
 
 function deriveTargetProfileHealthState({ events = [], addressVersions = [], profileModifiedAt = null } = {}) {
     const orderedEvents = [...(Array.isArray(events) ? events : [])]
-        .sort((a, b) => targetHealthTimestamp(b?.created_at) - targetHealthTimestamp(a?.created_at));
+        .sort((a, b) => targetHealthEventTime(b) - targetHealthEventTime(a));
     const orderedVersions = [...(Array.isArray(addressVersions) ? addressVersions : [])]
         .sort((a, b) => targetHealthTimestamp(b?.valid_from) - targetHealthTimestamp(a?.valid_from));
     const latestEvent = orderedEvents[0] || null;
+    const latestEventMs = targetHealthEventTime(latestEvent);
     const lastResellerEvent = orderedEvents.find((event) => event?.category === 'reseller') || null;
-    const lastResellerMs = targetHealthTimestamp(lastResellerEvent?.created_at);
+    const lastResellerMs = targetHealthEventTime(lastResellerEvent);
     const currentVersion = orderedVersions.find((version) => version?.is_current || !version?.valid_to) || orderedVersions[0] || null;
     const currentVersionChange = targetAddressVersionChangeTime(currentVersion, orderedVersions);
     const currentVersionMs = currentVersionChange.timestamp;
@@ -44,49 +49,58 @@ function deriveTargetProfileHealthState({ events = [], addressVersions = [], pro
     const lastResellerVersionId = String(lastResellerEvent?.address_version_id || '');
     const currentVersionId = String(currentVersion?.id || '');
 
-    // A new address version is only created when the address fingerprint changes. That makes this
-    // stricter than profile.updated_at, which can also move when a password or another field changes.
+    // Saving an existing Target profile creates a new current version, even when its address did
+    // not change. A changed profile must wait in standby until a newer checkout tests the saved
+    // details. This applies after every prior result: success, reseller, order ID, or other.
+    const profileChangedAfterLatestAttempt = Boolean(
+        currentVersion &&
+        hasPreviousAddressVersion &&
+        currentVersionMs &&
+        (!latestEventMs || currentVersionMs > latestEventMs)
+    );
     const addressChangedAfterReseller = Boolean(
         lastResellerMs &&
         currentVersionMs > lastResellerMs &&
         hasPreviousAddressVersion &&
         (!lastResellerVersionId || lastResellerVersionId !== currentVersionId)
     );
-    const postChangeEvents = addressChangedAfterReseller
-        ? orderedEvents.filter((event) => targetHealthTimestamp(event?.created_at) >= currentVersionMs)
+    const postChangeEvents = currentVersionMs
+        ? orderedEvents.filter((event) => targetHealthEventTime(event) >= currentVersionMs)
         : [];
 
-    if (addressChangedAfterReseller && !postChangeEvents.length) {
+    if (profileChangedAfterLatestAttempt && !postChangeEvents.length) {
         return {
             current_status: 'standby',
             reseller_needs_attention: false,
             standby_since: currentVersionChange.iso,
-            standby_reason: 'address_changed_after_reseller',
-            address_changed_after_reseller: true,
+            standby_reason: 'profile_changed_waiting_for_checkout',
+            profile_changed_after_checkout: true,
+            address_changed_after_reseller: addressChangedAfterReseller,
             latest_post_change_event: null,
             last_reseller_event: lastResellerEvent
         };
     }
 
-    if (addressChangedAfterReseller && postChangeEvents.length) {
+    if (postChangeEvents.length) {
         return {
             current_status: targetHealthStatusFromEvent(postChangeEvents[0]),
             reseller_needs_attention: postChangeEvents[0]?.category === 'reseller',
             standby_since: null,
             standby_reason: null,
-            address_changed_after_reseller: true,
+            profile_changed_after_checkout: false,
+            address_changed_after_reseller: addressChangedAfterReseller,
             latest_post_change_event: postChangeEvents[0],
             last_reseller_event: lastResellerEvent
         };
     }
 
-    const profileModifiedMs = targetHealthTimestamp(profileModifiedAt);
-    const resellerNeedsAttention = Boolean(lastResellerMs && lastResellerMs >= profileModifiedMs);
+    const resellerNeedsAttention = latestEvent?.category === 'reseller';
     return {
         current_status: resellerNeedsAttention ? 'reseller' : targetHealthStatusFromEvent(latestEvent),
         reseller_needs_attention: resellerNeedsAttention,
         standby_since: null,
         standby_reason: null,
+        profile_changed_after_checkout: false,
         address_changed_after_reseller: false,
         latest_post_change_event: null,
         last_reseller_event: lastResellerEvent
@@ -96,6 +110,7 @@ function deriveTargetProfileHealthState({ events = [], addressVersions = [], pro
 module.exports = {
     deriveTargetProfileHealthState,
     targetAddressVersionChangeTime,
+    targetHealthEventTime,
     targetHealthStatusFromEvent,
     targetHealthTimestamp
 };

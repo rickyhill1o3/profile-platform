@@ -22,7 +22,30 @@ const waiting = deriveTargetProfileHealthState({
 assert.strictEqual(waiting.current_status, 'standby');
 assert.strictEqual(waiting.reseller_needs_attention, false);
 assert.strictEqual(waiting.standby_since, changedAddress.valid_from);
-assert.strictEqual(waiting.standby_reason, 'address_changed_after_reseller');
+assert.strictEqual(waiting.standby_reason, 'profile_changed_waiting_for_checkout');
+
+for (const priorCategory of ['success', 'order_id', 'other']) {
+    const changedAfterAnyResult = deriveTargetProfileHealthState({
+        events: [event(priorCategory, '2026-09-01T12:00:00.000Z')],
+        addressVersions: [changedAddress, oldAddress],
+        profileModifiedAt: changedAddress.valid_from
+    });
+    assert.strictEqual(
+        changedAfterAnyResult.current_status,
+        'standby',
+        `a profile changed after ${priorCategory} must wait in standby`
+    );
+}
+
+const sameAddressSavedAgain = deriveTargetProfileHealthState({
+    events: [event('order_id', '2026-09-01T12:00:00.000Z')],
+    addressVersions: [
+        { ...changedAddress, address_fingerprint: 'same-address' },
+        { ...oldAddress, address_fingerprint: 'same-address' }
+    ],
+    profileModifiedAt: changedAddress.valid_from
+});
+assert.strictEqual(sameAddressSavedAgain.current_status, 'standby', 'saving other Target profile details must also create standby');
 
 const successfulRetry = deriveTargetProfileHealthState({
     events: [event('success', '2026-09-15T09:00:00.000Z'), reseller('2026-09-01T12:00:00.000Z')],
@@ -52,7 +75,7 @@ const noRealAddressChange = deriveTargetProfileHealthState({
     addressVersions: [oldAddress],
     profileModifiedAt: '2026-09-13T12:00:00.000Z'
 });
-assert.strictEqual(noRealAddressChange.current_status, 'reseller', 'editing a non-address field must not create standby');
+assert.strictEqual(noRealAddressChange.current_status, 'reseller', 'a timestamp alone without a saved profile version must not invent standby');
 
 const addressChangedBeforeCancel = deriveTargetProfileHealthState({
     events: [reseller('2026-09-14T12:00:00.000Z', 'address-new')],
@@ -91,14 +114,16 @@ const backdatedAfterAttempt = deriveTargetProfileHealthState({
 assert.strictEqual(backdatedAfterAttempt.current_status, 'success');
 
 const frontendSource = fs.readFileSync(path.resolve(__dirname, '..', '..', 'frontend', 'script.js'), 'utf8');
-assert.match(frontendSource, /Standby — address changed/);
+assert.match(frontendSource, /Standby — profile changed/);
 assert.match(frontendSource, /data-target-health-filter[\s\S]*?value="standby"/);
-assert.match(frontendSource, /do not change it again yet/i);
+assert.match(frontendSource, /waiting for a checkout/i);
 assert.match(frontendSource, /version\.change_detected_at \|\| version\.valid_from/);
 
 const serverSource = fs.readFileSync(path.resolve(__dirname, '..', 'server.js'), 'utf8');
 assert.match(serverSource, /deriveTargetProfileHealthState/);
 assert.match(serverSource, /standby:\s*0/);
+assert.match(serverSource, /forceNewVersion:\s*true/, 'saving an existing Target profile must record a new standby marker');
+assert.match(serverSource, /profile_updated_at:\s*sync\.changed_at\s*\|\|\s*newestProfileAt/, 'admin profile-changed date must prefer the actual save time');
 assert.doesNotMatch(serverSource, /requestedFromMs/, 'dashboard reads must never rewind an active address version');
 
 console.log('target profile standby state tests passed');

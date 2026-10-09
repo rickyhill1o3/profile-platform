@@ -8920,7 +8920,9 @@ app.get("/admin/store-run-status", auth, admin, async (req, res) => {
                             updated_at: runChangedAt,
                             profile_count: currentCount,
                             profile_accounts: userFilter ? (profileAccountsByUserStore.get(`${user.id}:${site}`) || []) : [],
-                            profile_updated_at: newestProfileAt,
+                            // profile_sync_status.changed_at is written on every save. Prefer it
+                            // over the original profile creation date shown by legacy rows.
+                            profile_updated_at: sync.changed_at || newestProfileAt,
                             ...sync,
                             changed_since_acknowledged: changedSinceAcknowledged
                         };
@@ -9135,7 +9137,7 @@ function targetAddressHistoryTableMissing(error) {
     return error?.code === '42P01' || /target_profile_address_(versions|events).*does not exist/i.test(msg);
 }
 
-async function syncTargetAddressVersion({ userId, profileId, address, effectiveAt = null }) {
+async function syncTargetAddressVersion({ userId, profileId, address, effectiveAt = null, forceNewVersion = false }) {
     if (!userId || !profileId || !address) return { version: null, unavailable: false };
     const fingerprint = targetAddressFingerprint(address);
     const pattern = classifyTargetAddressPattern(address);
@@ -9153,7 +9155,7 @@ async function syncTargetAddressVersion({ userId, profileId, address, effectiveA
         if (targetAddressHistoryTableMissing(activeError)) return { version: null, unavailable: true };
         throw activeError;
     }
-    if (active?.address_fingerprint === fingerprint) {
+    if (active?.address_fingerprint === fingerprint && !forceNewVersion) {
         // Never rewrite an existing version's start date during a dashboard read. `at` can be the
         // profile's original timestamp when the addresses table has no updated_at trigger, which
         // previously backdated a freshly saved address and prevented standby from activating.
@@ -9604,6 +9606,7 @@ app.get('/target-profile-health', auth, async (req, res) => {
                 reseller_needs_attention: state.reseller_needs_attention,
                 standby_since: state.standby_since,
                 standby_reason: state.standby_reason,
+                profile_changed_after_checkout: state.profile_changed_after_checkout,
                 address_changed_after_reseller: state.address_changed_after_reseller,
                 latest_post_change_event: state.latest_post_change_event,
                 profile_last_modified_at: profileModifiedMs ? new Date(profileModifiedMs).toISOString() : null,
@@ -10000,18 +10003,40 @@ app.patch("/profiles/bulk", auth, async (req, res) => {
         if (!ids.length) return res.status(400).json({ error: 'No profile ids were provided' });
         if (!allowedStores.has(store) || store === 'all') return res.status(400).json({ error: 'Choose a specific store group before bulk editing.' });
 
+        const hasProfileName = Object.prototype.hasOwnProperty.call(req.body || {}, 'profile_name') && String(req.body.profile_name || '').trim().length > 0;
+        const requestedProfileName = hasProfileName ? String(req.body.profile_name).trim() : '';
         const hasLoginPassword = store !== 'pokemoncenter' && Object.prototype.hasOwnProperty.call(req.body || {}, 'login_password') && String(req.body.login_password || '').length > 0;
         const hasGmailPassword = Object.prototype.hasOwnProperty.call(req.body || {}, 'gmail_app_password') && String(req.body.gmail_app_password || '').replace(/\s+/g, '').length > 0;
         const hasAycd = typeof req.body?.use_aycd_inbox === 'boolean';
         const hasState = Object.prototype.hasOwnProperty.call(req.body || {}, 'state') && String(req.body.state || '').trim().length > 0;
         const requestedState = hasState ? normalizeBulkProfileState(req.body.state) : '';
         if (hasState && !requestedState) return res.status(400).json({ error: 'Choose a valid state.' });
-        if (!hasLoginPassword && !hasGmailPassword && !hasAycd && !hasState) return res.status(400).json({ error: 'No profile changes were provided' });
+        if (!hasProfileName && !hasLoginPassword && !hasGmailPassword && !hasAycd && !hasState) return res.status(400).json({ error: 'No profile changes were provided' });
 
         const allProfiles = await getUserProfilesWithRelations(req.user_id);
         const owned = (allProfiles || []).filter((profile) => ids.includes(String(profile.id)) && profileAssignedStores(profile).includes(store));
         if (!owned.length) return res.status(404).json({ error: 'No matching profiles found in this store group' });
         const ownedIds = owned.map((profile) => String(profile.id));
+
+        let profileNameUpdatedCount = 0;
+        if (hasProfileName) {
+            // Bulk renaming intentionally permits matching names. This tool is used to label a
+            // selected run as one group, so the normal single-profile duplicate-name check does
+            // not apply here.
+            for (let i = 0; i < ownedIds.length; i += 75) {
+                const { data, error } = await supabase
+                    .from('profiles')
+                    .update({ profile_name: requestedProfileName })
+                    .eq('user_id', req.user_id)
+                    .in('id', ownedIds.slice(i, i + 75))
+                    .select('id');
+                if (error) throw error;
+                profileNameUpdatedCount += (data || []).length;
+            }
+            if (profileNameUpdatedCount !== ownedIds.length) {
+                throw new Error(`Profile name was updated for ${profileNameUpdatedCount} of ${ownedIds.length} selected profiles.`);
+            }
+        }
 
         const hasCredentialChanges = hasLoginPassword || hasGmailPassword || hasAycd;
         if (hasCredentialChanges) {
@@ -10100,22 +10125,42 @@ app.patch("/profiles/bulk", auth, async (req, res) => {
                 throw new Error(`State was updated for ${stateUpdatedCount} of ${ownedIds.length} selected profiles. One or more profiles are missing a shipping address.`);
             }
 
-            const targetProfiles = owned.filter((profile) => profileAssignedStores(profile).map(normalizeProfileAccountType).includes('target'));
-            for (let i = 0; i < targetProfiles.length; i += 10) {
-                await Promise.all(targetProfiles.slice(i, i + 10).map((profile) => {
-                    const address = { ...(profile.addresses?.[0] || {}), state: requestedState };
-                    return syncTargetAddressVersion({ userId: req.user_id, profileId: profile.id, address }).catch((error) => {
-                        console.error('Target address version capture failed after bulk state update:', error.message || error);
-                    });
-                }));
-            }
         }
 
-        const changedStores = hasState
+        // A Target profile that was actually edited must return to blue standby regardless of
+        // whether its previous checkout was successful, reseller, order ID, or another error.
+        // State and profile name are shared across stores, while credential-only edits affect
+        // Target only when the selected bulk-edit store is Target.
+        const changedTargetProfiles = (hasState || hasProfileName || store === 'target')
+            ? owned.filter((profile) => profileAssignedStores(profile).map(normalizeProfileAccountType).includes('target'))
+            : [];
+        for (let i = 0; i < changedTargetProfiles.length; i += 10) {
+            await Promise.all(changedTargetProfiles.slice(i, i + 10).map((profile) => {
+                const address = { ...(profile.addresses?.[0] || {}), ...(hasState ? { state: requestedState } : {}) };
+                return syncTargetAddressVersion({
+                    userId: req.user_id,
+                    profileId: profile.id,
+                    address,
+                    forceNewVersion: true
+                }).catch((error) => {
+                    console.error('Target profile change marker failed after bulk update:', error.message || error);
+                });
+            }));
+        }
+
+        const changedStores = (hasState || hasProfileName)
             ? [...new Set(owned.flatMap((profile) => profileAssignedStores(profile).map(normalizeProfileAccountType)).filter(Boolean))]
             : [store];
         await markProfileSyncChanged(req.user_id, changedStores, 'profiles_bulk_updated');
-        res.json({ success: true, updated_count: ownedIds.length, state_updated_count: stateUpdatedCount, state: hasState ? requestedState : null, store });
+        res.json({
+            success: true,
+            updated_count: ownedIds.length,
+            profile_name_updated_count: profileNameUpdatedCount,
+            profile_name: hasProfileName ? requestedProfileName : null,
+            state_updated_count: stateUpdatedCount,
+            state: hasState ? requestedState : null,
+            store
+        });
     } catch (err) {
         const status = err.message === 'This account has been revoked' ? 403 : 500;
         res.status(status).json({ error: err.message || 'Bulk profile update failed' });
@@ -10282,8 +10327,8 @@ app.put("/profiles/:id", auth, async (req, res) => {
         await upsertProfileRelations(id, data);
         await replaceProfileStoreAssignments(req.user_id, id, assignedStores);
         if ([...new Set([...previousStores, ...assignedStores])].map(normalizeProfileAccountType).includes('target')) {
-            await syncTargetAddressVersion({ userId: req.user_id, profileId: id, address: data }).catch((err) => {
-                console.error('Target address version capture failed after profile update:', err.message || err);
+            await syncTargetAddressVersion({ userId: req.user_id, profileId: id, address: data, forceNewVersion: true }).catch((err) => {
+                console.error('Target profile change marker failed after profile update:', err.message || err);
             });
         }
         await markProfileSyncChanged(req.user_id, [...new Set([...previousStores, ...assignedStores])], "profile_updated");
