@@ -98,11 +98,55 @@ const API =
         ? "http://localhost:3000"
         : "https://profile-platform.onrender.com";
 
+const PASSWORD_RESET_SESSION_KEY = 'shore_shack_password_reset_token';
+
+function isResetPasswordPath(pathname = window.location.pathname || '') {
+    return /(?:^|\/)reset-password(?:\.html)?\/?$/i.test(String(pathname || ''));
+}
+
+function jwtPurpose(value = '') {
+    try {
+        const payload = String(value || '').split('.')[1] || '';
+        if (!payload) return '';
+        const normalized = payload.replace(/-/g, '+').replace(/_/g, '/').padEnd(Math.ceil(payload.length / 4) * 4, '=');
+        return String(JSON.parse(atob(normalized))?.purpose || '');
+    } catch (_) {
+        return '';
+    }
+}
+
+function capturePasswordResetToken() {
+    if (!isResetPasswordPath()) return '';
+    const searchParams = new URLSearchParams(window.location.search || '');
+    const rawHash = String(window.location.hash || '').replace(/^#/, '');
+    const hashParams = new URLSearchParams(rawHash.includes('?') ? rawHash.slice(rawHash.indexOf('?') + 1) : rawHash);
+    const misplacedLoginToken = String(localStorage.getItem('token') || '');
+    let resetToken = searchParams.get('reset_token') || searchParams.get('token') || hashParams.get('reset_token') || hashParams.get('token') || '';
+
+    // Older versions consumed the reset JWT as if it were a login token and moved it to localStorage.
+    // Recover only a JWT explicitly signed for password_reset; never treat a real login token as a reset token.
+    if (!resetToken && jwtPurpose(misplacedLoginToken) === 'password_reset') resetToken = misplacedLoginToken;
+    if (!resetToken) resetToken = String(sessionStorage.getItem(PASSWORD_RESET_SESSION_KEY) || '');
+
+    if (resetToken) {
+        sessionStorage.setItem(PASSWORD_RESET_SESSION_KEY, resetToken);
+        if (misplacedLoginToken === resetToken || jwtPurpose(misplacedLoginToken) === 'password_reset') {
+            localStorage.removeItem('token');
+        }
+        if (window.location.search || window.location.hash) {
+            window.history.replaceState({}, document.title, window.location.pathname || 'reset-password.html');
+        }
+    }
+    return resetToken;
+}
+
+const pagePasswordResetToken = capturePasswordResetToken();
+
 function consumeOAuthRedirectParams() {
     const params = new URLSearchParams(window.location.search || '');
     const tokenValue = params.get('token');
     const errorValue = params.get('error');
-    if (tokenValue) {
+    if (tokenValue && !isResetPasswordPath()) {
         localStorage.token = tokenValue;
         const cleanUrl = window.location.pathname || 'dashboard.html';
         window.history.replaceState({}, document.title, cleanUrl);
@@ -6235,11 +6279,22 @@ if (forgotPasswordForm) {
 
 const resetPasswordForm = document.getElementById("resetPasswordForm");
 if (resetPasswordForm) {
+    const resetMessage = document.getElementById("error");
+    const resetSubmitButton = resetPasswordForm.querySelector('button[type="submit"]');
+    if (!pagePasswordResetToken) {
+        resetMessage.innerText = "This password-reset link is missing or expired. Request a new reset email and open the newest link.";
+        resetMessage.className = "error-text";
+        if (resetSubmitButton) resetSubmitButton.disabled = true;
+    }
     resetPasswordForm.onsubmit = async (e) => {
         e.preventDefault();
         try {
-            const params = new URLSearchParams(window.location.search);
-            const tokenValue = params.get("token");
+            const tokenValue = pagePasswordResetToken || capturePasswordResetToken();
+            if (!tokenValue) {
+                resetMessage.innerText = "This password-reset link is missing or expired. Request a new reset email and open the newest link.";
+                resetMessage.className = "error-text";
+                return;
+            }
             const res = await fetch(API + "/auth/reset-password", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
@@ -6253,7 +6308,10 @@ if (resetPasswordForm) {
             msg.innerText = data.error || "Password reset successful. You can now log in.";
             msg.className = data.error ? "error-text" : "success-text";
             if (!data.error) {
+                sessionStorage.removeItem(PASSWORD_RESET_SESSION_KEY);
                 setTimeout(() => { window.location = "login.html"; }, 1200);
+            } else if (/invalid|expired/i.test(String(data.error || ''))) {
+                sessionStorage.removeItem(PASSWORD_RESET_SESSION_KEY);
             }
         } catch {
             const msg = document.getElementById("error");

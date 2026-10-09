@@ -7888,7 +7888,9 @@ app.post("/auth/forgot-password", async (req, res) => {
             { expiresIn: "1h" }
         );
 
-        const resetUrl = buildAppUrl("/reset-password.html?token=" + encodeURIComponent(resetToken));
+        // Keep password-reset tokens distinct from OAuth/login tokens. The frontend still accepts
+        // the legacy `token` name so reset emails already sent before this deployment continue to work.
+        const resetUrl = buildAppUrl("/reset-password.html?reset_token=" + encodeURIComponent(resetToken));
 
         try {
             await sendEmail({
