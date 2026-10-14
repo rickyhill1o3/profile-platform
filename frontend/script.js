@@ -3313,6 +3313,8 @@ async function initCatalogTools() {
     const bulkImportForm = document.getElementById('catalogBulkImportForm');
     const targetBulkSkuLookupForm = document.getElementById('targetBulkSkuLookupForm');
     const targetBulkSkuLookupProgress = document.getElementById('targetBulkSkuLookupProgress');
+    const targetCatalogRescanAllButton = document.getElementById('targetCatalogRescanAllButton');
+    const targetCatalogRescanAllProgress = document.getElementById('targetCatalogRescanAllProgress');
     const exportForm = document.getElementById('catalogExportForm');
     const exportResults = document.getElementById('catalogExportResults');
     const superAdmin = canManageCatalog();
@@ -3381,36 +3383,94 @@ async function initCatalogTools() {
                 if (targetBulkSkuLookupProgress) targetBulkSkuLookupProgress.textContent = 'Paste at least one Target SKU.';
                 return;
             }
-            const chunkSize = 20;
+            const chunkSize = 6;
             let added = 0;
-            let skipped = 0;
+            let updated = 0;
+            let unchanged = 0;
             const failures = [];
             if (button) button.disabled = true;
             try {
                 for (let offset = 0; offset < skus.length; offset += chunkSize) {
                     const chunk = skus.slice(offset, offset + chunkSize);
                     if (targetBulkSkuLookupProgress) {
-                        targetBulkSkuLookupProgress.textContent = `Checking ${Math.min(offset + chunk.length, skus.length)} of ${skus.length} Target SKUs... Added ${added}; skipped ${skipped}.`;
+                        targetBulkSkuLookupProgress.textContent = `Checking ${Math.min(offset + chunk.length, skus.length)} of ${skus.length} Target SKUs... Added ${added}; updated ${updated}; unchanged ${unchanged}.`;
                     }
                     const data = await authJSON(API + '/admin/catalog-products/bulk-lookup-missing', {
                         method: 'POST',
                         body: JSON.stringify({ site: 'target', skus: chunk })
                     });
                     added += Number(data.added || 0);
-                    skipped += Number(data.skipped_existing || 0);
+                    updated += Number(data.updated || 0);
+                    unchanged += Number(data.unchanged || 0);
                     if (Array.isArray(data.failed)) failures.push(...data.failed);
                 }
                 const suffix = failures.length
                     ? ` ${failures.length} SKU${failures.length === 1 ? '' : 's'} could not be fully looked up and may need manual review: ${failures.slice(0, 8).map((row) => row.sku).join(', ')}${failures.length > 8 ? '…' : ''}`
                     : '';
-                if (targetBulkSkuLookupProgress) targetBulkSkuLookupProgress.textContent = `Finished. Added ${added} missing Target products and skipped ${skipped} products already in your catalog.${suffix}`;
-                message.textContent = `Target bulk lookup finished: ${added} added, ${skipped} skipped, ${failures.length} need review.`;
+                if (targetBulkSkuLookupProgress) targetBulkSkuLookupProgress.textContent = `Finished. Added ${added}, updated ${updated}, and left ${unchanged} unchanged.${suffix}`;
+                message.textContent = `Target lookup finished: ${added} added, ${updated} updated, ${unchanged} unchanged, ${failures.length} need review.`;
                 await loadCatalogProducts();
             } catch (err) {
                 if (targetBulkSkuLookupProgress) targetBulkSkuLookupProgress.textContent = `Stopped: ${err.message}`;
                 message.textContent = err.message;
             } finally {
                 if (button) button.disabled = false;
+            }
+        });
+    }
+
+    if (targetCatalogRescanAllButton && superAdmin) {
+        targetCatalogRescanAllButton.addEventListener('click', async () => {
+            const checkpointKey = 'targetCatalogRescanOffset';
+            let offset = Math.max(0, Number(localStorage.getItem(checkpointKey) || 0));
+            const resuming = offset > 0;
+            if (!resuming && !window.confirm('Rescan every Target SKU in the catalog? This can take several minutes. Credit costs and fields Target cannot verify will stay unchanged.')) return;
+
+            let added = 0;
+            let updated = 0;
+            let unchanged = 0;
+            let skippedGrouped = 0;
+            const failures = [];
+            targetCatalogRescanAllButton.disabled = true;
+            targetCatalogRescanAllButton.textContent = resuming ? 'Resuming Target rescan...' : 'Rescanning Target catalog...';
+            try {
+                let done = false;
+                while (!done) {
+                    if (targetCatalogRescanAllProgress) {
+                        targetCatalogRescanAllProgress.textContent = `${resuming ? 'Resuming' : 'Scanning'} at product ${offset + 1}... Updated ${updated}; unchanged ${unchanged}; failed ${failures.length}.`;
+                    }
+                    const data = await authJSON(API + '/admin/catalog-products/rescan-target-batch', {
+                        method: 'POST',
+                        body: JSON.stringify({ offset, limit: 6 })
+                    });
+                    added += Number(data.added || 0);
+                    updated += Number(data.updated || 0);
+                    unchanged += Number(data.unchanged || 0);
+                    skippedGrouped += Number(data.skipped_grouped || 0);
+                    if (Array.isArray(data.failed)) failures.push(...data.failed);
+                    offset = Number(data.next_offset || offset);
+                    done = !!data.done || Number(data.processed || 0) === 0;
+                    if (!done) localStorage.setItem(checkpointKey, String(offset));
+                    if (targetCatalogRescanAllProgress) {
+                        targetCatalogRescanAllProgress.textContent = `Checked ${Math.min(offset, Number(data.total || offset))} of ${Number(data.total || offset)} Target catalog products... Updated ${updated}; unchanged ${unchanged}; failed ${failures.length}.`;
+                    }
+                }
+                localStorage.removeItem(checkpointKey);
+                const failureSuffix = failures.length
+                    ? ` ${failures.length} need manual review: ${failures.slice(0, 8).map((row) => row.sku).join(', ')}${failures.length > 8 ? '…' : ''}.`
+                    : '';
+                if (targetCatalogRescanAllProgress) {
+                    targetCatalogRescanAllProgress.textContent = `Target catalog rescan finished: ${added} added, ${updated} updated, ${unchanged} already current, ${skippedGrouped} grouped SKU rows skipped.${failureSuffix}`;
+                }
+                message.textContent = `Target catalog rescan complete. ${updated} products updated and ${unchanged} left unchanged.`;
+                await loadCatalogProducts();
+            } catch (err) {
+                localStorage.setItem(checkpointKey, String(offset));
+                if (targetCatalogRescanAllProgress) targetCatalogRescanAllProgress.textContent = `Stopped after ${offset} products: ${err.message} Click Rescan all again to resume here.`;
+                message.textContent = err.message;
+            } finally {
+                targetCatalogRescanAllButton.disabled = false;
+                targetCatalogRescanAllButton.textContent = 'Rescan all Target catalog products';
             }
         });
     }

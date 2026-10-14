@@ -3768,15 +3768,19 @@ async function enrichMonitorItems(items = []) {
             continue;
         }
 
-        const needsCatalog = !!next.sku && (!next.image || !next.url || !next.title || !cleanMonitorPriceValue(next.price));
+        // Target catalog data is authoritative for identity fields. Always check it when a SKU is
+        // present so a manually shortened webhook title (for example "Star Trek Bundle") cannot
+        // hide the official Target title and send the item to the wrong Discord category.
+        const preferTargetCatalog = next.site === 'target' && !!next.sku;
+        const needsCatalog = !!next.sku && (preferTargetCatalog || !next.image || !next.url || !next.title || !cleanMonitorPriceValue(next.price));
         if (needsCatalog) {
             const catalog = await fetchCatalogProductDetailsForMonitor(next);
             if (catalog) {
-                next.title = next.title || catalog.title || next.title;
-                next.image = next.image || catalog.image || next.image;
-                next.url = next.url || catalog.url || next.url;
+                next.title = preferTargetCatalog ? (catalog.title || next.title) : (next.title || catalog.title || next.title);
+                next.image = preferTargetCatalog ? (catalog.image || next.image) : (next.image || catalog.image || next.image);
+                next.url = preferTargetCatalog ? (catalog.url || next.url) : (next.url || catalog.url || next.url);
                 next.price = cleanMonitorPriceValue(next.price) || cleanMonitorPriceValue(catalog.price) || next.price;
-                next.category = next.category || catalog.category || next.category;
+                next.category = preferTargetCatalog ? (catalog.category || next.category) : (next.category || catalog.category || next.category);
             }
         }
 

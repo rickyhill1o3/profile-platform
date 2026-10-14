@@ -243,17 +243,19 @@ placeholder="Enter one SKU per line&#10;12345678&#10;87654321"></textarea>
                     Product</button></div>
               </form>
 
-              <div class="banner banner-soft"><strong>Bulk Target SKU lookup</strong>
-                <p class="subtle-text">Paste Target TCIN/SKU numbers separated by commas or new lines. Existing catalog SKUs are skipped without being looked up again. Only missing SKUs are searched and added with the product name, current price, Target URL, and image when Target provides them. Credit cost remains blank for you to set manually.</p>
+              <div class="banner banner-soft"><strong>Bulk Target SKU lookup and refresh</strong>
+                <p class="subtle-text">Paste Target TCIN/SKU numbers separated by commas or new lines. Missing SKUs are added, and existing SKUs are searched again to refresh the official Target name, current price, image, URL, and brand. A saved field is left unchanged whenever Target does not return a usable replacement. Credit cost is never changed.</p>
               </div>
               <form id="targetBulkSkuLookupForm" class="form-grid">
                 <div class="field field--full"><label for="targetBulkSkuLookupInput">Target SKU list</label>
                   <textarea class="input" id="targetBulkSkuLookupInput" rows="8" placeholder="1007935778,1008581387,1010423714"></textarea>
                 </div>
                 <div class="field field--full panel-actions">
-                  <button class="btn btn-primary" type="submit" id="targetBulkSkuLookupButton">Find and add missing Target products</button>
+                  <button class="btn btn-primary" type="submit" id="targetBulkSkuLookupButton">Add or refresh entered Target products</button>
+                  <button class="btn" type="button" id="targetCatalogRescanAllButton">Rescan all Target catalog products</button>
                 </div>
                 <div class="field field--full"><div class="subtle-text" id="targetBulkSkuLookupProgress"></div></div>
+                <div class="field field--full"><div class="subtle-text" id="targetCatalogRescanAllProgress"></div></div>
               </form>
 
               <div class="banner banner-soft"><strong>Bulk import lists</strong>
@@ -1126,7 +1128,7 @@ placeholder="Enter one SKU per line&#10;12345678&#10;87654321"></textarea>
     </div>
   </div>
   <script src="profile-sync-state.js?v=20260918-profile-sync-display"></script>
-  <script src="script.js?v=20261008-target-profile-standby"></script>
+  <script src="script.js?v=20261014-target-catalog-rescan"></script>
   <script src="products.js?v=20260930-pokemon-sku-groups"></script>
 
 

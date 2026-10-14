@@ -51,6 +51,7 @@ const {
     productSkus,
     groupPokemonUsersByComparedSkus
 } = require('./pokemon-sku-user-groups');
+const { buildTargetCatalogRefreshPatch } = require('./target-catalog-refresh');
 
 const SUPPORTED_SITES = new Set(["amazon", "target", "walmart", "samsclub", "crunchyroll", "general", "supreme", "pokemon"]);
 const REQUESTABLE_SITES = new Set(["amazon", "target", "walmart", "samsclub", "crunchyroll", "general", "supreme", "pokemon"]);
@@ -590,6 +591,39 @@ async function upsertCatalogProductByLookup(supabase, site, sku) {
     }
 
     return result;
+}
+
+async function refreshTargetCatalogProduct(supabase, sku) {
+    const cleanSku = String(sku || '').trim();
+    if (!cleanSku) throw new Error('SKU is required.');
+    const existing = await firstRowOrNull(supabase, 'target', cleanSku);
+    if (!existing?.id) {
+        const product = await upsertCatalogProductByLookup(supabase, 'target', cleanSku);
+        return { status: 'added', product, changed_fields: ['name', 'image', 'url', 'price'].filter((field) => {
+            if (field === 'name') return product?.product_name && product.product_name !== cleanSku;
+            if (field === 'image') return !!product?.image_url;
+            if (field === 'url') return !!product?.product_url;
+            return Number(product?.default_max_price) > 0;
+        }) };
+    }
+
+    const lookup = await lookupTargetByTcin(cleanSku);
+    const refresh = buildTargetCatalogRefreshPatch(existing, lookup);
+    if (!refresh.lookupUsable) {
+        throw new Error('Target did not return a usable product name, image, or price. The saved product was not changed.');
+    }
+    if (!refresh.changedFields.length) {
+        return { status: 'unchanged', product: existing, changed_fields: [] };
+    }
+
+    const { data, error } = await supabase
+        .from('catalog_products')
+        .update(refresh.patch)
+        .eq('id', existing.id)
+        .select('*')
+        .single();
+    if (error) throw new Error(error.message);
+    return { status: 'updated', product: data, changed_fields: refresh.changedFields };
 }
 
 async function syncTargetPricingFromAmazon(supabase) {
@@ -1273,8 +1307,12 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
     app.post('/admin/catalog-products/upsert-by-sku', auth, admin, async (req, res) => {
         if (!requireSuperAdmin(req, res)) return;
         try {
-            const product = await upsertCatalogProductByLookup(supabase, normalizeSite(req.body.site), req.body.sku);
-            res.json({ success: true, product, message: `${product.product_name} was added / updated.` });
+            const site = normalizeSite(req.body.site);
+            const result = site === 'target'
+                ? await refreshTargetCatalogProduct(supabase, req.body.sku)
+                : { status: 'updated', product: await upsertCatalogProductByLookup(supabase, site, req.body.sku) };
+            const action = result.status === 'added' ? 'added' : result.status === 'unchanged' ? 'checked with no changes needed' : 'updated';
+            res.json({ success: true, ...result, message: `${result.product.product_name} was ${action}.` });
         } catch (err) {
             res.status(500).json({ error: err.message });
         }
@@ -1306,42 +1344,93 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
             const skus = [...new Set(raw.map((value) => String(value || '').trim()).filter(Boolean))].slice(0, 25);
             if (!skus.length) return res.status(400).json({ error: 'Enter at least one Target SKU.' });
 
-            const { data: existingRows, error: existingError } = await supabase
-                .from('catalog_products')
-                .select('sku')
-                .eq('site', site)
-                .in('sku', skus);
-            if (existingError) throw new Error(existingError.message);
-            const existing = new Set((existingRows || []).map((row) => String(row.sku || '').trim()));
-            const missing = skus.filter((sku) => !existing.has(sku));
             const added = [];
+            const updated = [];
+            const unchanged = [];
             const failed = [];
 
-            // Keep concurrency deliberately low so Target is not hammered and Render stays stable.
-            for (let index = 0; index < missing.length; index += 3) {
-                const group = missing.slice(index, index + 3);
+            // Existing SKUs are deliberately looked up again. Keep concurrency low so Target is
+            // not hammered and Render stays stable while fresh names/images/prices are collected.
+            for (let index = 0; index < skus.length; index += 3) {
+                const group = skus.slice(index, index + 3);
                 const results = await Promise.all(group.map(async (sku) => {
                     try {
-                        const product = await upsertCatalogProductByLookup(supabase, site, sku);
-                        return { ok: true, sku, product };
+                        const result = await refreshTargetCatalogProduct(supabase, sku);
+                        return { ok: true, sku, ...result };
                     } catch (err) {
                         return { ok: false, sku, error: String(err?.message || err) };
                     }
                 }));
                 results.forEach((result) => {
-                    if (result.ok) added.push(result.product);
-                    else failed.push({ sku: result.sku, error: result.error });
+                    if (!result.ok) failed.push({ sku: result.sku, error: result.error });
+                    else if (result.status === 'added') added.push(result.product);
+                    else if (result.status === 'updated') updated.push({ ...result.product, changed_fields: result.changed_fields });
+                    else unchanged.push(result.product);
                 });
             }
 
             res.json({
                 success: true,
                 requested: skus.length,
-                skipped_existing: skus.length - missing.length,
                 added: added.length,
+                updated: updated.length,
+                unchanged: unchanged.length,
                 failed,
-                items: added,
-                message: `Added ${added.length} missing Target product${added.length === 1 ? '' : 's'}; skipped ${skus.length - missing.length} already in the catalog${failed.length ? `; ${failed.length} lookup${failed.length === 1 ? '' : 's'} need review` : ''}.`
+                items: [...added, ...updated],
+                message: `Added ${added.length}, updated ${updated.length}, and left ${unchanged.length} unchanged after checking Target${failed.length ? `; ${failed.length} lookup${failed.length === 1 ? '' : 's'} need review` : ''}.`
+            });
+        } catch (err) {
+            res.status(500).json({ error: String(err?.message || err) });
+        }
+    });
+
+    app.post('/admin/catalog-products/rescan-target-batch', auth, admin, async (req, res) => {
+        if (!requireSuperAdmin(req, res)) return;
+        try {
+            const offset = Math.max(0, Math.floor(Number(req.body?.offset || 0)));
+            const limit = Math.max(1, Math.min(10, Math.floor(Number(req.body?.limit || 6))));
+            const { data: rows, error } = await fetchAllSupabaseRows(() => supabase
+                .from('catalog_products')
+                .select('id, site, sku, product_name, image_url, product_url, default_max_price, brand, metadata, is_enabled, created_at')
+                .eq('site', 'target')
+                .order('created_at', { ascending: true })
+                .order('id', { ascending: true }));
+            if (error) throw new Error(error.message);
+            const products = (rows || []).filter((row) => !isLegacyNextDropProduct(row) && !(row.metadata && row.metadata.virtual));
+            const batch = products.slice(offset, offset + limit);
+            const results = [];
+
+            for (let index = 0; index < batch.length; index += 2) {
+                const group = batch.slice(index, index + 2);
+                const groupResults = await Promise.all(group.map(async (row) => {
+                    const skuParts = parseCatalogSkuParts(row.sku);
+                    if (skuParts.length !== 1) {
+                        return { ok: true, status: 'skipped_grouped', sku: row.sku, product_name: row.product_name };
+                    }
+                    try {
+                        const refreshed = await refreshTargetCatalogProduct(supabase, skuParts[0]);
+                        return { ok: true, sku: skuParts[0], status: refreshed.status, changed_fields: refreshed.changed_fields || [] };
+                    } catch (lookupError) {
+                        return { ok: false, sku: skuParts[0], error: String(lookupError?.message || lookupError) };
+                    }
+                }));
+                results.push(...groupResults);
+            }
+
+            const nextOffset = offset + batch.length;
+            res.json({
+                success: true,
+                total: products.length,
+                offset,
+                processed: batch.length,
+                next_offset: nextOffset,
+                done: nextOffset >= products.length,
+                added: results.filter((row) => row.status === 'added').length,
+                updated: results.filter((row) => row.status === 'updated').length,
+                unchanged: results.filter((row) => row.status === 'unchanged').length,
+                skipped_grouped: results.filter((row) => row.status === 'skipped_grouped').length,
+                failed: results.filter((row) => !row.ok),
+                results
             });
         } catch (err) {
             res.status(500).json({ error: String(err?.message || err) });
