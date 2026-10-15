@@ -30,6 +30,15 @@ assert.strictEqual(plan.assignments.some((row) => row.profile_id === 9 || row.pr
 assert.strictEqual(plan.unchanged_count, 6, 'the planner should preserve already-correct addresses whenever quotas allow');
 assert.strictEqual(plan.changed_count, 2, 'only excess or unmatched addresses should move');
 
+const editedAddressA = { ...addressA, address1: '125 Soundview Drive' };
+const editPlan = buildZipAddressBalancePlan({ profiles, addresses: [editedAddressA, addressB, addressC], zip: '27916' });
+assert.strictEqual(editPlan.assignments.some((row) => row.address.address1 === addressA.address1), false, 'editing a listed address must remove the old address from every resulting assignment');
+assert.strictEqual(editPlan.assignments.filter((row) => [1, 2, 3, 4].includes(row.profile_id)).every((row) => row.changed), true, 'every profile that used the edited address must be updated');
+
+const removePlan = buildZipAddressBalancePlan({ profiles, addresses: [addressA, addressB], zip: '27916' });
+assert.deepStrictEqual(removePlan.distribution.map((row) => row.profile_count), [4, 4], 'removing an address must redistribute its profiles evenly among the addresses that remain');
+assert.strictEqual(removePlan.assignments.some((row) => row.address.address1 === addressC.address1), false, 'a removed address must not remain in any assignment');
+
 assert.throws(() => buildZipAddressBalancePlan({
     profiles,
     zip: '27916',
@@ -54,5 +63,10 @@ assert.match(serverSource, /update\(\{\s*address1:[\s\S]*?address2:[\s\S]*?city:
 assert.doesNotMatch(serverSource.match(/app\.post\('\/target-address-balance'[\s\S]*?app\.get\('\/target-profile-health'/)?.[0] || '', /billing_address/, 'ZIP balancing must not overwrite separate billing-address fields');
 assert.match(frontendSource, /Balance one ZIP/, 'Target dashboard must expose the ZIP balancing tool');
 assert.match(frontendSource, /Preview distribution/, 'the UI must preview changes before applying them');
+assert.match(frontendSource, /addresses:\s*\[\],\s*addressKeys:\s*new Set\(\)/, 'each ZIP must collect its current unique physical addresses for the modal');
+assert.match(frontendSource, /current\.addresses\.push\(\{[\s\S]*?address1:\s*address\.address1/, 'the modal choices must retain the complete current address instead of blank seed rows');
+assert.match(frontendSource, /renderTargetBalanceAddressRows\(modal, existingAddresses\.length \? existingAddresses/, 'opening or changing a ZIP must preload its current addresses');
+assert.doesNotMatch(frontendSource, /Array\.from\(\{ length: 5 \}/, 'the modal must not create five blank or duplicate address rows');
+assert.match(frontendSource, /Edit a row to replace that address everywhere, or remove it to redistribute its profiles/, 'the modal must explain edit and remove behavior');
 
 console.log('target ZIP address balance tests passed');
