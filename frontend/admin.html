@@ -5,7 +5,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Admin Panel</title>
-  <link rel="stylesheet" href="styles.css?v=20260930-pokemon-sku-groups" />
+  <link rel="stylesheet" href="styles.css?v=20261017-target-extra-accounts" />
 </head>
 
 <body class="app-page">
@@ -47,6 +47,7 @@
         <button class="admin-nav-button" type="button" data-admin-nav="users">Current Users</button>
         <button class="admin-nav-button" type="button" data-admin-nav="organizations" onclick="loadAdminOrganizations()">Admin Organizations</button>
         <button class="admin-nav-button" type="button" data-admin-nav="run-status">Store Run Status</button>
+        <button class="admin-nav-button" type="button" data-admin-nav="target-extra-accounts" id="targetExtraAccountsAdminNav" style="display:none">Target Extra Accounts</button>
         <button class="admin-nav-button" type="button" data-admin-nav="credits">Credits + Orders</button>
         <button class="admin-nav-button" type="button" data-admin-nav="webhooks">Webhooks</button>
         <a class="admin-nav-button" href="email-center.html" style="text-decoration:none;display:block">Email Center</a>
@@ -608,6 +609,41 @@ placeholder="Enter one SKU per line&#10;12345678&#10;87654321"></textarea>
 
 
         
+        <section class="admin-pane" data-admin-pane="target-extra-accounts" id="targetExtraAccountsAdminPane">
+          <section class="panel">
+            <div class="panel-header">
+              <div>
+                <h2>Target Extra Account Pool</h2>
+                <p class="subtle-text">Import super-admin-owned Target logins and assign them evenly to opted-in users, up to 10 per user.</p>
+              </div>
+              <div class="panel-actions"><button class="btn" type="button" id="refreshTargetExtraAccountsAdmin">Refresh</button></div>
+            </div>
+            <div class="banner banner-soft">
+              <strong>Secure Target-only access</strong>
+              <p class="subtle-text">Paste one <code>email:password</code> per line. Passwords are encrypted and never displayed on this page or shared as mailbox credentials. Imports that match any existing Target profile email are skipped.</p>
+            </div>
+            <div class="field field--full">
+              <label for="targetExtraAccountsImportText">Open Target accounts</label>
+              <textarea class="input" id="targetExtraAccountsImportText" rows="9" placeholder="account@example.com:target-password"></textarea>
+            </div>
+            <div class="panel-actions">
+              <button class="btn btn-primary" type="button" id="importTargetExtraAccountsButton">Import Accounts</button>
+              <button class="btn" type="button" id="fillTargetExtraAccountsButton">Fill Open Spots</button>
+              <button class="btn btn-danger" type="button" id="newTargetExtraAccountsCycleButton">Start New Assignment Round</button>
+            </div>
+            <div id="targetExtraAccountsAdminMessage" class="subtle-text"></div>
+            <div id="targetExtraAccountsStats" class="stats-grid stats-grid--compact"></div>
+          </section>
+          <section class="panel">
+            <div class="panel-header"><div><h2>Opted-in Users</h2><p class="subtle-text">Current fair-distribution totals. New accounts can be added and then assigned with Fill Open Spots.</p></div></div>
+            <div id="targetExtraAccountsUsers" class="table-wrap table-wrap--admin-scroll"></div>
+          </section>
+          <section class="panel">
+            <div class="panel-header"><div><h2>Account Inventory</h2><p class="subtle-text">Emails and assignment status are visible here; passwords are intentionally hidden.</p></div></div>
+            <div id="targetExtraAccountsInventory" class="table-wrap table-wrap--admin-scroll"></div>
+          </section>
+        </section>
+
         <section class="admin-pane" data-admin-pane="run-status">
           <section class="panel">
             <div class="panel-header">
@@ -1128,7 +1164,7 @@ placeholder="Enter one SKU per line&#10;12345678&#10;87654321"></textarea>
     </div>
   </div>
   <script src="profile-sync-state.js?v=20260918-profile-sync-display"></script>
-  <script src="script.js?v=20261014-target-catalog-rescan"></script>
+  <script src="script.js?v=20261017-target-extra-accounts"></script>
   <script src="products.js?v=20260930-pokemon-sku-groups"></script>
 
 

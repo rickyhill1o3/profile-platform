@@ -6278,6 +6278,188 @@ async function initAdminStoreRunStatus() {
     await load();
 }
 
+async function loadTargetExtraAccountStatus() {
+    const panel = document.getElementById('targetExtraAccountsPanel');
+    const optIn = document.getElementById('targetExtraAccountsOptIn');
+    const profileSelect = document.getElementById('targetExtraTemplateProfile');
+    const desiredCount = document.getElementById('targetExtraDesiredCount');
+    const saveButton = document.getElementById('saveTargetExtraAccountsPreference');
+    const message = document.getElementById('targetExtraAccountsMessage');
+    const assigned = document.getElementById('targetExtraAccountsAssigned');
+    if (!panel || !optIn || !profileSelect || !desiredCount || !saveButton || !message || !assigned) return;
+
+    const applyEnabledState = () => {
+        profileSelect.disabled = !optIn.checked;
+        desiredCount.disabled = !optIn.checked;
+    };
+    if (!optIn.dataset.targetExtraBound) {
+        optIn.dataset.targetExtraBound = '1';
+        optIn.addEventListener('change', applyEnabledState);
+        saveButton.addEventListener('click', async () => {
+            if (optIn.checked && !profileSelect.value) {
+                alert('Choose the Target profile whose shipping and payment information should be copied.');
+                return;
+            }
+            saveButton.disabled = true;
+            message.textContent = 'Saving your preference...';
+            try {
+                await authJSON(API + '/target-extra-accounts/preference', {
+                    method: 'PUT',
+                    body: JSON.stringify({
+                        opted_in: optIn.checked,
+                        template_profile_id: profileSelect.value,
+                        desired_count: Number(desiredCount.value || 10)
+                    })
+                });
+                message.textContent = optIn.checked
+                    ? 'Saved. Your super admin can now fill your open Target account spots.'
+                    : 'You are opted out. Your extra Target account assignments were released.';
+                await loadTargetExtraAccountStatus();
+            } catch (error) {
+                message.textContent = error.message || 'Could not save the extra-account preference.';
+            } finally {
+                saveButton.disabled = false;
+            }
+        });
+    }
+
+    try {
+        message.textContent = 'Loading extra Target account status...';
+        const data = await authJSON(API + '/target-extra-accounts/status');
+        const profiles = Array.isArray(data.target_profiles) ? data.target_profiles : [];
+        profileSelect.innerHTML = '<option value="">Choose a Target profile</option>' + profiles.map((profile) =>
+            `<option value="${escapeHTML(profile.id)}">${escapeHTML(profile.profile_name || 'Target profile')}${profile.email ? ` — ${escapeHTML(profile.email)}` : ''}</option>`
+        ).join('');
+        optIn.checked = !!data.opted_in;
+        profileSelect.value = data.template_profile_id || '';
+        desiredCount.value = String(data.desired_count || 10);
+        applyEnabledState();
+        const assignments = Array.isArray(data.assignments) ? data.assignments.filter((row) => row.status === 'available') : [];
+        if (assignments.length) {
+            assigned.innerHTML = assignments.map((row, index) => `
+                <div class="target-extra-assignment-list__item">
+                    <strong>${index + 1}. ${escapeHTML(row.email || 'Assigned Target account')}</strong>
+                    <span>Target access assigned</span>
+                </div>
+            `).join('');
+        } else {
+            assigned.innerHTML = '<div class="empty-card"><p>No extra Target accounts are assigned yet.</p></div>';
+        }
+        if (!profiles.length) {
+            message.textContent = 'Create or assign at least one Target profile before opting in.';
+            optIn.disabled = true;
+            saveButton.disabled = true;
+        } else if (data.opted_in) {
+            message.textContent = `${Number(data.assigned_count || 0)} of up to ${Number(data.desired_count || 10)} extra Target accounts are assigned.`;
+        } else {
+            message.textContent = 'You are not currently opted in.';
+        }
+    } catch (error) {
+        message.textContent = error.message || 'Could not load extra Target accounts.';
+        assigned.innerHTML = '';
+    }
+}
+
+async function initTargetExtraAccountsAdmin() {
+    const nav = document.getElementById('targetExtraAccountsAdminNav');
+    const pane = document.getElementById('targetExtraAccountsAdminPane');
+    if (!nav || !pane) return;
+    if (!isSuperAdmin()) {
+        nav.style.display = 'none';
+        return;
+    }
+    nav.style.display = '';
+
+    const importText = document.getElementById('targetExtraAccountsImportText');
+    const importButton = document.getElementById('importTargetExtraAccountsButton');
+    const fillButton = document.getElementById('fillTargetExtraAccountsButton');
+    const cycleButton = document.getElementById('newTargetExtraAccountsCycleButton');
+    const refreshButton = document.getElementById('refreshTargetExtraAccountsAdmin');
+    const message = document.getElementById('targetExtraAccountsAdminMessage');
+    const stats = document.getElementById('targetExtraAccountsStats');
+    const usersPanel = document.getElementById('targetExtraAccountsUsers');
+    const inventoryPanel = document.getElementById('targetExtraAccountsInventory');
+
+    const setBusy = (busy) => [importButton, fillButton, cycleButton, refreshButton].forEach((button) => { if (button) button.disabled = busy; });
+    const render = (data) => {
+        const counts = data?.counts || {};
+        stats.innerHTML = [
+            ['Pool', counts.total || 0], ['Enabled', counts.available || 0], ['Assigned', counts.assigned || 0],
+            ['Open', counts.unassigned || 0], ['Opted in', counts.opted_in_users || 0]
+        ].map(([label, value]) => `<div class="stat-card"><span class="stat-label">${escapeHTML(label)}</span><strong class="stat-value">${Number(value)}</strong></div>`).join('');
+
+        const users = Array.isArray(data?.users) ? data.users : [];
+        usersPanel.innerHTML = users.length ? `<table class="admin-table"><thead><tr><th>User</th><th>Opted In</th><th>Assigned</th><th>Requested</th><th>Template Profile</th></tr></thead><tbody>${users.map((user) => `
+            <tr><td>${escapeHTML(user.user_display || user.user_email || 'User')}</td><td>${user.opted_in ? 'Yes' : 'No'}</td>
+            <td>${Number(user.assigned_count || 0)}</td><td>${Number(user.desired_count || 10)}</td><td><code>${escapeHTML(user.template_profile_id || '—')}</code></td></tr>
+        `).join('')}</tbody></table>` : '<div class="empty-card"><p>No users have saved an extra Target account preference.</p></div>';
+
+        const accounts = Array.isArray(data?.accounts) ? data.accounts : [];
+        inventoryPanel.innerHTML = accounts.length ? `<table class="admin-table"><thead><tr><th>Target Login</th><th>Status</th><th>Assigned User</th><th>Assigned</th><th>Action</th></tr></thead><tbody>${accounts.map((account) => `
+            <tr><td>${escapeHTML(account.email || '')}</td><td>${escapeHTML(account.status || '')}</td><td>${escapeHTML(account.assigned_user || 'Open')}</td>
+            <td>${account.assigned_at ? escapeHTML(formatDateTimeShort(account.assigned_at)) : '—'}</td><td><button class="btn" type="button" data-target-extra-account-status="${account.status === 'available' ? 'disabled' : 'available'}" data-target-extra-account-id="${escapeHTML(account.id)}">${account.status === 'available' ? 'Disable' : 'Enable'}</button></td></tr>
+        `).join('')}</tbody></table>` : '<div class="empty-card"><p>No extra Target accounts have been imported.</p></div>';
+        inventoryPanel.querySelectorAll('[data-target-extra-account-id]').forEach((button) => {
+            button.addEventListener('click', async () => {
+                setBusy(true);
+                try {
+                    const next = await authJSON(API + `/admin/target-extra-accounts/${encodeURIComponent(button.dataset.targetExtraAccountId)}/status`, {
+                        method: 'PATCH', body: JSON.stringify({ status: button.dataset.targetExtraAccountStatus })
+                    });
+                    render(next);
+                    message.textContent = 'Target account status updated.';
+                } catch (error) { message.textContent = error.message; }
+                finally { setBusy(false); }
+            });
+        });
+    };
+
+    const load = async () => {
+        setBusy(true);
+        message.textContent = 'Loading Target extra accounts...';
+        try {
+            const data = await authJSON(API + '/admin/target-extra-accounts');
+            render(data);
+            message.textContent = 'Target extra-account pool loaded. Passwords remain hidden.';
+        } catch (error) { message.textContent = error.message || 'Could not load the Target account pool.'; }
+        finally { setBusy(false); }
+    };
+    const distribute = async (mode) => {
+        if (mode === 'new_cycle' && !confirm('Start a new assignment round? Current assignments will be released and the enabled pool will be redistributed evenly. Historical orders will keep their original owner.')) return;
+        setBusy(true);
+        message.textContent = mode === 'new_cycle' ? 'Starting a new assignment round...' : 'Filling open spots...';
+        try {
+            const result = await authJSON(API + '/admin/target-extra-accounts/distribute', { method: 'POST', body: JSON.stringify({ mode }) });
+            render(result.snapshot);
+            message.textContent = `Assigned ${Number(result.assigned || 0)}, preserved ${Number(result.preserved || 0)}, released ${Number(result.released || 0)}. ${Number(result.unassigned || 0)} enabled accounts remain open.`;
+        } catch (error) { message.textContent = error.message || 'Could not distribute Target accounts.'; }
+        finally { setBusy(false); }
+    };
+
+    if (!pane.dataset.targetExtraAdminBound) {
+        pane.dataset.targetExtraAdminBound = '1';
+        refreshButton?.addEventListener('click', load);
+        fillButton?.addEventListener('click', () => distribute('fill'));
+        cycleButton?.addEventListener('click', () => distribute('new_cycle'));
+        importButton?.addEventListener('click', async () => {
+            if (!String(importText?.value || '').trim()) return alert('Paste at least one account as email:password.');
+            setBusy(true);
+            message.textContent = 'Checking duplicates and encrypting new Target accounts...';
+            try {
+                const result = await authJSON(API + '/admin/target-extra-accounts/import', {
+                    method: 'POST', body: JSON.stringify({ accounts_text: importText.value })
+                });
+                if (importText) importText.value = '';
+                render(result.snapshot);
+                const skipped = Number(result.skipped_existing_pool?.length || 0) + Number(result.skipped_existing_target_profiles?.length || 0) + Number(result.duplicate_input?.length || 0);
+                message.textContent = `Imported ${Number(result.inserted || 0)} account${Number(result.inserted || 0) === 1 ? '' : 's'}. Skipped ${skipped} duplicate${skipped === 1 ? '' : 's'} and ${Number(result.invalid?.length || 0)} invalid line${Number(result.invalid?.length || 0) === 1 ? '' : 's'}.`;
+            } catch (error) { message.textContent = error.message || 'Could not import Target accounts.'; }
+            finally { setBusy(false); }
+        });
+    }
+    await load();
+}
+
 
 document.addEventListener("DOMContentLoaded", async () => {
     if (!requireAuthForPrivatePages()) return;
@@ -6301,6 +6483,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         if (!dashboardPaymentAlertTimer) dashboardPaymentAlertTimer = setInterval(() => loadDashboardRetailerPaymentAlerts().catch(err => showDashboardPaymentAlertFailure(err.message)), 60000);
         initUserDashboardNavigation();
         await loadProfiles();
+        try { await loadTargetExtraAccountStatus(); } catch (err) { console.error('Target extra-account status failed:', err); }
         try { await loadStoreRunStatusPanel(); } catch (err) { console.error("Store run status failed:", err); }
         try { await loadStoreProductPanels(); } catch (err) { console.error("Store products failed:", err); }
         try { await loadTargetCheckoutListsForUser(); } catch (err) { console.error("Target checkout lists failed:", err); }
@@ -6315,6 +6498,7 @@ document.addEventListener("DOMContentLoaded", async () => {
 
     if (document.querySelector('[data-admin-nav]')) {
         initAdminSidebar();
+        try { await initTargetExtraAccountsAdmin(); } catch (err) { console.error('Target extra-account admin failed:', err); }
     }
 
     if (document.getElementById("inviteTableBody")) {

@@ -110,6 +110,14 @@ const {
 const { deriveTargetProfileHealthState, targetAddressVersionChangeTime } = require("./target-profile-health-state");
 const { normalizeBulkProfileState } = require("./profile-bulk-update");
 const {
+    MAX_EXTRA_TARGET_ACCOUNTS,
+    normalizeEmail: normalizeTargetExtraEmail,
+    parseExtraTargetAccountLines,
+    clampDesiredCount: clampTargetExtraDesiredCount,
+    planEvenAssignments,
+    buildSyntheticTargetProfile
+} = require("./target-extra-accounts");
+const {
     normalizeFiveDigitZip,
     normalizedAddressKey,
     buildZipAddressBalancePlan,
@@ -1699,6 +1707,69 @@ function normalizeIncomingOrderPayload(payload = {}) {
     return normalized;
 }
 
+function isTargetExtraMigrationError(error) {
+    return /does not exist|schema cache|relation|target_extra_/i.test(String(error?.message || error || ''));
+}
+
+function targetExtraEventTime(payload = {}, normalized = {}) {
+    const embed = Array.isArray(payload.embeds) ? payload.embeds[0] : payload.embed;
+    const candidates = [
+        payload.assignment_event_at,
+        payload.webhook_received_at,
+        payload.created_at,
+        payload.occurred_at,
+        embed?.timestamp,
+        normalized.timestamp
+    ];
+    const now = Date.now();
+    for (const value of candidates) {
+        const parsed = new Date(value).getTime();
+        if (Number.isFinite(parsed) && parsed >= Date.UTC(2020, 0, 1) && parsed <= now + 86400000) {
+            return new Date(parsed).toISOString();
+        }
+    }
+    return new Date().toISOString();
+}
+
+async function findTargetExtraAccountOwnerAt(loginEmail, eventAt) {
+    const email = normalizeTargetExtraEmail(loginEmail);
+    if (!email) return null;
+    try {
+        const accountResult = await supabase
+            .from('target_extra_accounts')
+            .select('id, login_email')
+            .ilike('login_email', email)
+            .limit(1)
+            .maybeSingle();
+        if (accountResult.error) {
+            if (isTargetExtraMigrationError(accountResult.error)) return null;
+            throw new Error(accountResult.error.message);
+        }
+        if (!accountResult.data?.id) return null;
+
+        const assignmentResult = await supabase
+            .from('target_extra_account_assignments')
+            .select('id, user_id, assigned_at, released_at')
+            .eq('account_id', accountResult.data.id)
+            .lte('assigned_at', eventAt)
+            .order('assigned_at', { ascending: false })
+            .limit(50);
+        if (assignmentResult.error) {
+            if (isTargetExtraMigrationError(assignmentResult.error)) return null;
+            throw new Error(assignmentResult.error.message);
+        }
+        const eventTime = new Date(eventAt).getTime();
+        const assignment = (assignmentResult.data || []).find((row) => {
+            const releasedAt = row.released_at ? new Date(row.released_at).getTime() : Number.POSITIVE_INFINITY;
+            return eventTime < releasedAt;
+        });
+        return assignment?.user_id ? getUserById(assignment.user_id) : null;
+    } catch (error) {
+        console.warn('Target extra-account ownership lookup failed', error.message || error);
+        return null;
+    }
+}
+
 async function findUserForWebhook(payload) {
     const normalized = normalizeIncomingOrderPayload(payload);
 
@@ -1722,6 +1793,17 @@ async function findUserForWebhook(payload) {
         normalizedSource === 'shikari' ||
         !!buildFieldMapFromEmbeds(payload || {}).fields?.account
     );
+
+    // Extra Target accounts are owned by the user assigned at checkout time. The
+    // history lookup deliberately runs before profile/account matching because an
+    // account may be reassigned to another user in a later release cycle.
+    if (normalizedSite === 'target' && normalizedEmail) {
+        const historicalOwner = await findTargetExtraAccountOwnerAt(
+            normalizedEmail,
+            targetExtraEventTime(payload, normalized)
+        );
+        if (historicalOwner) return historicalOwner;
+    }
 
     // POKEMON CENTER OWNERSHIP RULE:
     // Stellar can reuse the FIRST queue entry's email while it checks out profiles 2/3 a few
@@ -5360,6 +5442,13 @@ app.post(["/webhooks/orders", "/webhooks/orders/:token"], async (req, res) => {
                 if (logId) {
                     await updateWebhookLogEntry(logId, { status: 'processing' }).catch(() => null);
                 }
+                // Persist the durable intake time in the saved raw checkout payload. This
+                // lets a later retry resolve an extra Target account against the assignment
+                // that was active for this order, even after a new weekly round begins.
+                const assignmentEventPayload = {
+                    ...payload,
+                    assignment_event_at: durableLogCreatedAt || payload.assignment_event_at || new Date().toISOString()
+                };
 
                 const enrichedNormalizedForLog = await enrichCheckoutProductFromStoredCatalog(normalized).catch(() => normalized);
                 if (logId && enrichedNormalizedForLog?.product_name && enrichedNormalizedForLog.product_name !== normalized.product_name) {
@@ -5398,7 +5487,7 @@ app.post(["/webhooks/orders", "/webhooks/orders/:token"], async (req, res) => {
                     return;
                 }
 
-                const matchedUser = await findUserForWebhook(payload).catch(() => null);
+                const matchedUser = await findUserForWebhook(assignmentEventPayload).catch(() => null);
                 let resolvedUser = matchedUser?.id ? matchedUser : null;
                 let finalDiscordResults = [];
                 let finalStatus = resolvedUser?.id ? 'processed' : 'unmatched_user';
@@ -5430,7 +5519,7 @@ app.post(["/webhooks/orders", "/webhooks/orders/:token"], async (req, res) => {
                 let recordedCreditsCharged = null;
                 if (resolvedUser?.id) {
                     try {
-                        const result = await recordSuccessfulCheckout(payload);
+                        const result = await recordSuccessfulCheckout(assignmentEventPayload);
                         recordedOrder = result?.order || null;
                         recordedCreditsCharged = result?.order?.credits_charged ?? result?.credits_charged ?? null;
                         // Persist/refresh Order Tracker immediately after a checkout webhook. The user should
@@ -5489,7 +5578,10 @@ app.post(["/webhooks/orders", "/webhooks/orders/:token"], async (req, res) => {
                     const relayStatus = checkoutType === 'error' ? 'checkout_error' : 'processed';
                     let discordResults = [];
                     if (!checkoutDiscordSent) {
-                        const fallbackMatchedUser = await findUserForWebhook(payload).catch(() => null);
+                        const fallbackMatchedUser = await findUserForWebhook({
+                            ...payload,
+                            assignment_event_at: durableLogCreatedAt || payload.assignment_event_at || new Date().toISOString()
+                        }).catch(() => null);
                         discordResults = await sendCheckoutDiscordNotificationsForPayload(payload, fallbackMatchedUser?.id ? fallbackMatchedUser : null, { status: relayStatus });
                         checkoutDiscordSent = true;
                     }
@@ -8375,6 +8467,59 @@ async function filterProfilesByActiveRunStatus(profiles, group = "", activeOnly 
     });
 }
 
+async function appendAssignedTargetExtraProfiles(profiles, group = '') {
+    const items = Array.isArray(profiles) ? profiles : [];
+    if (normalizeProfileAccountType(group || '') !== 'target' || !items.length) return items;
+
+    const templateMap = new Map(items.map((profile) => [String(profile.id), profile]));
+    const userIds = [...new Set(items.map((profile) => profile.user_id).filter(Boolean).map(String))];
+    if (!userIds.length) return items;
+
+    try {
+        const assignmentResult = await fetchAllSupabaseRows(() => supabase
+            .from('target_extra_account_assignments')
+            .select('id, account_id, user_id, template_profile_id, cycle_id, assigned_at, released_at')
+            .in('user_id', safeIn(userIds))
+            .is('released_at', null)
+            .order('assigned_at', { ascending: true }));
+        if (assignmentResult.error) {
+            if (isTargetExtraMigrationError(assignmentResult.error)) return items;
+            throw new Error(assignmentResult.error.message);
+        }
+        const assignments = assignmentResult.data || [];
+        if (!assignments.length) return items;
+
+        const accountIds = [...new Set(assignments.map((row) => row.account_id).filter(Boolean))];
+        const accountResult = await fetchAllSupabaseRowsInBatches(accountIds, (batch) => supabase
+            .from('target_extra_accounts')
+            .select('id, login_email, password_encrypted, status')
+            .in('id', batch));
+        if (accountResult.error) throw new Error(accountResult.error.message);
+        const accountMap = new Map((accountResult.data || []).map((account) => [String(account.id), account]));
+        const perUserIndex = new Map();
+        const synthetic = [];
+
+        assignments.forEach((assignment) => {
+            const template = templateMap.get(String(assignment.template_profile_id));
+            const account = accountMap.get(String(assignment.account_id));
+            if (!template || !account || account.status !== 'available') return;
+            let loginPassword = '';
+            try { loginPassword = decrypt(account.password_encrypted); } catch (_) { return; }
+            const userKey = String(assignment.user_id);
+            const index = perUserIndex.get(userKey) || 0;
+            perUserIndex.set(userKey, index + 1);
+            synthetic.push(buildSyntheticTargetProfile(template, {
+                ...account,
+                login_password: loginPassword
+            }, assignment, index));
+        });
+        return [...items, ...synthetic];
+    } catch (error) {
+        if (isTargetExtraMigrationError(error)) return items;
+        throw error;
+    }
+}
+
 function getProfileLimitForRole(role = "user", accountType = "general") {
     // Profiles are intentionally unlimited for every role and store. Retailer-specific
     // address/card/email guidance is presented in the profile editor as a recommendation,
@@ -8592,6 +8737,435 @@ app.get("/profile-sync-status", auth, async (req, res) => {
         })) });
     } catch (err) {
         res.status(500).json({ error: err.message || "Could not load profile update status" });
+    }
+});
+
+async function loadTargetExtraUserStatus(userId) {
+    const targetProfiles = (await getUserProfilesWithRelations(userId))
+        .filter((profile) => profileAssignedStores(profile).includes('target'))
+        .map((profile) => ({
+            id: profile.id,
+            profile_name: profile.profile_name || 'Target profile',
+            email: profile.store_credentials?.target?.login_email || profile.addresses?.[0]?.email || ''
+        }));
+    const preferenceResult = await supabase
+        .from('target_extra_account_preferences')
+        .select('user_id, opted_in, template_profile_id, desired_count, updated_at')
+        .eq('user_id', userId)
+        .maybeSingle();
+    if (preferenceResult.error) throw preferenceResult.error;
+
+    const assignmentResult = await supabase
+        .from('target_extra_account_assignments')
+        .select('id, account_id, template_profile_id, cycle_id, assigned_at')
+        .eq('user_id', userId)
+        .is('released_at', null)
+        .order('assigned_at', { ascending: true });
+    if (assignmentResult.error) throw assignmentResult.error;
+    const assignments = assignmentResult.data || [];
+    const accountIds = [...new Set(assignments.map((row) => row.account_id).filter(Boolean))];
+    let accountMap = new Map();
+    if (accountIds.length) {
+        const accountResult = await supabase
+            .from('target_extra_accounts')
+            .select('id, login_email, status')
+            .in('id', accountIds);
+        if (accountResult.error) throw accountResult.error;
+        accountMap = new Map((accountResult.data || []).map((row) => [String(row.id), row]));
+    }
+    const preference = preferenceResult.data || {};
+    const visibleAssignments = assignments.map((assignment) => ({
+        id: assignment.id,
+        email: accountMap.get(String(assignment.account_id))?.login_email || '',
+        status: accountMap.get(String(assignment.account_id))?.status || 'unavailable',
+        template_profile_id: assignment.template_profile_id,
+        cycle_id: assignment.cycle_id,
+        assigned_at: assignment.assigned_at
+    }));
+    return {
+        opted_in: !!preference.opted_in,
+        template_profile_id: preference.template_profile_id || '',
+        desired_count: clampTargetExtraDesiredCount(preference.desired_count),
+        maximum_count: MAX_EXTRA_TARGET_ACCOUNTS,
+        target_profiles: targetProfiles,
+        assignments: visibleAssignments,
+        assigned_count: visibleAssignments.filter((row) => row.status === 'available').length,
+        passwords_shared_with_user: false
+    };
+}
+
+app.get('/target-extra-accounts/status', auth, async (req, res) => {
+    try {
+        await ensureUserNotRevoked(req.user_id);
+        res.json(await loadTargetExtraUserStatus(req.user_id));
+    } catch (error) {
+        const status = isTargetExtraMigrationError(error) ? 503 : 500;
+        res.status(status).json({
+            error: status === 503
+                ? 'Target extra accounts are not ready yet. Install backend/sql/TARGET_EXTRA_ACCOUNTS.sql first.'
+                : (error.message || 'Could not load Target extra accounts.')
+        });
+    }
+});
+
+app.put('/target-extra-accounts/preference', auth, async (req, res) => {
+    try {
+        await ensureUserNotRevoked(req.user_id);
+        const optedIn = !!req.body?.opted_in;
+        const templateProfileId = String(req.body?.template_profile_id || '').trim();
+        const desiredCount = clampTargetExtraDesiredCount(req.body?.desired_count);
+        const targetProfiles = (await getUserProfilesWithRelations(req.user_id))
+            .filter((profile) => profileAssignedStores(profile).includes('target'));
+        if (optedIn && !targetProfiles.some((profile) => String(profile.id) === templateProfileId)) {
+            return res.status(400).json({ error: 'Choose one of your Target profiles to copy for the extra accounts.' });
+        }
+
+        const now = new Date().toISOString();
+        const preferenceResult = await supabase.from('target_extra_account_preferences').upsert({
+            user_id: req.user_id,
+            opted_in: optedIn,
+            template_profile_id: optedIn ? templateProfileId : null,
+            desired_count: desiredCount,
+            updated_at: now
+        }, { onConflict: 'user_id' });
+        if (preferenceResult.error) throw preferenceResult.error;
+
+        if (!optedIn) {
+            const releaseResult = await supabase.from('target_extra_account_assignments').update({
+                released_at: now,
+                release_reason: 'user_opted_out'
+            }).eq('user_id', req.user_id).is('released_at', null);
+            if (releaseResult.error) throw releaseResult.error;
+        } else {
+            const updateResult = await supabase.from('target_extra_account_assignments').update({
+                template_profile_id: templateProfileId
+            }).eq('user_id', req.user_id).is('released_at', null);
+            if (updateResult.error) throw updateResult.error;
+            const activeResult = await supabase.from('target_extra_account_assignments')
+                .select('id')
+                .eq('user_id', req.user_id)
+                .is('released_at', null)
+                .order('assigned_at', { ascending: true });
+            if (activeResult.error) throw activeResult.error;
+            const overflowIds = (activeResult.data || []).slice(desiredCount).map((row) => row.id);
+            if (overflowIds.length) {
+                const overflowResult = await supabase.from('target_extra_account_assignments').update({
+                    released_at: now,
+                    release_reason: 'user_reduced_requested_count'
+                }).in('id', overflowIds).is('released_at', null);
+                if (overflowResult.error) throw overflowResult.error;
+            }
+        }
+        await markProfileSyncChanged(req.user_id, ['target'], optedIn ? 'target_extra_accounts_opted_in' : 'target_extra_accounts_opted_out');
+        res.json(await loadTargetExtraUserStatus(req.user_id));
+    } catch (error) {
+        const status = isTargetExtraMigrationError(error) ? 503 : 500;
+        res.status(status).json({
+            error: status === 503
+                ? 'Target extra accounts are not ready yet. Install backend/sql/TARGET_EXTRA_ACCOUNTS.sql first.'
+                : (error.message || 'Could not save Target extra-account preference.')
+        });
+    }
+});
+
+async function loadTargetEmailsAlreadyInProfiles() {
+    const used = new Set();
+    const profilesResult = await fetchAllSupabaseRows(() => supabase
+        .from('profiles')
+        .select('id, account_type'));
+    if (profilesResult.error) throw profilesResult.error;
+    const targetProfileIds = new Set((profilesResult.data || [])
+        .filter((profile) => normalizeProfileAccountType(profile.account_type || '') === 'target')
+        .map((profile) => String(profile.id)));
+
+    const assignmentResult = await fetchAllSupabaseRows(() => supabase
+        .from('profile_store_assignments')
+        .select('profile_id, store'));
+    if (!assignmentResult.error) {
+        (assignmentResult.data || []).forEach((row) => {
+            if (normalizeProfileAccountType(row.store || '') === 'target') targetProfileIds.add(String(row.profile_id));
+        });
+    } else if (!isTargetExtraMigrationError(assignmentResult.error)) {
+        throw assignmentResult.error;
+    }
+
+    const credentialResult = await fetchAllSupabaseRows(() => supabase
+        .from('profile_store_credentials')
+        .select('profile_id, store, login_email'));
+    if (!credentialResult.error) {
+        (credentialResult.data || []).forEach((row) => {
+            if (normalizeProfileAccountType(row.store || '') === 'target') {
+                const email = normalizeTargetExtraEmail(row.login_email);
+                if (email) used.add(email);
+                targetProfileIds.add(String(row.profile_id));
+            }
+        });
+    } else if (!isTargetExtraMigrationError(credentialResult.error)) {
+        throw credentialResult.error;
+    }
+
+    const accountResult = await fetchAllSupabaseRows(() => supabase
+        .from('accounts')
+        .select('profile_id, provider, login_email'));
+    if (accountResult.error) throw accountResult.error;
+    (accountResult.data || []).forEach((row) => {
+        if (normalizeProfileAccountType(row.provider || '') === 'target' || targetProfileIds.has(String(row.profile_id))) {
+            const email = normalizeTargetExtraEmail(row.login_email);
+            if (email) used.add(email);
+        }
+    });
+
+    if (targetProfileIds.size) {
+        const addressResult = await fetchAllSupabaseRowsInBatches([...targetProfileIds], (batch) => supabase
+            .from('addresses')
+            .select('profile_id, email')
+            .in('profile_id', batch));
+        if (addressResult.error) throw addressResult.error;
+        (addressResult.data || []).forEach((row) => {
+            const email = normalizeTargetExtraEmail(row.email);
+            if (email) used.add(email);
+        });
+    }
+    return used;
+}
+
+async function loadTargetExtraAdminSnapshot() {
+    const [poolResult, preferenceResult, assignmentResult] = await Promise.all([
+        fetchAllSupabaseRows(() => supabase.from('target_extra_accounts').select('id, login_email, status, notes, created_at, updated_at').order('created_at', { ascending: false })),
+        fetchAllSupabaseRows(() => supabase.from('target_extra_account_preferences').select('user_id, opted_in, template_profile_id, desired_count, updated_at').order('updated_at', { ascending: false })),
+        fetchAllSupabaseRows(() => supabase.from('target_extra_account_assignments').select('id, account_id, user_id, template_profile_id, cycle_id, assigned_at').is('released_at', null).order('assigned_at', { ascending: true }))
+    ]);
+    const firstError = poolResult.error || preferenceResult.error || assignmentResult.error;
+    if (firstError) throw firstError;
+    const pool = poolResult.data || [];
+    const preferences = preferenceResult.data || [];
+    const assignments = assignmentResult.data || [];
+    const userIds = [...new Set([...preferences.map((row) => row.user_id), ...assignments.map((row) => row.user_id)].filter(Boolean))];
+    let userMap = new Map();
+    if (userIds.length) {
+        const userResult = await fetchAllSupabaseRowsInBatches(userIds, (batch) => supabase
+            .from('users')
+            .select('id, email, role, revoked, discord_username, discord_display_name')
+            .in('id', batch));
+        if (userResult.error) throw userResult.error;
+        userMap = new Map((userResult.data || []).map((user) => [String(user.id), user]));
+    }
+    const assignmentByAccount = new Map(assignments.map((row) => [String(row.account_id), row]));
+    const assignmentCounts = new Map();
+    assignments.forEach((row) => assignmentCounts.set(String(row.user_id), (assignmentCounts.get(String(row.user_id)) || 0) + 1));
+    const displayName = (user) => user?.discord_display_name || user?.discord_username || user?.email || 'Unknown user';
+    return {
+        maximum_per_user: MAX_EXTRA_TARGET_ACCOUNTS,
+        counts: {
+            total: pool.length,
+            available: pool.filter((row) => row.status === 'available').length,
+            assigned: assignments.length,
+            unassigned: pool.filter((row) => row.status === 'available' && !assignmentByAccount.has(String(row.id))).length,
+            opted_in_users: preferences.filter((row) => row.opted_in).length
+        },
+        accounts: pool.map((account) => {
+            const assignment = assignmentByAccount.get(String(account.id));
+            const owner = assignment ? userMap.get(String(assignment.user_id)) : null;
+            return {
+                id: account.id,
+                email: account.login_email,
+                status: account.status,
+                created_at: account.created_at,
+                assigned_user_id: assignment?.user_id || null,
+                assigned_user: owner ? displayName(owner) : null,
+                assigned_at: assignment?.assigned_at || null
+            };
+        }),
+        users: preferences.map((preference) => {
+            const user = userMap.get(String(preference.user_id));
+            return {
+                user_id: preference.user_id,
+                user_display: displayName(user),
+                user_email: user?.email || '',
+                revoked: !!user?.revoked,
+                opted_in: !!preference.opted_in,
+                desired_count: clampTargetExtraDesiredCount(preference.desired_count),
+                assigned_count: assignmentCounts.get(String(preference.user_id)) || 0,
+                template_profile_id: preference.template_profile_id || null,
+                updated_at: preference.updated_at
+            };
+        })
+    };
+}
+
+app.get('/admin/target-extra-accounts', auth, admin, async (req, res) => {
+    try {
+        const currentUser = await getCurrentUser(req);
+        if (currentUser.role !== 'super_admin') return res.status(403).json({ error: 'Super admin only' });
+        res.json(await loadTargetExtraAdminSnapshot());
+    } catch (error) {
+        const status = isTargetExtraMigrationError(error) ? 503 : 500;
+        res.status(status).json({
+            error: status === 503
+                ? 'Install backend/sql/TARGET_EXTRA_ACCOUNTS.sql before using the Target extra-account pool.'
+                : (error.message || 'Could not load Target extra accounts.')
+        });
+    }
+});
+
+app.post('/admin/target-extra-accounts/import', auth, admin, async (req, res) => {
+    try {
+        const currentUser = await getCurrentUser(req);
+        if (currentUser.role !== 'super_admin') return res.status(403).json({ error: 'Super admin only' });
+        const parsed = parseExtraTargetAccountLines(req.body?.accounts_text || '');
+        if (!parsed.valid.length && !parsed.invalid.length && !parsed.duplicateInput.length) {
+            return res.status(400).json({ error: 'Paste at least one Target account as email:password.' });
+        }
+        if (parsed.valid.length > 5000) return res.status(400).json({ error: 'Import at most 5,000 accounts at one time.' });
+
+        const poolResult = await fetchAllSupabaseRows(() => supabase.from('target_extra_accounts').select('login_email'));
+        if (poolResult.error) throw poolResult.error;
+        const existingPool = new Set((poolResult.data || []).map((row) => normalizeTargetExtraEmail(row.login_email)).filter(Boolean));
+        const existingProfiles = await loadTargetEmailsAlreadyInProfiles();
+        const duplicatePool = [];
+        const duplicateProfiles = [];
+        const accepted = [];
+        parsed.valid.forEach((account) => {
+            if (existingPool.has(account.email)) duplicatePool.push(account.email);
+            else if (existingProfiles.has(account.email)) duplicateProfiles.push(account.email);
+            else accepted.push(account);
+        });
+
+        if (accepted.length) {
+            const rows = accepted.map((account) => ({
+                login_email: account.email,
+                password_encrypted: encrypt(account.password),
+                status: 'available',
+                created_by: currentUser.id
+            }));
+            const insertResult = await supabase.from('target_extra_accounts').insert(rows);
+            if (insertResult.error) throw insertResult.error;
+        }
+        res.json({
+            inserted: accepted.length,
+            skipped_existing_pool: duplicatePool,
+            skipped_existing_target_profiles: duplicateProfiles,
+            duplicate_input: parsed.duplicateInput,
+            invalid: parsed.invalid,
+            passwords_returned: false,
+            snapshot: await loadTargetExtraAdminSnapshot()
+        });
+    } catch (error) {
+        const status = isTargetExtraMigrationError(error) ? 503 : 500;
+        res.status(status).json({ error: status === 503 ? 'Install backend/sql/TARGET_EXTRA_ACCOUNTS.sql first.' : (error.message || 'Could not import Target accounts.') });
+    }
+});
+
+app.patch('/admin/target-extra-accounts/:id/status', auth, admin, async (req, res) => {
+    try {
+        const currentUser = await getCurrentUser(req);
+        if (currentUser.role !== 'super_admin') return res.status(403).json({ error: 'Super admin only' });
+        const status = String(req.body?.status || '').trim().toLowerCase();
+        if (!['available', 'disabled'].includes(status)) return res.status(400).json({ error: 'Status must be available or disabled.' });
+        const updateResult = await supabase.from('target_extra_accounts').update({ status, updated_at: new Date().toISOString() }).eq('id', req.params.id);
+        if (updateResult.error) throw updateResult.error;
+        if (status === 'disabled') {
+            const currentResult = await supabase.from('target_extra_account_assignments').select('user_id').eq('account_id', req.params.id).is('released_at', null);
+            if (currentResult.error) throw currentResult.error;
+            const releaseResult = await supabase.from('target_extra_account_assignments').update({
+                released_at: new Date().toISOString(),
+                release_reason: 'account_disabled'
+            }).eq('account_id', req.params.id).is('released_at', null);
+            if (releaseResult.error) throw releaseResult.error;
+            await Promise.all([...(currentResult.data || [])].map((row) => markProfileSyncChanged(row.user_id, ['target'], 'target_extra_account_disabled')));
+        }
+        res.json(await loadTargetExtraAdminSnapshot());
+    } catch (error) {
+        const status = isTargetExtraMigrationError(error) ? 503 : 500;
+        res.status(status).json({ error: status === 503 ? 'Install backend/sql/TARGET_EXTRA_ACCOUNTS.sql first.' : (error.message || 'Could not update Target account.') });
+    }
+});
+
+app.post('/admin/target-extra-accounts/distribute', auth, admin, async (req, res) => {
+    try {
+        const currentUser = await getCurrentUser(req);
+        if (currentUser.role !== 'super_admin') return res.status(403).json({ error: 'Super admin only' });
+        const mode = req.body?.mode === 'new_cycle' ? 'new_cycle' : 'fill';
+        const [preferenceResult, poolResult, assignmentResult] = await Promise.all([
+            fetchAllSupabaseRows(() => supabase.from('target_extra_account_preferences').select('user_id, opted_in, template_profile_id, desired_count').eq('opted_in', true)),
+            fetchAllSupabaseRows(() => supabase.from('target_extra_accounts').select('id, login_email, status').eq('status', 'available')),
+            fetchAllSupabaseRows(() => supabase.from('target_extra_account_assignments').select('id, account_id, user_id, template_profile_id, cycle_id, assigned_at, released_at').is('released_at', null))
+        ]);
+        const firstError = preferenceResult.error || poolResult.error || assignmentResult.error;
+        if (firstError) throw firstError;
+        const preferences = preferenceResult.data || [];
+        const userIds = [...new Set(preferences.map((row) => row.user_id).filter(Boolean))];
+        const profileIds = [...new Set(preferences.map((row) => row.template_profile_id).filter(Boolean))];
+        const [userResult, profileResult] = await Promise.all([
+            userIds.length ? supabase.from('users').select('id, revoked').in('id', userIds) : Promise.resolve({ data: [], error: null }),
+            profileIds.length ? supabase.from('profiles').select('id, user_id, account_type').in('id', profileIds) : Promise.resolve({ data: [], error: null })
+        ]);
+        if (userResult.error) throw userResult.error;
+        if (profileResult.error) throw profileResult.error;
+        const validUsers = new Set((userResult.data || []).filter((user) => !user.revoked).map((user) => String(user.id)));
+        const targetProfileIds = new Set((profileResult.data || [])
+            .filter((profile) => normalizeProfileAccountType(profile.account_type || '') === 'target')
+            .map((profile) => String(profile.id)));
+        if (profileIds.length) {
+            const assignmentStoreResult = await supabase.from('profile_store_assignments').select('profile_id, store').in('profile_id', profileIds);
+            if (!assignmentStoreResult.error) {
+                (assignmentStoreResult.data || []).forEach((row) => {
+                    if (normalizeProfileAccountType(row.store || '') === 'target') targetProfileIds.add(String(row.profile_id));
+                });
+            }
+        }
+        const users = preferences.filter((preference) =>
+            validUsers.has(String(preference.user_id)) && targetProfileIds.has(String(preference.template_profile_id))
+        );
+        const eligibleUserIds = new Set(users.map((row) => String(row.user_id)));
+        const availableAccountIds = new Set((poolResult.data || []).map((row) => String(row.id)));
+        const currentAssignments = assignmentResult.data || [];
+        const staleAssignments = currentAssignments.filter((assignment) =>
+            mode === 'new_cycle' ||
+            !eligibleUserIds.has(String(assignment.user_id)) ||
+            !availableAccountIds.has(String(assignment.account_id))
+        );
+        const preservedAssignments = currentAssignments.filter((assignment) => !staleAssignments.includes(assignment));
+        const cycleId = uuidv4();
+        const plan = planEvenAssignments({
+            users: users.map((row) => ({ id: row.user_id, template_profile_id: row.template_profile_id, desired_count: row.desired_count })),
+            accounts: poolResult.data || [],
+            currentAssignments: mode === 'new_cycle' ? [] : preservedAssignments,
+            cycleId,
+            mode
+        });
+        const releases = [...staleAssignments, ...plan.release];
+        const releaseIds = [...new Set(releases.map((row) => row.id).filter(Boolean))];
+        const now = new Date().toISOString();
+        for (let index = 0; index < releaseIds.length; index += 200) {
+            const result = await supabase.from('target_extra_account_assignments').update({
+                released_at: now,
+                release_reason: mode === 'new_cycle' ? 'new_assignment_cycle' : 'distribution_rebalanced'
+            }).in('id', releaseIds.slice(index, index + 200)).is('released_at', null);
+            if (result.error) throw result.error;
+        }
+        if (plan.create.length) {
+            const insertResult = await supabase.from('target_extra_account_assignments').insert(plan.create.map((row) => ({
+                ...row,
+                assigned_at: now
+            })));
+            if (insertResult.error) throw insertResult.error;
+        }
+        const changedUserIds = [...new Set([...releases.map((row) => row.user_id), ...plan.create.map((row) => row.user_id)].filter(Boolean))];
+        await Promise.all(changedUserIds.map((userId) => markProfileSyncChanged(userId, ['target'], 'target_extra_accounts_distributed')));
+        res.json({
+            mode,
+            cycle_id: cycleId,
+            assigned: plan.create.length,
+            preserved: plan.keep.length,
+            released: releaseIds.length,
+            unassigned: plan.unassignedAccountIds.length,
+            counts_by_user: plan.counts,
+            snapshot: await loadTargetExtraAdminSnapshot()
+        });
+    } catch (error) {
+        const status = isTargetExtraMigrationError(error) ? 503 : 500;
+        res.status(status).json({ error: status === 503 ? 'Install backend/sql/TARGET_EXTRA_ACCOUNTS.sql first.' : (error.message || 'Could not distribute Target accounts.') });
     }
 });
 
@@ -11106,6 +11680,7 @@ app.get("/admin/export/count", auth, admin, async (req, res) => {
 
         let filtered = await attachAndFilterProfilesByStore(data || [], group || "");
         filtered = await filterProfilesByActiveRunStatus(filtered, group || "", activeOnly);
+        if (currentUser.role === 'super_admin') filtered = await appendAssignedTargetExtraProfiles(filtered, group || '');
         res.json({ count: filtered.length });
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -11151,6 +11726,7 @@ app.get("/admin/export/profiles-json", auth, admin, async (req, res) => {
 
         let exportProfiles = await attachAndFilterProfilesByStore(profiles || [], group || "");
         exportProfiles = await filterProfilesByActiveRunStatus(exportProfiles, group || "", activeOnly);
+        if (currentUser.role === 'super_admin') exportProfiles = await appendAssignedTargetExtraProfiles(exportProfiles, group || '');
 
         const rows = exportProfiles.map((profile) => {
             const address = profile.addresses?.[0] || {};
@@ -11441,6 +12017,7 @@ app.get("/admin/export/profiles-polar-json", auth, admin, async (req, res) => {
 
         let exportProfiles = await attachAndFilterProfilesByStore(profiles || [], group || "");
         exportProfiles = await filterProfilesByActiveRunStatus(exportProfiles, group || "", activeOnly);
+        if (currentUser.role === 'super_admin') exportProfiles = await appendAssignedTargetExtraProfiles(exportProfiles, group || '');
 
         const rows = exportProfiles.map((profile) => {
             const address = profile.addresses?.[0] || {};
@@ -11593,6 +12170,7 @@ app.get("/admin/export/profiles-stellar-json", auth, admin, async (req, res) => 
 
         let exportProfiles = await attachAndFilterProfilesByStore(profiles || [], group || "");
         exportProfiles = await filterProfilesByActiveRunStatus(exportProfiles, group || "", activeOnly);
+        if (currentUser.role === 'super_admin') exportProfiles = await appendAssignedTargetExtraProfiles(exportProfiles, group || '');
 
         const rows = buildStellarProfileRows(exportProfiles);
 
@@ -11645,6 +12223,7 @@ app.get("/admin/export/profiles-shikari-csv", auth, admin, async (req, res) => {
 
         let exportProfiles = await attachAndFilterProfilesByStore(profiles || [], group || "");
         exportProfiles = await filterProfilesByActiveRunStatus(exportProfiles, group || "", activeOnly);
+        if (currentUser.role === 'super_admin') exportProfiles = await appendAssignedTargetExtraProfiles(exportProfiles, group || '');
 
         const headers = [
             "profile_name", "first_name", "last_name", "email", "phone_num",
@@ -11754,6 +12333,7 @@ app.get("/admin/export/accounts-txt", auth, admin, async (req, res) => {
 
         let exportProfiles = await attachAndFilterProfilesByStore(profiles || [], group || "");
         exportProfiles = await filterProfilesByActiveRunStatus(exportProfiles, group || "", activeOnly);
+        if (currentUser.role === 'super_admin') exportProfiles = await appendAssignedTargetExtraProfiles(exportProfiles, group || '');
 
         const rows = exportProfiles.map((profile) => {
             const account = accountForExport(profile, group || profile.account_type);
