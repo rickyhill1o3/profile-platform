@@ -6281,38 +6281,23 @@ async function initAdminStoreRunStatus() {
 async function loadTargetExtraAccountStatus() {
     const panel = document.getElementById('targetExtraAccountsPanel');
     const optIn = document.getElementById('targetExtraAccountsOptIn');
-    const profileSelect = document.getElementById('targetExtraTemplateProfile');
-    const desiredCount = document.getElementById('targetExtraDesiredCount');
     const saveButton = document.getElementById('saveTargetExtraAccountsPreference');
     const message = document.getElementById('targetExtraAccountsMessage');
     const assigned = document.getElementById('targetExtraAccountsAssigned');
-    if (!panel || !optIn || !profileSelect || !desiredCount || !saveButton || !message || !assigned) return;
+    if (!panel || !optIn || !saveButton || !message || !assigned) return;
 
-    const applyEnabledState = () => {
-        profileSelect.disabled = !optIn.checked;
-        desiredCount.disabled = !optIn.checked;
-    };
     if (!optIn.dataset.targetExtraBound) {
         optIn.dataset.targetExtraBound = '1';
-        optIn.addEventListener('change', applyEnabledState);
         saveButton.addEventListener('click', async () => {
-            if (optIn.checked && !profileSelect.value) {
-                alert('Choose the Target profile whose shipping and payment information should be copied.');
-                return;
-            }
             saveButton.disabled = true;
             message.textContent = 'Saving your preference...';
             try {
                 await authJSON(API + '/target-extra-accounts/preference', {
                     method: 'PUT',
-                    body: JSON.stringify({
-                        opted_in: optIn.checked,
-                        template_profile_id: profileSelect.value,
-                        desired_count: Number(desiredCount.value || 10)
-                    })
+                    body: JSON.stringify({ opted_in: optIn.checked })
                 });
                 message.textContent = optIn.checked
-                    ? 'Saved. Your super admin can now fill your open Target account spots.'
+                    ? 'Saved. You will be included in the next admin distribution round, and your share will be balanced across all of your Target addresses.'
                     : 'You are opted out. Your extra Target account assignments were released.';
                 await loadTargetExtraAccountStatus();
             } catch (error) {
@@ -6327,19 +6312,13 @@ async function loadTargetExtraAccountStatus() {
         message.textContent = 'Loading extra Target account status...';
         const data = await authJSON(API + '/target-extra-accounts/status');
         const profiles = Array.isArray(data.target_profiles) ? data.target_profiles : [];
-        profileSelect.innerHTML = '<option value="">Choose a Target profile</option>' + profiles.map((profile) =>
-            `<option value="${escapeHTML(profile.id)}">${escapeHTML(profile.profile_name || 'Target profile')}${profile.email ? ` — ${escapeHTML(profile.email)}` : ''}</option>`
-        ).join('');
         optIn.checked = !!data.opted_in;
-        profileSelect.value = data.template_profile_id || '';
-        desiredCount.value = String(data.desired_count || 10);
-        applyEnabledState();
         const assignments = Array.isArray(data.assignments) ? data.assignments.filter((row) => row.status === 'available') : [];
         if (assignments.length) {
             assigned.innerHTML = assignments.map((row, index) => `
                 <div class="target-extra-assignment-list__item">
                     <strong>${index + 1}. ${escapeHTML(row.email || 'Assigned Target account')}</strong>
-                    <span>Target access assigned</span>
+                    <span>${escapeHTML(row.profile_name || 'Target profile')} · ${escapeHTML(row.address_label || 'Saved Target address')}</span>
                 </div>
             `).join('');
         } else {
@@ -6350,7 +6329,8 @@ async function loadTargetExtraAccountStatus() {
             optIn.disabled = true;
             saveButton.disabled = true;
         } else if (data.opted_in) {
-            message.textContent = `${Number(data.assigned_count || 0)} of up to ${Number(data.desired_count || 10)} extra Target accounts are assigned.`;
+            const addressCount = Number(data.address_count || 0);
+            message.textContent = `${Number(data.assigned_count || 0)} extra Target account${Number(data.assigned_count || 0) === 1 ? '' : 's'} assigned across ${addressCount} saved Target address${addressCount === 1 ? '' : 'es'}.`;
         } else {
             message.textContent = 'You are not currently opted in.';
         }
@@ -6389,9 +6369,10 @@ async function initTargetExtraAccountsAdmin() {
         ].map(([label, value]) => `<div class="stat-card"><span class="stat-label">${escapeHTML(label)}</span><strong class="stat-value">${Number(value)}</strong></div>`).join('');
 
         const users = Array.isArray(data?.users) ? data.users : [];
-        usersPanel.innerHTML = users.length ? `<table class="admin-table"><thead><tr><th>User</th><th>Opted In</th><th>Assigned</th><th>Requested</th><th>Template Profile</th></tr></thead><tbody>${users.map((user) => `
+        usersPanel.innerHTML = users.length ? `<table class="admin-table"><thead><tr><th>User</th><th>Opted In</th><th>Assigned</th><th>Target Addresses</th><th>Address Distribution</th></tr></thead><tbody>${users.map((user) => `
             <tr><td>${escapeHTML(user.user_display || user.user_email || 'User')}</td><td>${user.opted_in ? 'Yes' : 'No'}</td>
-            <td>${Number(user.assigned_count || 0)}</td><td>${Number(user.desired_count || 10)}</td><td><code>${escapeHTML(user.template_profile_id || '—')}</code></td></tr>
+            <td>${Number(user.assigned_count || 0)}</td><td>${Number(user.target_address_count || 0)} (${Number(user.target_profile_count || 0)} profiles)</td>
+            <td>${(Array.isArray(user.assigned_by_address) ? user.assigned_by_address : []).map((row) => `${Number(row.assigned_count || 0)} × ${escapeHTML(row.address_label || 'Saved Target address')}`).join('<br>') || '—'}</td></tr>
         `).join('')}</tbody></table>` : '<div class="empty-card"><p>No users have saved an extra Target account preference.</p></div>';
 
         const accounts = Array.isArray(data?.accounts) ? data.accounts : [];

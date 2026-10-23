@@ -50,10 +50,29 @@ function stableRotation(value, length) {
   return Math.abs(hash) % length;
 }
 
+function normalizeDistributionProfiles(user = {}) {
+  const source = Array.isArray(user.profiles)
+    ? user.profiles
+    : (Array.isArray(user.profile_ids) ? user.profile_ids.map((id) => ({ id })) : []);
+  const seen = new Set();
+  return source
+    .map((profile) => ({
+      id: String(profile?.id || '').trim(),
+      address_key: String(profile?.address_key || profile?.id || '').trim()
+    }))
+    .filter((profile) => {
+      if (!profile.id || seen.has(profile.id)) return false;
+      seen.add(profile.id);
+      return true;
+    })
+    .sort((left, right) => left.id.localeCompare(right.id));
+}
+
 function planEvenAssignments({ users = [], accounts = [], currentAssignments = [], cycleId = '', mode = 'fill' } = {}) {
   const eligibleUsers = (Array.isArray(users) ? users : [])
-    .filter((user) => user && user.id && user.template_profile_id)
-    .map((user) => ({ ...user, desired_count: clampDesiredCount(user.desired_count) }))
+    .filter((user) => user && user.id)
+    .map((user) => ({ ...user, profiles: normalizeDistributionProfiles(user) }))
+    .filter((user) => user.profiles.length)
     .sort((left, right) => String(left.id).localeCompare(String(right.id)));
   const enabledAccounts = (Array.isArray(accounts) ? accounts : [])
     .filter((account) => account && account.id && String(account.status || 'available') === 'available')
@@ -61,27 +80,46 @@ function planEvenAssignments({ users = [], accounts = [], currentAssignments = [
   const eligibleIds = new Set(eligibleUsers.map((user) => String(user.id)));
   const accountIds = new Set(enabledAccounts.map((account) => String(account.id)));
   const userById = new Map(eligibleUsers.map((user) => [String(user.id), user]));
-
-  const preserved = mode === 'new_cycle' ? [] : (Array.isArray(currentAssignments) ? currentAssignments : [])
-    .filter((assignment) => assignment && !assignment.released_at)
-    .filter((assignment) => eligibleIds.has(String(assignment.user_id)) && accountIds.has(String(assignment.account_id)));
+  const validProfilesByUser = new Map(eligibleUsers.map((user) => [
+    String(user.id),
+    new Set(user.profiles.map((profile) => profile.id))
+  ]));
+  const profileById = new Map(eligibleUsers.flatMap((user) => user.profiles.map((profile) => [profile.id, profile])));
+  const activeAssignments = (Array.isArray(currentAssignments) ? currentAssignments : [])
+    .filter((assignment) => assignment && !assignment.released_at);
 
   const counts = new Map(eligibleUsers.map((user) => [String(user.id), 0]));
+  const profileCounts = new Map(eligibleUsers.flatMap((user) => user.profiles.map((profile) => [profile.id, 0])));
+  const addressCounts = new Map(eligibleUsers.flatMap((user) => [
+    ...new Set(user.profiles.map((profile) => profile.address_key))
+  ].map((addressKey) => [`${user.id}:${addressKey}`, 0])));
   const kept = [];
   const release = [];
   const preservedAccountIds = new Set();
-  const sortedPreserved = [...preserved].sort((left, right) => String(left.assigned_at || '').localeCompare(String(right.assigned_at || '')));
+  const sortedPreserved = [...activeAssignments].sort((left, right) => String(left.assigned_at || '').localeCompare(String(right.assigned_at || '')));
   sortedPreserved.forEach((assignment) => {
     const userId = String(assignment.user_id);
+    const profileId = String(assignment.template_profile_id || '');
+    const accountId = String(assignment.account_id || '');
     const user = userById.get(userId);
-    const currentCount = counts.get(userId) || 0;
-    if (!user || currentCount >= user.desired_count || preservedAccountIds.has(String(assignment.account_id))) {
+    const profile = profileById.get(profileId);
+    const isValid = mode !== 'new_cycle'
+      && user
+      && eligibleIds.has(userId)
+      && accountIds.has(accountId)
+      && validProfilesByUser.get(userId)?.has(profileId)
+      && profile
+      && !preservedAccountIds.has(accountId);
+    if (!isValid) {
       release.push(assignment);
       return;
     }
     kept.push(assignment);
-    counts.set(userId, currentCount + 1);
-    preservedAccountIds.add(String(assignment.account_id));
+    counts.set(userId, (counts.get(userId) || 0) + 1);
+    profileCounts.set(profileId, (profileCounts.get(profileId) || 0) + 1);
+    const addressCountKey = `${userId}:${profile.address_key}`;
+    addressCounts.set(addressCountKey, (addressCounts.get(addressCountKey) || 0) + 1);
+    preservedAccountIds.add(accountId);
   });
 
   const available = enabledAccounts.filter((account) => !preservedAccountIds.has(String(account.id)));
@@ -93,7 +131,7 @@ function planEvenAssignments({ users = [], accounts = [], currentAssignments = [
   const create = [];
 
   available.forEach((account) => {
-    const candidates = eligibleUsers.filter((user) => (counts.get(String(user.id)) || 0) < user.desired_count);
+    const candidates = [...eligibleUsers];
     if (!candidates.length) return;
     candidates.sort((left, right) => {
       const countDifference = (counts.get(String(left.id)) || 0) - (counts.get(String(right.id)) || 0);
@@ -102,13 +140,42 @@ function planEvenAssignments({ users = [], accounts = [], currentAssignments = [
     });
     const user = candidates[0];
     const userId = String(user.id);
+    const addressGroups = new Map();
+    user.profiles.forEach((profile) => {
+      if (!addressGroups.has(profile.address_key)) addressGroups.set(profile.address_key, []);
+      addressGroups.get(profile.address_key).push(profile);
+    });
+    const addressRotation = stableRotation(`${cycleId}:${userId}:address`, addressGroups.size);
+    const addresses = [...addressGroups.keys()].sort();
+    const rotatedAddresses = addresses.slice(addressRotation).concat(addresses.slice(0, addressRotation));
+    const addressRank = new Map(rotatedAddresses.map((addressKey, index) => [addressKey, index]));
+    rotatedAddresses.sort((left, right) => {
+      const countDifference = (addressCounts.get(`${userId}:${left}`) || 0) - (addressCounts.get(`${userId}:${right}`) || 0);
+      if (countDifference) return countDifference;
+      return (addressRank.get(left) || 0) - (addressRank.get(right) || 0);
+    });
+    const addressKey = rotatedAddresses[0];
+    const profileCandidates = [...(addressGroups.get(addressKey) || [])];
+    const profileRotation = stableRotation(`${cycleId}:${userId}:${addressKey}:profile`, profileCandidates.length);
+    const rotatedProfiles = profileCandidates.slice(profileRotation).concat(profileCandidates.slice(0, profileRotation));
+    const profileRank = new Map(rotatedProfiles.map((profile, index) => [profile.id, index]));
+    rotatedProfiles.sort((left, right) => {
+      const countDifference = (profileCounts.get(left.id) || 0) - (profileCounts.get(right.id) || 0);
+      if (countDifference) return countDifference;
+      return (profileRank.get(left.id) || 0) - (profileRank.get(right.id) || 0);
+    });
+    const profile = rotatedProfiles[0];
+    if (!profile) return;
     create.push({
       account_id: account.id,
       user_id: user.id,
-      template_profile_id: user.template_profile_id,
+      template_profile_id: profile.id,
       cycle_id: cycleId
     });
     counts.set(userId, (counts.get(userId) || 0) + 1);
+    profileCounts.set(profile.id, (profileCounts.get(profile.id) || 0) + 1);
+    const addressCountKey = `${userId}:${addressKey}`;
+    addressCounts.set(addressCountKey, (addressCounts.get(addressCountKey) || 0) + 1);
   });
 
   return {
@@ -118,7 +185,9 @@ function planEvenAssignments({ users = [], accounts = [], currentAssignments = [
     unassignedAccountIds: available
       .filter((account) => !create.some((assignment) => String(assignment.account_id) === String(account.id)))
       .map((account) => account.id),
-    counts: Object.fromEntries([...counts.entries()])
+    counts: Object.fromEntries([...counts.entries()]),
+    profile_counts: Object.fromEntries([...profileCounts.entries()]),
+    address_counts: Object.fromEntries([...addressCounts.entries()])
   };
 }
 

@@ -5,7 +5,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Admin Panel</title>
-  <link rel="stylesheet" href="styles.css?v=20261017-target-extra-accounts" />
+  <link rel="stylesheet" href="styles.css?v=20261022-target-extra-address-balance" />
 </head>
 
 <body class="app-page">
@@ -614,7 +614,7 @@ placeholder="Enter one SKU per line&#10;12345678&#10;87654321"></textarea>
             <div class="panel-header">
               <div>
                 <h2>Target Extra Account Pool</h2>
-                <p class="subtle-text">Import super-admin-owned Target logins and assign them evenly to opted-in users, up to 10 per user.</p>
+                <p class="subtle-text">Import super-admin-owned Target logins and divide the full enabled pool evenly among opted-in users. Each user's share is then balanced across all of their Target addresses.</p>
               </div>
               <div class="panel-actions"><button class="btn" type="button" id="refreshTargetExtraAccountsAdmin">Refresh</button></div>
             </div>
@@ -635,7 +635,7 @@ placeholder="Enter one SKU per line&#10;12345678&#10;87654321"></textarea>
             <div id="targetExtraAccountsStats" class="stats-grid stats-grid--compact"></div>
           </section>
           <section class="panel">
-            <div class="panel-header"><div><h2>Opted-in Users</h2><p class="subtle-text">Current fair-distribution totals. New accounts can be added and then assigned with Fill Open Spots.</p></div></div>
+            <div class="panel-header"><div><h2>Opted-in Users</h2><p class="subtle-text">Current user and address distribution. New accounts can be added and then assigned with Fill Open Spots.</p></div></div>
             <div id="targetExtraAccountsUsers" class="table-wrap table-wrap--admin-scroll"></div>
           </section>
           <section class="panel">
@@ -1164,7 +1164,7 @@ placeholder="Enter one SKU per line&#10;12345678&#10;87654321"></textarea>
     </div>
   </div>
   <script src="profile-sync-state.js?v=20260918-profile-sync-display"></script>
-  <script src="script.js?v=20261017-target-extra-accounts"></script>
+  <script src="script.js?v=20261022-target-extra-address-balance"></script>
   <script src="products.js?v=20260930-pokemon-sku-groups"></script>
 
 

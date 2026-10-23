@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>User Dashboard</title>
-  <link rel="stylesheet" href="styles.css?v=20261017-target-extra-accounts" />
+  <link rel="stylesheet" href="styles.css?v=20261022-target-extra-address-balance" />
 </head>
 <body class="app-page">
   <div class="app-shell">
@@ -143,7 +143,7 @@
             <div class="panel-header">
               <div>
                 <h2>Extra Target Accounts</h2>
-                <p class="subtle-text">Opt in to receive up to 10 extra Target checkout accounts. Your saved shipping and payment profile is copied for these Target-only exports.</p>
+                <p class="subtle-text">Opt in to share the available extra Target account pool. Accounts are divided evenly among opted-in users, then balanced across all of your saved Target shipping and payment profiles.</p>
               </div>
             </div>
             <div class="banner banner-soft">
@@ -156,20 +156,12 @@
                 <span>Participation</span>
                 <span><input type="checkbox" id="targetExtraAccountsOptIn" /> I want extra Target accounts</span>
               </label>
-              <div class="field">
-                <label for="targetExtraTemplateProfile">Target profile to copy</label>
-                <select class="input" id="targetExtraTemplateProfile"><option value="">Choose a Target profile</option></select>
-              </div>
-              <div class="field">
-                <label for="targetExtraDesiredCount">Extra accounts requested</label>
-                <select class="input" id="targetExtraDesiredCount">
-                  <option value="10">Up to 10</option><option value="9">Up to 9</option><option value="8">Up to 8</option>
-                  <option value="7">Up to 7</option><option value="6">Up to 6</option><option value="5">Up to 5</option>
-                  <option value="4">Up to 4</option><option value="3">Up to 3</option><option value="2">Up to 2</option><option value="1">Up to 1</option>
-                </select>
-              </div>
             </div>
-            <div class="panel-actions"><button class="btn btn-primary" type="button" id="saveTargetExtraAccountsPreference">Save Extra Account Preference</button></div>
+            <div class="banner banner-soft">
+              <strong>Automatic address balancing</strong>
+              <p class="subtle-text">You do not need to choose one profile. Every saved Target profile is eligible, and your assigned extra accounts are spread as evenly as possible across your distinct shipping addresses.</p>
+            </div>
+            <div class="panel-actions"><button class="btn btn-primary" type="button" id="saveTargetExtraAccountsPreference">Save Participation</button></div>
             <div id="targetExtraAccountsMessage" class="subtle-text"></div>
             <div id="targetExtraAccountsAssigned" class="target-extra-assignment-list"></div>
           </section>
@@ -596,6 +588,6 @@
     </section>
   </div>
 
-  <script src="script.js?v=20261017-target-extra-accounts" defer></script>
+  <script src="script.js?v=20261022-target-extra-address-balance" defer></script>
 </body>
 </html>

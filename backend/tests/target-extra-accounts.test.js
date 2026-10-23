@@ -23,21 +23,41 @@ assert.strictEqual(parsed.duplicateInput.length, 1);
 assert.strictEqual(parsed.invalid.length, 1);
 
 const users = [
-  { id: 'user-a', template_profile_id: 'profile-a', desired_count: 10 },
-  { id: 'user-b', template_profile_id: 'profile-b', desired_count: 10 },
-  { id: 'user-c', template_profile_id: 'profile-c', desired_count: 2 }
+  { id: 'user-a', profiles: [{ id: 'profile-a1', address_key: 'address-a1' }, { id: 'profile-a2', address_key: 'address-a2' }] },
+  { id: 'user-b', profiles: [{ id: 'profile-b1', address_key: 'address-b1' }, { id: 'profile-b2', address_key: 'address-b2' }] },
+  { id: 'user-c', profiles: [{ id: 'profile-c1', address_key: 'address-c1' }, { id: 'profile-c2', address_key: 'address-c2' }] }
 ];
-const accounts = Array.from({ length: 10 }, (_, index) => ({ id: `account-${index}`, login_email: `account${index}@example.com`, status: 'available' }));
+const accounts = Array.from({ length: 12 }, (_, index) => ({ id: `account-${index}`, login_email: `account${index}@example.com`, status: 'available' }));
 const fairPlan = planEvenAssignments({ users, accounts, cycleId: 'fixed-cycle', mode: 'new_cycle' });
-assert.strictEqual(fairPlan.create.length, 10);
-assert.ok(Object.values(fairPlan.counts).every((count) => count <= 10));
-assert.strictEqual(fairPlan.counts['user-c'], 2);
-assert.ok(Math.abs(fairPlan.counts['user-a'] - fairPlan.counts['user-b']) <= 1, 'uncapped opted-in users should receive an even allocation');
+assert.strictEqual(fairPlan.create.length, 12);
+assert.deepStrictEqual(Object.values(fairPlan.counts).sort(), [4, 4, 4], 'the full pool should be divided evenly across opted-in users');
+for (const user of users) {
+  const perProfile = user.profiles.map((profile) => fairPlan.profile_counts[profile.id] || 0);
+  assert.ok(Math.max(...perProfile) - Math.min(...perProfile) <= 1, 'each user assignment should be balanced across saved Target addresses');
+}
+
+const uncappedAccounts = Array.from({ length: 14 }, (_, index) => ({ id: `solo-${index}`, login_email: `solo${index}@example.com`, status: 'available' }));
+const uncappedPlan = planEvenAssignments({ users: [users[0]], accounts: uncappedAccounts, cycleId: 'uncapped-cycle', mode: 'new_cycle' });
+assert.strictEqual(uncappedPlan.create.length, 14, 'all enabled accounts should be assigned even when one user receives more than the old ten-account cap');
+
+const groupedAddressPlan = planEvenAssignments({
+  users: [{ id: 'grouped-user', profiles: [
+    { id: 'grouped-1', address_key: 'physical-address-1' },
+    { id: 'grouped-2', address_key: 'physical-address-1' },
+    { id: 'grouped-3', address_key: 'physical-address-2' }
+  ] }],
+  accounts: accounts.slice(0, 8),
+  cycleId: 'grouped-address-cycle',
+  mode: 'new_cycle'
+});
+assert.strictEqual(groupedAddressPlan.address_counts['grouped-user:physical-address-1'], 4);
+assert.strictEqual(groupedAddressPlan.address_counts['grouped-user:physical-address-2'], 4);
+assert.ok(Math.abs(groupedAddressPlan.profile_counts['grouped-1'] - groupedAddressPlan.profile_counts['grouped-2']) <= 1, 'profiles sharing one address should rotate within that address share');
 
 const fillPlan = planEvenAssignments({
   users: users.slice(0, 2),
   accounts: accounts.slice(0, 5),
-  currentAssignments: [{ id: 'old', account_id: 'account-0', user_id: 'user-a', template_profile_id: 'profile-a', assigned_at: '2026-10-01T00:00:00Z', released_at: null }],
+  currentAssignments: [{ id: 'old', account_id: 'account-0', user_id: 'user-a', template_profile_id: 'profile-a1', assigned_at: '2026-10-01T00:00:00Z', released_at: null }],
   cycleId: 'fill-cycle',
   mode: 'fill'
 });
@@ -80,7 +100,10 @@ assert.match(server, /appendAssignedTargetExtraProfiles/);
 const imapRoute = server.slice(server.indexOf('app.get("/admin/export/gmail-imap-txt"'), server.indexOf('/* ================= SUPER ADMIN BOOTSTRAP'));
 assert.doesNotMatch(imapRoute, /appendAssignedTargetExtraProfiles/, 'extra Target logins must never be exported as IMAP credentials');
 assert.match(dashboard, /id="targetExtraAccountsOptIn"/);
+assert.doesNotMatch(dashboard, /id="targetExtraTemplateProfile"/, 'members should not have to choose one Target profile');
+assert.doesNotMatch(dashboard, /id="targetExtraDesiredCount"/, 'members should not choose an account quantity');
 assert.match(admin, /data-admin-nav="target-extra-accounts"/);
+assert.match(script, /assigned across[\s\S]*saved Target address/);
 assert.match(script, /Start a new assignment round/);
 assert.match(migration, /where released_at is null/i);
 assert.match(migration, /enable row level security/i);

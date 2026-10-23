@@ -113,7 +113,6 @@ const {
     MAX_EXTRA_TARGET_ACCOUNTS,
     normalizeEmail: normalizeTargetExtraEmail,
     parseExtraTargetAccountLines,
-    clampDesiredCount: clampTargetExtraDesiredCount,
     planEvenAssignments,
     buildSyntheticTargetProfile
 } = require("./target-extra-accounts");
@@ -8740,14 +8739,69 @@ app.get("/profile-sync-status", auth, async (req, res) => {
     }
 });
 
+function formatTargetExtraAddress(address = {}) {
+    const street = [address.address1, address.address2].map((value) => cleanFieldValue(value || '')).filter(Boolean).join(', ');
+    const locality = [address.city, address.state, address.zip].map((value) => cleanFieldValue(value || '')).filter(Boolean).join(', ');
+    return [street, locality].filter(Boolean).join(' · ') || 'Address not completed';
+}
+
+async function loadTargetExtraDistributionProfiles(userIds = []) {
+    const ids = [...new Set((Array.isArray(userIds) ? userIds : [userIds]).filter(Boolean).map(String))];
+    const empty = { profiles: [], profilesById: new Map(), profilesByUser: new Map() };
+    if (!ids.length) return empty;
+
+    const profileResult = await fetchAllSupabaseRowsInBatches(ids, (batch) => supabase
+        .from('profiles')
+        .select('id, user_id, profile_name, account_type, addresses(address1, address2, city, state, zip, email)')
+        .in('user_id', batch));
+    if (profileResult.error) throw profileResult.error;
+    const rawProfiles = profileResult.data || [];
+    const storesByProfile = new Map(rawProfiles.map((profile) => [
+        String(profile.id),
+        new Set([normalizeProfileAccountType(profile.account_type || 'general')])
+    ]));
+
+    const assignmentResult = await fetchAllSupabaseRowsInBatches(ids, (batch) => supabase
+        .from('profile_store_assignments')
+        .select('profile_id, user_id, store')
+        .in('user_id', batch));
+    if (!assignmentResult.error) {
+        (assignmentResult.data || []).forEach((row) => {
+            const profileId = String(row.profile_id || '');
+            if (!storesByProfile.has(profileId)) storesByProfile.set(profileId, new Set());
+            storesByProfile.get(profileId).add(normalizeProfileAccountType(row.store || ''));
+        });
+    }
+
+    const profiles = rawProfiles
+        .filter((profile) => storesByProfile.get(String(profile.id))?.has('target'))
+        .map((profile) => {
+            const address = profile.addresses?.[0] || {};
+            const rawAddressKey = targetPhysicalAddressKey(address);
+            const addressKey = rawAddressKey.replace(/\|/g, '') ? rawAddressKey : `profile:${profile.id}`;
+            return {
+                id: profile.id,
+                user_id: profile.user_id,
+                profile_name: profile.profile_name || 'Target profile',
+                email: address.email || '',
+                address_key: addressKey,
+                address_label: formatTargetExtraAddress(address)
+            };
+        })
+        .sort((left, right) => String(left.id).localeCompare(String(right.id)));
+    const profilesById = new Map(profiles.map((profile) => [String(profile.id), profile]));
+    const profilesByUser = new Map();
+    profiles.forEach((profile) => {
+        const userId = String(profile.user_id);
+        if (!profilesByUser.has(userId)) profilesByUser.set(userId, []);
+        profilesByUser.get(userId).push(profile);
+    });
+    return { profiles, profilesById, profilesByUser };
+}
+
 async function loadTargetExtraUserStatus(userId) {
-    const targetProfiles = (await getUserProfilesWithRelations(userId))
-        .filter((profile) => profileAssignedStores(profile).includes('target'))
-        .map((profile) => ({
-            id: profile.id,
-            profile_name: profile.profile_name || 'Target profile',
-            email: profile.store_credentials?.target?.login_email || profile.addresses?.[0]?.email || ''
-        }));
+    const distributionProfiles = await loadTargetExtraDistributionProfiles([userId]);
+    const targetProfiles = distributionProfiles.profilesByUser.get(String(userId)) || [];
     const preferenceResult = await supabase
         .from('target_extra_account_preferences')
         .select('user_id, opted_in, template_profile_id, desired_count, updated_at')
@@ -8774,20 +8828,23 @@ async function loadTargetExtraUserStatus(userId) {
         accountMap = new Map((accountResult.data || []).map((row) => [String(row.id), row]));
     }
     const preference = preferenceResult.data || {};
-    const visibleAssignments = assignments.map((assignment) => ({
-        id: assignment.id,
-        email: accountMap.get(String(assignment.account_id))?.login_email || '',
-        status: accountMap.get(String(assignment.account_id))?.status || 'unavailable',
-        template_profile_id: assignment.template_profile_id,
-        cycle_id: assignment.cycle_id,
-        assigned_at: assignment.assigned_at
-    }));
+    const visibleAssignments = assignments.map((assignment) => {
+        const profile = distributionProfiles.profilesById.get(String(assignment.template_profile_id));
+        return {
+            id: assignment.id,
+            email: accountMap.get(String(assignment.account_id))?.login_email || '',
+            status: accountMap.get(String(assignment.account_id))?.status || 'unavailable',
+            template_profile_id: assignment.template_profile_id,
+            profile_name: profile?.profile_name || 'Target profile',
+            address_label: profile?.address_label || 'Saved Target address',
+            cycle_id: assignment.cycle_id,
+            assigned_at: assignment.assigned_at
+        };
+    });
     return {
         opted_in: !!preference.opted_in,
-        template_profile_id: preference.template_profile_id || '',
-        desired_count: clampTargetExtraDesiredCount(preference.desired_count),
-        maximum_count: MAX_EXTRA_TARGET_ACCOUNTS,
         target_profiles: targetProfiles,
+        address_count: new Set(targetProfiles.map((profile) => profile.address_key)).size,
         assignments: visibleAssignments,
         assigned_count: visibleAssignments.filter((row) => row.status === 'available').length,
         passwords_shared_with_user: false
@@ -8812,20 +8869,18 @@ app.put('/target-extra-accounts/preference', auth, async (req, res) => {
     try {
         await ensureUserNotRevoked(req.user_id);
         const optedIn = !!req.body?.opted_in;
-        const templateProfileId = String(req.body?.template_profile_id || '').trim();
-        const desiredCount = clampTargetExtraDesiredCount(req.body?.desired_count);
-        const targetProfiles = (await getUserProfilesWithRelations(req.user_id))
-            .filter((profile) => profileAssignedStores(profile).includes('target'));
-        if (optedIn && !targetProfiles.some((profile) => String(profile.id) === templateProfileId)) {
-            return res.status(400).json({ error: 'Choose one of your Target profiles to copy for the extra accounts.' });
+        const distributionProfiles = await loadTargetExtraDistributionProfiles([req.user_id]);
+        const targetProfiles = distributionProfiles.profilesByUser.get(String(req.user_id)) || [];
+        if (optedIn && !targetProfiles.length) {
+            return res.status(400).json({ error: 'Create or assign at least one Target profile before opting in.' });
         }
 
         const now = new Date().toISOString();
         const preferenceResult = await supabase.from('target_extra_account_preferences').upsert({
             user_id: req.user_id,
             opted_in: optedIn,
-            template_profile_id: optedIn ? templateProfileId : null,
-            desired_count: desiredCount,
+            template_profile_id: null,
+            desired_count: MAX_EXTRA_TARGET_ACCOUNTS,
             updated_at: now
         }, { onConflict: 'user_id' });
         if (preferenceResult.error) throw preferenceResult.error;
@@ -8836,25 +8891,6 @@ app.put('/target-extra-accounts/preference', auth, async (req, res) => {
                 release_reason: 'user_opted_out'
             }).eq('user_id', req.user_id).is('released_at', null);
             if (releaseResult.error) throw releaseResult.error;
-        } else {
-            const updateResult = await supabase.from('target_extra_account_assignments').update({
-                template_profile_id: templateProfileId
-            }).eq('user_id', req.user_id).is('released_at', null);
-            if (updateResult.error) throw updateResult.error;
-            const activeResult = await supabase.from('target_extra_account_assignments')
-                .select('id')
-                .eq('user_id', req.user_id)
-                .is('released_at', null)
-                .order('assigned_at', { ascending: true });
-            if (activeResult.error) throw activeResult.error;
-            const overflowIds = (activeResult.data || []).slice(desiredCount).map((row) => row.id);
-            if (overflowIds.length) {
-                const overflowResult = await supabase.from('target_extra_account_assignments').update({
-                    released_at: now,
-                    release_reason: 'user_reduced_requested_count'
-                }).in('id', overflowIds).is('released_at', null);
-                if (overflowResult.error) throw overflowResult.error;
-            }
         }
         await markProfileSyncChanged(req.user_id, ['target'], optedIn ? 'target_extra_accounts_opted_in' : 'target_extra_accounts_opted_out');
         res.json(await loadTargetExtraUserStatus(req.user_id));
@@ -8950,12 +8986,12 @@ async function loadTargetExtraAdminSnapshot() {
         if (userResult.error) throw userResult.error;
         userMap = new Map((userResult.data || []).map((user) => [String(user.id), user]));
     }
+    const distributionProfiles = await loadTargetExtraDistributionProfiles(userIds);
     const assignmentByAccount = new Map(assignments.map((row) => [String(row.account_id), row]));
     const assignmentCounts = new Map();
     assignments.forEach((row) => assignmentCounts.set(String(row.user_id), (assignmentCounts.get(String(row.user_id)) || 0) + 1));
     const displayName = (user) => user?.discord_display_name || user?.discord_username || user?.email || 'Unknown user';
     return {
-        maximum_per_user: MAX_EXTRA_TARGET_ACCOUNTS,
         counts: {
             total: pool.length,
             available: pool.filter((row) => row.status === 'available').length,
@@ -8978,15 +9014,34 @@ async function loadTargetExtraAdminSnapshot() {
         }),
         users: preferences.map((preference) => {
             const user = userMap.get(String(preference.user_id));
+            const profiles = distributionProfiles.profilesByUser.get(String(preference.user_id)) || [];
+            const addressKeys = [...new Set(profiles.map((profile) => profile.address_key))];
+            const assignedByAddress = new Map(addressKeys.map((key) => [key, {
+                address_key: key,
+                address_label: profiles.find((profile) => profile.address_key === key)?.address_label || 'Saved Target address',
+                assigned_count: 0
+            }]));
+            assignments.filter((assignment) => String(assignment.user_id) === String(preference.user_id)).forEach((assignment) => {
+                const profile = distributionProfiles.profilesById.get(String(assignment.template_profile_id));
+                if (!profile) return;
+                const current = assignedByAddress.get(profile.address_key) || {
+                    address_key: profile.address_key,
+                    address_label: profile.address_label,
+                    assigned_count: 0
+                };
+                current.assigned_count += 1;
+                assignedByAddress.set(profile.address_key, current);
+            });
             return {
                 user_id: preference.user_id,
                 user_display: displayName(user),
                 user_email: user?.email || '',
                 revoked: !!user?.revoked,
                 opted_in: !!preference.opted_in,
-                desired_count: clampTargetExtraDesiredCount(preference.desired_count),
                 assigned_count: assignmentCounts.get(String(preference.user_id)) || 0,
-                template_profile_id: preference.template_profile_id || null,
+                target_profile_count: profiles.length,
+                target_address_count: addressKeys.length,
+                assigned_by_address: [...assignedByAddress.values()],
                 updated_at: preference.updated_at
             };
         })
@@ -9087,7 +9142,7 @@ app.post('/admin/target-extra-accounts/distribute', auth, admin, async (req, res
         if (currentUser.role !== 'super_admin') return res.status(403).json({ error: 'Super admin only' });
         const mode = req.body?.mode === 'new_cycle' ? 'new_cycle' : 'fill';
         const [preferenceResult, poolResult, assignmentResult] = await Promise.all([
-            fetchAllSupabaseRows(() => supabase.from('target_extra_account_preferences').select('user_id, opted_in, template_profile_id, desired_count').eq('opted_in', true)),
+            fetchAllSupabaseRows(() => supabase.from('target_extra_account_preferences').select('user_id, opted_in').eq('opted_in', true)),
             fetchAllSupabaseRows(() => supabase.from('target_extra_accounts').select('id, login_email, status').eq('status', 'available')),
             fetchAllSupabaseRows(() => supabase.from('target_extra_account_assignments').select('id, account_id, user_id, template_profile_id, cycle_id, assigned_at, released_at').is('released_at', null))
         ]);
@@ -9095,40 +9150,36 @@ app.post('/admin/target-extra-accounts/distribute', auth, admin, async (req, res
         if (firstError) throw firstError;
         const preferences = preferenceResult.data || [];
         const userIds = [...new Set(preferences.map((row) => row.user_id).filter(Boolean))];
-        const profileIds = [...new Set(preferences.map((row) => row.template_profile_id).filter(Boolean))];
-        const [userResult, profileResult] = await Promise.all([
-            userIds.length ? supabase.from('users').select('id, revoked').in('id', userIds) : Promise.resolve({ data: [], error: null }),
-            profileIds.length ? supabase.from('profiles').select('id, user_id, account_type').in('id', profileIds) : Promise.resolve({ data: [], error: null })
-        ]);
+        const userResult = userIds.length
+            ? await supabase.from('users').select('id, revoked').in('id', userIds)
+            : { data: [], error: null };
         if (userResult.error) throw userResult.error;
-        if (profileResult.error) throw profileResult.error;
         const validUsers = new Set((userResult.data || []).filter((user) => !user.revoked).map((user) => String(user.id)));
-        const targetProfileIds = new Set((profileResult.data || [])
-            .filter((profile) => normalizeProfileAccountType(profile.account_type || '') === 'target')
-            .map((profile) => String(profile.id)));
-        if (profileIds.length) {
-            const assignmentStoreResult = await supabase.from('profile_store_assignments').select('profile_id, store').in('profile_id', profileIds);
-            if (!assignmentStoreResult.error) {
-                (assignmentStoreResult.data || []).forEach((row) => {
-                    if (normalizeProfileAccountType(row.store || '') === 'target') targetProfileIds.add(String(row.profile_id));
-                });
-            }
-        }
-        const users = preferences.filter((preference) =>
-            validUsers.has(String(preference.user_id)) && targetProfileIds.has(String(preference.template_profile_id))
-        );
-        const eligibleUserIds = new Set(users.map((row) => String(row.user_id)));
+        const distributionProfiles = await loadTargetExtraDistributionProfiles([...validUsers]);
+        const users = preferences
+            .filter((preference) => validUsers.has(String(preference.user_id)))
+            .map((preference) => ({
+                id: preference.user_id,
+                profiles: (distributionProfiles.profilesByUser.get(String(preference.user_id)) || []).map((profile) => ({
+                    id: profile.id,
+                    address_key: profile.address_key
+                }))
+            }))
+            .filter((user) => user.profiles.length);
+        const eligibleUserIds = new Set(users.map((row) => String(row.id)));
+        const validProfileIds = new Set(users.flatMap((user) => user.profiles.map((profile) => String(profile.id))));
         const availableAccountIds = new Set((poolResult.data || []).map((row) => String(row.id)));
         const currentAssignments = assignmentResult.data || [];
         const staleAssignments = currentAssignments.filter((assignment) =>
             mode === 'new_cycle' ||
             !eligibleUserIds.has(String(assignment.user_id)) ||
-            !availableAccountIds.has(String(assignment.account_id))
+            !availableAccountIds.has(String(assignment.account_id)) ||
+            !validProfileIds.has(String(assignment.template_profile_id))
         );
         const preservedAssignments = currentAssignments.filter((assignment) => !staleAssignments.includes(assignment));
         const cycleId = uuidv4();
         const plan = planEvenAssignments({
-            users: users.map((row) => ({ id: row.user_id, template_profile_id: row.template_profile_id, desired_count: row.desired_count })),
+            users,
             accounts: poolResult.data || [],
             currentAssignments: mode === 'new_cycle' ? [] : preservedAssignments,
             cycleId,
