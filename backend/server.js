@@ -111,8 +111,10 @@ const { deriveTargetProfileHealthState, targetAddressVersionChangeTime } = requi
 const { normalizeBulkProfileState } = require("./profile-bulk-update");
 const {
     MAX_EXTRA_TARGET_ACCOUNTS,
+    DEFAULT_MAX_ASSIGNMENTS_PER_PROFILE,
     normalizeEmail: normalizeTargetExtraEmail,
     parseExtraTargetAccountLines,
+    clampMaxAssignmentsPerProfile,
     planEvenAssignments,
     buildSyntheticTargetProfile
 } = require("./target-extra-accounts");
@@ -9138,12 +9140,13 @@ async function loadTargetEmailsAlreadyInProfiles() {
 }
 
 async function loadTargetExtraAdminSnapshot() {
-    const [poolResult, preferenceResult, assignmentResult] = await Promise.all([
+    const [poolResult, preferenceResult, assignmentResult, settingsResult] = await Promise.all([
         fetchAllSupabaseRows(() => supabase.from('target_extra_accounts').select('id, login_email, status, source_profile_id, notes, created_at, updated_at').order('created_at', { ascending: false })),
         fetchAllSupabaseRows(() => supabase.from('target_extra_account_preferences').select('user_id, opted_in, template_profile_id, desired_count, updated_at').order('updated_at', { ascending: false })),
-        fetchAllSupabaseRows(() => supabase.from('target_extra_account_assignments').select('id, account_id, user_id, template_profile_id, cycle_id, assigned_at').is('released_at', null).order('assigned_at', { ascending: true }))
+        fetchAllSupabaseRows(() => supabase.from('target_extra_account_assignments').select('id, account_id, user_id, template_profile_id, cycle_id, assigned_at').is('released_at', null).order('assigned_at', { ascending: true })),
+        fetchAllSupabaseRows(() => supabase.from('target_extra_account_settings').select('setting_key, max_assignments_per_profile, updated_at').eq('setting_key', 'global').limit(1))
     ]);
-    const firstError = poolResult.error || preferenceResult.error || assignmentResult.error;
+    const firstError = poolResult.error || preferenceResult.error || assignmentResult.error || settingsResult.error;
     if (firstError) throw firstError;
     const pool = poolResult.data || [];
     const preferences = preferenceResult.data || [];
@@ -9163,7 +9166,14 @@ async function loadTargetExtraAdminSnapshot() {
     const assignmentCounts = new Map();
     assignments.forEach((row) => assignmentCounts.set(String(row.user_id), (assignmentCounts.get(String(row.user_id)) || 0) + 1));
     const displayName = (user) => user?.discord_display_name || user?.discord_username || user?.email || 'Unknown user';
+    const maxAssignmentsPerProfile = clampMaxAssignmentsPerProfile(
+        settingsResult.data?.[0]?.max_assignments_per_profile ?? DEFAULT_MAX_ASSIGNMENTS_PER_PROFILE
+    );
     return {
+        settings: {
+            max_assignments_per_profile: maxAssignmentsPerProfile,
+            maximum_allowed: MAX_EXTRA_TARGET_ACCOUNTS
+        },
         counts: {
             total: pool.length,
             available: pool.filter((row) => row.status === 'available').length,
@@ -9233,6 +9243,32 @@ app.get('/admin/target-extra-accounts', auth, admin, async (req, res) => {
             error: status === 503
                 ? 'Install backend/sql/TARGET_EXTRA_ACCOUNTS.sql before using the Target extra-account pool.'
                 : (error.message || 'Could not load Target extra accounts.')
+        });
+    }
+});
+
+app.patch('/admin/target-extra-accounts/settings', auth, admin, async (req, res) => {
+    try {
+        const currentUser = await getCurrentUser(req);
+        if (currentUser.role !== 'super_admin') return res.status(403).json({ error: 'Super admin only' });
+        const requestedLimit = Number.parseInt(req.body?.max_assignments_per_profile, 10);
+        if (!Number.isInteger(requestedLimit) || requestedLimit < 1 || requestedLimit > MAX_EXTRA_TARGET_ACCOUNTS) {
+            return res.status(400).json({ error: `The per-profile limit must be between 1 and ${MAX_EXTRA_TARGET_ACCOUNTS}.` });
+        }
+        const updateResult = await supabase.from('target_extra_account_settings').upsert({
+            setting_key: 'global',
+            max_assignments_per_profile: requestedLimit,
+            updated_by: currentUser.id,
+            updated_at: new Date().toISOString()
+        }, { onConflict: 'setting_key' });
+        if (updateResult.error) throw updateResult.error;
+        res.json(await loadTargetExtraAdminSnapshot());
+    } catch (error) {
+        const status = isTargetExtraMigrationError(error) ? 503 : 500;
+        res.status(status).json({
+            error: status === 503
+                ? 'Install backend/sql/TARGET_EXTRA_ACCOUNT_ASSIGNMENT_CAP.sql before saving the assignment limit.'
+                : (error.message || 'Could not save the Target assignment limit.')
         });
     }
 });
@@ -9315,13 +9351,17 @@ app.post('/admin/target-extra-accounts/distribute', auth, admin, async (req, res
         const currentUser = await getCurrentUser(req);
         if (currentUser.role !== 'super_admin') return res.status(403).json({ error: 'Super admin only' });
         const mode = req.body?.mode === 'new_cycle' ? 'new_cycle' : 'fill';
-        const [preferenceResult, poolResult, assignmentResult] = await Promise.all([
+        const [preferenceResult, poolResult, assignmentResult, settingsResult] = await Promise.all([
             fetchAllSupabaseRows(() => supabase.from('target_extra_account_preferences').select('user_id, opted_in').eq('opted_in', true)),
             fetchAllSupabaseRows(() => supabase.from('target_extra_accounts').select('id, login_email, status').eq('status', 'available')),
-            fetchAllSupabaseRows(() => supabase.from('target_extra_account_assignments').select('id, account_id, user_id, template_profile_id, cycle_id, assigned_at, released_at').is('released_at', null))
+            fetchAllSupabaseRows(() => supabase.from('target_extra_account_assignments').select('id, account_id, user_id, template_profile_id, cycle_id, assigned_at, released_at').is('released_at', null)),
+            fetchAllSupabaseRows(() => supabase.from('target_extra_account_settings').select('max_assignments_per_profile').eq('setting_key', 'global').limit(1))
         ]);
-        const firstError = preferenceResult.error || poolResult.error || assignmentResult.error;
+        const firstError = preferenceResult.error || poolResult.error || assignmentResult.error || settingsResult.error;
         if (firstError) throw firstError;
+        const maxAssignmentsPerProfile = clampMaxAssignmentsPerProfile(
+            settingsResult.data?.[0]?.max_assignments_per_profile ?? DEFAULT_MAX_ASSIGNMENTS_PER_PROFILE
+        );
         const preferences = preferenceResult.data || [];
         const userIds = [...new Set(preferences.map((row) => row.user_id).filter(Boolean))];
         const userResult = userIds.length
@@ -9357,7 +9397,8 @@ app.post('/admin/target-extra-accounts/distribute', auth, admin, async (req, res
             accounts: poolResult.data || [],
             currentAssignments: mode === 'new_cycle' ? [] : preservedAssignments,
             cycleId,
-            mode
+            mode,
+            maxAssignmentsPerProfile
         });
         const releases = [...staleAssignments, ...plan.release];
         const releaseIds = [...new Set(releases.map((row) => row.id).filter(Boolean))];
@@ -9385,6 +9426,7 @@ app.post('/admin/target-extra-accounts/distribute', auth, admin, async (req, res
             preserved: plan.keep.length,
             released: releaseIds.length,
             unassigned: plan.unassignedAccountIds.length,
+            max_assignments_per_profile: maxAssignmentsPerProfile,
             counts_by_user: plan.counts,
             snapshot: await loadTargetExtraAdminSnapshot()
         });

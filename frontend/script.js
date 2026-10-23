@@ -6408,24 +6408,33 @@ async function initTargetExtraAccountsAdmin() {
     const importButton = document.getElementById('importTargetExtraAccountsButton');
     const fillButton = document.getElementById('fillTargetExtraAccountsButton');
     const cycleButton = document.getElementById('newTargetExtraAccountsCycleButton');
+    const limitInput = document.getElementById('targetExtraMaxPerProfile');
+    const saveLimitButton = document.getElementById('saveTargetExtraAssignmentLimitButton');
     const refreshButton = document.getElementById('refreshTargetExtraAccountsAdmin');
     const message = document.getElementById('targetExtraAccountsAdminMessage');
     const stats = document.getElementById('targetExtraAccountsStats');
     const usersPanel = document.getElementById('targetExtraAccountsUsers');
     const inventoryPanel = document.getElementById('targetExtraAccountsInventory');
+    let savedProfileLimit = 3;
 
-    const setBusy = (busy) => [importButton, fillButton, cycleButton, refreshButton].forEach((button) => { if (button) button.disabled = busy; });
+    const setBusy = (busy) => [importButton, fillButton, cycleButton, saveLimitButton, refreshButton].forEach((button) => { if (button) button.disabled = busy; });
     const render = (data) => {
         const counts = data?.counts || {};
+        const settings = data?.settings || {};
+        const profileLimit = Math.max(1, Number(settings.max_assignments_per_profile || 3));
+        savedProfileLimit = profileLimit;
+        if (limitInput) limitInput.value = String(profileLimit);
+        const users = Array.isArray(data?.users) ? data.users : [];
+        const optedInProfileCount = users.filter((user) => user.opted_in).reduce((total, user) => total + Number(user.target_profile_count || 0), 0);
         stats.innerHTML = [
             ['Pool', counts.total || 0], ['Enabled', counts.available || 0], ['Assigned', counts.assigned || 0],
-            ['Open', counts.unassigned || 0], ['Opted in', counts.opted_in_users || 0]
+            ['Open', counts.unassigned || 0], ['Opted in', counts.opted_in_users || 0],
+            ['Cap / profile', profileLimit], ['Current capacity', optedInProfileCount * profileLimit]
         ].map(([label, value]) => `<div class="stat-card"><span class="stat-label">${escapeHTML(label)}</span><strong class="stat-value">${Number(value)}</strong></div>`).join('');
 
-        const users = Array.isArray(data?.users) ? data.users : [];
-        usersPanel.innerHTML = users.length ? `<table class="admin-table"><thead><tr><th>User</th><th>Opted In</th><th>Assigned</th><th>Target Addresses</th><th>Address Distribution</th></tr></thead><tbody>${users.map((user) => `
+        usersPanel.innerHTML = users.length ? `<table class="admin-table"><thead><tr><th>User</th><th>Opted In</th><th>Assigned</th><th>Capacity</th><th>Target Addresses</th><th>Address Distribution</th></tr></thead><tbody>${users.map((user) => `
             <tr><td>${escapeHTML(user.user_display || user.user_email || 'User')}</td><td>${user.opted_in ? 'Yes' : 'No'}</td>
-            <td>${Number(user.assigned_count || 0)}</td><td>${Number(user.target_address_count || 0)} (${Number(user.target_profile_count || 0)} profiles)</td>
+            <td>${Number(user.assigned_count || 0)}</td><td>${user.opted_in ? Number(user.target_profile_count || 0) * profileLimit : 0}</td><td>${Number(user.target_address_count || 0)} (${Number(user.target_profile_count || 0)} profiles)</td>
             <td>${(Array.isArray(user.assigned_by_address) ? user.assigned_by_address : []).map((row) => `${Number(row.assigned_count || 0)} × ${escapeHTML(row.address_label || 'Saved Target address')}`).join('<br>') || '—'}</td></tr>
         `).join('')}</tbody></table>` : '<div class="empty-card"><p>No users have saved an extra Target account preference.</p></div>';
 
@@ -6460,13 +6469,14 @@ async function initTargetExtraAccountsAdmin() {
         finally { setBusy(false); }
     };
     const distribute = async (mode) => {
-        if (mode === 'new_cycle' && !confirm('Start a new assignment round? Current assignments will be released and the enabled pool will be redistributed evenly. Historical orders will keep their original owner.')) return;
+        const profileLimit = savedProfileLimit;
+        if (mode === 'new_cycle' && !confirm(`Start a new assignment round with a maximum of ${profileLimit} extra account${profileLimit === 1 ? '' : 's'} per profile? Current assignments will be released and redistributed within that cap. Historical orders will keep their original owner.`)) return;
         setBusy(true);
         message.textContent = mode === 'new_cycle' ? 'Starting a new assignment round...' : 'Filling open spots...';
         try {
             const result = await authJSON(API + '/admin/target-extra-accounts/distribute', { method: 'POST', body: JSON.stringify({ mode }) });
             render(result.snapshot);
-            message.textContent = `Assigned ${Number(result.assigned || 0)}, preserved ${Number(result.preserved || 0)}, released ${Number(result.released || 0)}. ${Number(result.unassigned || 0)} enabled accounts remain open.`;
+            message.textContent = `Assigned ${Number(result.assigned || 0)}, preserved ${Number(result.preserved || 0)}, released ${Number(result.released || 0)}. Limit: ${Number(result.max_assignments_per_profile || profileLimit)} per profile. ${Number(result.unassigned || 0)} enabled accounts remain open.`;
         } catch (error) { message.textContent = error.message || 'Could not distribute Target accounts.'; }
         finally { setBusy(false); }
     };
@@ -6476,6 +6486,22 @@ async function initTargetExtraAccountsAdmin() {
         refreshButton?.addEventListener('click', load);
         fillButton?.addEventListener('click', () => distribute('fill'));
         cycleButton?.addEventListener('click', () => distribute('new_cycle'));
+        saveLimitButton?.addEventListener('click', async () => {
+            const requestedLimit = Number.parseInt(limitInput?.value || '', 10);
+            if (!Number.isInteger(requestedLimit) || requestedLimit < 1 || requestedLimit > 10) {
+                return alert('Enter a maximum between 1 and 10 accounts per profile.');
+            }
+            setBusy(true);
+            message.textContent = 'Saving the per-profile assignment limit...';
+            try {
+                const next = await authJSON(API + '/admin/target-extra-accounts/settings', {
+                    method: 'PATCH', body: JSON.stringify({ max_assignments_per_profile: requestedLimit })
+                });
+                render(next);
+                message.textContent = `Assignment limit saved at ${requestedLimit} extra Target account${requestedLimit === 1 ? '' : 's'} per profile. Use Fill Open Spots or Start New Assignment Round to apply it.`;
+            } catch (error) { message.textContent = error.message || 'Could not save the assignment limit.'; }
+            finally { setBusy(false); }
+        });
         importButton?.addEventListener('click', async () => {
             if (!String(importText?.value || '').trim()) return alert('Paste at least one account as email:password.');
             setBusy(true);

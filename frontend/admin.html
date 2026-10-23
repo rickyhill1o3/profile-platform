@@ -614,7 +614,7 @@ placeholder="Enter one SKU per line&#10;12345678&#10;87654321"></textarea>
             <div class="panel-header">
               <div>
                 <h2>Target Extra Account Pool</h2>
-                <p class="subtle-text">Import super-admin-owned Target logins and divide the full enabled pool evenly among opted-in users. Each user's share is then balanced across all of their Target addresses.</p>
+                <p class="subtle-text">Import super-admin-owned Target logins and divide the enabled pool evenly among opted-in users. Each saved Target profile receives only up to the safety limit below; remaining accounts stay open.</p>
               </div>
               <div class="panel-actions"><button class="btn" type="button" id="refreshTargetExtraAccountsAdmin">Refresh</button></div>
             </div>
@@ -626,6 +626,17 @@ placeholder="Enter one SKU per line&#10;12345678&#10;87654321"></textarea>
               <label for="targetExtraAccountsImportText">Open Target accounts</label>
               <textarea class="input" id="targetExtraAccountsImportText" rows="9" placeholder="account@example.com:target-password"></textarea>
             </div>
+            <div class="form-grid">
+              <div class="field">
+                <label for="targetExtraMaxPerProfile">Maximum extra accounts per profile</label>
+                <input class="input" id="targetExtraMaxPerProfile" type="number" min="1" max="10" step="1" value="3">
+                <p class="subtle-text">Default: 3. You can safely raise this later. Accounts above the total profile capacity remain unassigned.</p>
+              </div>
+              <div class="field field-actions">
+                <label>&nbsp;</label>
+                <button class="btn" type="button" id="saveTargetExtraAssignmentLimitButton">Save Assignment Limit</button>
+              </div>
+            </div>
             <div class="panel-actions">
               <button class="btn btn-primary" type="button" id="importTargetExtraAccountsButton">Import Accounts</button>
               <button class="btn" type="button" id="fillTargetExtraAccountsButton">Fill Open Spots</button>
@@ -635,7 +646,7 @@ placeholder="Enter one SKU per line&#10;12345678&#10;87654321"></textarea>
             <div id="targetExtraAccountsStats" class="stats-grid stats-grid--compact"></div>
           </section>
           <section class="panel">
-            <div class="panel-header"><div><h2>Opted-in Users</h2><p class="subtle-text">Current user and address distribution. New accounts can be added and then assigned with Fill Open Spots.</p></div></div>
+            <div class="panel-header"><div><h2>Opted-in Users</h2><p class="subtle-text">Current user and address distribution. Each profile is capped separately, so users with more eligible profiles can safely receive more accounts without overloading one profile.</p></div></div>
             <div id="targetExtraAccountsUsers" class="table-wrap table-wrap--admin-scroll"></div>
           </section>
           <section class="panel">
@@ -1164,7 +1175,7 @@ placeholder="Enter one SKU per line&#10;12345678&#10;87654321"></textarea>
     </div>
   </div>
   <script src="profile-sync-state.js?v=20260918-profile-sync-display"></script>
-  <script src="script.js?v=20261022-target-superadmin-sharing"></script>
+  <script src="script.js?v=20261023-target-extra-profile-cap"></script>
   <script src="products.js?v=20260930-pokemon-sku-groups"></script>
 
 

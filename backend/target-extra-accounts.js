@@ -1,6 +1,7 @@
 'use strict';
 
 const MAX_EXTRA_TARGET_ACCOUNTS = 10;
+const DEFAULT_MAX_ASSIGNMENTS_PER_PROFILE = 3;
 
 function normalizeEmail(value = '') {
   return String(value || '').trim().toLowerCase();
@@ -40,6 +41,12 @@ function clampDesiredCount(value) {
   return Math.max(1, Math.min(MAX_EXTRA_TARGET_ACCOUNTS, count));
 }
 
+function clampMaxAssignmentsPerProfile(value) {
+  const count = Number.parseInt(value, 10);
+  if (!Number.isFinite(count)) return DEFAULT_MAX_ASSIGNMENTS_PER_PROFILE;
+  return Math.max(1, Math.min(MAX_EXTRA_TARGET_ACCOUNTS, count));
+}
+
 function stableRotation(value, length) {
   if (!length) return 0;
   const text = String(value || '');
@@ -68,7 +75,15 @@ function normalizeDistributionProfiles(user = {}) {
     .sort((left, right) => left.id.localeCompare(right.id));
 }
 
-function planEvenAssignments({ users = [], accounts = [], currentAssignments = [], cycleId = '', mode = 'fill' } = {}) {
+function planEvenAssignments({
+  users = [],
+  accounts = [],
+  currentAssignments = [],
+  cycleId = '',
+  mode = 'fill',
+  maxAssignmentsPerProfile = DEFAULT_MAX_ASSIGNMENTS_PER_PROFILE
+} = {}) {
+  const profileLimit = clampMaxAssignmentsPerProfile(maxAssignmentsPerProfile);
   const eligibleUsers = (Array.isArray(users) ? users : [])
     .filter((user) => user && user.id)
     .map((user) => ({ ...user, profiles: normalizeDistributionProfiles(user) }))
@@ -109,6 +124,7 @@ function planEvenAssignments({ users = [], accounts = [], currentAssignments = [
       && accountIds.has(accountId)
       && validProfilesByUser.get(userId)?.has(profileId)
       && profile
+      && (profileCounts.get(profileId) || 0) < profileLimit
       && !preservedAccountIds.has(accountId);
     if (!isValid) {
       release.push(assignment);
@@ -131,7 +147,9 @@ function planEvenAssignments({ users = [], accounts = [], currentAssignments = [
   const create = [];
 
   available.forEach((account) => {
-    const candidates = [...eligibleUsers];
+    const candidates = eligibleUsers.filter((user) => user.profiles.some(
+      (profile) => (profileCounts.get(profile.id) || 0) < profileLimit
+    ));
     if (!candidates.length) return;
     candidates.sort((left, right) => {
       const countDifference = (counts.get(String(left.id)) || 0) - (counts.get(String(right.id)) || 0);
@@ -141,10 +159,13 @@ function planEvenAssignments({ users = [], accounts = [], currentAssignments = [
     const user = candidates[0];
     const userId = String(user.id);
     const addressGroups = new Map();
-    user.profiles.forEach((profile) => {
+    user.profiles
+      .filter((profile) => (profileCounts.get(profile.id) || 0) < profileLimit)
+      .forEach((profile) => {
       if (!addressGroups.has(profile.address_key)) addressGroups.set(profile.address_key, []);
       addressGroups.get(profile.address_key).push(profile);
     });
+    if (!addressGroups.size) return;
     const addressRotation = stableRotation(`${cycleId}:${userId}:address`, addressGroups.size);
     const addresses = [...addressGroups.keys()].sort();
     const rotatedAddresses = addresses.slice(addressRotation).concat(addresses.slice(0, addressRotation));
@@ -187,7 +208,8 @@ function planEvenAssignments({ users = [], accounts = [], currentAssignments = [
       .map((account) => account.id),
     counts: Object.fromEntries([...counts.entries()]),
     profile_counts: Object.fromEntries([...profileCounts.entries()]),
-    address_counts: Object.fromEntries([...addressCounts.entries()])
+    address_counts: Object.fromEntries([...addressCounts.entries()]),
+    max_assignments_per_profile: profileLimit
   };
 }
 
@@ -242,9 +264,11 @@ function buildSyntheticTargetProfile(template = {}, account = {}, assignment = {
 
 module.exports = {
   MAX_EXTRA_TARGET_ACCOUNTS,
+  DEFAULT_MAX_ASSIGNMENTS_PER_PROFILE,
   normalizeEmail,
   parseExtraTargetAccountLines,
   clampDesiredCount,
+  clampMaxAssignmentsPerProfile,
   planEvenAssignments,
   resolveAssignmentAtTime,
   buildSyntheticTargetProfile

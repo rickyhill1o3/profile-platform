@@ -4,11 +4,18 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const {
+  DEFAULT_MAX_ASSIGNMENTS_PER_PROFILE,
+  clampMaxAssignmentsPerProfile,
   parseExtraTargetAccountLines,
   planEvenAssignments,
   resolveAssignmentAtTime,
   buildSyntheticTargetProfile
 } = require('../target-extra-accounts');
+
+assert.strictEqual(DEFAULT_MAX_ASSIGNMENTS_PER_PROFILE, 3);
+assert.strictEqual(clampMaxAssignmentsPerProfile('5'), 5);
+assert.strictEqual(clampMaxAssignmentsPerProfile('99'), 10);
+assert.strictEqual(clampMaxAssignmentsPerProfile('not-a-number'), 3);
 
 const parsed = parseExtraTargetAccountLines([
   'First@example.com:password:with:colons',
@@ -36,9 +43,36 @@ for (const user of users) {
   assert.ok(Math.max(...perProfile) - Math.min(...perProfile) <= 1, 'each user assignment should be balanced across saved Target addresses');
 }
 
-const uncappedAccounts = Array.from({ length: 14 }, (_, index) => ({ id: `solo-${index}`, login_email: `solo${index}@example.com`, status: 'available' }));
-const uncappedPlan = planEvenAssignments({ users: [users[0]], accounts: uncappedAccounts, cycleId: 'uncapped-cycle', mode: 'new_cycle' });
-assert.strictEqual(uncappedPlan.create.length, 14, 'all enabled accounts should be assigned even when one user receives more than the old ten-account cap');
+const cappedAccounts = Array.from({ length: 14 }, (_, index) => ({ id: `solo-${index}`, login_email: `solo${index}@example.com`, status: 'available' }));
+const cappedPlan = planEvenAssignments({ users: [users[0]], accounts: cappedAccounts, cycleId: 'capped-cycle', mode: 'new_cycle' });
+assert.strictEqual(cappedPlan.create.length, 6, 'the default limit should assign at most three accounts to each of two profiles');
+assert.strictEqual(cappedPlan.unassignedAccountIds.length, 8, 'accounts above current profile capacity must remain open');
+assert.ok(Object.values(cappedPlan.profile_counts).every((count) => count <= 3));
+
+const raisedCapPlan = planEvenAssignments({
+  users: [users[0]], accounts: cappedAccounts, cycleId: 'raised-cap-cycle', mode: 'new_cycle', maxAssignmentsPerProfile: 7
+});
+assert.strictEqual(raisedCapPlan.create.length, 14, 'raising the adjustable limit should increase capacity without changing code');
+assert.ok(Object.values(raisedCapPlan.profile_counts).every((count) => count <= 7));
+
+const reducedCapPlan = planEvenAssignments({
+  users: [{ id: 'limited-user', profiles: [{ id: 'limited-profile', address_key: 'limited-address' }] }],
+  accounts: cappedAccounts.slice(0, 5),
+  currentAssignments: cappedAccounts.slice(0, 5).map((account, index) => ({
+    id: `existing-${index}`,
+    account_id: account.id,
+    user_id: 'limited-user',
+    template_profile_id: 'limited-profile',
+    assigned_at: `2026-10-0${index + 1}T00:00:00Z`,
+    released_at: null
+  })),
+  cycleId: 'reduced-cap-cycle',
+  mode: 'fill',
+  maxAssignmentsPerProfile: 3
+});
+assert.strictEqual(reducedCapPlan.keep.length, 3, 'lowering the limit should preserve only the oldest assignments up to the cap');
+assert.strictEqual(reducedCapPlan.release.length, 2, 'assignments above the lowered cap should be released');
+assert.strictEqual(reducedCapPlan.create.length, 0, 'released overflow must stay open when no profile capacity remains');
 
 const groupedAddressPlan = planEvenAssignments({
   users: [{ id: 'grouped-user', profiles: [
@@ -48,7 +82,8 @@ const groupedAddressPlan = planEvenAssignments({
   ] }],
   accounts: accounts.slice(0, 8),
   cycleId: 'grouped-address-cycle',
-  mode: 'new_cycle'
+  mode: 'new_cycle',
+  maxAssignmentsPerProfile: 10
 });
 assert.strictEqual(groupedAddressPlan.address_counts['grouped-user:physical-address-1'], 4);
 assert.strictEqual(groupedAddressPlan.address_counts['grouped-user:physical-address-2'], 4);
@@ -103,8 +138,14 @@ assert.match(dashboard, /id="targetExtraAccountsOptIn"/);
 assert.doesNotMatch(dashboard, /id="targetExtraTemplateProfile"/, 'members should not have to choose one Target profile');
 assert.doesNotMatch(dashboard, /id="targetExtraDesiredCount"/, 'members should not choose an account quantity');
 assert.match(admin, /data-admin-nav="target-extra-accounts"/);
+assert.match(admin, /id="targetExtraMaxPerProfile"/);
+assert.match(admin, /id="saveTargetExtraAssignmentLimitButton"/);
 assert.match(script, /assigned across[\s\S]*saved Target address/);
 assert.match(script, /Start a new assignment round/);
+assert.match(server, /app\.patch\('\/admin\/target-extra-accounts\/settings'/);
+assert.match(server, /maxAssignmentsPerProfile/);
+assert.match(migration, /target_extra_account_settings/i);
+assert.match(migration, /max_assignments_per_profile/i);
 assert.match(migration, /where released_at is null/i);
 assert.match(migration, /enable row level security/i);
 

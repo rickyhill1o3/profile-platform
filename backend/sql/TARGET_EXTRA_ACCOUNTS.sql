@@ -42,6 +42,18 @@ create table if not exists public.target_personal_account_status (
 create index if not exists target_personal_account_status_user_idx
   on public.target_personal_account_status (user_id, is_enabled, updated_at desc);
 
+create table if not exists public.target_extra_account_settings (
+  setting_key text primary key check (setting_key = 'global'),
+  max_assignments_per_profile integer not null default 3
+    check (max_assignments_per_profile between 1 and 10),
+  updated_by uuid references public.users(id) on delete set null,
+  updated_at timestamptz not null default now()
+);
+
+insert into public.target_extra_account_settings (setting_key, max_assignments_per_profile)
+values ('global', 3)
+on conflict (setting_key) do nothing;
+
 create table if not exists public.target_extra_account_assignments (
   id uuid primary key default gen_random_uuid(),
   account_id uuid not null references public.target_extra_accounts(id) on delete restrict,
@@ -71,6 +83,7 @@ alter table public.target_extra_account_preferences enable row level security;
 alter table public.target_extra_accounts enable row level security;
 alter table public.target_extra_account_assignments enable row level security;
 alter table public.target_personal_account_status enable row level security;
+alter table public.target_extra_account_settings enable row level security;
 
 -- The app uses the Supabase service role on the backend. No direct browser policies
 -- are intentionally created because account credentials must never be browser-readable.
