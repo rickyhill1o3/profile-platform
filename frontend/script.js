@@ -994,6 +994,8 @@ async function loadProfiles() {
                         </select>` : ''}
                         <button class="btn" type="button" data-profile-select-visible="${groupKey}">Select Visible</button>
                         <button class="btn" type="button" data-profile-edit-group="${groupKey}" ${selectedCount ? '' : 'disabled'}>Edit Selected (${selectedCount})</button>
+                        ${groupKey === 'target' && isSuperAdminDashboard ? `<button class="btn btn-primary" type="button" data-target-personal-status="on" ${selectedCount ? '' : 'disabled'}>Turn On Accounts (${selectedCount})</button>
+                        <button class="btn btn-warning" type="button" data-target-personal-status="pause" ${selectedCount ? '' : 'disabled'}>Pause Accounts (${selectedCount})</button>` : ''}
                         <button class="btn btn-danger" type="button" data-profile-delete-group="${groupKey}" ${selectedCount ? '' : 'disabled'}>Delete Selected (${selectedCount})</button>
                     </div>
             `;
@@ -1021,7 +1023,7 @@ async function loadProfiles() {
                         <article class="profile-card-modern">
                             <div class="profile-card-top">
                                 <label class="checkbox-inline"><input type="checkbox" data-profile-select="${p.id}" ${checked} /><span>Select</span></label>
-                                <span class="badge">${escapeHTML(profileAssignedStores(p).join(", ") || groupKey)}</span>
+                                <div class="profile-card-status-badges"><span class="badge">${escapeHTML(profileAssignedStores(p).join(", ") || groupKey)}</span>${groupKey === 'target' && isSuperAdminDashboard ? (p.target_personal_account_enabled === false ? '<span class="badge badge-paused">Paused · shared pool</span>' : '<span class="badge badge-active">On · personal export</span>') : ''}</div>
                             </div>
                             <div class="profile-card-top">
                                 <div>
@@ -1145,38 +1147,41 @@ function ensureBulkProfileEditModal() {
                 <button class="btn" type="button" data-bulk-edit-close>Close</button>
             </div>
             <div class="bulk-edit-body">
-                <label class="field">
-                    <span>Profile name</span>
-                    <input id="bulkProfileName" class="input" type="text" autocomplete="off" placeholder="Leave blank to keep existing profile names" />
-                    <small>If entered, every selected profile will receive this exact same name. Matching profile names are allowed.</small>
-                </label>
-                <label class="field" data-bulk-account-password>
-                    <span>Account password</span>
-                    <input id="bulkProfileLoginPassword" class="input" type="password" autocomplete="new-password" placeholder="Leave blank to keep existing passwords" />
-                    <small>Applies the same retailer account password to every selected profile.</small>
-                </label>
-                <label class="field">
-                    <span>Gmail app password / direct IMAP</span>
-                    <input id="bulkProfileGmailAppPassword" class="input" type="password" autocomplete="new-password" placeholder="Leave blank to keep existing app passwords" />
-                    <small>Only change this when the selected mailboxes all use the same direct IMAP app password.</small>
-                </label>
-                <label class="field">
-                    <span>Order-email source</span>
-                    <select id="bulkProfileAycdAction" class="input">
-                        <option value="keep">No change</option>
-                        <option value="enable">Use AYCD Unified Inbox</option>
-                        <option value="disable">Use direct IMAP instead</option>
-                    </select>
-                    <small>AYCD profiles count as email-connected without requiring an individual Gmail app password.</small>
-                </label>
-                <label class="field">
-                    <span>Shipping state</span>
-                    <select id="bulkProfileState" class="input">
-                        <option value="">No change</option>
-                        ${PROFILE_STATE_OPTIONS.map(([code, name]) => `<option value="${name}">${name} (${code})</option>`).join('')}
-                    </select>
-                    <small>Sets the same shipping state on every selected profile. All other shipping fields stay unchanged.</small>
-                </label>
+                <div class="bulk-edit-notice"><strong>Choose each field you want to change.</strong><span>Unchecked fields keep their current value. Check Address Line 2 and leave it blank when you need to clear it.</span></div>
+                <details class="bulk-edit-section" open>
+                    <summary>Profile, shipping, and contact</summary>
+                    <div class="bulk-edit-field-grid">
+                        <label class="field field--full"><span><input type="checkbox" data-bulk-apply="profile_name" /> Profile name</span><input id="bulkProfileName" data-bulk-value="profile_name" class="input" type="text" autocomplete="off" disabled /><small>Matching profile names are allowed.</small></label>
+                        <label class="field"><span><input type="checkbox" data-bulk-apply="first_name" /> Shipping first name</span><input id="bulkProfileFirstName" data-bulk-value="first_name" class="input" type="text" disabled /></label>
+                        <label class="field"><span><input type="checkbox" data-bulk-apply="last_name" /> Shipping last name</span><input id="bulkProfileLastName" data-bulk-value="last_name" class="input" type="text" disabled /></label>
+                        <label class="field"><span><input type="checkbox" data-bulk-apply="email" /> Shipping email</span><input id="bulkProfileEmail" data-bulk-value="email" class="input" type="email" disabled /></label>
+                        <label class="field"><span><input type="checkbox" data-bulk-apply="phone" /> Shipping phone</span><input id="bulkProfilePhone" data-bulk-value="phone" class="input" type="text" maxlength="10" placeholder="xxxxxxxxxx" disabled /></label>
+                        <label class="field field--full"><span><input type="checkbox" data-bulk-apply="address1" /> Shipping address line 1</span><input id="bulkProfileAddress1" data-bulk-value="address1" class="input" type="text" disabled /></label>
+                        <label class="field field--full"><span><input type="checkbox" data-bulk-apply="address2" /> Shipping address line 2</span><input id="bulkProfileAddress2" data-bulk-value="address2" class="input" type="text" placeholder="Check and leave blank to clear" disabled /></label>
+                        <label class="field"><span><input type="checkbox" data-bulk-apply="city" /> Shipping city</span><input id="bulkProfileCity" data-bulk-value="city" class="input" type="text" disabled /></label>
+                        <label class="field"><span><input type="checkbox" data-bulk-apply="state" /> Shipping state</span><select id="bulkProfileState" data-bulk-value="state" class="input" disabled><option value="">Select state</option>${PROFILE_STATE_OPTIONS.map(([code, name]) => `<option value="${name}">${name} (${code})</option>`).join('')}</select></label>
+                        <label class="field"><span><input type="checkbox" data-bulk-apply="zip" /> Shipping ZIP</span><input id="bulkProfileZip" data-bulk-value="zip" class="input" type="text" disabled /></label>
+                    </div>
+                </details>
+                <details class="bulk-edit-section">
+                    <summary>Payment</summary>
+                    <div class="bulk-edit-field-grid">
+                        <label class="field field--full"><span><input type="checkbox" data-bulk-apply="card" /> Card number</span><input id="bulkProfileCard" data-bulk-value="card" class="input" type="text" inputmode="numeric" autocomplete="off" disabled /><small>The same encrypted card will be saved on every selected profile.</small></label>
+                        <label class="field"><span><input type="checkbox" data-bulk-apply="exp_month" /> Expiration month</span><input id="bulkProfileExpMonth" data-bulk-value="exp_month" class="input" type="text" placeholder="MM" disabled /></label>
+                        <label class="field"><span><input type="checkbox" data-bulk-apply="exp_year" /> Expiration year</span><input id="bulkProfileExpYear" data-bulk-value="exp_year" class="input" type="text" placeholder="YYYY" disabled /></label>
+                        <label class="field"><span><input type="checkbox" data-bulk-apply="cvv" /> CVV</span><input id="bulkProfileCvv" data-bulk-value="cvv" class="input" type="password" autocomplete="new-password" disabled /></label>
+                    </div>
+                </details>
+                <details class="bulk-edit-section">
+                    <summary>Retailer login and order-email connection</summary>
+                    <div class="bulk-edit-field-grid">
+                        <label class="field field--full"><span><input type="checkbox" data-bulk-apply="login_email" /> Account login email</span><input id="bulkProfileLoginEmail" data-bulk-value="login_email" class="input" type="email" disabled /></label>
+                        <label class="field field--full" data-bulk-account-password><span><input type="checkbox" data-bulk-apply="login_password" /> Account password</span><input id="bulkProfileLoginPassword" data-bulk-value="login_password" class="input" type="password" autocomplete="new-password" disabled /></label>
+                        <label class="field field--full"><span><input type="checkbox" data-bulk-apply="gmail_app_password" /> Gmail app password / direct IMAP</span><input id="bulkProfileGmailAppPassword" data-bulk-value="gmail_app_password" class="input" type="password" autocomplete="new-password" disabled /><small>Use one value only when every selected mailbox shares that direct IMAP password.</small></label>
+                        <label class="field field--full"><span><input type="checkbox" data-bulk-apply="amazon_2fa_secret" /> Amazon authenticator / 2FA secret</span><input id="bulkProfileAmazon2fa" data-bulk-value="amazon_2fa_secret" class="input" type="text" autocomplete="off" disabled /></label>
+                        <label class="field field--full"><span>Order-email source</span><select id="bulkProfileAycdAction" class="input"><option value="keep">No change</option><option value="enable">Use AYCD Unified Inbox</option><option value="disable">Use direct IMAP instead</option></select><small>AYCD profiles count as email-connected without an individual app password.</small></label>
+                    </div>
+                </details>
                 <div id="bulkProfileEditMessage" class="form-help"></div>
             </div>
             <div class="bulk-edit-footer">
@@ -1186,6 +1191,11 @@ function ensureBulkProfileEditModal() {
         </section>`;
     document.body.appendChild(modal);
     modal.querySelectorAll('[data-bulk-edit-close]').forEach((el) => el.addEventListener('click', () => modal.classList.remove('is-open')));
+    modal.querySelectorAll('[data-bulk-apply]').forEach((checkbox) => checkbox.addEventListener('change', () => {
+        const input = modal.querySelector(`[data-bulk-value="${checkbox.dataset.bulkApply}"]`);
+        if (input) input.disabled = !checkbox.checked;
+        if (checkbox.checked) input?.focus();
+    }));
     return modal;
 }
 
@@ -1194,14 +1204,12 @@ function openBulkProfileEdit(group, ids) {
     modal.dataset.group = group;
     modal.dataset.ids = JSON.stringify(ids);
     modal.querySelector('#bulkProfileEditTitle').textContent = `Edit ${ids.length} selected ${group} profile${ids.length === 1 ? '' : 's'}`;
-    modal.querySelector('#bulkProfileEditSummary').textContent = 'Only fields selected or entered below will be changed. Existing emails, cards, and other shipping details stay untouched.';
+    modal.querySelector('#bulkProfileEditSummary').textContent = 'Edit any shared profile, shipping, payment, or retailer-login field for every selected profile.';
     const accountPasswordField = modal.querySelector('[data-bulk-account-password]');
     if (accountPasswordField) accountPasswordField.style.display = group === 'pokemoncenter' ? 'none' : '';
-    modal.querySelector('#bulkProfileName').value = '';
-    modal.querySelector('#bulkProfileLoginPassword').value = '';
-    modal.querySelector('#bulkProfileGmailAppPassword').value = '';
+    modal.querySelectorAll('[data-bulk-apply]').forEach((checkbox) => { checkbox.checked = false; });
+    modal.querySelectorAll('[data-bulk-value]').forEach((input) => { input.value = ''; input.disabled = true; });
     modal.querySelector('#bulkProfileAycdAction').value = 'keep';
-    modal.querySelector('#bulkProfileState').value = '';
     const message = modal.querySelector('#bulkProfileEditMessage');
     message.textContent = '';
     message.className = 'form-help';
@@ -1209,12 +1217,23 @@ function openBulkProfileEdit(group, ids) {
 
     const saveButton = modal.querySelector('#bulkProfileEditSave');
     saveButton.onclick = async () => {
-        const profileName = modal.querySelector('#bulkProfileName').value.trim();
-        const loginPassword = group === 'pokemoncenter' ? '' : modal.querySelector('#bulkProfileLoginPassword').value;
-        const gmailAppPassword = modal.querySelector('#bulkProfileGmailAppPassword').value.replace(/\s+/g, '');
+        const changes = {};
+        modal.querySelectorAll('[data-bulk-apply]:checked').forEach((checkbox) => {
+            const key = checkbox.dataset.bulkApply;
+            const input = modal.querySelector(`[data-bulk-value="${key}"]`);
+            if (input) changes[key] = key === 'gmail_app_password' ? input.value.replace(/\s+/g, '') : input.value.trim();
+        });
+        if (group === 'pokemoncenter') delete changes.login_password;
+        if (Object.prototype.hasOwnProperty.call(changes, 'login_email') && ids.length > 1) {
+            message.textContent = 'Select one profile at a time when changing the retailer login email.';
+            return;
+        }
+        const profileName = Object.prototype.hasOwnProperty.call(changes, 'profile_name') ? changes.profile_name : '';
+        const loginPassword = changes.login_password;
+        const gmailAppPassword = changes.gmail_app_password;
         const aycdAction = modal.querySelector('#bulkProfileAycdAction').value;
-        const state = modal.querySelector('#bulkProfileState').value;
-        if (!profileName && !loginPassword && !gmailAppPassword && aycdAction === 'keep' && !state) {
+        const state = changes.state;
+        if (!Object.keys(changes).length && aycdAction === 'keep') {
             message.textContent = 'Choose at least one change.';
             return;
         }
@@ -1231,16 +1250,18 @@ function openBulkProfileEdit(group, ids) {
                     login_password: loginPassword || undefined,
                     gmail_app_password: gmailAppPassword || undefined,
                     use_aycd_inbox: aycdAction === 'keep' ? undefined : aycdAction === 'enable',
+                    ...changes,
                     state: state || undefined
                 })
             });
             const data = await response.json().catch(() => ({}));
             if (!response.ok || data.error) throw new Error(data.error || 'Could not update selected profiles.');
             const updatedCount = data.updated_count || ids.length;
-            message.textContent = `Updated ${updatedCount} profile${updatedCount === 1 ? '' : 's'}.${data.profile_name ? ` Profile name set to ${data.profile_name}.` : ''}${data.state ? ` Shipping state set to ${data.state}.` : ''}`;
+            const changedCount = Number(data.changed_fields?.length || Object.keys(changes).length || (aycdAction === 'keep' ? 0 : 1));
+            message.textContent = `Updated ${updatedCount} profile${updatedCount === 1 ? '' : 's'} across ${changedCount} selected field${changedCount === 1 ? '' : 's'}.`;
             message.className = 'form-help success';
             ids.forEach((id) => selectedProfileIds.delete(String(id)));
-            if (profileName || state || group === 'target') targetProfileHealthCache = { data: null, loadedAt: 0 };
+            if (Object.keys(changes).length || group === 'target') targetProfileHealthCache = { data: null, loadedAt: 0 };
             await loadProfiles();
             setTimeout(() => modal.classList.remove('is-open'), 500);
         } catch (error) {
@@ -1480,6 +1501,36 @@ function openTargetZipBalance() {
     modal.classList.add('is-open');
 }
 
+async function updateSelectedPersonalTargetAccounts(isEnabled) {
+    const visibleIds = new Set(visibleDashboardProfileIdsByGroup.get('target') || []);
+    const ids = allDashboardProfiles
+        .filter((profile) => profileInGroup(profile, 'target') && visibleIds.has(String(profile.id)) && selectedProfileIds.has(String(profile.id)))
+        .map((profile) => String(profile.id));
+    if (!ids.length) return;
+    const action = isEnabled ? 'turn on' : 'pause';
+    const warning = isEnabled
+        ? `Turn on ${ids.length} selected personal Target account(s)? They will be removed from shared use immediately and restored to your personal exports.`
+        : `Pause ${ids.length} selected personal Target account(s)? Their Target logins will be placed in the extra-account pool for the next assignment round. Your shipping and payment details are never shared.`;
+    if (!confirm(warning)) return;
+    try {
+        const response = await fetch(API + '/target-personal-accounts/status', {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token() },
+            body: JSON.stringify({ ids, is_enabled: isEnabled })
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok || data.error) throw new Error(data.error || `Could not ${action} the selected Target accounts.`);
+        ids.forEach((id) => selectedProfileIds.delete(String(id)));
+        targetProfileHealthCache = { data: null, loadedAt: 0 };
+        await loadProfiles();
+        alert(isEnabled
+            ? `${data.updated_count || ids.length} account(s) are on and back in your personal Target exports.`
+            : `${data.updated_count || ids.length} account(s) are paused and available for the next extra-account assignment round.`);
+    } catch (error) {
+        alert(error.message || `Could not ${action} the selected Target accounts.`);
+    }
+}
+
 function bindProfileDashboardControls() {
     document.querySelectorAll('[data-profile-search]').forEach((input) => {
         input.addEventListener('input', () => {
@@ -1581,6 +1632,9 @@ function bindProfileDashboardControls() {
             if (!ids.length) return;
             openBulkProfileEdit(group, ids);
         });
+    });
+    document.querySelectorAll('[data-target-personal-status]').forEach((button) => {
+        button.addEventListener('click', () => updateSelectedPersonalTargetAccounts(button.dataset.targetPersonalStatus === 'on'));
     });
     document.querySelectorAll('[data-profile-delete-group]').forEach((button) => {
         button.addEventListener('click', async () => {

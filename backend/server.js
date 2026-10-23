@@ -8449,7 +8449,33 @@ async function attachAndFilterProfilesByStore(profiles, group = "") {
     if (!group) return attached;
 
     const cleanGroup = normalizeProfileAccountType(group);
-    return attached.filter((profile) => profileAssignedStores(profile).includes(cleanGroup));
+    const storeProfiles = attached.filter((profile) => profileAssignedStores(profile).includes(cleanGroup));
+    if (cleanGroup !== 'target') return storeProfiles;
+
+    // A paused personal super-admin Target profile remains editable on the dashboard,
+    // but it must not also be exported as a personal account while its login is in the
+    // shared extra-account pool. Missing migration data defaults safely to enabled.
+    const personalState = await loadTargetPersonalAccountStateMap(storeProfiles.map((profile) => profile.id));
+    return storeProfiles.filter((profile) => personalState.get(String(profile.id)) !== false);
+}
+
+async function loadTargetPersonalAccountStateMap(profileIds = []) {
+    const ids = [...new Set((profileIds || []).map((id) => String(id || '').trim()).filter(Boolean))];
+    const map = new Map();
+    if (!ids.length) return map;
+    try {
+        for (let index = 0; index < ids.length; index += 75) {
+            const result = await supabase
+                .from('target_personal_account_status')
+                .select('profile_id,is_enabled')
+                .in('profile_id', ids.slice(index, index + 75));
+            if (result.error) throw result.error;
+            (result.data || []).forEach((row) => map.set(String(row.profile_id), row.is_enabled !== false));
+        }
+    } catch (error) {
+        if (!isTargetExtraMigrationError(error)) throw error;
+    }
+    return map;
 }
 
 async function filterProfilesByActiveRunStatus(profiles, group = "", activeOnly = false) {
@@ -8904,6 +8930,152 @@ app.put('/target-extra-accounts/preference', auth, async (req, res) => {
     }
 });
 
+app.patch('/target-personal-accounts/status', auth, admin, async (req, res) => {
+    try {
+        const currentUser = await getCurrentUser(req);
+        if (String(currentUser.role || '').toLowerCase() !== 'super_admin') {
+            return res.status(403).json({ error: 'Super admin only' });
+        }
+        const ids = Array.isArray(req.body?.ids)
+            ? [...new Set(req.body.ids.map((id) => String(id || '').trim()).filter(Boolean))]
+            : [];
+        const isEnabled = req.body?.is_enabled;
+        if (!ids.length) return res.status(400).json({ error: 'Select at least one Target account.' });
+        if (ids.length > 1000) return res.status(400).json({ error: 'Update at most 1,000 accounts at one time.' });
+        if (typeof isEnabled !== 'boolean') return res.status(400).json({ error: 'Choose whether the accounts should be on or paused.' });
+
+        const allProfiles = await getUserProfilesWithRelations(req.user_id);
+        const owned = (allProfiles || []).filter((profile) =>
+            ids.includes(String(profile.id)) && profileAssignedStores(profile).map(normalizeProfileAccountType).includes('target')
+        );
+        if (owned.length !== ids.length) {
+            return res.status(403).json({ error: 'One or more selected profiles are not your personal Target profiles.' });
+        }
+
+        let accountRows = [];
+        for (let index = 0; index < ids.length; index += 75) {
+            const result = await supabase.from('accounts').select('profile_id,provider,login_email,login_password').in('profile_id', ids.slice(index, index + 75));
+            if (result.error) throw result.error;
+            accountRows.push(...(result.data || []));
+        }
+        const legacyByProfile = new Map(accountRows
+            .filter((row) => normalizeProfileAccountType(row.provider || '') === 'target')
+            .map((row) => [String(row.profile_id), row]));
+        const credentials = owned.map((profile) => {
+            const storeCredential = profile.store_credentials?.target || {};
+            const legacy = legacyByProfile.get(String(profile.id)) || {};
+            return {
+                profile,
+                email: normalizeTargetExtraEmail(storeCredential.login_email || legacy.login_email || ''),
+                password: String(storeCredential.login_password || legacy.login_password || '')
+            };
+        });
+
+        if (!isEnabled) {
+            const incomplete = credentials.filter((item) => !item.email || !item.password);
+            if (incomplete.length) {
+                return res.status(400).json({
+                    error: `${incomplete.length} selected Target profile${incomplete.length === 1 ? ' is' : 's are'} missing a Target login email or password. Edit those profiles before pausing them for shared use.`,
+                    incomplete_profiles: incomplete.map((item) => ({ id: item.profile.id, profile_name: item.profile.profile_name || 'Unnamed profile' }))
+                });
+            }
+            const duplicateEmails = credentials.filter((item, index, all) => all.findIndex((other) => other.email === item.email) !== index);
+            if (duplicateEmails.length) return res.status(400).json({ error: 'Two or more selected profiles use the same Target login email.' });
+        }
+
+        const poolResult = await fetchAllSupabaseRows(() => supabase
+            .from('target_extra_accounts')
+            .select('id,login_email,source_profile_id,status'));
+        if (poolResult.error) throw poolResult.error;
+        const pool = poolResult.data || [];
+        const poolBySource = new Map(pool.filter((row) => row.source_profile_id).map((row) => [String(row.source_profile_id), row]));
+        const poolByEmail = new Map(pool.map((row) => [normalizeTargetExtraEmail(row.login_email), row]));
+
+        if (!isEnabled) {
+            for (const item of credentials) {
+                const emailOwner = poolByEmail.get(item.email);
+                if (emailOwner?.source_profile_id && String(emailOwner.source_profile_id) !== String(item.profile.id)) {
+                    return res.status(409).json({ error: `${item.email} is already linked to another personal Target profile.` });
+                }
+            }
+        }
+
+        const now = new Date().toISOString();
+        const statusRows = ids.map((profileId) => ({
+            profile_id: profileId,
+            user_id: req.user_id,
+            is_enabled: isEnabled,
+            updated_by: req.user_id,
+            updated_at: now
+        }));
+        // Pause the personal export before making the same login shareable. For
+        // reactivation, remove the shared assignment first and only then turn the
+        // personal export back on. This ordering prevents a login from being live
+        // in personal and shared exports at the same time if a later write fails.
+        if (!isEnabled) {
+            const statusResult = await supabase.from('target_personal_account_status').upsert(statusRows, { onConflict: 'profile_id' });
+            if (statusResult.error) throw statusResult.error;
+        }
+
+        const affectedMemberIds = new Set();
+        if (!isEnabled) {
+            for (const item of credentials) {
+                const existing = poolBySource.get(String(item.profile.id)) || poolByEmail.get(item.email);
+                const changes = {
+                    login_email: item.email,
+                    password_encrypted: encrypt(item.password),
+                    status: 'available',
+                    source_profile_id: item.profile.id,
+                    created_by: req.user_id,
+                    updated_at: now
+                };
+                const result = existing?.id
+                    ? await supabase.from('target_extra_accounts').update(changes).eq('id', existing.id)
+                    : await supabase.from('target_extra_accounts').insert(changes);
+                if (result.error) throw result.error;
+            }
+        } else {
+            const sharedRows = pool.filter((row) => ids.includes(String(row.source_profile_id || '')));
+            const sharedIds = sharedRows.map((row) => row.id).filter(Boolean);
+            if (sharedIds.length) {
+                for (let index = 0; index < sharedIds.length; index += 200) {
+                    const chunk = sharedIds.slice(index, index + 200);
+                    const assignmentResult = await supabase.from('target_extra_account_assignments').select('user_id').in('account_id', chunk).is('released_at', null);
+                    if (assignmentResult.error) throw assignmentResult.error;
+                    (assignmentResult.data || []).forEach((row) => affectedMemberIds.add(String(row.user_id)));
+                    const releaseResult = await supabase.from('target_extra_account_assignments').update({
+                        released_at: now,
+                        release_reason: 'source_profile_reactivated'
+                    }).in('account_id', chunk).is('released_at', null);
+                    if (releaseResult.error) throw releaseResult.error;
+                    const disableResult = await supabase.from('target_extra_accounts').update({ status: 'disabled', updated_at: now }).in('id', chunk);
+                    if (disableResult.error) throw disableResult.error;
+                }
+            }
+            const statusResult = await supabase.from('target_personal_account_status').upsert(statusRows, { onConflict: 'profile_id' });
+            if (statusResult.error) throw statusResult.error;
+        }
+
+        await markProfileSyncChanged(req.user_id, ['target'], isEnabled ? 'personal_target_accounts_turned_on' : 'personal_target_accounts_paused_for_sharing');
+        await Promise.all([...affectedMemberIds].map((userId) => markProfileSyncChanged(userId, ['target'], 'shared_target_account_returned_to_owner')));
+        res.json({
+            success: true,
+            is_enabled: isEnabled,
+            updated_count: ids.length,
+            pool_count: isEnabled ? 0 : ids.length,
+            released_assignment_users: affectedMemberIds.size,
+            next_step: isEnabled ? 'Accounts are active in your personal Target exports.' : 'Accounts are available for the next extra-account assignment round.'
+        });
+    } catch (error) {
+        const status = isTargetExtraMigrationError(error) ? 503 : 500;
+        res.status(status).json({
+            error: status === 503
+                ? 'Install backend/sql/TARGET_SUPER_ADMIN_ACCOUNT_SHARING.sql before pausing personal Target accounts.'
+                : (error.message || 'Could not change the selected Target accounts.')
+        });
+    }
+});
+
 async function loadTargetEmailsAlreadyInProfiles() {
     const used = new Set();
     const profilesResult = await fetchAllSupabaseRows(() => supabase
@@ -8967,7 +9139,7 @@ async function loadTargetEmailsAlreadyInProfiles() {
 
 async function loadTargetExtraAdminSnapshot() {
     const [poolResult, preferenceResult, assignmentResult] = await Promise.all([
-        fetchAllSupabaseRows(() => supabase.from('target_extra_accounts').select('id, login_email, status, notes, created_at, updated_at').order('created_at', { ascending: false })),
+        fetchAllSupabaseRows(() => supabase.from('target_extra_accounts').select('id, login_email, status, source_profile_id, notes, created_at, updated_at').order('created_at', { ascending: false })),
         fetchAllSupabaseRows(() => supabase.from('target_extra_account_preferences').select('user_id, opted_in, template_profile_id, desired_count, updated_at').order('updated_at', { ascending: false })),
         fetchAllSupabaseRows(() => supabase.from('target_extra_account_assignments').select('id, account_id, user_id, template_profile_id, cycle_id, assigned_at').is('released_at', null).order('assigned_at', { ascending: true }))
     ]);
@@ -9006,6 +9178,8 @@ async function loadTargetExtraAdminSnapshot() {
                 id: account.id,
                 email: account.login_email,
                 status: account.status,
+                source_profile_id: account.source_profile_id || null,
+                source: account.source_profile_id ? 'personal_super_admin_profile' : 'manual_pool_import',
                 created_at: account.created_at,
                 assigned_user_id: assignment?.user_id || null,
                 assigned_user: owner ? displayName(owner) : null,
@@ -10353,10 +10527,14 @@ app.get("/profiles", auth, async (req, res) => {
 
         const assignments = await loadProfileStoreAssignments(req.user_id);
         const credentials = await loadProfileStoreCredentials((data || []).map((profile) => profile.id));
+        const targetPersonalState = String(profileUser.role || '').toLowerCase() === 'super_admin'
+            ? await loadTargetPersonalAccountStateMap((data || []).map((profile) => profile.id))
+            : new Map();
 
         (data || []).forEach((profile) => {
             profile.store_assignments = assignments?.get(String(profile.id)) || [normalizeProfileAccountType(profile.account_type || "general")];
             profile.store_credentials = { ...(credentials.get(String(profile.id)) || {}) };
+            profile.target_personal_account_enabled = targetPersonalState.get(String(profile.id)) !== false;
             if (profile.store_assignments.map(normalizeProfileAccountType).includes('pokemoncenter') && !profile.store_credentials.pokemoncenter) {
                 profile.store_credentials.pokemoncenter = {
                     store: 'pokemoncenter',
@@ -10634,18 +10812,69 @@ app.patch("/profiles/bulk", auth, async (req, res) => {
 
         const hasProfileName = Object.prototype.hasOwnProperty.call(req.body || {}, 'profile_name') && String(req.body.profile_name || '').trim().length > 0;
         const requestedProfileName = hasProfileName ? String(req.body.profile_name).trim() : '';
+        const hasLoginEmail = Object.prototype.hasOwnProperty.call(req.body || {}, 'login_email') && String(req.body.login_email || '').trim().length > 0;
         const hasLoginPassword = store !== 'pokemoncenter' && Object.prototype.hasOwnProperty.call(req.body || {}, 'login_password') && String(req.body.login_password || '').length > 0;
         const hasGmailPassword = Object.prototype.hasOwnProperty.call(req.body || {}, 'gmail_app_password') && String(req.body.gmail_app_password || '').replace(/\s+/g, '').length > 0;
+        const hasAmazon2faSecret = Object.prototype.hasOwnProperty.call(req.body || {}, 'amazon_2fa_secret') && String(req.body.amazon_2fa_secret || '').trim().length > 0;
         const hasAycd = typeof req.body?.use_aycd_inbox === 'boolean';
         const hasState = Object.prototype.hasOwnProperty.call(req.body || {}, 'state') && String(req.body.state || '').trim().length > 0;
         const requestedState = hasState ? normalizeBulkProfileState(req.body.state) : '';
         if (hasState && !requestedState) return res.status(400).json({ error: 'Choose a valid state.' });
-        if (!hasProfileName && !hasLoginPassword && !hasGmailPassword && !hasAycd && !hasState) return res.status(400).json({ error: 'No profile changes were provided' });
+        const requestedAddressFields = ['first_name', 'last_name', 'email', 'phone', 'address1', 'address2', 'city', 'zip'];
+        const addressChanges = {};
+        requestedAddressFields.forEach((field) => {
+            if (Object.prototype.hasOwnProperty.call(req.body || {}, field)) addressChanges[field] = String(req.body[field] ?? '').trim();
+        });
+        if (hasState) addressChanges.state = requestedState;
+        const requiredAddressFields = ['first_name', 'last_name', 'email', 'phone', 'address1', 'city', 'zip'];
+        const blankRequiredAddress = requiredAddressFields.find((field) => Object.prototype.hasOwnProperty.call(addressChanges, field) && !addressChanges[field]);
+        if (blankRequiredAddress) return res.status(400).json({ error: `${blankRequiredAddress.replace(/_/g, ' ')} cannot be blank.` });
+        if (Object.prototype.hasOwnProperty.call(addressChanges, 'phone') && !phoneRegex.test(addressChanges.phone)) {
+            return res.status(400).json({ error: 'Phone must be xxxxxxxxxx.' });
+        }
+        if (Object.prototype.hasOwnProperty.call(addressChanges, 'email') && !isValidEmailForRaffle(addressChanges.email)) {
+            return res.status(400).json({ error: 'Enter a valid shipping email.' });
+        }
+        const hasAddressChanges = Object.keys(addressChanges).length > 0;
+
+        const paymentChanges = {};
+        const hasCard = Object.prototype.hasOwnProperty.call(req.body || {}, 'card') && String(req.body.card || '').trim().length > 0;
+        const hasCvv = Object.prototype.hasOwnProperty.call(req.body || {}, 'cvv') && String(req.body.cvv || '').trim().length > 0;
+        const hasExpMonth = Object.prototype.hasOwnProperty.call(req.body || {}, 'exp_month') && String(req.body.exp_month || '').trim().length > 0;
+        const hasExpYear = Object.prototype.hasOwnProperty.call(req.body || {}, 'exp_year') && String(req.body.exp_year || '').trim().length > 0;
+        if (hasCard) {
+            const cardNumber = String(req.body.card).replace(/[\s-]+/g, '');
+            if (!/^\d{12,19}$/.test(cardNumber)) return res.status(400).json({ error: 'Card number must contain 12 to 19 digits.' });
+            paymentChanges.card_encrypted = encrypt(cardNumber);
+            paymentChanges.card_last4 = cardNumber.slice(-4);
+        }
+        if (hasCvv) {
+            const cvv = String(req.body.cvv).trim();
+            if (!/^\d{3,4}$/.test(cvv)) return res.status(400).json({ error: 'CVV must contain 3 or 4 digits.' });
+            paymentChanges.cvv_encrypted = encrypt(cvv);
+        }
+        if (hasExpMonth) {
+            const month = String(req.body.exp_month).trim().padStart(2, '0');
+            if (!/^(0[1-9]|1[0-2])$/.test(month)) return res.status(400).json({ error: 'Expiration month must be 01 through 12.' });
+            paymentChanges.exp_month = month;
+        }
+        if (hasExpYear) {
+            const year = String(req.body.exp_year).trim();
+            if (!/^\d{2,4}$/.test(year)) return res.status(400).json({ error: 'Expiration year must be 2 or 4 digits.' });
+            paymentChanges.exp_year = year;
+        }
+        const hasPaymentChanges = Object.keys(paymentChanges).length > 0;
+        if (!hasProfileName && !hasLoginEmail && !hasLoginPassword && !hasGmailPassword && !hasAmazon2faSecret && !hasAycd && !hasAddressChanges && !hasPaymentChanges) {
+            return res.status(400).json({ error: 'No profile changes were provided' });
+        }
 
         const allProfiles = await getUserProfilesWithRelations(req.user_id);
         const owned = (allProfiles || []).filter((profile) => ids.includes(String(profile.id)) && profileAssignedStores(profile).includes(store));
         if (!owned.length) return res.status(404).json({ error: 'No matching profiles found in this store group' });
         const ownedIds = owned.map((profile) => String(profile.id));
+        if (hasLoginEmail && ownedIds.length > 1) {
+            return res.status(400).json({ error: 'Select one profile at a time when changing the retailer login email so multiple accounts do not receive the same login.' });
+        }
 
         let profileNameUpdatedCount = 0;
         if (hasProfileName) {
@@ -10667,7 +10896,8 @@ app.patch("/profiles/bulk", auth, async (req, res) => {
             }
         }
 
-        const hasCredentialChanges = hasLoginPassword || hasGmailPassword || hasAycd;
+        const hasCredentialChanges = hasLoginEmail || hasLoginPassword || hasGmailPassword || hasAmazon2faSecret || hasAycd;
+        const updatedCredentialByProfile = new Map();
         if (hasCredentialChanges) {
             let existingRows = [];
             try {
@@ -10695,13 +10925,14 @@ app.patch("/profiles/bulk", auth, async (req, res) => {
                     ...(current.id ? { id: current.id } : {}),
                     profile_id: profile.id,
                     store,
-                    login_email: current.login_email || fallbackAccount.username || fallbackAccount.email || profile.addresses?.[0]?.email || null,
-                    login_password: hasLoginPassword ? String(req.body.login_password) : (current.login_password || fallbackAccount.password || null),
+                    login_email: hasLoginEmail ? String(req.body.login_email).trim() : (current.login_email || fallbackAccount.login_email || fallbackAccount.username || fallbackAccount.email || profile.addresses?.[0]?.email || null),
+                    login_password: hasLoginPassword ? String(req.body.login_password) : (current.login_password || fallbackAccount.login_password || fallbackAccount.password || null),
                     gmail_app_password: hasGmailPassword ? normalizeStoredGmailAppPassword(req.body.gmail_app_password) : (current.gmail_app_password || null),
-                    amazon_2fa_secret: current.amazon_2fa_secret || fallbackAccount.two_fa_secret || null,
+                    amazon_2fa_secret: hasAmazon2faSecret ? String(req.body.amazon_2fa_secret).trim() : (current.amazon_2fa_secret || fallbackAccount.two_fa_secret || null),
                     use_aycd_inbox: hasAycd ? !!req.body.use_aycd_inbox : !!current.use_aycd_inbox
                 };
             });
+            rows.forEach((row) => updatedCredentialByProfile.set(String(row.profile_id), row));
 
             // Process bounded concurrent writes. Sequentially updating 500-700 profiles can exceed
             // Render's request timeout even though every individual update is valid.
@@ -10718,7 +10949,7 @@ app.patch("/profiles/bulk", auth, async (req, res) => {
                 if (failed?.error) throw failed.error;
             }
 
-            if (hasLoginPassword) {
+            if (hasLoginEmail || hasLoginPassword || hasGmailPassword || hasAmazon2faSecret) {
                 const accountRows = [];
                 for (let i = 0; i < ownedIds.length; i += 75) {
                     const { data, error } = await supabase
@@ -10730,8 +10961,13 @@ app.patch("/profiles/bulk", auth, async (req, res) => {
                 }
                 const matchingAccounts = accountRows.filter((account) => normalizeProfileAccountType(account.provider || '') === store);
                 for (let i = 0; i < matchingAccounts.length; i += 25) {
+                    const accountChanges = {};
+                    if (hasLoginEmail) accountChanges.login_email = String(req.body.login_email).trim();
+                    if (hasLoginPassword) accountChanges.login_password = String(req.body.login_password);
+                    if (hasGmailPassword) accountChanges.gmail_app_password = normalizeStoredGmailAppPassword(req.body.gmail_app_password);
+                    if (hasAmazon2faSecret) accountChanges.amazon_2fa_secret = String(req.body.amazon_2fa_secret).trim();
                     const results = await Promise.all(matchingAccounts.slice(i, i + 25).map((account) =>
-                        supabase.from('accounts').update({ login_password: String(req.body.login_password) }).eq('id', account.id)
+                        supabase.from('accounts').update(accountChanges).eq('id', account.id)
                     ));
                     const failed = results.find((result) => result?.error);
                     if (failed?.error) throw failed.error;
@@ -10739,33 +10975,73 @@ app.patch("/profiles/bulk", auth, async (req, res) => {
             }
         }
 
-        let stateUpdatedCount = 0;
-        if (hasState) {
+        let addressUpdatedCount = 0;
+        if (hasAddressChanges) {
             for (let i = 0; i < ownedIds.length; i += 75) {
                 const { data, error } = await supabase
                     .from('addresses')
-                    .update({ state: requestedState })
+                    .update(addressChanges)
                     .in('profile_id', ownedIds.slice(i, i + 75))
                     .select('profile_id');
                 if (error) throw error;
-                stateUpdatedCount += (data || []).length;
+                addressUpdatedCount += (data || []).length;
             }
-            if (stateUpdatedCount !== ownedIds.length) {
-                throw new Error(`State was updated for ${stateUpdatedCount} of ${ownedIds.length} selected profiles. One or more profiles are missing a shipping address.`);
+            if (addressUpdatedCount !== ownedIds.length) {
+                throw new Error(`Shipping details were updated for ${addressUpdatedCount} of ${ownedIds.length} selected profiles. One or more profiles are missing a shipping address.`);
             }
+        }
 
+        let paymentUpdatedCount = 0;
+        if (hasPaymentChanges) {
+            for (let i = 0; i < ownedIds.length; i += 75) {
+                const { data, error } = await supabase
+                    .from('payments')
+                    .update(paymentChanges)
+                    .in('profile_id', ownedIds.slice(i, i + 75))
+                    .select('profile_id');
+                if (error) throw error;
+                paymentUpdatedCount += (data || []).length;
+            }
+            if (paymentUpdatedCount !== ownedIds.length) {
+                throw new Error(`Payment details were updated for ${paymentUpdatedCount} of ${ownedIds.length} selected profiles. One or more profiles are missing a payment record.`);
+            }
+        }
+
+        // If a paused personal Target account is already in the shared pool, keep
+        // its pool login synchronized with bulk credential edits. Shipping/payment
+        // remain cloned from the receiving user's template profile and are never shared.
+        if (store === 'target' && (hasLoginEmail || hasLoginPassword)) {
+            const personalState = await loadTargetPersonalAccountStateMap(ownedIds);
+            const pausedIds = ownedIds.filter((id) => personalState.get(String(id)) === false);
+            if (pausedIds.length) {
+                const poolResult = await fetchAllSupabaseRowsInBatches(pausedIds, (batch) => supabase
+                    .from('target_extra_accounts')
+                    .select('id,source_profile_id')
+                    .in('source_profile_id', batch));
+                if (poolResult.error) throw poolResult.error;
+                for (const poolRow of (poolResult.data || [])) {
+                    const credential = updatedCredentialByProfile.get(String(poolRow.source_profile_id));
+                    if (!credential?.login_email || !credential?.login_password) continue;
+                    const result = await supabase.from('target_extra_accounts').update({
+                        login_email: normalizeTargetExtraEmail(credential.login_email),
+                        password_encrypted: encrypt(credential.login_password),
+                        updated_at: new Date().toISOString()
+                    }).eq('id', poolRow.id);
+                    if (result.error) throw result.error;
+                }
+            }
         }
 
         // A Target profile that was actually edited must return to blue standby regardless of
         // whether its previous checkout was successful, reseller, order ID, or another error.
         // State and profile name are shared across stores, while credential-only edits affect
         // Target only when the selected bulk-edit store is Target.
-        const changedTargetProfiles = (hasState || hasProfileName || store === 'target')
+        const changedTargetProfiles = (hasAddressChanges || hasPaymentChanges || hasProfileName || store === 'target')
             ? owned.filter((profile) => profileAssignedStores(profile).map(normalizeProfileAccountType).includes('target'))
             : [];
         for (let i = 0; i < changedTargetProfiles.length; i += 10) {
             await Promise.all(changedTargetProfiles.slice(i, i + 10).map((profile) => {
-                const address = { ...(profile.addresses?.[0] || {}), ...(hasState ? { state: requestedState } : {}) };
+                const address = { ...(profile.addresses?.[0] || {}), ...addressChanges };
                 return syncTargetAddressVersion({
                     userId: req.user_id,
                     profileId: profile.id,
@@ -10777,7 +11053,7 @@ app.patch("/profiles/bulk", auth, async (req, res) => {
             }));
         }
 
-        const changedStores = (hasState || hasProfileName)
+        const changedStores = (hasAddressChanges || hasPaymentChanges || hasProfileName)
             ? [...new Set(owned.flatMap((profile) => profileAssignedStores(profile).map(normalizeProfileAccountType)).filter(Boolean))]
             : [store];
         await markProfileSyncChanged(req.user_id, changedStores, 'profiles_bulk_updated');
@@ -10786,8 +11062,22 @@ app.patch("/profiles/bulk", auth, async (req, res) => {
             updated_count: ownedIds.length,
             profile_name_updated_count: profileNameUpdatedCount,
             profile_name: hasProfileName ? requestedProfileName : null,
-            state_updated_count: stateUpdatedCount,
+            address_updated_count: addressUpdatedCount,
+            payment_updated_count: paymentUpdatedCount,
             state: hasState ? requestedState : null,
+            changed_fields: [
+                ...(hasProfileName ? ['profile_name'] : []),
+                ...Object.keys(addressChanges),
+                ...(hasCard ? ['card'] : []),
+                ...(hasCvv ? ['cvv'] : []),
+                ...(hasExpMonth ? ['exp_month'] : []),
+                ...(hasExpYear ? ['exp_year'] : []),
+                ...(hasLoginEmail ? ['login_email'] : []),
+                ...(hasLoginPassword ? ['login_password'] : []),
+                ...(hasGmailPassword ? ['gmail_app_password'] : []),
+                ...(hasAmazon2faSecret ? ['amazon_2fa_secret'] : []),
+                ...(hasAycd ? ['use_aycd_inbox'] : [])
+            ],
             store
         });
     } catch (err) {

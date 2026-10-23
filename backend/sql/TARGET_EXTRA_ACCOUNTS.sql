@@ -17,6 +17,7 @@ create table if not exists public.target_extra_accounts (
   login_email text not null,
   password_encrypted text not null,
   status text not null default 'available' check (status in ('available', 'disabled')),
+  source_profile_id uuid references public.profiles(id) on delete set null,
   created_by uuid references public.users(id) on delete set null,
   notes text,
   created_at timestamptz not null default now(),
@@ -25,6 +26,21 @@ create table if not exists public.target_extra_accounts (
 
 create unique index if not exists target_extra_accounts_login_email_unique
   on public.target_extra_accounts (lower(login_email));
+
+create unique index if not exists target_extra_accounts_source_profile_unique
+  on public.target_extra_accounts (source_profile_id)
+  where source_profile_id is not null;
+
+create table if not exists public.target_personal_account_status (
+  profile_id uuid primary key references public.profiles(id) on delete cascade,
+  user_id uuid not null references public.users(id) on delete cascade,
+  is_enabled boolean not null default true,
+  updated_by uuid references public.users(id) on delete set null,
+  updated_at timestamptz not null default now()
+);
+
+create index if not exists target_personal_account_status_user_idx
+  on public.target_personal_account_status (user_id, is_enabled, updated_at desc);
 
 create table if not exists public.target_extra_account_assignments (
   id uuid primary key default gen_random_uuid(),
@@ -54,6 +70,7 @@ comment on table public.target_extra_account_assignments is
 alter table public.target_extra_account_preferences enable row level security;
 alter table public.target_extra_accounts enable row level security;
 alter table public.target_extra_account_assignments enable row level security;
+alter table public.target_personal_account_status enable row level security;
 
 -- The app uses the Supabase service role on the backend. No direct browser policies
 -- are intentionally created because account credentials must never be browser-readable.
