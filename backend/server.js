@@ -135,6 +135,10 @@ const {
     addZipScopedIdealCounts
 } = require("./target-address-zip-balancer");
 const {
+    targetBaseStreetParts,
+    sameTargetPhysicalAddress
+} = require("./target-physical-address");
+const {
     CREDIT_AUTO_PAUSE_THRESHOLD,
     STORE_REACTIVATION_MINIMUM_BALANCE,
     shouldAutoPauseStores,
@@ -9852,87 +9856,6 @@ function extractTargetProfileNumber(value = '') {
     return match ? String(Number(match[1])) : '';
 }
 
-function normalizeTargetStreetSuffix(token = '') {
-    const map = {
-        street:'st', st:'st', str:'st',
-        lane:'ln', ln:'ln',
-        road:'rd', rd:'rd',
-        avenue:'ave', ave:'ave', av:'ave',
-        boulevard:'blvd', blvd:'blvd',
-        drive:'dr', dr:'dr',
-        court:'ct', ct:'ct',
-        circle:'cir', cir:'cir',
-        highway:'hwy', hwy:'hwy',
-        parkway:'pkwy', pkwy:'pkwy',
-        place:'pl', pl:'pl',
-        terrace:'ter', ter:'ter',
-        trail:'trl', trl:'trl',
-        way:'way'
-    };
-    return map[token] || token;
-}
-
-function normalizeTargetState(value = '') {
-    const raw = normalizeTargetAddressPart(value).replace(/[^a-z]/g, '');
-    const map = {
-        northcarolina:'nc', nc:'nc', virginia:'va', va:'va', southcarolina:'sc', sc:'sc',
-        maryland:'md', md:'md', delaware:'de', de:'de', georgia:'ga', ga:'ga', florida:'fl', fl:'fl',
-        newyork:'ny', ny:'ny', pennsylvania:'pa', pa:'pa', newjersey:'nj', nj:'nj'
-    };
-    return map[raw] || raw;
-}
-
-function targetBaseStreetParts(address = {}) {
-    let line1 = normalizeTargetAddressPart(address.address1 || '');
-    // Secondary/unit details do not define the physical street address for distribution counts.
-    // Shikari exports may place these on line 1, including PO-box text after a real street address.
-    line1 = line1.replace(/\s+(?:apt|apartment|unit|suite|ste|floor|fl|flat|building|bldg|room|rm|door|pmb|mailbox|po\s*box|p\.?o\.?\s*box|#)\b.*$/i, '').trim();
-    const tokens = line1.replace(/[^a-z0-9]+/g, ' ').trim().split(/\s+/).filter(Boolean);
-    const rawHouse = tokens[0] && /^\d+[a-z]?$/.test(tokens[0]) ? tokens.shift() : '';
-    // Treat a trailing letter immediately attached to the street number as an address variant/jig,
-    // not as a different physical location. Example: 121 and 121A group together; 6007 and
-    // 6007A group together. The exact raw address remains preserved in the variants/history UI.
-    const houseMatch = String(rawHouse || '').match(/^(\d+)([a-z]?)$/i);
-    const house = houseMatch ? houseMatch[1] : rawHouse;
-    const house_variant = houseMatch ? (houseMatch[2] || '') : '';
-    const normalizedTokens = tokens.map(normalizeTargetStreetSuffix);
-    return {
-        house,
-        house_variant,
-        street: normalizedTokens.join(' '),
-        street_compact: normalizedTokens.join('').replace(/[^a-z0-9]/g, ''),
-        city: normalizeTargetAddressPart(address.city || ''),
-        state: normalizeTargetState(address.state || ''),
-        zip: normalizeTargetAddressPart(address.zip || '').replace(/[^0-9]/g, '').slice(0, 5)
-    };
-}
-
-function targetStringSimilarity(a = '', b = '') {
-    a = String(a || ''); b = String(b || '');
-    if (a === b) return 1;
-    if (!a || !b) return 0;
-    const prev = Array.from({ length: b.length + 1 }, (_, i) => i);
-    for (let i = 1; i <= a.length; i += 1) {
-        let last = prev[0]; prev[0] = i;
-        for (let j = 1; j <= b.length; j += 1) {
-            const old = prev[j];
-            prev[j] = Math.min(prev[j] + 1, prev[j - 1] + 1, last + (a[i - 1] === b[j - 1] ? 0 : 1));
-            last = old;
-        }
-    }
-    return 1 - (prev[b.length] / Math.max(a.length, b.length));
-}
-
-function sameTargetPhysicalAddress(a = {}, b = {}) {
-    const aa = targetBaseStreetParts(a), bb = targetBaseStreetParts(b);
-    if (!aa.house || !bb.house || aa.house !== bb.house) return false;
-    if (aa.zip && bb.zip && aa.zip !== bb.zip) return false;
-    if (aa.state && bb.state && aa.state !== bb.state) return false;
-    if (aa.city && bb.city && aa.city !== bb.city) return false;
-    if (!aa.street_compact || !bb.street_compact) return false;
-    return targetStringSimilarity(aa.street_compact, bb.street_compact) >= 0.70;
-}
-
 function targetPhysicalAddressKey(address = {}) {
     const p = targetBaseStreetParts(address);
     return [p.house, p.street_compact, p.city, p.state, p.zip].join('|');
@@ -10262,7 +10185,13 @@ app.delete('/target-address-pool/:id', auth, async (req, res) => {
         await ensureUserNotRevoked(req.user_id);
         const key = targetAddressPoolSettingKey(req.user_id);
         const current = await getAppSetting(key, []);
-        const pool = (Array.isArray(current) ? current : []).filter((item) => String(item?.id || '') !== String(req.params.id || ''));
+        const currentPool = Array.isArray(current) ? current : [];
+        const selected = currentPool.find((item) => String(item?.id || '') === String(req.params.id || ''));
+        // One displayed row represents one physical address, including older saved spelling/unit
+        // duplicates. Removing that row must remove every saved alias or the empty duplicates return.
+        const pool = currentPool.filter((item) => selected
+            ? !sameTargetPhysicalAddress(selected, item || {})
+            : String(item?.id || '') !== String(req.params.id || ''));
         await setAppSetting(key, pool);
         res.json({ ok: true, items: pool });
     } catch (err) { res.status(500).json({ error: err.message || String(err) }); }
@@ -10613,33 +10542,54 @@ app.get('/target-profile-health', auth, async (req, res) => {
         // Minor spelling differences in the street name are clustered with a conservative fuzzy match.
         const savedAddressPoolRaw = await getAppSetting(targetAddressPoolSettingKey(req.user_id), []).catch(() => []);
         const savedAddressPool = Array.isArray(savedAddressPoolRaw) ? savedAddressPoolRaw : [];
-        const physicalGroups = savedAddressPool.map((entry) => ({
-            group_key: targetPhysicalAddressKey(entry || {}),
-            pool_id: entry.id || '',
-            is_saved_pool: true,
-            label: entry.label || targetPhysicalAddressLabel(entry || {}),
-            sample_address: {
+        const physicalGroups = [];
+        for (const entry of savedAddressPool) {
+            const sampleAddress = {
                 address1: cleanFieldValue(entry.address1 || ''), address2: cleanFieldValue(entry.address2 || ''),
                 city: cleanFieldValue(entry.city || ''), state: cleanFieldValue(entry.state || ''), zip: cleanFieldValue(entry.zip || '')
-            },
-            profile_ids: [], profile_names: [], emails: [], variants: new Map()
-        }));
+            };
+            const existingGroup = physicalGroups.find((item) => (item.match_addresses || [item.sample_address])
+                .some((candidate) => sameTargetPhysicalAddress(candidate, sampleAddress)));
+            if (existingGroup) {
+                existingGroup.match_addresses.push(sampleAddress);
+                existingGroup.pool_ids.push(entry.id || '');
+                continue;
+            }
+            physicalGroups.push({
+                group_key: targetPhysicalAddressKey(entry || {}),
+                pool_id: entry.id || '',
+                pool_ids: [entry.id || ''],
+                is_saved_pool: true,
+                label: entry.label || targetPhysicalAddressLabel(entry || {}),
+                sample_address: sampleAddress,
+                match_addresses: [sampleAddress],
+                profile_ids: [], profile_names: [], emails: [], variants: new Map()
+            });
+        }
         for (const profile of targetProfiles) {
             const address = profile.addresses?.[0] || {};
-            let group = physicalGroups.find((item) => sameTargetPhysicalAddress(item.sample_address, address));
+            const comparableAddress = {
+                address1: cleanFieldValue(address.address1 || ''), address2: cleanFieldValue(address.address2 || ''),
+                city: cleanFieldValue(address.city || ''), state: cleanFieldValue(address.state || ''), zip: cleanFieldValue(address.zip || '')
+            };
+            // Compare every address variant already assigned to a group. This makes clustering
+            // transitive, so a chain of spelling/building variations cannot split one location.
+            let group = physicalGroups.find((item) => (item.match_addresses || [item.sample_address])
+                .some((candidate) => sameTargetPhysicalAddress(candidate, comparableAddress)));
             if (!group) {
                 group = {
                     group_key: targetPhysicalAddressKey(address),
                     pool_id: '',
+                    pool_ids: [],
                     is_saved_pool: false,
                     label: targetPhysicalAddressLabel(address),
-                    sample_address: {
-                        address1: cleanFieldValue(address.address1 || ''), address2: cleanFieldValue(address.address2 || ''),
-                        city: cleanFieldValue(address.city || ''), state: cleanFieldValue(address.state || ''), zip: cleanFieldValue(address.zip || '')
-                    },
+                    sample_address: comparableAddress,
+                    match_addresses: [comparableAddress],
                     profile_ids: [], profile_names: [], emails: [], variants: new Map()
                 };
                 physicalGroups.push(group);
+            } else {
+                group.match_addresses.push(comparableAddress);
             }
             group.profile_ids.push(profile.id);
             group.profile_names.push(profile.profile_name || '');
