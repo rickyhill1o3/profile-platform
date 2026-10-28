@@ -206,6 +206,8 @@ let profileGroupFilters = { all: '', general: '', walmart: '', target: '', samsc
 let targetProfileHealthFilter = 'all';
 let targetPhysicalAddressFilter = '';
 let targetProfileHealthCache = { data: null, loadedAt: 0 };
+let pokemonCenterProfileHealthFilter = 'all';
+let pokemonCenterProfileHealthCache = { data: null, loadedAt: 0 };
 let selectedProfileIds = new Set();
 let visibleDashboardProfileIdsByGroup = new Map();
 
@@ -838,6 +840,22 @@ async function loadProfiles() {
             }
         }
         const targetHealthByProfile = new Map((targetProfileHealth.profiles || []).map((item) => [String(item.profile_id), item]));
+        let pokemonCenterProfileHealth = pokemonCenterProfileHealthCache.data || { profiles: [], totals: {}, days: 30 };
+        if (!pokemonCenterProfileHealthCache.data || (Date.now() - Number(pokemonCenterProfileHealthCache.loadedAt || 0)) > 60000) {
+            try {
+                const healthResponse = await fetch(API + "/pokemon-center-profile-health?days=30", {
+                    headers: { Authorization: "Bearer " + token() }
+                });
+                const healthData = await healthResponse.json();
+                if (healthResponse.ok && healthData && Array.isArray(healthData.profiles)) {
+                    pokemonCenterProfileHealth = healthData;
+                    pokemonCenterProfileHealthCache = { data: healthData, loadedAt: Date.now() };
+                }
+            } catch (err) {
+                console.warn("Pokémon Center profile health load failed:", err);
+            }
+        }
+        const pokemonCenterHealthByProfile = new Map((pokemonCenterProfileHealth.profiles || []).map((item) => [String(item.profile_id), item]));
         const targetAddressGroups = Array.isArray(targetProfileHealth.address_distribution) ? targetProfileHealth.address_distribution : [];
         let activeTargetAddressGroup = targetAddressGroups.find((row) => String(row.group_key || '') === targetPhysicalAddressFilter) || null;
         if (targetPhysicalAddressFilter && !activeTargetAddressGroup) {
@@ -900,6 +918,18 @@ async function loadProfiles() {
                     return bTime - aTime;
                 });
             }
+            if (groupKey === 'pokemoncenter') {
+                const priority = { payment_decline: 0, standby: 1, other: 2, success: 3, no_activity: 4 };
+                rawItems.sort((a, b) => {
+                    const aHealth = pokemonCenterHealthByProfile.get(String(a.id)) || {};
+                    const bHealth = pokemonCenterHealthByProfile.get(String(b.id)) || {};
+                    const rankDiff = (priority[aHealth.current_status || 'no_activity'] ?? 9) - (priority[bHealth.current_status || 'no_activity'] ?? 9);
+                    if (rankDiff) return rankDiff;
+                    const aTime = new Date(aHealth.latest_event?.event_at || aHealth.latest_event?.created_at || 0).getTime();
+                    const bTime = new Date(bHealth.latest_event?.event_at || bHealth.latest_event?.created_at || 0).getTime();
+                    return bTime - aTime;
+                });
+            }
             const filterValue = String(profileGroupFilters[groupKey] || '').trim().toLowerCase();
             let items = filterValue
                 ? rawItems.filter((p) => {
@@ -914,6 +944,9 @@ async function loadProfiles() {
             }
             if (groupKey === 'target' && targetProfileHealthFilter !== 'all') {
                 items = items.filter((p) => (targetHealthByProfile.get(String(p.id))?.current_status || 'no_activity') === targetProfileHealthFilter);
+            }
+            if (groupKey === 'pokemoncenter' && pokemonCenterProfileHealthFilter !== 'all') {
+                items = items.filter((p) => (pokemonCenterHealthByProfile.get(String(p.id))?.current_status || 'no_activity') === pokemonCenterProfileHealthFilter);
             }
             visibleDashboardProfileIdsByGroup.set(groupKey, items.map((p) => String(p.id)));
             const selectedCount = items.filter((p) => selectedProfileIds.has(String(p.id))).length;
@@ -976,6 +1009,25 @@ async function loadProfiles() {
                             })()}
                         </div>`;
                     })() : ""}
+                    ${groupKey === "pokemoncenter" ? (() => {
+                        const totals = pokemonCenterProfileHealth.totals || {};
+                        return `
+                        <div class="target-health-overview pokemon-center-health-overview">
+                            <div class="target-health-overview__intro">
+                                <strong>Pokémon Center Profile Health</strong>
+                                <span>Last ${escapeHTML(String(pokemonCenterProfileHealth.days || 30))} days of Stellar checkout results. Payment declines are placed first so you can update those profiles before the next release.</span>
+                            </div>
+                            <div class="target-health-summary-grid">
+                                <div class="target-health-summary target-health-summary--success"><span>Successful now</span><strong>${Number(totals.success || 0)}</strong></div>
+                                <div class="target-health-summary target-health-summary--payment-decline"><span>Payment declines</span><strong>${Number(totals.payment_decline || 0)}</strong></div>
+                                <div class="target-health-summary target-health-summary--standby"><span>Standby after change</span><strong>${Number(totals.standby || 0)}</strong></div>
+                                <div class="target-health-summary target-health-summary--other"><span>Other errors</span><strong>${Number(totals.other || 0)}</strong></div>
+                                <div class="target-health-summary"><span>No recent activity</span><strong>${Number(totals.no_activity || 0)}</strong></div>
+                            </div>
+                            <div class="subtle-text">Red means the latest attempt was a payment decline. After you edit that profile, it turns blue and stays in standby until a newer checkout changes it to green, red, or another error.</div>
+                            ${pokemonCenterProfileHealth.health_storage_available === false ? `<div class="target-address-history-warning">Run backend/sql/POKEMON_CENTER_PROFILE_HEALTH.sql in Supabase to save new checkout results and blue profile-change markers. Existing webhook history can still display.</div>` : ''}
+                        </div>`;
+                    })() : ""}
                     <div data-profile-list-anchor="${groupKey}"></div>
                     ${groupKey === 'target' && activeTargetAddressGroup ? `<div class="target-address-filter-active" role="status">
                         <div><span>Showing physical address</span><strong>${escapeHTML(activeTargetAddressGroup.label || 'Selected address')}</strong><small>${Number(activeTargetAddressGroup.actual_count || 0)} profile${Number(activeTargetAddressGroup.actual_count || 0) === 1 ? '' : 's'}, including its address-line variants</small></div>
@@ -991,6 +1043,14 @@ async function loadProfiles() {
                             <option value="other" ${targetProfileHealthFilter === 'other' ? 'selected' : ''}>Other errors</option>
                             <option value="success" ${targetProfileHealthFilter === 'success' ? 'selected' : ''}>Successful</option>
                             <option value="no_activity" ${targetProfileHealthFilter === 'no_activity' ? 'selected' : ''}>No recent activity</option>
+                        </select>` : ''}
+                        ${groupKey === 'pokemoncenter' ? `<select class="input" data-pokemon-center-health-filter aria-label="Filter Pokémon Center profile health">
+                            <option value="all" ${pokemonCenterProfileHealthFilter === 'all' ? 'selected' : ''}>All health statuses</option>
+                            <option value="payment_decline" ${pokemonCenterProfileHealthFilter === 'payment_decline' ? 'selected' : ''}>Payment declines</option>
+                            <option value="standby" ${pokemonCenterProfileHealthFilter === 'standby' ? 'selected' : ''}>Standby — profile changed</option>
+                            <option value="other" ${pokemonCenterProfileHealthFilter === 'other' ? 'selected' : ''}>Other errors</option>
+                            <option value="success" ${pokemonCenterProfileHealthFilter === 'success' ? 'selected' : ''}>Successful</option>
+                            <option value="no_activity" ${pokemonCenterProfileHealthFilter === 'no_activity' ? 'selected' : ''}>No recent activity</option>
                         </select>` : ''}
                         <button class="btn" type="button" data-profile-select-visible="${groupKey}">Select Visible</button>
                         <button class="btn" type="button" data-profile-edit-group="${groupKey}" ${selectedCount ? '' : 'disabled'}>Edit Selected (${selectedCount})</button>
@@ -1072,6 +1132,52 @@ async function loadProfiles() {
                                     ${standbyNotice}
                                     ${eventHistoryHtml}
                                     ${historyHtml}
+                                </div>`;
+                            })() : ""}
+                            ${groupKey === "pokemoncenter" ? (() => {
+                                const health = pokemonCenterHealthByProfile.get(String(p.id));
+                                const current = String(health?.current_status || "no_activity");
+                                const labels = {
+                                    success: "Successful",
+                                    payment_decline: "Payment declined",
+                                    standby: "Standby — profile changed",
+                                    other: "Other error",
+                                    no_activity: "No recent activity"
+                                };
+                                const latest = health?.latest_event || null;
+                                const counts = health?.counts || {};
+                                const standbySince = health?.standby_since || null;
+                                const latestAt = latest?.event_at || latest?.created_at || null;
+                                const when = current === 'standby' && standbySince
+                                    ? `Profile changed ${new Date(standbySince).toLocaleString()} · waiting for the next checkout attempt`
+                                    : (latestAt ? new Date(latestAt).toLocaleString() : "No Pokémon Center checkout webhook in the last 30 days");
+                                const recentEvents = Array.isArray(health?.recent_events) ? health.recent_events : [];
+                                const declineNotice = current === 'payment_decline'
+                                    ? `<div class="pokemon-center-decline-review"><b>Payment update recommended</b><span>${escapeHTML(latest?.reason || 'The latest Pokémon Center attempt was declined. Review this profile’s card details before the next release.')}</span></div>`
+                                    : '';
+                                const standbyNotice = current === 'standby'
+                                    ? `<div class="target-standby-review"><b>Profile change recorded — waiting for a checkout</b><span>The next Stellar Pokémon Center result will automatically replace this blue standby state.</span></div>`
+                                    : '';
+                                const eventHistoryHtml = recentEvents.length
+                                    ? `<details class="target-checkout-history"><summary>Recent Pokémon Center results (${recentEvents.length})</summary><div class="target-checkout-history__list">${recentEvents.map((event) => {
+                                        const eventAt = event.event_at || event.created_at;
+                                        return `<div class="target-checkout-history__item target-checkout-history__item--${escapeHTML(event.category || 'other')}"><b>${escapeHTML(labels[event.category] || event.category || 'Event')}</b>${eventAt ? `<span>${escapeHTML(new Date(eventAt).toLocaleString())}</span>` : ''}${event.product ? `<span>${escapeHTML(event.product)}</span>` : ''}${event.order_id ? `<span>Order ${escapeHTML(event.order_id)}</span>` : ''}${event.reason ? `<span>${escapeHTML(event.reason)}</span>` : ''}</div>`;
+                                    }).join('')}</div></details>`
+                                    : '';
+                                return `
+                                <div class="target-profile-health target-profile-health--${escapeHTML(current)} pokemon-center-profile-health">
+                                    <div class="target-profile-health__top">
+                                        <span class="target-profile-health__badge">${escapeHTML(labels[current] || "No recent activity")}</span>
+                                        <span class="subtle-text">${escapeHTML(when)}</span>
+                                    </div>
+                                    <div class="target-profile-health__counts">
+                                        <span><b>${Number(counts.success || 0)}</b> success</span>
+                                        <span class="is-payment-decline"><b>${Number(counts.payment_decline || 0)}</b> payment declines</span>
+                                        <span><b>${Number(counts.other || 0)}</b> other</span>
+                                    </div>
+                                    ${declineNotice}
+                                    ${standbyNotice}
+                                    ${eventHistoryHtml}
                                 </div>`;
                             })() : ""}
                             <div class="profile-detail-list">
@@ -1262,6 +1368,7 @@ function openBulkProfileEdit(group, ids) {
             message.className = 'form-help success';
             ids.forEach((id) => selectedProfileIds.delete(String(id)));
             if (Object.keys(changes).length || group === 'target') targetProfileHealthCache = { data: null, loadedAt: 0 };
+            if (Object.keys(changes).length || group === 'pokemoncenter') pokemonCenterProfileHealthCache = { data: null, loadedAt: 0 };
             await loadProfiles();
             setTimeout(() => modal.classList.remove('is-open'), 500);
         } catch (error) {
@@ -1544,6 +1651,12 @@ function bindProfileDashboardControls() {
             loadProfiles();
         });
     });
+    document.querySelectorAll('[data-pokemon-center-health-filter]').forEach((select) => {
+        select.addEventListener('change', () => {
+            pokemonCenterProfileHealthFilter = select.value || 'all';
+            loadProfiles();
+        });
+    });
     document.querySelectorAll('[data-target-address-filter]').forEach((button) => {
         button.addEventListener('click', async () => {
             const key = String(button.dataset.targetAddressFilter || '');
@@ -1655,6 +1768,7 @@ function bindProfileDashboardControls() {
             }
             ids.forEach((id) => selectedProfileIds.delete(String(id)));
             if (group === 'target') targetProfileHealthCache = { data: null, loadedAt: 0 };
+            if (group === 'pokemoncenter') pokemonCenterProfileHealthCache = { data: null, loadedAt: 0 };
             await loadProfiles();
         });
     });

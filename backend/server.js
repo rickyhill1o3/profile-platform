@@ -108,6 +108,16 @@ const {
     buildUserScopedTargetEvents
 } = require("./target-profile-event-ownership");
 const { deriveTargetProfileHealthState, targetAddressVersionChangeTime } = require("./target-profile-health-state");
+const {
+    addPokemonCenterEvent,
+    buildPokemonCenterProfileIndex,
+    classifyPokemonCenterProfileWebhook,
+    derivePokemonCenterProfileHealthState,
+    normalizePokemonCenterIdentity,
+    pokemonCenterEventTime,
+    resolveOwnedPokemonCenterProfile,
+    summarizePokemonCenterEvents
+} = require("./pokemon-center-profile-health");
 const { normalizeBulkProfileState } = require("./profile-bulk-update");
 const {
     MAX_EXTRA_TARGET_ACCOUNTS,
@@ -5500,6 +5510,9 @@ app.post(["/webhooks/orders", "/webhooks/orders/:token"], async (req, res) => {
                         await recordTargetProfileAddressOutcome({ payload, resolvedUser, webhookLogId: logId, eventAt: durableLogCreatedAt }).catch((err) => {
                             console.error('Target address outcome capture failed:', err.message || err);
                         });
+                        await recordPokemonCenterProfileOutcome({ payload, resolvedUser, webhookLogId: logId, eventAt: durableLogCreatedAt }).catch((err) => {
+                            console.error('Pokémon Center profile outcome capture failed:', err.message || err);
+                        });
                     }
                     finalDiscordResults = await sendCheckoutDiscordNotificationsForPayload(payload, resolvedUser, {
                         status: 'checkout_error'
@@ -5548,6 +5561,9 @@ app.post(["/webhooks/orders", "/webhooks/orders/:token"], async (req, res) => {
                 if (resolvedUser?.id) {
                     await recordTargetProfileAddressOutcome({ payload, resolvedUser, webhookLogId: logId, eventAt: durableLogCreatedAt }).catch((err) => {
                         console.error('Target address outcome capture failed:', err.message || err);
+                    });
+                    await recordPokemonCenterProfileOutcome({ payload, resolvedUser, webhookLogId: logId, eventAt: durableLogCreatedAt }).catch((err) => {
+                        console.error('Pokémon Center profile outcome capture failed:', err.message || err);
                     });
                 }
 
@@ -10077,6 +10093,129 @@ async function recordTargetProfileAddressOutcome({ payload, resolvedUser, webhoo
     return { profile_id: profile.id, category: parsed.category, version_id: versionResult.version.id, unavailable: !!error };
 }
 
+function pokemonCenterProfileHealthTableMissing(error) {
+    const message = String(error?.message || error || '');
+    return error?.code === '42P01' || (
+        /pokemon_center_profile_events/i.test(message) && /does not exist|could not find|schema cache|relation/i.test(message)
+    );
+}
+
+async function recordPokemonCenterProfileOutcome({ payload, resolvedUser, webhookLogId, eventAt = null, profiles = null }) {
+    if (!resolvedUser?.id || !payload || !webhookLogId) return null;
+    const parsed = classifyPokemonCenterProfileWebhook(payload);
+    if (!parsed.category) return null;
+
+    const allProfiles = Array.isArray(profiles) ? profiles : await getUserProfilesWithRelations(resolvedUser.id);
+    const pokemonProfiles = (allProfiles || []).filter((profile) =>
+        profileAssignedStores(profile).map(normalizeProfileAccountType).includes('pokemoncenter')
+    );
+    const profile = resolveOwnedPokemonCenterProfile(buildPokemonCenterProfileIndex(pokemonProfiles), parsed);
+    if (!profile) return null;
+
+    const { error } = await supabase.from('pokemon_center_profile_events').upsert({
+        webhook_log_id: String(webhookLogId),
+        user_id: resolvedUser.id,
+        profile_id: profile.id,
+        event_at: eventAt || new Date().toISOString(),
+        category: parsed.category,
+        reason: String(parsed.reason || '').slice(0, 1000),
+        order_id: parsed.orderId || '',
+        account_email: parsed.accountEmail || '',
+        profile_name: profile.profile_name || parsed.profileName || '',
+        product: parsed.product || '',
+        sku: parsed.sku || ''
+    }, { onConflict: 'webhook_log_id' });
+    if (error && !pokemonCenterProfileHealthTableMissing(error)) throw error;
+    return { profile_id: profile.id, category: parsed.category, unavailable: !!error };
+}
+
+async function recordPokemonCenterProfileChanges({ userId, profiles = [], reason = 'profile_updated' }) {
+    const rows = (profiles || []).map((profile) => ({
+        webhook_log_id: `profile-change:${crypto.randomUUID()}`,
+        user_id: userId,
+        profile_id: profile.id,
+        event_at: new Date().toISOString(),
+        category: 'profile_changed',
+        reason,
+        order_id: '',
+        account_email: extractEmail(profile.addresses?.[0]?.email || ''),
+        profile_name: profile.profile_name || '',
+        product: '',
+        sku: ''
+    }));
+    if (!rows.length) return { inserted: 0, unavailable: false };
+    let inserted = 0;
+    for (let index = 0; index < rows.length; index += 250) {
+        const batch = rows.slice(index, index + 250);
+        const { error } = await supabase.from('pokemon_center_profile_events').insert(batch);
+        if (error) {
+            if (pokemonCenterProfileHealthTableMissing(error)) return { inserted, unavailable: true };
+            throw error;
+        }
+        inserted += batch.length;
+    }
+    return { inserted, unavailable: false };
+}
+
+async function loadHistoricalPokemonCenterProfileEvents({ userId, profiles = [], since }) {
+    if (!userId || !profiles.length) return { eventsByProfile: new Map(), matched: 0 };
+    const profileIndex = buildPokemonCenterProfileIndex(profiles);
+    const eventsByProfile = new Map(profiles.map((profile) => [String(profile.id), []]));
+    const seenByProfile = new Map(profiles.map((profile) => [String(profile.id), new Set()]));
+
+    // Historical webhooks do not contain a user_id. Before using one, require the Stellar Profile
+    // name to identify exactly one website owner across every Pokémon Center profile. Duplicate
+    // names across users are skipped instead of risking another user's checkout being exposed.
+    const [allProfilesResult, assignmentResult] = await Promise.all([
+        fetchAllSupabaseRows(() => supabase.from('profiles').select('id,user_id,profile_name,account_type')),
+        fetchAllSupabaseRows(() => supabase.from('profile_store_assignments').select('profile_id,user_id,store').eq('store', 'pokemoncenter'))
+            .catch(() => ({ data: [], error: null }))
+    ]);
+    if (allProfilesResult.error) throw allProfilesResult.error;
+    const assignedPokemonIds = new Set((assignmentResult.data || []).map((row) => String(row.profile_id || '')));
+    const ownersByName = new Map();
+    for (const row of allProfilesResult.data || []) {
+        if (normalizeProfileAccountType(row.account_type || '') !== 'pokemoncenter' && !assignedPokemonIds.has(String(row.id || ''))) continue;
+        const name = normalizePokemonCenterIdentity(row.profile_name || '');
+        if (!name) continue;
+        if (!ownersByName.has(name)) ownersByName.set(name, new Set());
+        ownersByName.get(name).add(String(row.user_id || ''));
+    }
+
+    const logGroups = await Promise.all([
+        getWebhookLogEntries({ limit: 20000, type: 'checkout', site: 'pokemon', from: since }),
+        getWebhookLogEntries({ limit: 20000, type: 'checkout', site: 'pokemoncenter', from: since })
+    ]);
+    const logs = dedupeWebhookRows(logGroups.flat());
+    let matched = 0;
+    for (const log of logs) {
+        const parsed = classifyPokemonCenterProfileWebhook(log.payload || {});
+        if (!parsed.category) continue;
+        const normalizedName = normalizePokemonCenterIdentity(parsed.profileName || '');
+        if (!normalizedName) continue;
+        const owners = ownersByName.get(normalizedName) || new Set();
+        if (owners.size !== 1 || !owners.has(String(userId))) continue;
+        const profile = resolveOwnedPokemonCenterProfile(profileIndex, parsed);
+        if (!profile) continue;
+        const profileId = String(profile.id);
+        const event = {
+            id: String(log.id || ''),
+            webhook_log_id: String(log.id || ''),
+            event_at: log.created_at,
+            created_at: log.created_at,
+            category: parsed.category,
+            reason: parsed.reason || '',
+            order_id: parsed.orderId || log.external_order_id || '',
+            account_email: parsed.accountEmail || '',
+            profile_name: profile.profile_name || parsed.profileName || '',
+            product: parsed.product || log.product || '',
+            sku: parsed.sku || log.sku || ''
+        };
+        if (addPokemonCenterEvent(eventsByProfile.get(profileId), event, seenByProfile.get(profileId))) matched += 1;
+    }
+    return { eventsByProfile, matched };
+}
+
 function summarizeTargetProfileEvents(events = []) {
     const summary = { success: 0, reseller: 0, order_id: 0, other: 0, total: 0 };
     const lastByCategory = {};
@@ -10542,6 +10681,164 @@ app.get('/target-profile-health', auth, async (req, res) => {
             address_distribution: addressDistribution,
             address_pool_count: savedAddressPool.length,
             next_underfilled_address: nextUnderfilledAddress
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message || String(err) });
+    }
+});
+
+// Pokémon Center Profile Health mirrors the Target color workflow while keeping its event model
+// store-specific: green success, red payment decline, blue after an edit, gray other error, and
+// neutral no activity. Every returned row belongs to req.user_id.
+app.get('/pokemon-center-profile-health', auth, async (req, res) => {
+    try {
+        await ensureUserNotRevoked(req.user_id);
+        const daysRaw = Number(req.query.days || 30);
+        const days = Math.min(180, Math.max(1, Number.isFinite(daysRaw) ? Math.round(daysRaw) : 30));
+        const since = new Date(Date.now() - days * 86400000).toISOString();
+
+        const { data: profileRows, error: profileError } = await supabase
+            .from('profiles')
+            .select('*,addresses(*),payments(*),accounts(*)')
+            .eq('user_id', req.user_id);
+        if (profileError) throw profileError;
+
+        const assignments = await loadProfileStoreAssignments(req.user_id);
+        const credentialMap = await loadProfileStoreCredentials((profileRows || []).map((profile) => profile.id));
+        const pokemonProfiles = (profileRows || []).filter((profile) => {
+            profile.store_assignments = assignments?.get(String(profile.id)) || [normalizeProfileAccountType(profile.account_type || 'general')];
+            profile.store_credentials = credentialMap.get(String(profile.id)) || {};
+            return profile.store_assignments.map(normalizeProfileAccountType).includes('pokemoncenter');
+        });
+        const profileIds = pokemonProfiles.map((profile) => profile.id);
+        const eventsByProfile = new Map(pokemonProfiles.map((profile) => [String(profile.id), []]));
+        const seenByProfile = new Map(pokemonProfiles.map((profile) => [String(profile.id), new Set()]));
+        let healthStorageAvailable = true;
+        let storedEventCount = 0;
+
+        if (profileIds.length) {
+            const { data: storedRows, error: storedError } = await supabase
+                .from('pokemon_center_profile_events')
+                .select('id,webhook_log_id,user_id,profile_id,event_at,category,reason,order_id,account_email,profile_name,product,sku,created_at')
+                .eq('user_id', req.user_id)
+                .in('profile_id', profileIds)
+                .gte('event_at', since)
+                .order('event_at', { ascending: false });
+            if (storedError) {
+                if (pokemonCenterProfileHealthTableMissing(storedError)) healthStorageAvailable = false;
+                else throw storedError;
+            } else {
+                for (const row of storedRows || []) {
+                    const profileId = String(row.profile_id || '');
+                    if (!eventsByProfile.has(profileId)) continue;
+                    if (addPokemonCenterEvent(eventsByProfile.get(profileId), row, seenByProfile.get(profileId))) storedEventCount += 1;
+                }
+            }
+        }
+
+        // Also parse the durable checkout log so events from before this migration appear now.
+        // The loader refuses any profile name shared by multiple website owners. When the new
+        // table exists, persist the safe matches and run this heavier backfill at most every six
+        // hours; normal new webhooks are recorded immediately during intake.
+        let historicalMatched = 0;
+        const historyBackfillKey = `pokemon_center_profile_health_backfill:${req.user_id}`;
+        const historyBackfillState = healthStorageAvailable
+            ? await getAppSetting(historyBackfillKey, {}).catch(() => ({}))
+            : {};
+        const lastBackfillMs = new Date(historyBackfillState?.completed_at || 0).getTime() || 0;
+        const historyBackfillDue = !healthStorageAvailable || (Date.now() - lastBackfillMs) >= 6 * 60 * 60 * 1000;
+        if (pokemonProfiles.length && historyBackfillDue) {
+            try {
+                const historical = await loadHistoricalPokemonCenterProfileEvents({
+                    userId: req.user_id,
+                    profiles: pokemonProfiles,
+                    since
+                });
+                historicalMatched = historical.matched;
+                for (const [profileId, rows] of historical.eventsByProfile.entries()) {
+                    if (!eventsByProfile.has(profileId)) continue;
+                    for (const row of rows || []) addPokemonCenterEvent(eventsByProfile.get(profileId), row, seenByProfile.get(profileId));
+                }
+                if (healthStorageAvailable) {
+                    const historicalRows = [];
+                    for (const [profileId, rows] of historical.eventsByProfile.entries()) {
+                        for (const row of rows || []) {
+                            if (!row.webhook_log_id) continue;
+                            historicalRows.push({
+                                webhook_log_id: String(row.webhook_log_id),
+                                user_id: req.user_id,
+                                profile_id: profileId,
+                                event_at: row.event_at || row.created_at || new Date().toISOString(),
+                                category: row.category,
+                                reason: String(row.reason || '').slice(0, 1000),
+                                order_id: row.order_id || '',
+                                account_email: row.account_email || '',
+                                profile_name: row.profile_name || '',
+                                product: row.product || '',
+                                sku: row.sku || ''
+                            });
+                        }
+                    }
+                    for (let index = 0; index < historicalRows.length; index += 250) {
+                        const { error: backfillError } = await supabase
+                            .from('pokemon_center_profile_events')
+                            .upsert(historicalRows.slice(index, index + 250), { onConflict: 'webhook_log_id' });
+                        if (backfillError) throw backfillError;
+                    }
+                    await setAppSetting(historyBackfillKey, {
+                        completed_at: new Date().toISOString(),
+                        matched_events: historicalMatched,
+                        days
+                    });
+                }
+            } catch (historyError) {
+                console.warn('Pokémon Center historical health lookup failed:', historyError.message || historyError);
+            }
+        }
+
+        const profiles = pokemonProfiles.map((profile) => {
+            const events = (eventsByProfile.get(String(profile.id)) || [])
+                .sort((a, b) => pokemonCenterEventTime(b) - pokemonCenterEventTime(a));
+            const counts = summarizePokemonCenterEvents(events);
+            const state = derivePokemonCenterProfileHealthState({ events });
+            const attempts = events.filter((event) => ['success', 'payment_decline', 'other'].includes(event?.category));
+            return {
+                profile_id: profile.id,
+                profile_name: profile.profile_name || '',
+                email: extractEmail(profile.addresses?.[0]?.email || ''),
+                current_status: state.current_status,
+                standby_since: state.standby_since,
+                standby_reason: state.standby_reason,
+                counts,
+                latest_event: state.latest_attempt || null,
+                latest_change: state.latest_change || null,
+                recent_events: attempts.slice(0, 12)
+            };
+        });
+        const totals = profiles.reduce((acc, profile) => {
+            acc.profiles += 1;
+            acc[profile.current_status] = (acc[profile.current_status] || 0) + 1;
+            for (const key of ['success', 'payment_decline', 'other']) acc.events[key] += Number(profile.counts?.[key] || 0);
+            return acc;
+        }, {
+            profiles: 0,
+            success: 0,
+            payment_decline: 0,
+            standby: 0,
+            other: 0,
+            no_activity: 0,
+            events: { success: 0, payment_decline: 0, other: 0 }
+        });
+
+        res.json({
+            days,
+            since,
+            profiles,
+            totals,
+            matched_events: profiles.reduce((sum, profile) => sum + Number(profile.counts?.total || 0), 0),
+            stored_event_count: storedEventCount,
+            historical_matched: historicalMatched,
+            health_storage_available: healthStorageAvailable
         });
     } catch (err) {
         res.status(500).json({ error: err.message || String(err) });
@@ -11095,6 +11392,19 @@ app.patch("/profiles/bulk", auth, async (req, res) => {
             }));
         }
 
+        const changedPokemonProfiles = (hasAddressChanges || hasPaymentChanges || hasProfileName || store === 'pokemoncenter')
+            ? owned.filter((profile) => profileAssignedStores(profile).map(normalizeProfileAccountType).includes('pokemoncenter'))
+            : [];
+        if (changedPokemonProfiles.length) {
+            await recordPokemonCenterProfileChanges({
+                userId: req.user_id,
+                profiles: changedPokemonProfiles,
+                reason: 'profiles_bulk_updated'
+            }).catch((error) => {
+                console.error('Pokémon Center profile change marker failed after bulk update:', error.message || error);
+            });
+        }
+
         const changedStores = (hasAddressChanges || hasPaymentChanges || hasProfileName)
             ? [...new Set(owned.flatMap((profile) => profileAssignedStores(profile).map(normalizeProfileAccountType)).filter(Boolean))]
             : [store];
@@ -11290,6 +11600,15 @@ app.put("/profiles/:id", auth, async (req, res) => {
         if ([...new Set([...previousStores, ...assignedStores])].map(normalizeProfileAccountType).includes('target')) {
             await syncTargetAddressVersion({ userId: req.user_id, profileId: id, address: data, forceNewVersion: true }).catch((err) => {
                 console.error('Target profile change marker failed after profile update:', err.message || err);
+            });
+        }
+        if ([...new Set([...previousStores, ...assignedStores])].map(normalizeProfileAccountType).includes('pokemoncenter')) {
+            await recordPokemonCenterProfileChanges({
+                userId: req.user_id,
+                profiles: [{ ...(currentProfile || {}), id, profile_name: data.profile_name || currentProfile?.profile_name || '' }],
+                reason: 'profile_updated'
+            }).catch((err) => {
+                console.error('Pokémon Center profile change marker failed after profile update:', err.message || err);
             });
         }
         await markProfileSyncChanged(req.user_id, [...new Set([...previousStores, ...assignedStores])], "profile_updated");
