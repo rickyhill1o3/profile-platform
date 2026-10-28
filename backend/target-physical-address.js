@@ -32,7 +32,11 @@ const TARGET_SECONDARY_ADDRESS_WORDS = new Set([
     'apt', 'apartment', 'apartments', 'appartment', 'unit', 'suite', 'ste',
     'floor', 'fl', 'flat', 'level', 'lvl', 'building', 'bldg', 'blding',
     'buildng', 'bulding', 'room', 'rm', 'door', 'pmb', 'mailbox', 'box',
-    'dorm', 'basement', 'cellar', 'barn', 'lot', 'trailer', 'rear', 'front'
+    'dorm', 'basement', 'cellar', 'barn', 'lot', 'trailer', 'rear', 'front',
+    // Complete USPS Publication 28 C2 abbreviations used by the bulk randomizer.
+    'dept', 'hngr', 'hangar', 'key', 'pier', 'slip', 'spc', 'space', 'stop',
+    'trlr', 'bsmt', 'frnt', 'lbby', 'lobby', 'lowr', 'lower', 'ofc', 'office',
+    'ph', 'penthouse', 'side', 'uppr', 'upper'
 ]);
 
 function normalizeTargetState(value = '') {
@@ -127,3 +131,4 @@ module.exports = {
     hasMatchingTargetStreetAnchor,
     sameTargetPhysicalAddress
 };
+

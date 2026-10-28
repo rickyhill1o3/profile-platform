@@ -1235,6 +1235,33 @@ const PROFILE_STATE_OPTIONS = [
     ['DC', 'District of Columbia'], ['PR', 'Puerto Rico']
 ];
 
+const TARGET_RANDOMIZER_LOCATION_FIELDS = new Set(['address1', 'address2', 'city', 'state', 'zip']);
+
+function setTargetRandomizerLocationInputsDisabled(modal, disabled) {
+    modal.querySelectorAll('[data-bulk-apply]').forEach((checkbox) => {
+        if (!TARGET_RANDOMIZER_LOCATION_FIELDS.has(checkbox.dataset.bulkApply)) return;
+        if (disabled) checkbox.checked = false;
+        checkbox.disabled = disabled;
+        const input = modal.querySelector(`[data-bulk-value="${checkbox.dataset.bulkApply}"]`);
+        if (input) {
+            if (disabled) input.value = '';
+            input.disabled = true;
+        }
+    });
+}
+
+function clearTargetAddressRandomizerPreview(modal) {
+    modal._targetAddressRandomization = null;
+    setTargetRandomizerLocationInputsDisabled(modal, false);
+    const preview = modal.querySelector('#bulkTargetAddressRandomizerPreview');
+    if (preview) {
+        preview.hidden = true;
+        preview.innerHTML = '';
+    }
+    const clearButton = modal.querySelector('#bulkTargetAddressRandomizerClear');
+    if (clearButton) clearButton.hidden = true;
+}
+
 function ensureBulkProfileEditModal() {
     let modal = document.getElementById('bulkProfileEditModal');
     if (modal) return modal;
@@ -1254,6 +1281,18 @@ function ensureBulkProfileEditModal() {
             </div>
             <div class="bulk-edit-body">
                 <div class="bulk-edit-notice"><strong>Choose each field you want to change.</strong><span>Unchecked fields keep their current value. Check Address Line 2 and leave it blank when you need to clear it.</span></div>
+                <section id="bulkTargetAddressRandomizer" class="target-usps-randomizer" hidden>
+                    <div class="target-usps-randomizer__heading">
+                        <div><strong>Randomize selected address with USPS designators</strong><span>Keep the selected profiles at their current physical address and give each one a different USPS Publication 28 secondary designator.</span></div>
+                    </div>
+                    <div class="target-usps-randomizer__actions">
+                        <button class="btn btn-primary" type="button" id="bulkTargetAddressRandomizerBuild">Preview randomized versions of this address</button>
+                        <button class="btn" type="button" id="bulkTargetAddressRandomizerClear" hidden>Clear preview</button>
+                    </div>
+                    <small>All selected profiles must be part of the same physical-address group. The street number, street, city, state, and ZIP stay unchanged.</small>
+                    <small>APT, BLDG, DEPT, FL, HNGR, KEY, LOT, PIER, RM, SLIP, SPC, STOP, STE, TRLR, UNIT, and # receive a random four-digit number. BSMT, FRNT, LBBY, LOWR, OFC, PH, REAR, SIDE, and UPPR do not receive a number.</small>
+                    <div id="bulkTargetAddressRandomizerPreview" class="target-usps-randomizer__preview" hidden></div>
+                </section>
                 <details class="bulk-edit-section" open>
                     <summary>Profile, shipping, and contact</summary>
                     <div class="bulk-edit-field-grid">
@@ -1302,6 +1341,45 @@ function ensureBulkProfileEditModal() {
         if (input) input.disabled = !checkbox.checked;
         if (checkbox.checked) input?.focus();
     }));
+    modal.querySelector('#bulkTargetAddressRandomizerClear')?.addEventListener('click', () => clearTargetAddressRandomizerPreview(modal));
+    modal.querySelector('#bulkTargetAddressRandomizerBuild')?.addEventListener('click', async () => {
+        const buildButton = modal.querySelector('#bulkTargetAddressRandomizerBuild');
+        const preview = modal.querySelector('#bulkTargetAddressRandomizerPreview');
+        const message = modal.querySelector('#bulkProfileEditMessage');
+        const ids = JSON.parse(modal.dataset.ids || '[]');
+        clearTargetAddressRandomizerPreview(modal);
+        buildButton.disabled = true;
+        buildButton.textContent = 'Building preview...';
+        message.textContent = '';
+        message.className = 'form-help';
+        try {
+            const response = await fetch(API + '/profiles/target-address-randomizer/preview', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token() },
+                body: JSON.stringify({ ids })
+            });
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok || data.error) throw new Error(data.error || 'Could not preview randomized addresses.');
+            const assignments = Array.isArray(data.assignments) ? data.assignments : [];
+            if (assignments.length !== ids.length) throw new Error('The preview did not include every selected profile.');
+            modal._targetAddressRandomization = { assignments };
+            setTargetRandomizerLocationInputsDisabled(modal, true);
+            preview.hidden = false;
+            preview.innerHTML = `
+                <div class="target-usps-randomizer__preview-heading"><strong>${assignments.length} addresses ready</strong><span>Base: ${escapeHTML(data.source?.address1 || '')} · ${escapeHTML([data.source?.city, data.source?.state, data.source?.zip].filter(Boolean).join(', '))}</span></div>
+                <div class="target-usps-randomizer__preview-list">${assignments.map((assignment, index) => `<div><span>${index + 1}</span><code>${escapeHTML(assignment.address1 || '')}</code></div>`).join('')}</div>
+                <small>This exact preview will be saved. Manual street, city, state, and ZIP fields are disabled while the preview is active.</small>`;
+            modal.querySelector('#bulkTargetAddressRandomizerClear').hidden = false;
+            message.textContent = 'Review the randomized addresses, then click Save selected profiles.';
+            message.className = 'form-help success';
+        } catch (error) {
+            message.textContent = error.message || 'Could not preview randomized addresses.';
+            message.className = 'form-help error';
+        } finally {
+            buildButton.disabled = false;
+            buildButton.textContent = 'Preview randomized versions of this address';
+        }
+    });
     return modal;
 }
 
@@ -1313,6 +1391,9 @@ function openBulkProfileEdit(group, ids) {
     modal.querySelector('#bulkProfileEditSummary').textContent = 'Edit any shared profile, shipping, payment, or retailer-login field for every selected profile.';
     const accountPasswordField = modal.querySelector('[data-bulk-account-password]');
     if (accountPasswordField) accountPasswordField.style.display = group === 'pokemoncenter' ? 'none' : '';
+    const targetRandomizerPanel = modal.querySelector('#bulkTargetAddressRandomizer');
+    if (targetRandomizerPanel) targetRandomizerPanel.hidden = group !== 'target';
+    clearTargetAddressRandomizerPreview(modal);
     modal.querySelectorAll('[data-bulk-apply]').forEach((checkbox) => { checkbox.checked = false; });
     modal.querySelectorAll('[data-bulk-value]').forEach((input) => { input.value = ''; input.disabled = true; });
     modal.querySelector('#bulkProfileAycdAction').value = 'keep';
@@ -1339,7 +1420,8 @@ function openBulkProfileEdit(group, ids) {
         const gmailAppPassword = changes.gmail_app_password;
         const aycdAction = modal.querySelector('#bulkProfileAycdAction').value;
         const state = changes.state;
-        if (!Object.keys(changes).length && aycdAction === 'keep') {
+        const targetAddressRandomization = group === 'target' ? modal._targetAddressRandomization : null;
+        if (!Object.keys(changes).length && aycdAction === 'keep' && !targetAddressRandomization) {
             message.textContent = 'Choose at least one change.';
             return;
         }
@@ -1356,6 +1438,7 @@ function openBulkProfileEdit(group, ids) {
                     login_password: loginPassword || undefined,
                     gmail_app_password: gmailAppPassword || undefined,
                     use_aycd_inbox: aycdAction === 'keep' ? undefined : aycdAction === 'enable',
+                    target_address_randomization: targetAddressRandomization || undefined,
                     ...changes,
                     state: state || undefined
                 })
@@ -1363,8 +1446,10 @@ function openBulkProfileEdit(group, ids) {
             const data = await response.json().catch(() => ({}));
             if (!response.ok || data.error) throw new Error(data.error || 'Could not update selected profiles.');
             const updatedCount = data.updated_count || ids.length;
-            const changedCount = Number(data.changed_fields?.length || Object.keys(changes).length || (aycdAction === 'keep' ? 0 : 1));
-            message.textContent = `Updated ${updatedCount} profile${updatedCount === 1 ? '' : 's'} across ${changedCount} selected field${changedCount === 1 ? '' : 's'}.`;
+            const changedCount = Number(data.changed_fields?.length || Object.keys(changes).length + (targetAddressRandomization ? 1 : 0) || (aycdAction === 'keep' ? 0 : 1));
+            message.textContent = targetAddressRandomization
+                ? `Randomized and updated ${updatedCount} Target profile${updatedCount === 1 ? '' : 's'} using the selected USPS secondary-address plan.`
+                : `Updated ${updatedCount} profile${updatedCount === 1 ? '' : 's'} across ${changedCount} selected field${changedCount === 1 ? '' : 's'}.`;
             message.className = 'form-help success';
             ids.forEach((id) => selectedProfileIds.delete(String(id)));
             if (Object.keys(changes).length || group === 'target') targetProfileHealthCache = { data: null, loadedAt: 0 };

@@ -139,6 +139,10 @@ const {
     sameTargetPhysicalAddress
 } = require("./target-physical-address");
 const {
+    buildTargetUspsRandomizationPlan,
+    validateTargetUspsRandomizationPlan
+} = require("./target-usps-secondary-randomizer");
+const {
     CREDIT_AUTO_PAUSE_THRESHOLD,
     STORE_REACTIVATION_MINIMUM_BALANCE,
     shouldAutoPauseStores,
@@ -10187,8 +10191,6 @@ app.delete('/target-address-pool/:id', auth, async (req, res) => {
         const current = await getAppSetting(key, []);
         const currentPool = Array.isArray(current) ? current : [];
         const selected = currentPool.find((item) => String(item?.id || '') === String(req.params.id || ''));
-        // One displayed row represents one physical address, including older saved spelling/unit
-        // duplicates. Removing that row must remove every saved alias or the empty duplicates return.
         const pool = currentPool.filter((item) => selected
             ? !sameTargetPhysicalAddress(selected, item || {})
             : String(item?.id || '') !== String(req.params.id || ''));
@@ -10572,8 +10574,6 @@ app.get('/target-profile-health', auth, async (req, res) => {
                 address1: cleanFieldValue(address.address1 || ''), address2: cleanFieldValue(address.address2 || ''),
                 city: cleanFieldValue(address.city || ''), state: cleanFieldValue(address.state || ''), zip: cleanFieldValue(address.zip || '')
             };
-            // Compare every address variant already assigned to a group. This makes clustering
-            // transitive, so a chain of spelling/building variations cannot split one location.
             let group = physicalGroups.find((item) => (item.match_addresses || [item.sample_address])
                 .some((candidate) => sameTargetPhysicalAddress(candidate, comparableAddress)));
             if (!group) {
@@ -11088,6 +11088,50 @@ app.post("/profiles/raffle-builder", auth, async (req, res) => {
 });
 
 
+function targetProfilesFromOwnedProfiles(profiles = []) {
+    return (Array.isArray(profiles) ? profiles : []).filter((profile) =>
+        profileAssignedStores(profile).map(normalizeProfileAccountType).includes('target')
+    );
+}
+
+function targetRandomizerSelectedAddresses(selectedProfiles = []) {
+    const addresses = (Array.isArray(selectedProfiles) ? selectedProfiles : [])
+        .map((profile) => profile.addresses?.[0] || {});
+    if (!addresses.length || addresses.some((address) => !address.address1)) {
+        throw new Error('Every selected profile must have a shipping address before randomizing.');
+    }
+    const firstAddress = addresses[0];
+    if (addresses.some((address) => !sameTargetPhysicalAddress(firstAddress, address))) {
+        throw new Error('Select profiles from one physical-address group before randomizing.');
+    }
+    return addresses;
+}
+
+app.post("/profiles/target-address-randomizer/preview", auth, async (req, res) => {
+    try {
+        await ensureUserNotRevoked(req.user_id);
+        const ids = Array.isArray(req.body?.ids) ? [...new Set(req.body.ids.map((id) => String(id || '').trim()).filter(Boolean))] : [];
+        if (!ids.length) return res.status(400).json({ error: 'Select at least one Target profile.' });
+
+        const allProfiles = await getUserProfilesWithRelations(req.user_id);
+        const targetProfiles = targetProfilesFromOwnedProfiles(allProfiles);
+        const selected = targetProfiles.filter((profile) => ids.includes(String(profile.id)));
+        if (selected.length !== ids.length) return res.status(400).json({ error: 'One or more selected profiles are not available in your Target group.' });
+        const sourceAddresses = targetRandomizerSelectedAddresses(selected);
+        const plan = buildTargetUspsRandomizationPlan({ profileIds: ids, sourceAddresses });
+        res.json({
+            success: true,
+            source_group_count: sourceAddresses.length,
+            source: plan.source,
+            assignments: plan.assignments
+        });
+    } catch (err) {
+        const message = err.message || 'Could not preview randomized Target addresses.';
+        const status = /select|physical-address group|shipping address|available|determine/i.test(message) ? 400 : 500;
+        res.status(status).json({ error: message });
+    }
+});
+
 app.patch("/profiles/bulk", auth, async (req, res) => {
     try {
         await ensureUserNotRevoked(req.user_id);
@@ -11098,6 +11142,11 @@ app.patch("/profiles/bulk", auth, async (req, res) => {
         if (store === 'walmart' && String(bulkUser.role || '').toLowerCase() !== 'super_admin') return res.status(403).json({ error: 'Walmart profiles are available only to the super admin.' });
         if (!ids.length) return res.status(400).json({ error: 'No profile ids were provided' });
         if (!allowedStores.has(store) || store === 'all') return res.status(400).json({ error: 'Choose a specific store group before bulk editing.' });
+        const requestedTargetRandomization = req.body?.target_address_randomization;
+        const hasTargetAddressRandomization = store === 'target'
+            && requestedTargetRandomization && typeof requestedTargetRandomization === 'object'
+            && Array.isArray(requestedTargetRandomization.assignments);
+        if (requestedTargetRandomization && store !== 'target') return res.status(400).json({ error: 'USPS address randomization is available only for Target profiles.' });
 
         const hasProfileName = Object.prototype.hasOwnProperty.call(req.body || {}, 'profile_name') && String(req.body.profile_name || '').trim().length > 0;
         const requestedProfileName = hasProfileName ? String(req.body.profile_name).trim() : '';
@@ -11124,7 +11173,12 @@ app.patch("/profiles/bulk", auth, async (req, res) => {
         if (Object.prototype.hasOwnProperty.call(addressChanges, 'email') && !isValidEmailForRaffle(addressChanges.email)) {
             return res.status(400).json({ error: 'Enter a valid shipping email.' });
         }
-        const hasAddressChanges = Object.keys(addressChanges).length > 0;
+        const randomizedLocationFields = ['address1', 'address2', 'city', 'state', 'zip'];
+        if (hasTargetAddressRandomization && randomizedLocationFields.some((field) => Object.prototype.hasOwnProperty.call(addressChanges, field))) {
+            return res.status(400).json({ error: 'Use either the USPS randomizer or manual street/city/state/ZIP changes, not both at the same time.' });
+        }
+        const hasSharedAddressChanges = Object.keys(addressChanges).length > 0;
+        const hasAddressChanges = hasSharedAddressChanges || hasTargetAddressRandomization;
 
         const paymentChanges = {};
         const hasCard = Object.prototype.hasOwnProperty.call(req.body || {}, 'card') && String(req.body.card || '').trim().length > 0;
@@ -11161,6 +11215,19 @@ app.patch("/profiles/bulk", auth, async (req, res) => {
         const owned = (allProfiles || []).filter((profile) => ids.includes(String(profile.id)) && profileAssignedStores(profile).includes(store));
         if (!owned.length) return res.status(404).json({ error: 'No matching profiles found in this store group' });
         const ownedIds = owned.map((profile) => String(profile.id));
+        let targetRandomizedAddressByProfile = new Map();
+        let targetRandomizationSource = null;
+        if (hasTargetAddressRandomization) {
+            if (ownedIds.length !== ids.length) return res.status(400).json({ error: 'One or more selected profiles are not available in your Target group.' });
+            const sourceAddresses = targetRandomizerSelectedAddresses(owned);
+            const validated = validateTargetUspsRandomizationPlan({
+                profileIds: ownedIds,
+                sourceAddresses,
+                assignments: requestedTargetRandomization.assignments
+            });
+            targetRandomizationSource = validated.source;
+            targetRandomizedAddressByProfile = new Map(validated.assignments.map((assignment) => [String(assignment.profile_id), assignment]));
+        }
         if (hasLoginEmail && ownedIds.length > 1) {
             return res.status(400).json({ error: 'Select one profile at a time when changing the retailer login email so multiple accounts do not receive the same login.' });
         }
@@ -11266,14 +11333,33 @@ app.patch("/profiles/bulk", auth, async (req, res) => {
 
         let addressUpdatedCount = 0;
         if (hasAddressChanges) {
-            for (let i = 0; i < ownedIds.length; i += 75) {
-                const { data, error } = await supabase
-                    .from('addresses')
-                    .update(addressChanges)
-                    .in('profile_id', ownedIds.slice(i, i + 75))
-                    .select('profile_id');
-                if (error) throw error;
-                addressUpdatedCount += (data || []).length;
+            if (hasTargetAddressRandomization) {
+                // Each profile receives its own approved USPS secondary designator. Keep contact
+                // changes shared, but write the randomized street/location one profile at a time.
+                for (let i = 0; i < ownedIds.length; i += 20) {
+                    const results = await Promise.all(ownedIds.slice(i, i + 20).map(async (profileId) => {
+                        const randomized = targetRandomizedAddressByProfile.get(String(profileId));
+                        if (!randomized) return { error: new Error(`Missing randomized address for profile ${profileId}.`) };
+                        const { profile_id, ...randomizedLocation } = randomized;
+                        return supabase.from('addresses')
+                            .update({ ...addressChanges, ...randomizedLocation })
+                            .eq('profile_id', profileId)
+                            .select('profile_id');
+                    }));
+                    const failed = results.find((result) => result?.error);
+                    if (failed?.error) throw failed.error;
+                    addressUpdatedCount += results.reduce((sum, result) => sum + Number(result?.data?.length || 0), 0);
+                }
+            } else {
+                for (let i = 0; i < ownedIds.length; i += 75) {
+                    const { data, error } = await supabase
+                        .from('addresses')
+                        .update(addressChanges)
+                        .in('profile_id', ownedIds.slice(i, i + 75))
+                        .select('profile_id');
+                    if (error) throw error;
+                    addressUpdatedCount += (data || []).length;
+                }
             }
             if (addressUpdatedCount !== ownedIds.length) {
                 throw new Error(`Shipping details were updated for ${addressUpdatedCount} of ${ownedIds.length} selected profiles. One or more profiles are missing a shipping address.`);
@@ -11330,7 +11416,9 @@ app.patch("/profiles/bulk", auth, async (req, res) => {
             : [];
         for (let i = 0; i < changedTargetProfiles.length; i += 10) {
             await Promise.all(changedTargetProfiles.slice(i, i + 10).map((profile) => {
-                const address = { ...(profile.addresses?.[0] || {}), ...addressChanges };
+                const randomized = targetRandomizedAddressByProfile.get(String(profile.id)) || {};
+                const { profile_id: _randomizedProfileId, ...randomizedLocation } = randomized;
+                const address = { ...(profile.addresses?.[0] || {}), ...addressChanges, ...randomizedLocation };
                 return syncTargetAddressVersion({
                     userId: req.user_id,
                     profileId: profile.id,
@@ -11367,9 +11455,11 @@ app.patch("/profiles/bulk", auth, async (req, res) => {
             address_updated_count: addressUpdatedCount,
             payment_updated_count: paymentUpdatedCount,
             state: hasState ? requestedState : null,
+            target_address_randomization_source: targetRandomizationSource,
             changed_fields: [
                 ...(hasProfileName ? ['profile_name'] : []),
                 ...Object.keys(addressChanges),
+                ...(hasTargetAddressRandomization ? ['target_address_randomization'] : []),
                 ...(hasCard ? ['card'] : []),
                 ...(hasCvv ? ['cvv'] : []),
                 ...(hasExpMonth ? ['exp_month'] : []),
@@ -11383,8 +11473,11 @@ app.patch("/profiles/bulk", auth, async (req, res) => {
             store
         });
     } catch (err) {
-        const status = err.message === 'This account has been revoked' ? 403 : 500;
-        res.status(status).json({ error: err.message || 'Bulk profile update failed' });
+        const message = err.message || 'Bulk profile update failed';
+        const status = message === 'This account has been revoked' ? 403
+            : /randomized|randomization|source address|source location|selected profiles|USPS designator|preview/i.test(message) ? 400
+                : 500;
+        res.status(status).json({ error: message });
     }
 });
 
