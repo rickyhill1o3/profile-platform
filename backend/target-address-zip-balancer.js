@@ -1,3 +1,5 @@
+const { sameTargetPhysicalAddress } = require('./target-physical-address');
+
 function cleanAddressValue(value = '') {
     return String(value == null ? '' : value).trim().replace(/\s+/g, ' ');
 }
@@ -40,10 +42,14 @@ function normalizeBalanceDestinations(addresses = [], selectedZip = '') {
     }
 
     const seen = new Set();
+    const physicalDestinations = [];
     for (const address of normalized) {
         const key = normalizedAddressKey(address);
-        if (seen.has(key)) throw new Error('Each destination address must be unique.');
+        if (seen.has(key) || physicalDestinations.some((candidate) => sameTargetPhysicalAddress(candidate, address))) {
+            throw new Error('Each destination physical address must be unique.');
+        }
         seen.add(key);
+        physicalDestinations.push(address);
     }
     return normalized;
 }
@@ -65,13 +71,23 @@ function buildZipAddressBalancePlan({ profiles = [], addresses = [], zip = '', s
     const base = Math.floor(eligibleProfiles.length / destinations.length);
     const remainder = eligibleProfiles.length % destinations.length;
     const quotas = destinations.map((_, index) => base + (index < remainder ? 1 : 0));
-    const destinationIndexByKey = new Map(destinations.map((address, index) => [normalizedAddressKey(address), index]));
     const keptByDestination = destinations.map(() => []);
     const movePool = [];
 
     for (const profile of eligibleProfiles) {
-        const destinationIndex = destinationIndexByKey.get(normalizedAddressKey(profileAddress(profile)));
-        if (destinationIndex == null || keptByDestination[destinationIndex].length >= quotas[destinationIndex]) {
+        const currentAddress = profileAddress(profile);
+        // A destination represents one physical street address, not one exact jig/variant.
+        // Preserve every existing APT/BLDG/FRNT/misspelling variation for profiles that can
+        // remain in their current physical group. Only a group's true excess enters movePool.
+        let destinationIndex = destinations.findIndex((destination) =>
+            normalizedAddressKey(destination) === normalizedAddressKey(currentAddress)
+        );
+        if (destinationIndex < 0) {
+            destinationIndex = destinations.findIndex((destination) =>
+                sameTargetPhysicalAddress(destination, currentAddress)
+            );
+        }
+        if (destinationIndex < 0 || keptByDestination[destinationIndex].length >= quotas[destinationIndex]) {
             movePool.push(profile);
         } else {
             keptByDestination[destinationIndex].push(profile);

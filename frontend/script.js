@@ -1570,7 +1570,7 @@ function ensureTargetZipBalanceModal() {
                     <small id="targetBalanceZipHelp"></small>
                 </label>
                 <div class="target-balance-destinations-header">
-                    <div><strong>Addresses to use</strong><span>All saved physical addresses for this ZIP are loaded below. Edit a row to replace that address everywhere, or remove it to redistribute its profiles across the addresses that remain.</span></div>
+                    <div><strong>Addresses to use</strong><span>All saved physical addresses for this ZIP are loaded below. Existing address variations stay exactly as written for profiles that remain in their current group. Only excess profiles move. Edit a row to replace that physical address, or remove it to redistribute its profiles.</span></div>
                     <button class="btn btn-small" type="button" id="targetBalanceAddAddress">Add address</button>
                 </div>
                 <div id="targetBalanceAddressRows" class="target-balance-address-rows"></div>
@@ -1629,7 +1629,7 @@ function renderTargetBalancePreview(modal, data) {
     const preview = modal.querySelector('#targetBalancePreview');
     preview.hidden = false;
     preview.innerHTML = `
-        <div class="target-balance-preview__summary"><strong>${Number(data.eligible_count || 0)} profiles in ZIP ${escapeHTML(data.zip || '')}</strong><span>${Number(data.changed_count || 0)} address changes · ${Number(data.unchanged_count || 0)} already in a balanced spot</span></div>
+        <div class="target-balance-preview__summary"><strong>${Number(data.eligible_count || 0)} profiles in ZIP ${escapeHTML(data.zip || '')}</strong><span>${Number(data.changed_count || 0)} excess profiles will move · ${Number(data.unchanged_count || 0)} existing address variations will stay unchanged</span></div>
         <div class="target-balance-preview__grid">${(data.distribution || []).map((row) => {
             const address = row.address || {};
             const label = [address.address1, address.address2, [address.city, address.state, address.zip].filter(Boolean).join(', ')].filter(Boolean).join(' · ');
