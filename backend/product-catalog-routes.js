@@ -55,6 +55,7 @@ const { buildTargetCatalogRefreshPatch } = require('./target-catalog-refresh');
 
 const SUPPORTED_SITES = new Set(["amazon", "target", "walmart", "samsclub", "crunchyroll", "general", "supreme", "pokemon"]);
 const REQUESTABLE_SITES = new Set(["amazon", "target", "walmart", "samsclub", "crunchyroll", "general", "supreme", "pokemon"]);
+const CATALOG_SITE_CONSTRAINT_MIGRATION = 'backend/sql/2026-10-30-expand-catalog-product-sites.sql';
 
 // Legacy auto-created virtual products such as TARGET-NEXT-DROP are now disabled.
 // Keep these values only so the API can hide/ignore old rows that may still exist in Supabase.
@@ -154,6 +155,16 @@ function normalizeSite(value) {
     return site;
 }
 
+function catalogSiteLabel(site) {
+    if (site === 'samsclub') return "Sam's Club";
+    if (site === 'pokemon') return 'Pokémon Center';
+    return site ? site.charAt(0).toUpperCase() + site.slice(1) : 'Selected store';
+}
+
+function catalogSiteConstraintError(site) {
+    return `Database site constraint is blocking ${catalogSiteLabel(site)} products. Run ${CATALOG_SITE_CONSTRAINT_MIGRATION} in Supabase SQL Editor once, then try again.`;
+}
+
 function normalizeRunMode(value, fallback = "current") {
     const mode = String(value || fallback).trim().toLowerCase();
     return mode === "next" ? "next" : "current";
@@ -239,7 +250,7 @@ async function ensureActiveCatalogForSite(supabase, site) {
     if (catalogError) throw new Error(catalogError.message);
     if (activeCatalog?.id) return activeCatalog;
 
-    const label = site === "samsclub" ? "Sam's Club" : site === "pokemon" ? "Pokemon Center" : site.charAt(0).toUpperCase() + site.slice(1);
+    const label = catalogSiteLabel(site);
     const { data: createdCatalog, error: createCatalogError } = await supabase
         .from("product_catalogs")
         .insert({
@@ -1326,8 +1337,14 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
         } catch (err) {
             const msg = String(err && err.message || err);
             if (msg.includes('product_catalogs_site_check') || msg.includes('catalog_products_site_check')) {
+                let site = String(req.body?.site || '').trim().toLowerCase();
+                try {
+                    site = normalizeSite(site);
+                } catch (_) {
+                    site = '';
+                }
                 return res.status(500).json({
-                    error: "Database constraint is blocking Sam's Club products. Run backend/sql/2026-05-25-add-samsclub-site.sql in Supabase SQL Editor once, then try again."
+                    error: catalogSiteConstraintError(site)
                 });
             }
             res.status(500).json({ error: msg });
