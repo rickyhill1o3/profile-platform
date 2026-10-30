@@ -143,31 +143,83 @@ function pokemonCenterEventTime(event = {}) {
     return pokemonCenterHealthTimestamp(event?.event_at || event?.created_at);
 }
 
-function derivePokemonCenterProfileHealthState({ events = [] } = {}) {
+function pokemonCenterEventDayKey(event = {}, timeZone = 'America/New_York') {
+    const timestamp = pokemonCenterEventTime(event);
+    if (!timestamp) return '';
+    const date = new Date(timestamp);
+    try {
+        const parts = new Intl.DateTimeFormat('en-US', {
+            timeZone,
+            year: 'numeric',
+            month: '2-digit',
+            day: '2-digit'
+        }).formatToParts(date).reduce((result, part) => {
+            if (part.type !== 'literal') result[part.type] = part.value;
+            return result;
+        }, {});
+        return `${parts.year}-${parts.month}-${parts.day}`;
+    } catch (_) {
+        return date.toISOString().slice(0, 10);
+    }
+}
+
+function derivePokemonCenterProfileHealthState({ events = [], timeZone = 'America/New_York' } = {}) {
     const ordered = [...(Array.isArray(events) ? events : [])]
         .sort((a, b) => pokemonCenterEventTime(b) - pokemonCenterEventTime(a));
     const latestChange = ordered.find((event) => event?.category === 'profile_changed') || null;
-    const latestAttempt = ordered.find((event) => ['success', 'payment_decline', 'other'].includes(event?.category)) || null;
     const latestChangeMs = pokemonCenterEventTime(latestChange);
-    const latestAttemptMs = pokemonCenterEventTime(latestAttempt);
+    const allLatestAttempt = ordered.find((event) => ['success', 'payment_decline', 'other'].includes(event?.category)) || null;
+    const attemptsAfterLatestChange = ordered.filter((event) => {
+        if (!['success', 'payment_decline', 'other'].includes(event?.category)) return false;
+        return !latestChangeMs || pokemonCenterEventTime(event) > latestChangeMs;
+    });
+    const latestAttempt = attemptsAfterLatestChange[0] || null;
 
-    if (latestChangeMs && (!latestAttemptMs || latestChangeMs > latestAttemptMs)) {
+    if (latestChangeMs && !latestAttempt) {
         return {
             current_status: 'standby',
             standby_since: latestChange?.event_at || latestChange?.created_at || null,
             standby_reason: 'profile_changed_waiting_for_checkout',
-            latest_attempt: latestAttempt,
-            latest_change: latestChange
+            latest_attempt: allLatestAttempt,
+            latest_change: latestChange,
+            current_activity_day: null,
+            latest_day_counts: summarizePokemonCenterEvents([])
         };
     }
+
+    if (!latestAttempt) {
+        return {
+            current_status: 'no_activity',
+            standby_since: null,
+            standby_reason: null,
+            latest_attempt: null,
+            latest_change: latestChange,
+            current_activity_day: null,
+            latest_day_counts: summarizePokemonCenterEvents([])
+        };
+    }
+
+    // Pokémon Center normally accepts only the first successful checkout for the same
+    // information on a release day. Later same-day attempts can be declined even though the
+    // profile is good, so one success wins over every later decline on that activity day.
+    const currentActivityDay = pokemonCenterEventDayKey(latestAttempt, timeZone);
+    const latestDayAttempts = attemptsAfterLatestChange.filter((event) => (
+        pokemonCenterEventDayKey(event, timeZone) === currentActivityDay
+    ));
+    const statusOrder = ['success', 'payment_decline', 'other'];
+    const currentStatus = statusOrder.find((category) => (
+        latestDayAttempts.some((event) => event?.category === category)
+    )) || 'no_activity';
+    const statusEvent = latestDayAttempts.find((event) => event?.category === currentStatus) || latestAttempt;
+
     return {
-        current_status: ['success', 'payment_decline', 'other'].includes(latestAttempt?.category)
-            ? latestAttempt.category
-            : 'no_activity',
+        current_status: currentStatus,
         standby_since: null,
         standby_reason: null,
-        latest_attempt: latestAttempt,
-        latest_change: latestChange
+        latest_attempt: statusEvent,
+        latest_change: latestChange,
+        current_activity_day: currentActivityDay,
+        latest_day_counts: summarizePokemonCenterEvents(latestDayAttempts)
     };
 }
 
@@ -199,6 +251,7 @@ module.exports = {
     isPokemonCenterSite,
     normalizePokemonCenterEmail,
     normalizePokemonCenterIdentity,
+    pokemonCenterEventDayKey,
     pokemonCenterEventTime,
     pokemonCenterProfileEmails,
     resolveOwnedPokemonCenterProfile,

@@ -1015,7 +1015,7 @@ async function loadProfiles() {
                         <div class="target-health-overview pokemon-center-health-overview">
                             <div class="target-health-overview__intro">
                                 <strong>Pokémon Center Profile Health</strong>
-                                <span>Last ${escapeHTML(String(pokemonCenterProfileHealth.days || 30))} days of Stellar checkout results. Payment declines are placed first so you can update those profiles before the next release.</span>
+                                <span>Last ${escapeHTML(String(pokemonCenterProfileHealth.days || 30))} days of Stellar checkout results. Each profile is graded by its most recent activity day, and one success keeps that day successful even if later same-day attempts decline.</span>
                             </div>
                             <div class="target-health-summary-grid">
                                 <div class="target-health-summary target-health-summary--success"><span>Successful now</span><strong>${Number(totals.success || 0)}</strong></div>
@@ -1024,7 +1024,7 @@ async function loadProfiles() {
                                 <div class="target-health-summary target-health-summary--other"><span>Other errors</span><strong>${Number(totals.other || 0)}</strong></div>
                                 <div class="target-health-summary"><span>No recent activity</span><strong>${Number(totals.no_activity || 0)}</strong></div>
                             </div>
-                            <div class="subtle-text">Red means the latest attempt was a payment decline. After you edit that profile, it turns blue and stays in standby until a newer checkout changes it to green, red, or another error.</div>
+                            <div class="subtle-text">Green means the profile had at least one success on its most recent activity day. Red means that day had payment declines and no success. After you edit a profile, it turns blue and stays in standby until a newer checkout tests the changed details.</div>
                             ${pokemonCenterProfileHealth.health_storage_available === false ? `<div class="target-address-history-warning">Run backend/sql/POKEMON_CENTER_PROFILE_HEALTH.sql in Supabase to save new checkout results and blue profile-change markers. Existing webhook history can still display.</div>` : ''}
                         </div>`;
                     })() : ""}
@@ -1053,6 +1053,7 @@ async function loadProfiles() {
                             <option value="no_activity" ${pokemonCenterProfileHealthFilter === 'no_activity' ? 'selected' : ''}>No recent activity</option>
                         </select>` : ''}
                         <button class="btn" type="button" data-profile-select-visible="${groupKey}">Select Visible</button>
+                        ${groupKey === 'pokemoncenter' ? `<button class="btn btn-warning" type="button" data-profile-select-declined>Select Declined Profiles (${Number(pokemonCenterProfileHealth.totals?.payment_decline || 0)})</button>` : ''}
                         <button class="btn" type="button" data-profile-edit-group="${groupKey}" ${selectedCount ? '' : 'disabled'}>Edit Selected (${selectedCount})</button>
                         ${groupKey === 'target' && isSuperAdminDashboard ? `<button class="btn btn-primary" type="button" data-target-personal-status="on" ${selectedCount ? '' : 'disabled'}>Turn On Accounts (${selectedCount})</button>
                         <button class="btn btn-warning" type="button" data-target-personal-status="pause" ${selectedCount ? '' : 'disabled'}>Pause Accounts (${selectedCount})</button>` : ''}
@@ -1145,12 +1146,16 @@ async function loadProfiles() {
                                     no_activity: "No recent activity"
                                 };
                                 const latest = health?.latest_event || null;
-                                const counts = health?.counts || {};
+                                const counts = health?.latest_day_counts || health?.counts || {};
                                 const standbySince = health?.standby_since || null;
                                 const latestAt = latest?.event_at || latest?.created_at || null;
+                                const activityDay = health?.current_activity_day || '';
+                                const activityDayLabel = activityDay
+                                    ? new Date(`${activityDay}T12:00:00`).toLocaleDateString()
+                                    : '';
                                 const when = current === 'standby' && standbySince
                                     ? `Profile changed ${new Date(standbySince).toLocaleString()} · waiting for the next checkout attempt`
-                                    : (latestAt ? new Date(latestAt).toLocaleString() : "No Pokémon Center checkout webhook in the last 30 days");
+                                    : (latestAt ? `${activityDayLabel ? `Status for ${activityDayLabel} · ` : ''}${new Date(latestAt).toLocaleString()}` : "No Pokémon Center checkout webhook in the last 30 days");
                                 const recentEvents = Array.isArray(health?.recent_events) ? health.recent_events : [];
                                 const declineNotice = current === 'payment_decline'
                                     ? `<div class="pokemon-center-decline-review"><b>Payment update recommended</b><span>${escapeHTML(latest?.reason || 'The latest Pokémon Center attempt was declined. Review this profile’s card details before the next release.')}</span></div>`
@@ -1171,9 +1176,9 @@ async function loadProfiles() {
                                         <span class="subtle-text">${escapeHTML(when)}</span>
                                     </div>
                                     <div class="target-profile-health__counts">
-                                        <span><b>${Number(counts.success || 0)}</b> success</span>
-                                        <span class="is-payment-decline"><b>${Number(counts.payment_decline || 0)}</b> payment declines</span>
-                                        <span><b>${Number(counts.other || 0)}</b> other</span>
+                                        <span><b>${Number(counts.success || 0)}</b> success on latest day</span>
+                                        <span class="is-payment-decline"><b>${Number(counts.payment_decline || 0)}</b> payment declines on latest day</span>
+                                        <span><b>${Number(counts.other || 0)}</b> other on latest day</span>
                                     </div>
                                     ${declineNotice}
                                     ${standbyNotice}
@@ -1819,6 +1824,21 @@ function bindProfileDashboardControls() {
             const group = button.dataset.profileSelectVisible;
             const visibleIds = visibleDashboardProfileIdsByGroup.get(group) || [];
             visibleIds.forEach((id) => selectedProfileIds.add(String(id)));
+            loadProfiles();
+        });
+    });
+    document.querySelectorAll('[data-profile-select-declined]').forEach((button) => {
+        button.addEventListener('click', () => {
+            const pokemonCenterIds = allDashboardProfiles
+                .filter((profile) => profileInGroup(profile, 'pokemoncenter'))
+                .map((profile) => String(profile.id));
+            pokemonCenterIds.forEach((id) => selectedProfileIds.delete(id));
+            const declinedIds = (pokemonCenterProfileHealthCache.data?.profiles || [])
+                .filter((profile) => profile?.current_status === 'payment_decline')
+                .map((profile) => String(profile.profile_id));
+            declinedIds.forEach((id) => selectedProfileIds.add(id));
+            profileGroupFilters.pokemoncenter = '';
+            pokemonCenterProfileHealthFilter = 'payment_decline';
             loadProfiles();
         });
     });

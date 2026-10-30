@@ -10760,6 +10760,8 @@ app.get('/pokemon-center-profile-health', auth, async (req, res) => {
                 standby_since: state.standby_since,
                 standby_reason: state.standby_reason,
                 counts,
+                current_activity_day: state.current_activity_day,
+                latest_day_counts: state.latest_day_counts,
                 latest_event: state.latest_attempt || null,
                 latest_change: state.latest_change || null,
                 recent_events: attempts.slice(0, 12)
