@@ -118,7 +118,7 @@ function shuffledDesignators(randomInt = crypto.randomInt) {
 
 function buildTargetUspsRandomizationPlan({ profileIds = [], sourceAddresses = [], randomInt = crypto.randomInt } = {}) {
     const ids = [...new Set((Array.isArray(profileIds) ? profileIds : []).map((id) => String(id || '').trim()).filter(Boolean))];
-    if (!ids.length) throw new Error('Select at least one Target profile to randomize.');
+    if (!ids.length) throw new Error('Select at least one profile to randomize.');
     const source = canonicalTargetSourceAddress(sourceAddresses);
     const designators = shuffledDesignators(randomInt);
     const reusableRequiredDesignators = designators.filter((designator) => REQUIRED_USPS_SECONDARY_DESIGNATORS.includes(designator));

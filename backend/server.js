@@ -11090,9 +11090,10 @@ app.post("/profiles/raffle-builder", auth, async (req, res) => {
 });
 
 
-function targetProfilesFromOwnedProfiles(profiles = []) {
+function profilesFromOwnedProfilesForAddressRandomizer(profiles = [], store = 'target') {
+    const normalizedStore = normalizeProfileAccountType(store);
     return (Array.isArray(profiles) ? profiles : []).filter((profile) =>
-        profileAssignedStores(profile).map(normalizeProfileAccountType).includes('target')
+        profileAssignedStores(profile).map(normalizeProfileAccountType).includes(normalizedStore)
     );
 }
 
@@ -11112,23 +11113,28 @@ function targetRandomizerSelectedAddresses(selectedProfiles = []) {
 app.post("/profiles/target-address-randomizer/preview", auth, async (req, res) => {
     try {
         await ensureUserNotRevoked(req.user_id);
+        const store = normalizeProfileAccountType(req.body?.store || 'target');
+        const randomizerStores = new Set(['target', 'pokemoncenter']);
+        if (!randomizerStores.has(store)) return res.status(400).json({ error: 'USPS address randomization is available only for Target and Pokémon Center profiles.' });
+        const storeLabel = store === 'pokemoncenter' ? 'Pokémon Center' : 'Target';
         const ids = Array.isArray(req.body?.ids) ? [...new Set(req.body.ids.map((id) => String(id || '').trim()).filter(Boolean))] : [];
-        if (!ids.length) return res.status(400).json({ error: 'Select at least one Target profile.' });
+        if (!ids.length) return res.status(400).json({ error: `Select at least one ${storeLabel} profile.` });
 
         const allProfiles = await getUserProfilesWithRelations(req.user_id);
-        const targetProfiles = targetProfilesFromOwnedProfiles(allProfiles);
-        const selected = targetProfiles.filter((profile) => ids.includes(String(profile.id)));
-        if (selected.length !== ids.length) return res.status(400).json({ error: 'One or more selected profiles are not available in your Target group.' });
+        const storeProfiles = profilesFromOwnedProfilesForAddressRandomizer(allProfiles, store);
+        const selected = storeProfiles.filter((profile) => ids.includes(String(profile.id)));
+        if (selected.length !== ids.length) return res.status(400).json({ error: `One or more selected profiles are not available in your ${storeLabel} group.` });
         const sourceAddresses = targetRandomizerSelectedAddresses(selected);
         const plan = buildTargetUspsRandomizationPlan({ profileIds: ids, sourceAddresses });
         res.json({
             success: true,
+            store,
             source_group_count: sourceAddresses.length,
             source: plan.source,
             assignments: plan.assignments
         });
     } catch (err) {
-        const message = err.message || 'Could not preview randomized Target addresses.';
+        const message = err.message || 'Could not preview randomized addresses.';
         const status = /select|physical-address group|shipping address|available|determine/i.test(message) ? 400 : 500;
         res.status(status).json({ error: message });
     }
@@ -11145,10 +11151,11 @@ app.patch("/profiles/bulk", auth, async (req, res) => {
         if (!ids.length) return res.status(400).json({ error: 'No profile ids were provided' });
         if (!allowedStores.has(store) || store === 'all') return res.status(400).json({ error: 'Choose a specific store group before bulk editing.' });
         const requestedTargetRandomization = req.body?.target_address_randomization;
-        const hasTargetAddressRandomization = store === 'target'
+        const addressRandomizerStores = new Set(['target', 'pokemoncenter']);
+        const hasTargetAddressRandomization = addressRandomizerStores.has(store)
             && requestedTargetRandomization && typeof requestedTargetRandomization === 'object'
             && Array.isArray(requestedTargetRandomization.assignments);
-        if (requestedTargetRandomization && store !== 'target') return res.status(400).json({ error: 'USPS address randomization is available only for Target profiles.' });
+        if (requestedTargetRandomization && !addressRandomizerStores.has(store)) return res.status(400).json({ error: 'USPS address randomization is available only for Target and Pokémon Center profiles.' });
 
         const hasProfileName = Object.prototype.hasOwnProperty.call(req.body || {}, 'profile_name') && String(req.body.profile_name || '').trim().length > 0;
         const requestedProfileName = hasProfileName ? String(req.body.profile_name).trim() : '';
@@ -11220,7 +11227,7 @@ app.patch("/profiles/bulk", auth, async (req, res) => {
         let targetRandomizedAddressByProfile = new Map();
         let targetRandomizationSource = null;
         if (hasTargetAddressRandomization) {
-            if (ownedIds.length !== ids.length) return res.status(400).json({ error: 'One or more selected profiles are not available in your Target group.' });
+            if (ownedIds.length !== ids.length) return res.status(400).json({ error: `One or more selected profiles are not available in your ${store === 'pokemoncenter' ? 'Pokémon Center' : 'Target'} group.` });
             const sourceAddresses = targetRandomizerSelectedAddresses(owned);
             const validated = validateTargetUspsRandomizationPlan({
                 profileIds: ownedIds,

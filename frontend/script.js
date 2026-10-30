@@ -1361,7 +1361,7 @@ function ensureBulkProfileEditModal() {
             const response = await fetch(API + '/profiles/target-address-randomizer/preview', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token() },
-                body: JSON.stringify({ ids })
+                body: JSON.stringify({ ids, store: modal.dataset.group || 'target' })
             });
             const data = await response.json().catch(() => ({}));
             if (!response.ok || data.error) throw new Error(data.error || 'Could not preview randomized addresses.');
@@ -1397,7 +1397,7 @@ function openBulkProfileEdit(group, ids) {
     const accountPasswordField = modal.querySelector('[data-bulk-account-password]');
     if (accountPasswordField) accountPasswordField.style.display = group === 'pokemoncenter' ? 'none' : '';
     const targetRandomizerPanel = modal.querySelector('#bulkTargetAddressRandomizer');
-    if (targetRandomizerPanel) targetRandomizerPanel.hidden = group !== 'target';
+    if (targetRandomizerPanel) targetRandomizerPanel.hidden = !['target', 'pokemoncenter'].includes(group);
     clearTargetAddressRandomizerPreview(modal);
     modal.querySelectorAll('[data-bulk-apply]').forEach((checkbox) => { checkbox.checked = false; });
     modal.querySelectorAll('[data-bulk-value]').forEach((input) => { input.value = ''; input.disabled = true; });
@@ -1425,7 +1425,7 @@ function openBulkProfileEdit(group, ids) {
         const gmailAppPassword = changes.gmail_app_password;
         const aycdAction = modal.querySelector('#bulkProfileAycdAction').value;
         const state = changes.state;
-        const targetAddressRandomization = group === 'target' ? modal._targetAddressRandomization : null;
+        const targetAddressRandomization = ['target', 'pokemoncenter'].includes(group) ? modal._targetAddressRandomization : null;
         if (!Object.keys(changes).length && aycdAction === 'keep' && !targetAddressRandomization) {
             message.textContent = 'Choose at least one change.';
             return;
@@ -1453,7 +1453,7 @@ function openBulkProfileEdit(group, ids) {
             const updatedCount = data.updated_count || ids.length;
             const changedCount = Number(data.changed_fields?.length || Object.keys(changes).length + (targetAddressRandomization ? 1 : 0) || (aycdAction === 'keep' ? 0 : 1));
             message.textContent = targetAddressRandomization
-                ? `Randomized and updated ${updatedCount} Target profile${updatedCount === 1 ? '' : 's'} using the selected USPS secondary-address plan.`
+                ? `Randomized and updated ${updatedCount} ${group === 'pokemoncenter' ? 'Pokémon Center' : 'Target'} profile${updatedCount === 1 ? '' : 's'} using the selected USPS secondary-address plan.`
                 : `Updated ${updatedCount} profile${updatedCount === 1 ? '' : 's'} across ${changedCount} selected field${changedCount === 1 ? '' : 's'}.`;
             message.className = 'form-help success';
             ids.forEach((id) => selectedProfileIds.delete(String(id)));
