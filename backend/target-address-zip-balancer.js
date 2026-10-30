@@ -52,7 +52,7 @@ function profileAddress(profile = {}) {
     return profile.addresses?.[0] || profile.address || {};
 }
 
-function buildZipAddressBalancePlan({ profiles = [], addresses = [], zip = '' } = {}) {
+function buildZipAddressBalancePlan({ profiles = [], addresses = [], zip = '', storeLabel = 'Target' } = {}) {
     const selectedZip = normalizeFiveDigitZip(zip);
     const destinations = normalizeBalanceDestinations(addresses, selectedZip);
     const eligibleProfiles = (Array.isArray(profiles) ? profiles : [])
@@ -60,7 +60,7 @@ function buildZipAddressBalancePlan({ profiles = [], addresses = [], zip = '' } 
         .slice()
         .sort((a, b) => String(a.id || '').localeCompare(String(b.id || ''), undefined, { numeric: true }));
 
-    if (!eligibleProfiles.length) throw new Error(`No Target profiles use ZIP ${selectedZip}.`);
+    if (!eligibleProfiles.length) throw new Error(`No ${cleanAddressValue(storeLabel) || 'store'} profiles use ZIP ${selectedZip}.`);
 
     const base = Math.floor(eligibleProfiles.length / destinations.length);
     const remainder = eligibleProfiles.length % destinations.length;

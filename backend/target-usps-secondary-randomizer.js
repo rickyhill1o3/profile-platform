@@ -190,10 +190,62 @@ function validateTargetUspsRandomizationPlan({ profileIds = [], sourceAddresses 
     return { source, assignments: normalized };
 }
 
+function groupUspsRandomizerProfiles({ profileIds = [], sourceAddresses = [] } = {}) {
+    const ids = [...new Set((Array.isArray(profileIds) ? profileIds : []).map((id) => String(id || '').trim()).filter(Boolean))];
+    const addresses = Array.isArray(sourceAddresses) ? sourceAddresses : [];
+    if (!ids.length || ids.length !== addresses.length) {
+        throw new Error('Every selected profile must have a shipping address before randomizing.');
+    }
+
+    const groups = [];
+    ids.forEach((profileId, index) => {
+        const address = addresses[index] || {};
+        if (!address.address1) throw new Error('Every selected profile must have a shipping address before randomizing.');
+        let group = groups.find((candidate) => sameTargetPhysicalAddress(candidate.sourceAddresses[0], address));
+        if (!group) {
+            group = { profileIds: [], sourceAddresses: [] };
+            groups.push(group);
+        }
+        group.profileIds.push(profileId);
+        group.sourceAddresses.push(address);
+    });
+    return groups;
+}
+
+function buildGroupedUspsRandomizationPlan({ profileIds = [], sourceAddresses = [], randomInt = crypto.randomInt } = {}) {
+    const groups = groupUspsRandomizerProfiles({ profileIds, sourceAddresses }).map((group) => {
+        const plan = buildTargetUspsRandomizationPlan({ ...group, randomInt });
+        return { source: plan.source, assignments: plan.assignments };
+    });
+    return {
+        groups,
+        assignments: groups.flatMap((group) => group.assignments)
+    };
+}
+
+function validateGroupedUspsRandomizationPlan({ profileIds = [], sourceAddresses = [], assignments = [] } = {}) {
+    const groups = groupUspsRandomizerProfiles({ profileIds, sourceAddresses });
+    const assignmentByProfile = new Map((Array.isArray(assignments) ? assignments : []).map((assignment) => [String(assignment?.profile_id || ''), assignment]));
+    if (assignmentByProfile.size !== profileIds.length) throw new Error('Preview the randomized addresses again before saving.');
+
+    const validatedGroups = groups.map((group) => validateTargetUspsRandomizationPlan({
+        profileIds: group.profileIds,
+        sourceAddresses: group.sourceAddresses,
+        assignments: group.profileIds.map((profileId) => assignmentByProfile.get(String(profileId)))
+    }));
+    return {
+        groups: validatedGroups,
+        assignments: validatedGroups.flatMap((group) => group.assignments)
+    };
+}
+
 module.exports = {
     REQUIRED_USPS_SECONDARY_DESIGNATORS,
     OPTIONAL_USPS_SECONDARY_DESIGNATORS,
     canonicalTargetSourceAddress,
     buildTargetUspsRandomizationPlan,
-    validateTargetUspsRandomizationPlan
+    validateTargetUspsRandomizationPlan,
+    groupUspsRandomizerProfiles,
+    buildGroupedUspsRandomizationPlan,
+    validateGroupedUspsRandomizationPlan
 };

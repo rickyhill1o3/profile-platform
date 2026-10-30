@@ -139,8 +139,8 @@ const {
     sameTargetPhysicalAddress
 } = require("./target-physical-address");
 const {
-    buildTargetUspsRandomizationPlan,
-    validateTargetUspsRandomizationPlan
+    buildGroupedUspsRandomizationPlan,
+    validateGroupedUspsRandomizationPlan
 } = require("./target-usps-secondary-randomizer");
 const {
     CREDIT_AUTO_PAUSE_THRESHOLD,
@@ -10160,9 +10160,101 @@ function targetAddressPoolSettingKey(userId) {
     return `target_address_pool:${userId}`;
 }
 
+function profileAddressPoolSettingKey(userId, store = 'target') {
+    const normalizedStore = normalizeProfileAccountType(store || 'target');
+    return normalizedStore === 'pokemoncenter'
+        ? `pokemoncenter_address_pool:${userId}`
+        : targetAddressPoolSettingKey(userId);
+}
+
+function supportedAddressToolStore(value = 'target') {
+    const store = normalizeProfileAccountType(value || 'target');
+    return ['target', 'pokemoncenter'].includes(store) ? store : '';
+}
+
+function addressToolStoreLabel(store = 'target') {
+    return store === 'pokemoncenter' ? 'Pokémon Center' : 'Target';
+}
+
+function buildPhysicalAddressDistribution(profiles = [], savedAddressPool = []) {
+    const physicalGroups = [];
+    for (const entry of Array.isArray(savedAddressPool) ? savedAddressPool : []) {
+        const sampleAddress = {
+            address1: cleanFieldValue(entry.address1 || ''), address2: cleanFieldValue(entry.address2 || ''),
+            city: cleanFieldValue(entry.city || ''), state: cleanFieldValue(entry.state || ''), zip: cleanFieldValue(entry.zip || '')
+        };
+        const existingGroup = physicalGroups.find((item) => (item.match_addresses || [item.sample_address])
+            .some((candidate) => sameTargetPhysicalAddress(candidate, sampleAddress)));
+        if (existingGroup) {
+            existingGroup.match_addresses.push(sampleAddress);
+            existingGroup.pool_ids.push(entry.id || '');
+            continue;
+        }
+        physicalGroups.push({
+            group_key: targetPhysicalAddressKey(entry || {}),
+            pool_id: entry.id || '',
+            pool_ids: [entry.id || ''],
+            is_saved_pool: true,
+            label: entry.label || targetPhysicalAddressLabel(entry || {}),
+            sample_address: sampleAddress,
+            match_addresses: [sampleAddress],
+            profile_ids: [], profile_names: [], emails: [], variants: new Map()
+        });
+    }
+    for (const profile of Array.isArray(profiles) ? profiles : []) {
+        const address = profile.addresses?.[0] || {};
+        const comparableAddress = {
+            address1: cleanFieldValue(address.address1 || ''), address2: cleanFieldValue(address.address2 || ''),
+            city: cleanFieldValue(address.city || ''), state: cleanFieldValue(address.state || ''), zip: cleanFieldValue(address.zip || '')
+        };
+        let group = physicalGroups.find((item) => (item.match_addresses || [item.sample_address])
+            .some((candidate) => sameTargetPhysicalAddress(candidate, comparableAddress)));
+        if (!group) {
+            group = {
+                group_key: targetPhysicalAddressKey(address),
+                pool_id: '', pool_ids: [], is_saved_pool: false,
+                label: targetPhysicalAddressLabel(address),
+                sample_address: comparableAddress,
+                match_addresses: [comparableAddress],
+                profile_ids: [], profile_names: [], emails: [], variants: new Map()
+            };
+            physicalGroups.push(group);
+        } else {
+            group.match_addresses.push(comparableAddress);
+        }
+        group.profile_ids.push(profile.id);
+        group.profile_names.push(profile.profile_name || '');
+        group.emails.push(extractEmail(address.email || ''));
+        const variant = [cleanFieldValue(address.address1 || ''), cleanFieldValue(address.address2 || '')].filter(Boolean).join(' | ') || '(blank)';
+        group.variants.set(variant, (group.variants.get(variant) || 0) + 1);
+    }
+    const addressDistribution = addZipScopedIdealCounts(physicalGroups).map((group) => ({
+        group_key: group.group_key,
+        pool_id: group.pool_id || '',
+        is_saved_pool: Boolean(group.is_saved_pool),
+        label: group.label,
+        sample_address: group.sample_address,
+        zip: group.zip || normalizeFiveDigitZip(group.sample_address?.zip || ''),
+        zip_profile_count: Number(group.zip_profile_count || 0),
+        zip_address_count: Number(group.zip_address_count || 0),
+        actual_count: Number(group.actual_count || 0),
+        ideal_count: Number(group.ideal_count || 0),
+        delta: Number(group.delta || 0),
+        profile_ids: group.profile_ids,
+        profile_names: group.profile_names,
+        variants: [...group.variants.entries()].map(([address, count]) => ({ address, count })).sort((a, b) => b.count - a.count || a.address.localeCompare(b.address))
+    }));
+    return {
+        addressDistribution,
+        nextUnderfilledAddress: addressDistribution.filter((row) => row.delta < 0).sort((a, b) => a.delta - b.delta || a.actual_count - b.actual_count)[0] || null
+    };
+}
+
 app.post('/target-address-pool', auth, async (req, res) => {
     try {
         await ensureUserNotRevoked(req.user_id);
+        const store = supportedAddressToolStore(req.body?.store || 'target');
+        if (!store) return res.status(400).json({ error: 'Address distribution is available only for Target and Pokémon Center profiles.' });
         const entry = {
             id: crypto.randomUUID(),
             label: cleanFieldValue(req.body?.label || ''),
@@ -10173,21 +10265,23 @@ app.post('/target-address-pool', auth, async (req, res) => {
             zip: cleanFieldValue(req.body?.zip || '')
         };
         if (!entry.address1) return res.status(400).json({ error: 'Address line 1 is required.' });
-        const key = targetAddressPoolSettingKey(req.user_id);
+        const key = profileAddressPoolSettingKey(req.user_id, store);
         const current = await getAppSetting(key, []);
         const pool = Array.isArray(current) ? current : [];
         const existing = pool.find((item) => sameTargetPhysicalAddress(item || {}, entry));
         if (existing) return res.json({ ok: true, item: existing, duplicate: true, items: pool });
         pool.push(entry);
         await setAppSetting(key, pool.slice(0, 100));
-        res.json({ ok: true, item: entry, items: pool });
+        res.json({ ok: true, store, item: entry, items: pool });
     } catch (err) { res.status(500).json({ error: err.message || String(err) }); }
 });
 
 app.delete('/target-address-pool/:id', auth, async (req, res) => {
     try {
         await ensureUserNotRevoked(req.user_id);
-        const key = targetAddressPoolSettingKey(req.user_id);
+        const store = supportedAddressToolStore(req.query?.store || 'target');
+        if (!store) return res.status(400).json({ error: 'Address distribution is available only for Target and Pokémon Center profiles.' });
+        const key = profileAddressPoolSettingKey(req.user_id, store);
         const current = await getAppSetting(key, []);
         const currentPool = Array.isArray(current) ? current : [];
         const selected = currentPool.find((item) => String(item?.id || '') === String(req.params.id || ''));
@@ -10195,7 +10289,7 @@ app.delete('/target-address-pool/:id', auth, async (req, res) => {
             ? !sameTargetPhysicalAddress(selected, item || {})
             : String(item?.id || '') !== String(req.params.id || ''));
         await setAppSetting(key, pool);
-        res.json({ ok: true, items: pool });
+        res.json({ ok: true, store, items: pool });
     } catch (err) { res.status(500).json({ error: err.message || String(err) }); }
 });
 
@@ -10223,17 +10317,21 @@ function targetAddressBalanceResponse(plan = {}, applied = false) {
 app.post('/target-address-balance', auth, async (req, res) => {
     try {
         await ensureUserNotRevoked(req.user_id);
+        const store = supportedAddressToolStore(req.body?.store || 'target');
+        if (!store) return res.status(400).json({ error: 'Address distribution is available only for Target and Pokémon Center profiles.' });
+        const storeLabel = addressToolStoreLabel(store);
         const selectedZip = normalizeFiveDigitZip(req.body?.zip || '');
         if (!selectedZip) return res.status(400).json({ error: 'Choose a valid five-digit ZIP code.' });
 
         const allProfiles = await getUserProfilesWithRelations(req.user_id);
-        const targetProfiles = (allProfiles || []).filter((profile) =>
-            profileAssignedStores(profile).map(normalizeProfileAccountType).includes('target')
+        const storeProfiles = (allProfiles || []).filter((profile) =>
+            profileAssignedStores(profile).map(normalizeProfileAccountType).includes(store)
         );
         const plan = buildZipAddressBalancePlan({
-            profiles: targetProfiles,
+            profiles: storeProfiles,
             addresses: req.body?.addresses,
-            zip: selectedZip
+            zip: selectedZip,
+            storeLabel
         });
 
         const previewOnly = req.body?.preview !== false;
@@ -10269,23 +10367,44 @@ app.post('/target-address-balance', auth, async (req, res) => {
             }
         }
         if (updatedCount !== changedAssignments.length) {
-            throw new Error(`Updated ${updatedCount} of ${changedAssignments.length} planned Target profiles. Run the same ZIP balance again to finish safely.`);
+            throw new Error(`Updated ${updatedCount} of ${changedAssignments.length} planned ${storeLabel} profiles. Run the same ZIP balance again to finish safely.`);
         }
 
-        for (let i = 0; i < changedAssignments.length; i += 10) {
-            await Promise.all(changedAssignments.slice(i, i + 10).map((assignment) =>
-                syncTargetAddressVersion({
-                    userId: req.user_id,
-                    profileId: assignment.profile_id,
-                    address: assignment.address
-                }).catch((error) => {
-                    console.error('Target address version capture failed after ZIP balance:', error.message || error);
-                })
-            ));
+        const changedIds = new Set(changedAssignments.map((assignment) => String(assignment.profile_id)));
+        const changedProfiles = storeProfiles.filter((profile) => changedIds.has(String(profile.id)));
+        const changedTargetProfiles = changedProfiles.filter((profile) =>
+            profileAssignedStores(profile).map(normalizeProfileAccountType).includes('target')
+        );
+        const changedPokemonProfiles = changedProfiles.filter((profile) =>
+            profileAssignedStores(profile).map(normalizeProfileAccountType).includes('pokemoncenter')
+        );
+        if (changedTargetProfiles.length) {
+            const assignmentByProfile = new Map(changedAssignments.map((assignment) => [String(assignment.profile_id), assignment]));
+            for (let i = 0; i < changedTargetProfiles.length; i += 10) {
+                await Promise.all(changedTargetProfiles.slice(i, i + 10).map((profile) =>
+                    syncTargetAddressVersion({
+                        userId: req.user_id,
+                        profileId: profile.id,
+                        address: assignmentByProfile.get(String(profile.id))?.address || profile.addresses?.[0] || {},
+                        forceNewVersion: true
+                    }).catch((error) => {
+                        console.error('Target profile change marker failed after ZIP balance:', error.message || error);
+                    })
+                ));
+            }
+        }
+        if (changedPokemonProfiles.length) {
+            await recordPokemonCenterProfileChanges({
+                userId: req.user_id,
+                profiles: changedPokemonProfiles,
+                reason: 'pokemoncenter_zip_addresses_balanced'
+            }).catch((error) => {
+                console.error('Pokémon Center profile change marker failed after ZIP balance:', error.message || error);
+            });
         }
 
         // Make the entered addresses the planning pool for this ZIP while preserving every other ZIP.
-        const settingKey = targetAddressPoolSettingKey(req.user_id);
+        const settingKey = profileAddressPoolSettingKey(req.user_id, store);
         const currentPoolRaw = await getAppSetting(settingKey, []).catch(() => []);
         const currentPool = Array.isArray(currentPoolRaw) ? currentPoolRaw : [];
         const selectedZipPool = currentPool.filter((item) => normalizeFiveDigitZip(item?.zip || '') === selectedZip);
@@ -10300,11 +10419,14 @@ app.post('/target-address-balance', auth, async (req, res) => {
         });
         await setAppSetting(settingKey, [...otherZipPool, ...replacementPool].slice(0, 100));
 
-        if (updatedCount) await markProfileSyncChanged(req.user_id, ['target'], 'target_zip_addresses_balanced');
-        return res.json({ ...targetAddressBalanceResponse(plan, true), updated_count: updatedCount });
+        if (updatedCount) {
+            const changedStores = [...new Set(changedProfiles.flatMap((profile) => profileAssignedStores(profile).map(normalizeProfileAccountType)).filter(Boolean))];
+            await markProfileSyncChanged(req.user_id, changedStores.length ? changedStores : [store], `${store}_zip_addresses_balanced`);
+        }
+        return res.json({ ...targetAddressBalanceResponse(plan, true), store, updated_count: updatedCount });
     } catch (err) {
         const message = err.message || String(err);
-        const status = /choose|enter|unique|destination|no target profiles|confirm zip/i.test(message) ? 400 : 500;
+        const status = /choose|enter|unique|destination|no target profiles|no pokémon center profiles|confirm zip/i.test(message) ? 400 : 500;
         res.status(status).json({ error: message });
     }
 });
@@ -10767,6 +10889,12 @@ app.get('/pokemon-center-profile-health', auth, async (req, res) => {
                 recent_events: attempts.slice(0, 12)
             };
         });
+        const pokemonAddressPoolRaw = await getAppSetting(profileAddressPoolSettingKey(req.user_id, 'pokemoncenter'), []).catch(() => []);
+        const pokemonAddressPool = Array.isArray(pokemonAddressPoolRaw) ? pokemonAddressPoolRaw : [];
+        const {
+            addressDistribution: pokemonAddressDistribution,
+            nextUnderfilledAddress: pokemonNextUnderfilledAddress
+        } = buildPhysicalAddressDistribution(pokemonProfiles, pokemonAddressPool);
         const totals = profiles.reduce((acc, profile) => {
             acc.profiles += 1;
             acc[profile.current_status] = (acc[profile.current_status] || 0) + 1;
@@ -10790,7 +10918,10 @@ app.get('/pokemon-center-profile-health', auth, async (req, res) => {
             matched_events: profiles.reduce((sum, profile) => sum + Number(profile.counts?.total || 0), 0),
             stored_event_count: storedEventCount,
             historical_matched: historicalMatched,
-            health_storage_available: healthStorageAvailable
+            health_storage_available: healthStorageAvailable,
+            address_distribution: pokemonAddressDistribution,
+            address_pool_count: pokemonAddressPool.length,
+            next_underfilled_address: pokemonNextUnderfilledAddress
         });
     } catch (err) {
         res.status(500).json({ error: err.message || String(err) });
@@ -11097,15 +11228,11 @@ function profilesFromOwnedProfilesForAddressRandomizer(profiles = [], store = 't
     );
 }
 
-function targetRandomizerSelectedAddresses(selectedProfiles = []) {
+function addressRandomizerSelectedAddresses(selectedProfiles = []) {
     const addresses = (Array.isArray(selectedProfiles) ? selectedProfiles : [])
         .map((profile) => profile.addresses?.[0] || {});
     if (!addresses.length || addresses.some((address) => !address.address1)) {
         throw new Error('Every selected profile must have a shipping address before randomizing.');
-    }
-    const firstAddress = addresses[0];
-    if (addresses.some((address) => !sameTargetPhysicalAddress(firstAddress, address))) {
-        throw new Error('Select profiles from one physical-address group before randomizing.');
     }
     return addresses;
 }
@@ -11124,13 +11251,15 @@ app.post("/profiles/target-address-randomizer/preview", auth, async (req, res) =
         const storeProfiles = profilesFromOwnedProfilesForAddressRandomizer(allProfiles, store);
         const selected = storeProfiles.filter((profile) => ids.includes(String(profile.id)));
         if (selected.length !== ids.length) return res.status(400).json({ error: `One or more selected profiles are not available in your ${storeLabel} group.` });
-        const sourceAddresses = targetRandomizerSelectedAddresses(selected);
-        const plan = buildTargetUspsRandomizationPlan({ profileIds: ids, sourceAddresses });
+        const selectedIds = selected.map((profile) => String(profile.id));
+        const sourceAddresses = addressRandomizerSelectedAddresses(selected);
+        const plan = buildGroupedUspsRandomizationPlan({ profileIds: selectedIds, sourceAddresses });
         res.json({
             success: true,
             store,
-            source_group_count: sourceAddresses.length,
-            source: plan.source,
+            source_group_count: plan.groups.length,
+            groups: plan.groups,
+            source: plan.groups[0]?.source || null,
             assignments: plan.assignments
         });
     } catch (err) {
@@ -11228,13 +11357,13 @@ app.patch("/profiles/bulk", auth, async (req, res) => {
         let targetRandomizationSource = null;
         if (hasTargetAddressRandomization) {
             if (ownedIds.length !== ids.length) return res.status(400).json({ error: `One or more selected profiles are not available in your ${store === 'pokemoncenter' ? 'Pokémon Center' : 'Target'} group.` });
-            const sourceAddresses = targetRandomizerSelectedAddresses(owned);
-            const validated = validateTargetUspsRandomizationPlan({
+            const sourceAddresses = addressRandomizerSelectedAddresses(owned);
+            const validated = validateGroupedUspsRandomizationPlan({
                 profileIds: ownedIds,
                 sourceAddresses,
                 assignments: requestedTargetRandomization.assignments
             });
-            targetRandomizationSource = validated.source;
+            targetRandomizationSource = validated.groups.map((group) => group.source);
             targetRandomizedAddressByProfile = new Map(validated.assignments.map((assignment) => [String(assignment.profile_id), assignment]));
         }
         if (hasLoginEmail && ownedIds.length > 1) {

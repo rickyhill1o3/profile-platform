@@ -207,6 +207,7 @@ let targetProfileHealthFilter = 'all';
 let targetPhysicalAddressFilter = '';
 let targetProfileHealthCache = { data: null, loadedAt: 0 };
 let pokemonCenterProfileHealthFilter = 'all';
+let pokemonCenterPhysicalAddressFilter = '';
 let pokemonCenterProfileHealthCache = { data: null, loadedAt: 0 };
 let selectedProfileIds = new Set();
 let visibleDashboardProfileIdsByGroup = new Map();
@@ -863,6 +864,13 @@ async function loadProfiles() {
             activeTargetAddressGroup = null;
         }
         const activeTargetAddressProfileIds = new Set((activeTargetAddressGroup?.profile_ids || []).map(String));
+        const pokemonCenterAddressGroups = Array.isArray(pokemonCenterProfileHealth.address_distribution) ? pokemonCenterProfileHealth.address_distribution : [];
+        let activePokemonCenterAddressGroup = pokemonCenterAddressGroups.find((row) => String(row.group_key || '') === pokemonCenterPhysicalAddressFilter) || null;
+        if (pokemonCenterPhysicalAddressFilter && !activePokemonCenterAddressGroup) {
+            pokemonCenterPhysicalAddressFilter = '';
+            activePokemonCenterAddressGroup = null;
+        }
+        const activePokemonCenterAddressProfileIds = new Set((activePokemonCenterAddressGroup?.profile_ids || []).map(String));
 
         const setStat = (id, value) => {
             const el = document.getElementById(id);
@@ -941,6 +949,9 @@ async function loadProfiles() {
                 : rawItems;
             if (groupKey === 'target' && activeTargetAddressGroup) {
                 items = items.filter((p) => activeTargetAddressProfileIds.has(String(p.id)));
+            }
+            if (groupKey === 'pokemoncenter' && activePokemonCenterAddressGroup) {
+                items = items.filter((p) => activePokemonCenterAddressProfileIds.has(String(p.id)));
             }
             if (groupKey === 'target' && targetProfileHealthFilter !== 'all') {
                 items = items.filter((p) => (targetHealthByProfile.get(String(p.id))?.current_status || 'no_activity') === targetProfileHealthFilter);
@@ -1025,6 +1036,25 @@ async function loadProfiles() {
                                 <div class="target-health-summary"><span>No recent activity</span><strong>${Number(totals.no_activity || 0)}</strong></div>
                             </div>
                             <div class="subtle-text">Green means the profile had at least one success on its most recent activity day. Red means that day had payment declines and no success. After you edit a profile, it turns blue and stays in standby until a newer checkout tests the changed details.</div>
+                            ${(() => {
+                                const addressGroups = pokemonCenterAddressGroups;
+                                if (!addressGroups.length) return '';
+                                const next = pokemonCenterProfileHealth.next_underfilled_address || null;
+                                return `<div class="target-address-distribution">
+                                    <div class="target-address-patterns__title"><strong>Physical address distribution</strong><span>Pokémon Center profiles are balanced separately inside each five-digit ZIP. Unit/floor/apt and trailing house-letter variations stay grouped under the same physical street address.</span><button class="btn btn-small" type="button" data-profile-address-pool-add="pokemoncenter">Add physical address</button><button class="btn btn-small btn-primary" type="button" data-profile-address-balance-open="pokemoncenter">Balance one ZIP</button></div>
+                                    ${next ? `<div class="target-address-balance-next"><b>Most underfilled:</b> ${escapeHTML(next.label || '')} — ${Number(next.actual_count || 0)} profiles, target ${Number(next.ideal_count || 0)}</div>` : `<div class="target-address-balance-next is-balanced">Pokémon Center address distribution is currently balanced.</div>`}
+                                    <div class="target-address-patterns__table-wrap"><table class="target-address-patterns__table target-address-distribution__table"><thead><tr><th>Physical address</th><th>Profiles</th><th>Even target</th><th>Balance</th><th>Address variants currently used</th></tr></thead><tbody>
+                                    ${addressGroups.map((row) => {
+                                        const delta = Number(row.delta || 0);
+                                        const balance = delta === 0 ? 'Balanced' : delta > 0 ? `${delta} over` : `${Math.abs(delta)} under`;
+                                        const variants = Array.isArray(row.variants) ? row.variants : [];
+                                        const isActive = String(row.group_key || '') === pokemonCenterPhysicalAddressFilter;
+                                        return `<tr class="${isActive ? 'is-filtered' : ''}"><td><button class="target-address-filter-button ${isActive ? 'is-active' : ''}" type="button" data-profile-address-filter="${escapeHTML(row.group_key || '')}" data-profile-address-store="pokemoncenter" aria-pressed="${isActive ? 'true' : 'false'}"><strong>${escapeHTML(row.label || 'Unknown')}</strong><span>View ${Number(row.actual_count || 0)} profile${Number(row.actual_count || 0) === 1 ? '' : 's'}</span></button>${row.is_saved_pool && row.pool_id ? `<button class="btn btn-small target-address-pool-remove" type="button" data-profile-address-pool-remove="${escapeHTML(row.pool_id)}" data-profile-address-store="pokemoncenter">Remove</button>` : ''}</td><td>${Number(row.actual_count || 0)}</td><td>${Number(row.ideal_count || 0)}</td><td><span class="target-address-balance ${delta === 0 ? 'is-even' : delta > 0 ? 'is-over' : 'is-under'}">${escapeHTML(balance)}</span>${delta > 0 ? `<button class="btn btn-small target-balance-select" type="button" data-profile-balance-select="${escapeHTML(row.group_key || '')}" data-profile-balance-store="pokemoncenter" data-profile-balance-excess="${delta}">Select ${delta} excess</button>` : ''}</td><td>${variants.length ? variants.slice(0,4).map(v => `${escapeHTML(v.address || '')} <b>×${Number(v.count || 0)}</b>`).join('<br>') : '<span class="subtle-text">No profiles assigned yet</span>'}${variants.length > 4 ? `<br><span class="subtle-text">+${variants.length - 4} more variants</span>` : ''}</td></tr>`;
+                                    }).join('')}
+                                    </tbody></table></div>
+                                    <div class="subtle-text">Pokémon Center profiles in one ZIP are never mixed with another ZIP. If the same saved profile is also assigned to another store, its shared shipping address will update there too.</div>
+                                </div>`;
+                            })()}
                             ${pokemonCenterProfileHealth.health_storage_available === false ? `<div class="target-address-history-warning">Run backend/sql/POKEMON_CENTER_PROFILE_HEALTH.sql in Supabase to save new checkout results and blue profile-change markers. Existing webhook history can still display.</div>` : ''}
                         </div>`;
                     })() : ""}
@@ -1032,6 +1062,10 @@ async function loadProfiles() {
                     ${groupKey === 'target' && activeTargetAddressGroup ? `<div class="target-address-filter-active" role="status">
                         <div><span>Showing physical address</span><strong>${escapeHTML(activeTargetAddressGroup.label || 'Selected address')}</strong><small>${Number(activeTargetAddressGroup.actual_count || 0)} profile${Number(activeTargetAddressGroup.actual_count || 0) === 1 ? '' : 's'}, including its address-line variants</small></div>
                         <button class="btn" type="button" data-target-address-filter-clear>Show all addresses</button>
+                    </div>` : ''}
+                    ${groupKey === 'pokemoncenter' && activePokemonCenterAddressGroup ? `<div class="target-address-filter-active" role="status">
+                        <div><span>Showing Pokémon Center physical address</span><strong>${escapeHTML(activePokemonCenterAddressGroup.label || 'Selected address')}</strong><small>${Number(activePokemonCenterAddressGroup.actual_count || 0)} profile${Number(activePokemonCenterAddressGroup.actual_count || 0) === 1 ? '' : 's'}, including its address-line variants</small></div>
+                        <button class="btn" type="button" data-profile-address-filter-clear="pokemoncenter">Show all addresses</button>
                     </div>` : ''}
                     <div class="toolbar-row profile-group-toolbar">
                         <input class="input" type="search" placeholder="Search ${labels[groupKey].toLowerCase()}" value="${escapeHTML(profileGroupFilters[groupKey] || '')}" data-profile-search="${groupKey}" />
@@ -1294,7 +1328,7 @@ function ensureBulkProfileEditModal() {
                         <button class="btn btn-primary" type="button" id="bulkTargetAddressRandomizerBuild">Preview randomized versions of this address</button>
                         <button class="btn" type="button" id="bulkTargetAddressRandomizerClear" hidden>Clear preview</button>
                     </div>
-                    <small>All selected profiles must be part of the same physical-address group. The street number, street, city, state, and ZIP stay unchanged.</small>
+                    <small>You may select profiles from one or several physical-address groups. Each profile stays with its own street number, street, city, state, and ZIP while every group is randomized independently.</small>
                     <small>APT, BLDG, DEPT, FL, HNGR, KEY, LOT, PIER, RM, SLIP, SPC, STOP, STE, TRLR, UNIT, and # receive a random four-digit number. BSMT, FRNT, LBBY, LOWR, OFC, PH, REAR, SIDE, and UPPR do not receive a number.</small>
                     <div id="bulkTargetAddressRandomizerPreview" class="target-usps-randomizer__preview" hidden></div>
                 </section>
@@ -1367,12 +1401,18 @@ function ensureBulkProfileEditModal() {
             if (!response.ok || data.error) throw new Error(data.error || 'Could not preview randomized addresses.');
             const assignments = Array.isArray(data.assignments) ? data.assignments : [];
             if (assignments.length !== ids.length) throw new Error('The preview did not include every selected profile.');
+            const addressGroups = Array.isArray(data.groups) && data.groups.length
+                ? data.groups
+                : [{ source: data.source || {}, assignments }];
             modal._targetAddressRandomization = { assignments };
             setTargetRandomizerLocationInputsDisabled(modal, true);
             preview.hidden = false;
             preview.innerHTML = `
-                <div class="target-usps-randomizer__preview-heading"><strong>${assignments.length} addresses ready</strong><span>Base: ${escapeHTML(data.source?.address1 || '')} · ${escapeHTML([data.source?.city, data.source?.state, data.source?.zip].filter(Boolean).join(', '))}</span></div>
-                <div class="target-usps-randomizer__preview-list">${assignments.map((assignment, index) => `<div><span>${index + 1}</span><code>${escapeHTML(assignment.address1 || '')}</code></div>`).join('')}</div>
+                <div class="target-usps-randomizer__preview-heading"><strong>${assignments.length} addresses ready across ${addressGroups.length} physical group${addressGroups.length === 1 ? '' : 's'}</strong><span>Every profile remains at its own base physical address.</span></div>
+                ${addressGroups.map((addressGroup, groupIndex) => `<div class="target-usps-randomizer__preview-group">
+                    <div class="target-usps-randomizer__preview-heading"><strong>Group ${groupIndex + 1}: ${escapeHTML(addressGroup.source?.address1 || '')}</strong><span>${escapeHTML([addressGroup.source?.city, addressGroup.source?.state, addressGroup.source?.zip].filter(Boolean).join(', '))}</span></div>
+                    <div class="target-usps-randomizer__preview-list">${(addressGroup.assignments || []).map((assignment, index) => `<div><span>${index + 1}</span><code>${escapeHTML(assignment.address1 || '')}</code></div>`).join('')}</div>
+                </div>`).join('')}
                 <small>This exact preview will be saved. Manual street, city, state, and ZIP fields are disabled while the preview is active.</small>`;
             modal.querySelector('#bulkTargetAddressRandomizerClear').hidden = false;
             message.textContent = 'Review the randomized addresses, then click Save selected profiles.';
@@ -1471,9 +1511,10 @@ function openBulkProfileEdit(group, ids) {
     };
 }
 
-function targetBalanceZipChoices() {
-    const rows = Array.isArray(targetProfileHealthCache.data?.address_distribution)
-        ? targetProfileHealthCache.data.address_distribution
+function targetBalanceZipChoices(store = 'target') {
+    const cache = store === 'pokemoncenter' ? pokemonCenterProfileHealthCache : targetProfileHealthCache;
+    const rows = Array.isArray(cache.data?.address_distribution)
+        ? cache.data.address_distribution
         : [];
     const byZip = new Map();
     rows.forEach((row) => {
@@ -1596,17 +1637,25 @@ function renderTargetBalancePreview(modal, data) {
         }).join('')}</div>`;
 }
 
-function openTargetZipBalance() {
+function openTargetZipBalance(store = 'target') {
+    const normalizedStore = store === 'pokemoncenter' ? 'pokemoncenter' : 'target';
+    const storeLabel = normalizedStore === 'pokemoncenter' ? 'Pokémon Center' : 'Target';
+    const storeCache = normalizedStore === 'pokemoncenter' ? pokemonCenterProfileHealthCache : targetProfileHealthCache;
     const modal = ensureTargetZipBalanceModal();
-    const choices = targetBalanceZipChoices();
+    const choices = targetBalanceZipChoices(normalizedStore);
+    modal.dataset.store = normalizedStore;
+    modal.querySelector('.eyebrow').textContent = `${storeLabel.toUpperCase()} ADDRESS BALANCER`;
+    modal.querySelector('#targetZipBalanceTitle').textContent = `Evenly distribute one ${storeLabel} ZIP`;
+    modal.querySelector('.bulk-edit-header .subtle-text').textContent = `Only your ${storeLabel} profiles already using the selected ZIP are included. Other ZIPs, stores, and separate billing-address fields stay unchanged.`;
     const zipSelect = modal.querySelector('#targetBalanceZip');
     const message = modal.querySelector('#targetBalanceMessage');
     const previewButton = modal.querySelector('#targetBalancePreviewButton');
     const applyButton = modal.querySelector('#targetBalanceApplyButton');
     const addButton = modal.querySelector('#targetBalanceAddAddress');
-    const activeZip = String(targetProfileHealthCache.data?.address_distribution?.find((row) => String(row.group_key || '') === targetPhysicalAddressFilter)?.zip || '');
+    const activeFilter = normalizedStore === 'pokemoncenter' ? pokemonCenterPhysicalAddressFilter : targetPhysicalAddressFilter;
+    const activeZip = String(storeCache.data?.address_distribution?.find((row) => String(row.group_key || '') === activeFilter)?.zip || '');
 
-    zipSelect.innerHTML = choices.map((choice) => `<option value="${escapeHTML(choice.zip)}" ${choice.zip === activeZip ? 'selected' : ''}>${escapeHTML(choice.zip)} — ${Number(choice.profileCount || 0)} Target profiles</option>`).join('');
+    zipSelect.innerHTML = choices.map((choice) => `<option value="${escapeHTML(choice.zip)}" ${choice.zip === activeZip ? 'selected' : ''}>${escapeHTML(choice.zip)} — ${Number(choice.profileCount || 0)} ${escapeHTML(storeLabel)} profiles</option>`).join('');
     modal.dataset.previewPayload = '';
     message.textContent = '';
     message.className = 'form-help';
@@ -1637,7 +1686,7 @@ function openTargetZipBalance() {
     };
 
     previewButton.onclick = async () => {
-        const payload = { zip: zipSelect.value, addresses: collectTargetBalanceAddresses(modal), preview: true };
+        const payload = { store: normalizedStore, zip: zipSelect.value, addresses: collectTargetBalanceAddresses(modal), preview: true };
         previewButton.disabled = true;
         previewButton.textContent = 'Building preview...';
         message.textContent = '';
@@ -1681,11 +1730,16 @@ function openTargetZipBalance() {
             const data = await response.json().catch(() => ({}));
             if (!response.ok || data.error) throw new Error(data.error || 'Could not apply the address balance.');
             renderTargetBalancePreview(modal, data);
-            message.textContent = `Balanced ${Number(data.eligible_count || 0)} Target profiles in ZIP ${data.zip}. ${Number(data.updated_count || 0)} shipping addresses were changed.`;
+            message.textContent = `Balanced ${Number(data.eligible_count || 0)} ${storeLabel} profiles in ZIP ${data.zip}. ${Number(data.updated_count || 0)} shipping addresses were changed.`;
             message.className = 'form-help success';
             modal.dataset.previewPayload = '';
-            targetPhysicalAddressFilter = '';
-            targetProfileHealthCache = { data: null, loadedAt: 0 };
+            if (normalizedStore === 'pokemoncenter') {
+                pokemonCenterPhysicalAddressFilter = '';
+                pokemonCenterProfileHealthCache = { data: null, loadedAt: 0 };
+            } else {
+                targetPhysicalAddressFilter = '';
+                targetProfileHealthCache = { data: null, loadedAt: 0 };
+            }
             await loadProfiles();
         } catch (error) {
             message.textContent = error.message || 'Could not apply the address balance.';
@@ -1762,6 +1816,28 @@ function bindProfileDashboardControls() {
             document.querySelector('[data-profile-list-anchor="target"]')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
         });
     });
+    document.querySelectorAll('[data-profile-address-filter]').forEach((button) => {
+        button.addEventListener('click', async () => {
+            const store = String(button.dataset.profileAddressStore || 'target');
+            const key = String(button.dataset.profileAddressFilter || '');
+            if (store === 'pokemoncenter') {
+                pokemonCenterPhysicalAddressFilter = pokemonCenterPhysicalAddressFilter === key ? '' : key;
+            } else {
+                targetPhysicalAddressFilter = targetPhysicalAddressFilter === key ? '' : key;
+            }
+            await loadProfiles();
+            document.querySelector(`[data-profile-list-anchor="${store}"]`)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        });
+    });
+    document.querySelectorAll('[data-profile-address-filter-clear]').forEach((button) => {
+        button.addEventListener('click', async () => {
+            const store = String(button.dataset.profileAddressFilterClear || 'target');
+            if (store === 'pokemoncenter') pokemonCenterPhysicalAddressFilter = '';
+            else targetPhysicalAddressFilter = '';
+            await loadProfiles();
+            document.querySelector(`[data-profile-list-anchor="${store}"]`)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        });
+    });
     document.querySelectorAll('[data-target-address-pool-add]').forEach((button) => {
         button.addEventListener('click', async () => {
             const address1 = prompt('Physical address line 1 (example: 194 Tabernacle Lane):');
@@ -1784,7 +1860,34 @@ function bindProfileDashboardControls() {
         });
     });
     document.querySelectorAll('[data-target-address-balance-open]').forEach((button) => {
-        button.addEventListener('click', openTargetZipBalance);
+        button.addEventListener('click', () => openTargetZipBalance('target'));
+    });
+    document.querySelectorAll('[data-profile-address-pool-add]').forEach((button) => {
+        button.addEventListener('click', async () => {
+            const store = String(button.dataset.profileAddressPoolAdd || 'target');
+            const storeLabel = store === 'pokemoncenter' ? 'Pokémon Center' : 'Target';
+            const address1 = prompt(`Physical address line 1 for ${storeLabel} (example: 194 Tabernacle Lane):`);
+            if (!address1) return;
+            const city = prompt('City:') || '';
+            const state = prompt('State:') || '';
+            const zip = prompt('ZIP code:') || '';
+            const label = prompt('Optional label for this address (example: Address 1):') || '';
+            try {
+                const response = await fetch(API + '/target-address-pool', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token() },
+                    body: JSON.stringify({ store, address1, city, state, zip, label })
+                });
+                const data = await response.json().catch(() => ({}));
+                if (!response.ok || data.error) throw new Error(data.error || 'Could not add address.');
+                if (store === 'pokemoncenter') pokemonCenterProfileHealthCache = { data: null, loadedAt: 0 };
+                else targetProfileHealthCache = { data: null, loadedAt: 0 };
+                await loadProfiles();
+            } catch (error) { alert(error.message || 'Could not add address.'); }
+        });
+    });
+    document.querySelectorAll('[data-profile-address-balance-open]').forEach((button) => {
+        button.addEventListener('click', () => openTargetZipBalance(String(button.dataset.profileAddressBalanceOpen || 'target')));
     });
     document.querySelectorAll('[data-target-address-pool-remove]').forEach((button) => {
         button.addEventListener('click', async () => {
@@ -1809,6 +1912,35 @@ function bindProfileDashboardControls() {
             if (!group || !excess) return;
             const ids = (group.profile_ids || []).slice(-excess).map(String);
             ids.forEach((id) => selectedProfileIds.add(id));
+            loadProfiles();
+        });
+    });
+    document.querySelectorAll('[data-profile-address-pool-remove]').forEach((button) => {
+        button.addEventListener('click', async () => {
+            const id = String(button.dataset.profileAddressPoolRemove || '');
+            const store = String(button.dataset.profileAddressStore || 'target');
+            if (!id || !confirm('Remove this physical address from the balancing pool? Profiles will not be changed.')) return;
+            try {
+                const response = await fetch(API + '/target-address-pool/' + encodeURIComponent(id) + '?store=' + encodeURIComponent(store), {
+                    method: 'DELETE', headers: { Authorization: 'Bearer ' + token() }
+                });
+                const data = await response.json().catch(() => ({}));
+                if (!response.ok || data.error) throw new Error(data.error || 'Could not remove address.');
+                if (store === 'pokemoncenter') pokemonCenterProfileHealthCache = { data: null, loadedAt: 0 };
+                else targetProfileHealthCache = { data: null, loadedAt: 0 };
+                await loadProfiles();
+            } catch (error) { alert(error.message || 'Could not remove address.'); }
+        });
+    });
+    document.querySelectorAll('[data-profile-balance-select]').forEach((button) => {
+        button.addEventListener('click', () => {
+            const store = String(button.dataset.profileBalanceStore || 'target');
+            const key = String(button.dataset.profileBalanceSelect || '');
+            const excess = Math.max(0, Number(button.dataset.profileBalanceExcess || 0));
+            const cache = store === 'pokemoncenter' ? pokemonCenterProfileHealthCache : targetProfileHealthCache;
+            const group = (cache.data?.address_distribution || []).find((row) => String(row.group_key || '') === key);
+            if (!group || !excess) return;
+            (group.profile_ids || []).slice(-excess).map(String).forEach((id) => selectedProfileIds.add(id));
             loadProfiles();
         });
     });
