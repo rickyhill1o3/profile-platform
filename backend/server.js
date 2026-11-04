@@ -98,6 +98,7 @@ const { registerOrderTracker, notifyCheckoutForOrderTracker } = require("./order
 const { buildShikariAccountsCsv, buildShikariImapCsv } = require("./shikari-credential-exports");
 const { buildStellarAmazonAccountsText } = require("./stellar-amazon-account-export");
 const { buildValorProfileExport } = require("./valor-profile-export");
+const { applyExcludeCurrentUserFilter } = require("./admin-export-audience");
 const { buildStellarRowsFromImportedProfiles } = require("./shikari-pokemoncenter-stellar");
 const { registerMarketValueEngine } = require("./market-value-engine");
 const { registerMasterProductCatalog } = require("./master-product-catalog");
@@ -9586,6 +9587,7 @@ app.get("/admin/store-run-status", auth, admin, async (req, res) => {
                 .order("id", { ascending: true });
             if (currentUser.role !== "super_admin") query = query.eq("owner_admin_id", currentUser.id);
             if (userFilter) query = query.eq("id", userFilter);
+            query = applyRequestedCurrentUserExclusion(query, req, currentUser, userFilter, "id");
             return query;
         };
 
@@ -9806,6 +9808,7 @@ app.get("/admin/store-run-status", auth, admin, async (req, res) => {
         });
 
         res.json({
+            current_user: { id: currentUser.id, role: currentUser.role },
             stores: STORE_RUN_STATUS_SITES.map((site) => ({ site, label: STORE_RUN_STATUS_LABELS[site] || site })),
             users: usersOut,
             summary
@@ -12477,6 +12480,16 @@ app.delete("/admin/invites/:id", auth, admin, async (req, res) => {
 
 /* ================= EXPORT ================= */
 
+function applyRequestedCurrentUserExclusion(query, req, currentUser, selectedUserId = "", column = "user_id") {
+    return applyExcludeCurrentUserFilter(query, {
+        currentUserRole: currentUser?.role,
+        currentUserId: currentUser?.id,
+        selectedUserId,
+        excludeCurrentUser: String(req.query.exclude_current_user || "") === "1",
+        column
+    });
+}
+
 app.get("/admin/export/accounts", auth, admin, async (req, res) => {
     try {
         const currentUser = await getCurrentUser(req);
@@ -12556,6 +12569,8 @@ app.get("/admin/export/count", auth, admin, async (req, res) => {
 
         }
 
+        query = applyRequestedCurrentUserExclusion(query, req, currentUser, user_id);
+
         const { data, error } = await query;
 
         if (error) {
@@ -12601,6 +12616,8 @@ app.get("/admin/export/profiles-json", auth, admin, async (req, res) => {
 
             if (user_id) query = query.eq("user_id", user_id);
         }
+
+        query = applyRequestedCurrentUserExclusion(query, req, currentUser, user_id);
 
         const { data: profiles, error } = await query;
 
@@ -12896,6 +12913,8 @@ app.get("/admin/export/profiles-polar-json", auth, admin, async (req, res) => {
             if (user_id) query = query.eq("user_id", user_id);
         }
 
+        query = applyRequestedCurrentUserExclusion(query, req, currentUser, user_id);
+
         const { data: profiles, error } = await query;
         if (error) return res.status(500).json({ error: error.message });
 
@@ -13011,6 +13030,8 @@ app.get("/admin/export/profiles-valor-json", auth, admin, async (req, res) => {
             if (user_id) query = query.eq("user_id", user_id);
         }
 
+        query = applyRequestedCurrentUserExclusion(query, req, currentUser, user_id);
+
         const { data: profiles, error } = await query;
         if (error) return res.status(500).json({ error: error.message });
 
@@ -13090,6 +13111,8 @@ app.get("/admin/export/profiles-stellar-json", auth, admin, async (req, res) => 
             if (user_id) query = query.eq("user_id", user_id);
         }
 
+        query = applyRequestedCurrentUserExclusion(query, req, currentUser, user_id);
+
         const { data: profiles, error } = await query;
 
         if (error) {
@@ -13142,6 +13165,8 @@ app.get("/admin/export/profiles-shikari-csv", auth, admin, async (req, res) => {
 
             if (user_id) query = query.eq("user_id", user_id);
         }
+
+        query = applyRequestedCurrentUserExclusion(query, req, currentUser, user_id);
 
         const { data: profiles, error } = await query;
 
@@ -13253,6 +13278,8 @@ app.get("/admin/export/accounts-txt", auth, admin, async (req, res) => {
             if (user_id) query = query.eq("user_id", user_id);
         }
 
+        query = applyRequestedCurrentUserExclusion(query, req, currentUser, user_id);
+
         const { data: profiles, error } = await query;
 
         if (error) {
@@ -13315,6 +13342,8 @@ app.get("/admin/export/stellar-amazon-accounts-txt", auth, admin, async (req, re
             query = query.in("user_id", safeIn(ownedUserIds));
             if (user_id) query = query.eq("user_id", user_id);
         }
+
+        query = applyRequestedCurrentUserExclusion(query, req, currentUser, user_id);
 
         const { data: profiles, error } = await query;
         if (error) return res.status(500).json({ error: error.message });
@@ -13386,6 +13415,8 @@ app.get("/admin/export/gmail-imap-txt", auth, admin, async (req, res) => {
 
             if (user_id) query = query.eq("user_id", user_id);
         }
+
+        query = applyRequestedCurrentUserExclusion(query, req, currentUser, user_id);
 
         const { data: profiles, error } = await query;
 

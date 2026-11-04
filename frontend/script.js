@@ -6409,6 +6409,7 @@ async function loadStoreRunStatusPanel() {
 }
 
 async function initAdminStoreRunStatus() {
+    const ALL_EXCEPT_CURRENT_USER = '__all_except_current_user__';
     const panel = document.getElementById('adminRunStatusPanel');
     const storeFilter = document.getElementById('adminRunStatusStoreFilter');
     const userFilter = document.getElementById('adminRunStatusUserFilter');
@@ -6428,6 +6429,7 @@ async function initAdminStoreRunStatus() {
     if (!panel || !storeFilter || !userFilter) return;
 
     let lastUsers = [];
+    let optionUsers = [];
     let lastData = null;
 
     const renderUserOptions = (users) => {
@@ -6436,7 +6438,10 @@ async function initAdminStoreRunStatus() {
         (users || []).forEach((user) => {
             if (user && user.id && !byId.has(user.id)) byId.set(user.id, user);
         });
-        userFilter.innerHTML = '<option value="">All Users</option>' + [...byId.values()].map((user) => {
+        const combinedOption = lastData?.current_user?.role === 'super_admin'
+            ? `<option value="${ALL_EXCEPT_CURRENT_USER}">All Admins + Users — Exclude My Profiles</option>`
+            : '';
+        userFilter.innerHTML = '<option value="">All Users</option>' + combinedOption + [...byId.values()].map((user) => {
             const relevantStores = (user.stores || []).filter((store) => !storeFilter.value || store.site === storeFilter.value);
             const pending = relevantStores.some((store) => store.changed_since_acknowledged);
             return `<option value="${escapeHTML(user.id)}">${pending ? '🔴' : '🟢'} ${escapeHTML(user.user_display || user.email || 'User')}${pending ? ' - profiles need update' : ' - synced'}</option>`;
@@ -6480,14 +6485,16 @@ async function initAdminStoreRunStatus() {
         const params = new URLSearchParams();
         params.set('group', selectedStore);
         params.set('active_only', '1');
-        if (userFilter.value) params.set('user_id', userFilter.value);
+        if (userFilter.value === ALL_EXCEPT_CURRENT_USER) params.set('exclude_current_user', '1');
+        else if (userFilter.value) params.set('user_id', userFilter.value);
         return params;
     };
 
     const activeExportFilename = (prefix) => {
         const store = storeFilter.value || 'store';
         const date = new Date().toISOString().slice(0, 10);
-        return `${prefix}-${store}-active-${date}`;
+        const audience = userFilter.value === ALL_EXCEPT_CURRENT_USER ? '-admins-users-excluding-mine' : '';
+        return `${prefix}-${store}${audience}-active-${date}`;
     };
 
     const exportActive = async (endpoint, prefix, ext) => {
@@ -6506,7 +6513,8 @@ async function initAdminStoreRunStatus() {
     const exportActiveCostcoAccounts = async () => {
         try {
             const params = new URLSearchParams({ group: 'costco', active_only: '1' });
-            if (userFilter.value) params.set('user_id', userFilter.value);
+            if (userFilter.value === ALL_EXCEPT_CURRENT_USER) params.set('exclude_current_user', '1');
+            else if (userFilter.value) params.set('user_id', userFilter.value);
             const date = new Date().toISOString().slice(0, 10);
             const filename = promptForExportFilename(`shikari-accounts-costco-active-${date}`);
             if (!filename) return;
@@ -6520,7 +6528,8 @@ async function initAdminStoreRunStatus() {
     const exportActiveStellarAmazonAccounts = async () => {
         try {
             const params = new URLSearchParams({ active_only: '1' });
-            if (userFilter.value) params.set('user_id', userFilter.value);
+            if (userFilter.value === ALL_EXCEPT_CURRENT_USER) params.set('exclude_current_user', '1');
+            else if (userFilter.value) params.set('user_id', userFilter.value);
             const date = new Date().toISOString().slice(0, 10);
             const filename = promptForExportFilename(`stellar-accounts-amazon-active-${date}`);
             if (!filename) return;
@@ -6545,7 +6554,9 @@ async function initAdminStoreRunStatus() {
         panel.innerHTML = '<div class="empty-card"><p>Loading store run status...</p></div>';
         const params = new URLSearchParams();
         if (storeFilter.value) params.set('site', storeFilter.value);
-        if (userFilter.value) params.set('user_id', userFilter.value);
+        const selectedAudience = userFilter.value;
+        if (selectedAudience === ALL_EXCEPT_CURRENT_USER) params.set('exclude_current_user', '1');
+        else if (selectedAudience) params.set('user_id', selectedAudience);
         try {
             const data = await authJSON(API + '/admin/store-run-status' + (params.toString() ? `?${params.toString()}` : ''));
             lastData = data;
@@ -6554,11 +6565,17 @@ async function initAdminStoreRunStatus() {
             // into the full selector cache so the banner and dropdown immediately
             // use the same post-acknowledgment sync state as the table.
             const mergeUserCache = window.ProfileSyncState?.mergeUserCache;
-            lastUsers = typeof mergeUserCache === 'function'
-                ? mergeUserCache(lastUsers, users, !userFilter.value)
-                : users;
-            renderUserOptions(lastUsers);
-            if (params.get('user_id')) userFilter.value = params.get('user_id');
+            if (typeof mergeUserCache === 'function') {
+                optionUsers = mergeUserCache(optionUsers, users, !selectedAudience);
+            } else {
+                const merged = new Map((!selectedAudience ? [] : optionUsers).map((user) => [String(user.id), user]));
+                users.forEach((user) => merged.set(String(user.id), user));
+                optionUsers = [...merged.values()];
+            }
+            lastUsers = users;
+            renderUserOptions(optionUsers);
+            if (params.get('exclude_current_user') === '1') userFilter.value = ALL_EXCEPT_CURRENT_USER;
+            else if (params.get('user_id')) userFilter.value = params.get('user_id');
             const activeSummary = STORE_RUN_STATUS_OPTIONS.map((store) => `${store.label}: ${Number(data.summary?.[store.site] || 0)} active`).join(' • ');
             if (summary) summary.textContent = activeSummary;
             updateProfileSyncBanner();
@@ -6657,6 +6674,10 @@ async function initAdminStoreRunStatus() {
     storeFilter.addEventListener('change', load);
     userFilter.addEventListener('change', load);
     if (acknowledgeButton) acknowledgeButton.addEventListener('click', async () => {
+        if (userFilter.value === ALL_EXCEPT_CURRENT_USER) {
+            alert('Choose one specific user before marking profiles updated. The combined export option does not acknowledge every user at once.');
+            return;
+        }
         if (!storeFilter.value || !userFilter.value) {
             alert('Choose one store and one user first. Export their current profiles before marking them updated.');
             return;
