@@ -97,6 +97,7 @@ const registerSuccessNetwork = require("./success-network");
 const { registerOrderTracker, notifyCheckoutForOrderTracker } = require("./order-tracker");
 const { buildShikariAccountsCsv, buildShikariImapCsv } = require("./shikari-credential-exports");
 const { buildStellarAmazonAccountsText } = require("./stellar-amazon-account-export");
+const { buildValorProfileExport } = require("./valor-profile-export");
 const { buildStellarRowsFromImportedProfiles } = require("./shikari-pokemoncenter-stellar");
 const { registerMarketValueEngine } = require("./market-value-engine");
 const { registerMasterProductCatalog } = require("./master-product-catalog");
@@ -12974,6 +12975,50 @@ app.get("/admin/export/profiles-polar-json", auth, admin, async (req, res) => {
             }
         };
 
+        res.setHeader("Content-Type", "application/json");
+        res.setHeader("Content-Disposition", `attachment; filename="${filename}.json"`);
+        res.send(JSON.stringify(payload, null, 2));
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.get("/admin/export/profiles-valor-json", auth, admin, async (req, res) => {
+    try {
+        const currentUser = await getCurrentUser(req);
+        const { user_id, group } = req.query;
+        const filename = (req.query.filename || "valor-profiles").replace(/[^a-zA-Z0-9-_]/g, "");
+        const activeOnly = String(req.query.active_only || "") === "1";
+
+        let query = supabase
+            .from("profiles")
+            .select(`
+                *,
+                addresses(*),
+                payments(*),
+                accounts(*)
+            `)
+            .order("created_at", { ascending: false });
+
+        if (currentUser.role === "super_admin") {
+            if (user_id) query = query.eq("user_id", user_id);
+        } else {
+            const ownedUserIds = await getScopeUserIdsForAdmin(currentUser);
+            if (user_id && !ownedUserIds.includes(user_id)) {
+                return res.status(403).json({ error: "Cannot export that account" });
+            }
+            query = query.in("user_id", safeIn(ownedUserIds));
+            if (user_id) query = query.eq("user_id", user_id);
+        }
+
+        const { data: profiles, error } = await query;
+        if (error) return res.status(500).json({ error: error.message });
+
+        let exportProfiles = await attachAndFilterProfilesByStore(profiles || [], group || "");
+        exportProfiles = await filterProfilesByActiveRunStatus(exportProfiles, group || "", activeOnly);
+        if (currentUser.role === 'super_admin') exportProfiles = await appendAssignedTargetExtraProfiles(exportProfiles, group || '');
+
+        const payload = buildValorProfileExport(exportProfiles, { decrypt });
         res.setHeader("Content-Type", "application/json");
         res.setHeader("Content-Disposition", `attachment; filename="${filename}.json"`);
         res.send(JSON.stringify(payload, null, 2));

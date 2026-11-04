@@ -6417,6 +6417,7 @@ async function initAdminStoreRunStatus() {
     const exportStellarProfilesButton = document.getElementById('adminRunStatusExportStellarProfilesButton');
     const exportShikariProfilesButton = document.getElementById('adminRunStatusExportShikariProfilesButton');
     const exportPolarProfilesButton = document.getElementById('adminRunStatusExportPolarProfilesButton');
+    const exportValorProfilesButton = document.getElementById('adminRunStatusExportValorProfilesButton');
     const exportAccountsButton = document.getElementById('adminRunStatusExportAccountsButton');
     const exportStellarAmazonAccountsButton = document.getElementById('adminRunStatusExportStellarAmazonAccountsButton');
     const exportCostcoAccountsButton = document.getElementById('adminRunStatusExportCostcoAccountsButton');
@@ -6534,6 +6535,7 @@ async function initAdminStoreRunStatus() {
     if (exportStellarProfilesButton) exportStellarProfilesButton.addEventListener('click', () => exportActive('/admin/export/profiles-stellar-json', 'stellar-profiles', '.json'));
     if (exportShikariProfilesButton) exportShikariProfilesButton.addEventListener('click', () => exportActive('/admin/export/profiles-shikari-csv', 'shikari-profiles', '.csv'));
     if (exportPolarProfilesButton) exportPolarProfilesButton.addEventListener('click', () => exportActive('/admin/export/profiles-polar-json', 'polar-profiles', '.json'));
+    if (exportValorProfilesButton) exportValorProfilesButton.addEventListener('click', () => exportActive('/admin/export/profiles-valor-json', 'valor-profiles', '.json'));
     if (exportAccountsButton) exportAccountsButton.addEventListener('click', () => exportActive('/admin/export/accounts-txt', 'shikari-accounts', '.csv'));
     if (exportStellarAmazonAccountsButton) exportStellarAmazonAccountsButton.addEventListener('click', exportActiveStellarAmazonAccounts);
     if (exportCostcoAccountsButton) exportCostcoAccountsButton.addEventListener('click', exportActiveCostcoAccounts);
