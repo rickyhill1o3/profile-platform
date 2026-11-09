@@ -45,8 +45,8 @@ const frontendScript = fs.readFileSync(path.join(projectRoot, 'frontend', 'scrip
 const serverScript = fs.readFileSync(path.join(projectRoot, 'backend', 'server.js'), 'utf8');
 
 assert.match(adminHtml, /profile-sync-state\.js\?v=20260918-profile-sync-display/, 'admin must load the profile sync cache helper');
-assert.match(frontendScript, /mergeUserCache\(lastUsers, users, !userFilter\.value\)/, 'admin refresh must merge the acknowledged user into the selector cache');
-assert.match(frontendScript, /renderUserOptions\(lastUsers\);[\s\S]*?updateProfileSyncBanner\(\);/, 'dropdown and banner must render from the refreshed shared cache');
+assert.match(frontendScript, /mergeUserCache\(optionUsers, users, !selectedAudience\)/, 'admin refresh must merge the acknowledged user into the selector cache');
+assert.match(frontendScript, /lastUsers = users;[\s\S]*?renderUserOptions\(optionUsers\);[\s\S]*?updateProfileSyncBanner\(\);/, 'dropdown must keep the full selector cache while the banner uses the current audience');
 assert.match(serverScript, /fetchAllSupabaseRows\(buildUsersQuery\)/, 'the all-user sync view must load the complete user list');
 assert.match(serverScript, /fetchAllSupabaseRows\(\(\) => supabase\s*\.from\("profiles"\)/, 'the all-user sync view must load every profile before comparing acknowledged counts');
 

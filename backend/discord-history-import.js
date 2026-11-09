@@ -42,6 +42,7 @@ function positiveWholeNumber(value, fallback = 1) {
 function normalizeStore(value) {
   const compact = lower(value).replace(/[^a-z0-9]/g, '');
   if (!compact) return '';
+  if (compact.includes('amazon')) return 'amazon';
   if (compact.includes('pokemoncenter') || compact === 'pokemon' || compact === 'pokemoncenterus') return 'pokemoncenter';
   if (compact.includes('supreme')) return 'supreme';
   if (compact.includes('target')) return 'target';
@@ -166,11 +167,12 @@ function isSuccessfulCheckoutEmbed(embed = {}) {
   return /successful\s+checkout|checkout\s+success/.test(heading);
 }
 
-function parseCheckoutEmbed(message = {}, embed = {}, embedIndex = 0, channel = {}) {
+function parseCheckoutEmbed(message = {}, embed = {}, embedIndex = 0, channel = {}, options = {}) {
   if (!isSuccessfulCheckoutEmbed(embed)) return { skip_reason:'not_successful_checkout' };
   const fields = fieldList(embed);
   const store = inferStore(embed, fields);
-  if (!ALLOWED_STORES.has(store)) return { skip_reason:'unsupported_store', detected_store:store || 'unknown' };
+  const allowedStores = options.allowedStores instanceof Set ? options.allowedStores : ALLOWED_STORES;
+  if (!allowedStores.has(store)) return { skip_reason:'unsupported_store', detected_store:store || 'unknown' };
 
   const items = parseEmbedItems(embed);
   const orderNumber = extractOrderNumber(store, embed, fields);
@@ -258,6 +260,20 @@ async function discordGet(token, apiPath, attempt = 0) {
     throw error;
   }
   return body;
+}
+
+function getHistoryCheckerBotConfig() {
+  const historyToken = clean(process.env.DISCORD_HISTORY_BOT_TOKEN, 500);
+  const fallbackToken = clean(process.env.DISCORD_BOT_TOKEN, 500);
+  const token = historyToken || fallbackToken;
+  const clientId = clean(process.env.DISCORD_HISTORY_BOT_CLIENT_ID || process.env.DISCORD_BOT_CLIENT_ID || process.env.DISCORD_CLIENT_ID, 100);
+  return {
+    token,
+    clientId,
+    configured:Boolean(token),
+    token_source:historyToken ? 'DISCORD_HISTORY_BOT_TOKEN' : (fallbackToken ? 'DISCORD_BOT_TOKEN' : null),
+    bot_label:'history checker'
+  };
 }
 
 async function loadChannelHistory(token, channelId, cutoffAt, job) {
@@ -418,8 +434,7 @@ function registerDiscordHistoryImport({ app, supabase, auth, finalizeImportedOrd
   // This importer is a one-time recovery tool. Keep it off after the historical import unless
   // the owner deliberately opts back in for another manual preview/import session.
   const enabled = lower(process.env.DISCORD_HISTORY_IMPORT_ENABLED || '') === 'true';
-  const token = clean(process.env.DISCORD_HISTORY_BOT_TOKEN || process.env.DISCORD_BOT_TOKEN, 500);
-  const clientId = clean(process.env.DISCORD_HISTORY_BOT_CLIENT_ID || process.env.DISCORD_BOT_CLIENT_ID || process.env.DISCORD_CLIENT_ID, 100);
+  const { token, clientId } = getHistoryCheckerBotConfig();
   const inviteUrl = clientId ? `https://discord.com/oauth2/authorize?client_id=${encodeURIComponent(clientId)}&scope=bot&permissions=66560` : null;
 
   app.get('/orders/discord-history/config', auth, async (req, res) => {
@@ -577,5 +592,7 @@ function registerDiscordHistoryImport({ app, supabase, auth, finalizeImportedOrd
 
 module.exports = {
   registerDiscordHistoryImport,
+  getHistoryCheckerBotConfig,
+  discordGet,
   __test:{ clean, normalizeStore, parseEmbedItems, parseCheckoutEmbed, timestampSnowflake, channelIdsFromInput, safeCutoff, orderInsertRow }
 };

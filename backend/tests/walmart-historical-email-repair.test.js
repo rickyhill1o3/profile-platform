@@ -20,6 +20,7 @@ function loadTestHooks() {
       if (id === 'cheerio') return require(id);
       if (id === './encryption') return { encrypt:value => value, decrypt:value => value };
       if (id === './discord-history-import') return { registerDiscordHistoryImport:() => {} };
+      if (id === './discord-checkout-recovery') return { registerDiscordCheckoutRecovery:() => {} };
       if (id === './retailer-reconciliation') return {
         parseRetailEmail:() => ({}), expectedWebhookItems:() => [], matchScore:() => 0,
         mainItemMatch:() => false, targetSingleLineDeliveryAlias:() => null,

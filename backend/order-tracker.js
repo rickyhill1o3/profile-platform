@@ -7,6 +7,7 @@ const zlib = require('zlib');
 const { encrypt, decrypt } = require('./encryption');
 const { parseRetailEmail, expectedWebhookItems, matchScore, mainItemMatch, targetSingleLineDeliveryAlias, deriveOverallStatus, parseSupremeWebhookCheckoutAt, norm: reconcileNorm } = require('./retailer-reconciliation');
 const { registerDiscordHistoryImport } = require('./discord-history-import');
+const { registerDiscordCheckoutRecovery } = require('./discord-checkout-recovery');
 
 
 function createGuardedImapFlow(options = {}, label = 'IMAP') {
@@ -181,16 +182,33 @@ function durableRetailerJobCanResume(job) {
 
 const yieldReconcileTurn = () => new Promise(resolve => setImmediate(resolve));
 
-function notifyCheckoutForOrderTracker(userId) {
+function notifyCheckoutForOrderTracker(userId, options = {}) {
   if (!userId || !checkoutScanRuntime) return;
   const key = String(userId);
   const existing = checkoutScanTimers.get(key);
-  if (existing) clearTimeout(existing);
+  if (existing?.timer) clearTimeout(existing.timer);
+  else if (existing) clearTimeout(existing);
+  const priorOptions = existing?.options || {};
+  const priorSince = new Date(priorOptions.replaySinceAt || 0).getTime();
+  const nextSince = new Date(options.replaySinceAt || 0).getTime();
+  const replaySinceAt = Number.isFinite(priorSince) && priorSince > 0 && Number.isFinite(nextSince) && nextSince > 0
+    ? new Date(Math.min(priorSince, nextSince)).toISOString()
+    : (options.replaySinceAt || priorOptions.replaySinceAt || null);
+  const onlyMailboxEmails = [...new Set([
+    ...(Array.isArray(priorOptions.onlyMailboxEmails) ? priorOptions.onlyMailboxEmails : []),
+    ...(Array.isArray(options.onlyMailboxEmails) ? options.onlyMailboxEmails : [])
+  ].map(lower).filter(Boolean))];
+  const mergedOptions = {
+    ...priorOptions,
+    ...options,
+    ...(replaySinceAt ? { replaySinceAt } : {}),
+    ...(onlyMailboxEmails.length ? { onlyMailboxEmails } : {})
+  };
   const timer = setTimeout(() => {
     checkoutScanTimers.delete(key);
-    Promise.resolve(checkoutScanRuntime(key)).catch(err => console.error('Checkout-triggered Order Tracker refresh failed:', err.message || err));
+    Promise.resolve(checkoutScanRuntime(key, mergedOptions)).catch(err => console.error('Checkout-triggered Order Tracker refresh failed:', err.message || err));
   }, 5000);
-  checkoutScanTimers.set(key, timer);
+  checkoutScanTimers.set(key, { timer, options:mergedOptions });
 }
 
 function clean(v) { return String(v || '').trim(); }
@@ -3887,7 +3905,9 @@ async function scanImportedAccount(supabase, account, adjustCredits = null, onPr
         const prior=folderState[key]||{};
         let highestUid=Number(prior.last_seen_uid||0);
         let ids=[];
-        if(highestUid>0) ids=await client.search({uid:`${highestUid+1}:*`},{uid:true});
+        const replaySince = new Date(options.replaySinceAt || 0);
+        if(Number.isFinite(replaySince.getTime()) && replaySince.getTime() > 0) ids=await client.search({since:replaySince},{uid:true});
+        else if(highestUid>0) ids=await client.search({uid:`${highestUid+1}:*`},{uid:true});
         else {
           const configuredStart=new Date(INITIAL_SCAN_START);const fallbackStart=new Date(Date.now()-INITIAL_LOOKBACK_DAYS*86400000);
           ids=await client.search({since:Number.isNaN(configuredStart.getTime())?fallbackStart:configuredStart},{uid:true});
@@ -3975,7 +3995,10 @@ async function scanAccount(supabase, account, adjustCredits = null, onProgress =
     const lock = await client.getMailboxLock(mailboxName);
     try {
       let uids = [];
-      if (highestUid > 0) {
+      const replaySince = new Date(options.replaySinceAt || 0);
+      if (Number.isFinite(replaySince.getTime()) && replaySince.getTime() > 0) {
+        uids = await client.search({ since:replaySince }, { uid:true });
+      } else if (highestUid > 0) {
         uids = await client.search({ uid: `${highestUid + 1}:*` }, { uid: true });
       } else {
         const configuredStart = new Date(INITIAL_SCAN_START);
@@ -5173,6 +5196,8 @@ async function scanAll(supabase, userId = null, adjustCredits = null, onProgress
   try {
     let accounts = await loadScanAccounts(supabase, userId);
     const loaderDiagnostics = accounts.loaderDiagnostics || {};
+    const onlyMailboxEmails = new Set((Array.isArray(options.onlyMailboxEmails) ? options.onlyMailboxEmails : []).map(lower).filter(Boolean));
+    if (onlyMailboxEmails.size) accounts = accounts.filter(account => onlyMailboxEmails.has(lower(account.email)));
     if (userId) await syncServiceOrders(supabase, userId, accounts);
     else await syncRecentServiceOrdersForBackground(supabase, accounts);
     // Mailboxes referenced by pending checkouts are always scanned first so a 500-account
@@ -5520,8 +5545,8 @@ async function scanAycdForUser(supabase, userId, adjustCredits = null, confirmPe
   return { configured: true, checked: result.messages.length, matched, ignored };
 }
 
-function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, confirmPendingAmazonCheckout }) {
-  checkoutScanRuntime = async (userId) => {
+function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, confirmPendingAmazonCheckout, recoverDiscordCheckout }) {
+  checkoutScanRuntime = async (userId, scanOptions = {}) => {
     // A checkout webhook is the strongest signal that this user's mailbox should be checked now.
     // First persist the webhook order into tracked_orders, then scan only this user's relevant mailboxes.
     const accounts = await loadScanAccounts(supabase, userId);
@@ -5531,13 +5556,28 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
     try { await supabase.from('imap_scan_accounts').update({ last_success_at:null }).eq('user_id', userId); } catch (_) {}
     try { await supabase.from('imported_mail_accounts').update({ last_success_at:null }).eq('matched_user_id', userId).eq('is_enabled', true); } catch (_) {}
     console.log(`[ORDER TRACKER] Checkout-triggered mailbox scan for user ${userId}; ${accounts.length} mailbox(es).`);
-    await scanAll(supabase, userId, adjustUserCredits, null, confirmPendingAmazonCheckout);
-    // Confirmation emails can arrive a little after the webhook. Schedule one quiet follow-up pass
-    // outside the minimum rescan interval so users do not have to open Order Tracker to cause it.
-    setTimeout(() => {
-      scanAll(supabase, userId, adjustUserCredits, null, confirmPendingAmazonCheckout)
-        .catch(err => console.error('[ORDER TRACKER] Follow-up checkout scan failed:', err.message || err));
-    }, Math.max(MIN_RESCAN_INTERVAL_MS + 5000, 150000));
+    await scanAll(supabase, userId, adjustUserCredits, null, confirmPendingAmazonCheckout, {
+      ...scanOptions,
+      force:Boolean(scanOptions.replaySinceAt || scanOptions.force),
+      maxMessagesPerMailbox:scanOptions.replaySinceAt ? Math.max(500, Number(scanOptions.maxMessagesPerMailbox || 0)) : scanOptions.maxMessagesPerMailbox
+    });
+    // Confirmation emails can arrive after the webhook. Normal checkouts keep the existing quiet
+    // follow-up pass; Discord recovery may request a few bounded retries for late Amazon mail.
+    const requestedDelays = Array.isArray(scanOptions.followUpDelaysMs) ? scanOptions.followUpDelaysMs : [];
+    const followUpDelays = (requestedDelays.length ? requestedDelays : [Math.max(MIN_RESCAN_INTERVAL_MS + 5000, 150000)])
+      .map(value => Math.max(MIN_RESCAN_INTERVAL_MS + 5000, Number(value || 0)))
+      .filter((value, index, values) => Number.isFinite(value) && value <= 30 * 60 * 1000 && values.indexOf(value) === index)
+      .sort((a, b) => a - b);
+    for (const delayMs of followUpDelays) {
+      setTimeout(() => {
+        scanAll(supabase, userId, adjustUserCredits, null, confirmPendingAmazonCheckout, {
+          ...scanOptions,
+          force:Boolean(scanOptions.replaySinceAt || scanOptions.force),
+          maxMessagesPerMailbox:scanOptions.replaySinceAt ? Math.max(500, Number(scanOptions.maxMessagesPerMailbox || 0)) : scanOptions.maxMessagesPerMailbox
+        })
+          .catch(err => console.error('[ORDER TRACKER] Follow-up checkout scan failed:', err.message || err));
+      }, delayMs).unref?.();
+    }
   };
 
   registerDiscordHistoryImport({
@@ -5588,6 +5628,13 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
 
       return { tracker_orders:tracked.length, email_repair_queued:repairIds.length };
     }
+  });
+
+  registerDiscordCheckoutRecovery({
+    app,
+    supabase,
+    auth,
+    recoverDiscordCheckout
   });
 
   app.post('/admin/email-center/import-aycd-accounts', auth, async (req, res) => {

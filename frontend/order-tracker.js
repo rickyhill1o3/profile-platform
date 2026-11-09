@@ -7,6 +7,8 @@ let retailerPaymentAlerts=[];
 let isSuperAdmin=false;
 let discordHistoryJobId='';
 let discordHistoryPreview=null;
+let discordRecoveryJobId='';
+let discordRecoveryPreview=null;
 const $=id=>document.getElementById(id);
 function logout(){localStorage.removeItem('token');location.href='login.html'}
 function money(n){return `$${Number(n||0).toFixed(2)}`}
@@ -108,7 +110,7 @@ async function resolvePaymentAlert(id){
   try{await api(`/orders/account-alerts/${encodeURIComponent(id)}/resolve`,{method:'POST',body:'{}'});await loadRetailerPaymentAlerts()}catch(error){alert(error.message||'The payment warning could not be resolved.')}
 }
 function applyOrders(orders=[],summary={}){allOrders=orders;render();$('countAll').textContent=allOrders.length;$('countActive').textContent=(summary.confirmed||0)+(summary.processing||0);$('countSuccess').textContent=(summary.shipped||0)+(summary.delivered||0);$('countCanceled').textContent=(summary.canceled||0)+(summary.refunded||0);$('successRate').textContent=`${Number(summary.success_rate||0).toFixed(1)}%`}
-async function bootstrap(){const j=await api('/orders/bootstrap');isSuperAdmin=Boolean(j.is_super_admin);renderAccounts(j.accounts||[]);applyOrders(j.orders||[],j.summary||{});try{await loadRetailerPaymentAlerts()}catch(error){showWarning(error.message)}$('scanMessage').textContent=`${j.connected_count||0} connected mailbox${Number(j.connected_count||0)===1?'':'es'}. Scans continue from the last saved IMAP UID, so previously checked messages are not searched again.`;if(Array.isArray(j.warnings)&&j.warnings.length)showWarning(`Some optional data could not be refreshed: ${j.warnings.join(' | ')}`);if(j.is_super_admin){$('aycdPanel').hidden=false;$('oneTimePokemonPanel').hidden=false;$('discordHistoryPanel').hidden=false;$('exportEmailIndex').hidden=false;$('exportEmailDatabase').hidden=false;refreshAycdStatus();loadDiscordHistoryConfig()}return j}
+async function bootstrap(){const j=await api('/orders/bootstrap');isSuperAdmin=Boolean(j.is_super_admin);renderAccounts(j.accounts||[]);applyOrders(j.orders||[],j.summary||{});try{await loadRetailerPaymentAlerts()}catch(error){showWarning(error.message)}$('scanMessage').textContent=`${j.connected_count||0} connected mailbox${Number(j.connected_count||0)===1?'':'es'}. Scans continue from the last saved IMAP UID, so previously checked messages are not searched again.`;if(Array.isArray(j.warnings)&&j.warnings.length)showWarning(`Some optional data could not be refreshed: ${j.warnings.join(' | ')}`);if(j.is_super_admin){$('aycdPanel').hidden=false;$('oneTimePokemonPanel').hidden=false;$('discordRecoveryPanel').hidden=false;$('discordHistoryPanel').hidden=false;$('exportEmailIndex').hidden=false;$('exportEmailDatabase').hidden=false;refreshAycdStatus();loadDiscordRecoveryConfig();loadDiscordHistoryConfig()}return j}
 async function loadOrders(){const qs=new URLSearchParams();if($('statusFilter').value)qs.set('status',$('statusFilter').value);if($('yearFilter').value)qs.set('year',$('yearFilter').value);const [j]=await Promise.all([api('/orders/tracked?'+qs),loadRetailerPaymentAlerts().catch(()=>null)]);applyOrders(j.orders||[],j.summary||{})}
 function isPokemonCenterOrder(o){const store=String(o.store||'').toLowerCase().replace(/[^a-z0-9]/g,'');return store==='pokemon'||store==='pokemoncenter'}
 function hasPokemonConfirmationEmail(o){const c=o.email_counts||{};return Boolean(o.has_confirmation_email)||Number(c.confirmed||0)>0||(String(o.last_message_id||'').startsWith('manual-pdf:')&&Boolean(o.receipt_html||o.receipt_text))}
@@ -301,6 +303,128 @@ if($('runOneTimePokemonRecovery')) $('runOneTimePokemonRecovery').onclick=async(
     button.disabled=false;
     button.textContent='Recover these order emails';
   }
+};
+
+function setDiscordRecoveryStatus(text,{error=false,progress=null}={}){
+  const status=$('discordRecoveryStatus');
+  if(status){status.textContent=String(text||'');status.className=`discord-history-status${error?' error':''}`}
+  if(progress!=null&&$('discordRecoveryProgressBar'))$('discordRecoveryProgressBar').style.width=`${Math.max(0,Math.min(100,Number(progress)||0))}%`;
+}
+
+function localDatetimeValue(date){
+  const value=new Date(date);
+  const local=new Date(value.getTime()-value.getTimezoneOffset()*60000);
+  return local.toISOString().slice(0,16);
+}
+
+function discordRecoveryChannels(){
+  return String($('discordRecoveryChannels').value||'').split(/[\s,]+/).map(value=>value.trim()).filter(Boolean);
+}
+
+async function loadDiscordRecoveryConfig(){
+  if(!$('discordRecoveryPanel'))return;
+  if(!$('discordRecoveryStart').value)$('discordRecoveryStart').value=localDatetimeValue(Date.now()-24*60*60*1000);
+  if(!$('discordRecoveryEnd').value)$('discordRecoveryEnd').value=localDatetimeValue(Date.now()+2*60*1000);
+  try{
+    const config=await api('/orders/discord-checkout-recovery/config');
+    if(Array.isArray(config.saved_channels)&&config.saved_channels.length&&!String($('discordRecoveryChannels').value||'').trim())$('discordRecoveryChannels').value=config.saved_channels.join('\n');
+    $('discordRecoveryAuto').checked=config.auto_enabled===true;
+    if(!config.token_configured){
+      $('previewDiscordRecovery').disabled=true;$('saveDiscordRecovery').disabled=true;
+      setDiscordRecoveryStatus('The existing history checker token is not available on Render. Restore DISCORD_HISTORY_BOT_TOKEN before using recovery.',{error:true,progress:0});
+      return;
+    }
+    $('previewDiscordRecovery').disabled=false;$('saveDiscordRecovery').disabled=false;
+    const auto=config.auto_enabled?'Automatic safety net is ON.':'Automatic safety net is off.';
+    const last=config.last_auto_run?.at?` Last automatic check: ${new Date(config.last_auto_run.at).toLocaleString()} (${config.last_auto_run.status||'complete'}).`:'';
+    setDiscordRecoveryStatus(`Existing history checker bot is ready. Choose the incident time range and preview first. ${auto}${last}`,{progress:0});
+  }catch(error){setDiscordRecoveryStatus(error.message||'Could not load history checker Amazon recovery.',{error:true,progress:0})}
+}
+
+function renderDiscordRecoveryPreview(result={}){
+  discordRecoveryPreview=result;
+  const reports=Array.isArray(result.channels)?result.channels:[];
+  const channelLines=reports.map(report=>`${report.channel?.guild_name||'Discord'} / #${report.channel?.name||report.channel?.id||'-'}: ${Number(report.messages_scanned||0).toLocaleString()} messages scanned, ${Number(report.checkout_matches||0).toLocaleString()} Amazon successes`);
+  const warnings=[];
+  if(result.message_content_warning)warnings.push('Discord returned empty webhook embeds. Enable Message Content Intent for the existing history checker bot, then preview again.');
+  if(result.truncated)warnings.push('A channel reached the recovery scan limit. Shorten the time range or raise DISCORD_CHECKOUT_RECOVERY_MAX_MESSAGES_PER_CHANNEL.');
+  if(Number(result.missing_account_email||0)>0)warnings.push(`${result.missing_account_email} checkout(s) have no Account/Email field and cannot be safely assigned to a user.`);
+  $('discordRecoverySummary').textContent=[
+    `Range: ${new Date(result.start_at).toLocaleString()} through ${new Date(result.end_at).toLocaleString()}`,
+    `Messages scanned: ${Number(result.messages_scanned||0).toLocaleString()}`,
+    `Amazon successful-checkout embeds: ${Number(result.supported_checkouts||0).toLocaleString()}`,
+    `Missed checkouts ready to recover: ${Number(result.importable||0).toLocaleString()}`,
+    `Already recorded / duplicate: ${Number(result.duplicates||0).toLocaleString()}`,
+    `Skipped because ownership is unsafe: ${Number(result.unsafe||0).toLocaleString()}`,
+    ...channelLines,
+    ...warnings.map(warning=>`Warning: ${warning}`)
+  ].join('\n');
+  const entries=Array.isArray(result.entries)?result.entries:[];
+  $('discordRecoveryRows').innerHTML=entries.length?entries.map(entry=>`<tr class="${entry.action==='recover'?'':'skip-row'}"><td>${esc(new Date(entry.checkout_at).toLocaleString())}</td><td>${esc(entry.guild_name||'Discord')} / #${esc(entry.channel_name||'-')}</td><td>${esc(entry.checkout_account_email||'Missing')}</td><td>${esc(entry.retailer_order_number||entry.order_number||'-')}</td><td>${esc(entry.sku||'-')}<br>${esc(entry.product_name||'-')}</td><td>${esc(entry.quantity||1)}</td><td>${entry.action==='recover'?'Recover as pending':`Skip · ${esc(entry.duplicate_reason||'already exists')}`}</td></tr>`).join(''):'<tr><td colspan="7">No direct-to-Discord Amazon successful checkout embeds were found in this range.</td></tr>';
+  $('discordRecoveryResults').hidden=false;
+  $('importDiscordRecovery').disabled=Number(result.importable||0)<1;
+}
+
+async function pollDiscordRecoveryJob(jobId,readyStates){
+  const wanted=new Set(readyStates);const started=Date.now();
+  while(true){
+    await wait(1500);
+    const response=await api(`/orders/discord-checkout-recovery/status?job_id=${encodeURIComponent(jobId)}`);
+    const job=response.job||{};
+    if(job.status==='idle')throw new Error('The checkout recovery job was lost after the server restarted. Run Preview again.');
+    if(job.status==='error')throw new Error(job.error||'History checker checkout recovery failed.');
+    const progress=job.phase==='recovering'?90:Math.min(82,12+Math.log10(Number(job.messages_scanned||0)+1)*18);
+    setDiscordRecoveryStatus(job.progress_message||'Working…',{progress});
+    if(job.result&&job.status==='preview_ready')renderDiscordRecoveryPreview(job.result);
+    if(wanted.has(job.status))return job;
+    if(Date.now()-started>30*60*1000)throw new Error('Checkout recovery is still running after 30 minutes. Refresh and check the Render logs before retrying.');
+  }
+}
+
+if($('saveDiscordRecovery'))$('saveDiscordRecovery').onclick=async()=>{
+  const button=$('saveDiscordRecovery'),channels=discordRecoveryChannels();
+  if(!channels.length){setDiscordRecoveryStatus('Paste the private super-admin checkout channel ID first.',{error:true,progress:0});return}
+  button.disabled=true;
+  try{
+    const saved=await api('/orders/discord-checkout-recovery/config',{method:'POST',body:JSON.stringify({channels,auto_enabled:$('discordRecoveryAuto').checked})});
+    setDiscordRecoveryStatus(`Saved for the existing history checker bot. Automatic safety net is ${saved.auto_enabled?'ON':'off'}.`,{progress:0});
+  }catch(error){setDiscordRecoveryStatus(error.message||'Could not save checkout recovery settings.',{error:true,progress:0})}
+  finally{button.disabled=false}
+};
+
+if($('previewDiscordRecovery'))$('previewDiscordRecovery').onclick=async()=>{
+  const button=$('previewDiscordRecovery'),channels=discordRecoveryChannels();
+  if(!channels.length){setDiscordRecoveryStatus('Paste the private super-admin checkout channel ID first.',{error:true,progress:0});return}
+  const startValue=$('discordRecoveryStart').value,endValue=$('discordRecoveryEnd').value;
+  if(!startValue||!endValue){setDiscordRecoveryStatus('Choose both the checkout start and end time.',{error:true,progress:0});return}
+  button.disabled=true;$('importDiscordRecovery').disabled=true;$('discordRecoveryResults').hidden=true;discordRecoveryPreview=null;discordRecoveryJobId='';
+  try{
+    setDiscordRecoveryStatus('The existing history checker bot is reading the private checkout channel…',{progress:5});
+    const response=await api('/orders/discord-checkout-recovery/preview',{method:'POST',body:JSON.stringify({channels,start_at:new Date(startValue).toISOString(),end_at:new Date(endValue).toISOString()})});
+    discordRecoveryJobId=response.job?.id||'';
+    if(!discordRecoveryJobId)throw new Error('The server did not return a checkout recovery job ID.');
+    const job=await pollDiscordRecoveryJob(discordRecoveryJobId,['preview_ready']);
+    renderDiscordRecoveryPreview(job.result||{});
+    setDiscordRecoveryStatus(job.progress_message||'Preview ready. Review the rows, then recover them.',{progress:85});
+  }catch(error){setDiscordRecoveryStatus(error.message||'Checkout recovery preview failed.',{error:true,progress:0})}
+  finally{button.disabled=false}
+};
+
+if($('importDiscordRecovery'))$('importDiscordRecovery').onclick=async()=>{
+  const count=Number(discordRecoveryPreview?.importable||0);
+  if(!discordRecoveryJobId||count<1)return;
+  if(!confirm(`Recover ${count} missed Amazon checkout${count===1?'':'s'} as pending, then search the matching IMAP account for confirmation emails? No credits or public pings occur without email verification.`))return;
+  const button=$('importDiscordRecovery');button.disabled=true;$('previewDiscordRecovery').disabled=true;
+  try{
+    setDiscordRecoveryStatus('Recovering pending checkouts and queueing original-time IMAP searches…',{progress:90});
+    await api('/orders/discord-checkout-recovery/import',{method:'POST',body:JSON.stringify({job_id:discordRecoveryJobId})});
+    const job=await pollDiscordRecoveryJob(discordRecoveryJobId,['complete']);
+    const result=job.import_result||{};
+    setDiscordRecoveryStatus(`History checker recovery accepted ${result.recovered_orders||0} pending checkout(s), skipped ${result.duplicates_skipped||0} duplicate(s), and queued ${result.mailbox_scans_queued||0} mailbox check(s) across ${result.affected_users||0} user(s). ${result.failed_orders||0} failed. Confirmed emails will charge the exact catalog SKU once and publish the checkout; unconfirmed checkouts remain uncharged.`,{error:Number(result.failed_orders||0)>0,progress:100});
+    $('importDiscordRecovery').disabled=true;
+    await wait(7000);await loadOrders();
+  }catch(error){setDiscordRecoveryStatus(error.message||'Checkout recovery failed.',{error:true,progress:0});button.disabled=false}
+  finally{$('previewDiscordRecovery').disabled=false}
 };
 
 function setDiscordHistoryStatus(text,{error=false,progress=null}={}){

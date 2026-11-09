@@ -20,6 +20,7 @@ function loadTestHooks() {
       if (id === 'cheerio') return require(id);
       if (id === './encryption') return { encrypt:value => value, decrypt:value => value };
       if (id === './discord-history-import') return { registerDiscordHistoryImport:() => {} };
+      if (id === './discord-checkout-recovery') return { registerDiscordCheckoutRecovery:() => {} };
       if (id === './retailer-reconciliation') return {
         parseRetailEmail:() => ({}), expectedWebhookItems:() => [], matchScore:() => 0,
         mainItemMatch:() => false, targetSingleLineDeliveryAlias:() => null,
@@ -182,8 +183,8 @@ function fakeSupabase(database) { return { from:table => new Query(database, tab
   assert.match(trackerSource, /if \(isRetailerPaymentAlert\(store, parsed\.subject \|\| '', text\)\)/);
   assert.match(dashboardSource, /showDashboardPaymentAlertFailure/);
   assert.match(orderTrackerSource, /showRetailerPaymentAlertFailure/);
-  assert.match(dashboardHtml, /script\.js\?v=20261017-target-extra-accounts/);
-  assert.match(orderTrackerHtml, /order-tracker\.js\?v=20261008-manual-pokemon-receipt-pdf/);
+  assert.match(dashboardHtml, /script\.js\?v=20261104-export-other-users/);
+  assert.match(orderTrackerHtml, /order-tracker\.js\?v=20261109-history-checker-amazon-recovery/);
 
   console.log('Pokemon Center and Target payment-alert tests passed');
 })().catch(error => { console.error(error); process.exitCode=1; });

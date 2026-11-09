@@ -2259,6 +2259,10 @@ async function createOrderRecord(payload) {
         metadata: payload.metadata || {},
         raw_payload: payload.raw_payload || payload
     };
+    const requestedCreatedAt = new Date(payload.created_at || 0);
+    if (Number.isFinite(requestedCreatedAt.getTime()) && requestedCreatedAt.getTime() > 0) {
+        insertPayload.created_at = requestedCreatedAt.toISOString();
+    }
     const { data, error } = await supabase.from("orders").insert(insertPayload).select("*").single();
     if (error) throw new Error(error.message);
     return data;
@@ -4816,7 +4820,7 @@ async function sendCheckoutDiscordNotifications(order, user, options = {}) {
     return results;
 }
 
-async function recordSuccessfulCheckout(payload) {
+async function recordSuccessfulCheckout(payload, options = {}) {
     const normalized = await enrichCheckoutProductFromStoredCatalog(normalizeIncomingOrderPayload(payload));
     const externalOrderId = normalized.external_order_id;
 
@@ -4853,6 +4857,10 @@ async function recordSuccessfulCheckout(payload) {
         && crossedAutoPauseThreshold(currentBalance, projectedBalance);
 
     const isAmazonPendingVerification = String(normalized.site || '').toLowerCase().includes('amazon');
+    const trustedCreatedAt = new Date(options.createdAt || 0);
+    const checkoutCreatedAt = Number.isFinite(trustedCreatedAt.getTime()) && trustedCreatedAt.getTime() > 0
+        ? trustedCreatedAt.toISOString()
+        : new Date().toISOString();
 
     // Amazon Fast can emit ghost success webhooks. Save those as pending and do not
     // charge credits until a distinct confirmation email is matched one-to-one.
@@ -4872,7 +4880,7 @@ async function recordSuccessfulCheckout(payload) {
             purchase_id: normalized.purchase_id || normalized.order_number || null,
             order_number: normalized.order_number || null,
             confirmation_status: isAmazonPendingVerification ? 'pending_email_verification' : 'waiting_confirmation',
-            waiting_for_confirmation_since: new Date().toISOString(),
+            waiting_for_confirmation_since: checkoutCreatedAt,
             requested_credits: creditsToCharge,
             pending_credits_to_charge: isAmazonPendingVerification ? creditsToCharge : 0,
             quantity: Number(normalized.quantity || 1) || 1,
@@ -4884,7 +4892,8 @@ async function recordSuccessfulCheckout(payload) {
             balance_crossed_auto_pause_limit: willCrossAutoPauseThreshold,
             pokemon_credit_items: resolvedCost.pokemonMultiItemMatch?.items || []
         },
-        raw_payload: payload
+        raw_payload: payload,
+        created_at:checkoutCreatedAt
     });
 
     let balanceAfter = currentBalance;
@@ -13543,6 +13552,118 @@ registerSuccessNetwork({
 
 registerOrderTracker({
     app, supabase, auth, admin, adjustUserCredits,
+    recoverDiscordCheckout: async (entry = {}) => {
+        if (String(entry.store || '').toLowerCase() !== 'amazon') {
+            throw new Error('Only Amazon successful-checkout messages can use the missed-checkout recovery path.');
+        }
+        const checkoutAt = new Date(entry.checkout_at || 0);
+        if (!Number.isFinite(checkoutAt.getTime())) throw new Error('The Discord checkout timestamp is missing or invalid.');
+        if (!entry.checkout_account_email) throw new Error('The Discord checkout embed does not include the Amazon account email needed for safe ownership matching.');
+
+        const recoveryPayload = {
+            source:'stellar',
+            username:entry.author_name || 'Stellar AIO',
+            timestamp:checkoutAt.toISOString(),
+            assignment_event_at:checkoutAt.toISOString(),
+            external_order_id:entry.order_number,
+            recovery_source:'history_checker_discord_channel',
+            discord_recovery_source_key:entry.source_key,
+            discord_message_url:entry.message_url || null,
+            metadata:{
+                discord_recovery:true,
+                recovery_bot:'history checker',
+                discord_recovery_source_key:entry.source_key,
+                discord_message_id:entry.message_id,
+                discord_channel_id:entry.channel_id,
+                discord_guild_id:entry.guild_id,
+                original_checkout_at:checkoutAt.toISOString()
+            },
+            embeds:[entry.embed]
+        };
+        const normalized = await enrichCheckoutProductFromStoredCatalog(normalizeIncomingOrderPayload(recoveryPayload));
+        if (String(normalized.site || '').toLowerCase() !== 'amazon') throw new Error('The recovered Discord embed did not parse as an Amazon checkout.');
+
+        const matchedUser = await findUserForWebhook(recoveryPayload);
+        if (!matchedUser?.id) throw new Error(`Could not match Amazon account ${entry.checkout_account_email} to a website user.`);
+
+        const result = await recordSuccessfulCheckout(recoveryPayload, { createdAt:checkoutAt.toISOString() });
+        let order = result?.order || null;
+        if (order?.id) {
+            const recoveryMetadata = {
+                ...(order.metadata || {}),
+                discord_recovery:true,
+                recovery_bot:'history checker',
+                discord_recovery_source_key:entry.source_key,
+                discord_message_id:entry.message_id,
+                discord_channel_id:entry.channel_id,
+                discord_channel_name:entry.channel_name || null,
+                discord_guild_id:entry.guild_id,
+                discord_guild_name:entry.guild_name || null,
+                discord_message_url:entry.message_url || null,
+                original_checkout_at:checkoutAt.toISOString(),
+                recovered_at:new Date().toISOString()
+            };
+            const recoveryPatch = { metadata:recoveryMetadata };
+            if (!result?.duplicate) {
+                recoveryPatch.source = 'discord_checkout_recovery';
+                recoveryPatch.created_at = checkoutAt.toISOString();
+            }
+            const updated = await supabase.from('orders').update(recoveryPatch).eq('id', order.id).select('*').single();
+            if (updated.error) console.error('[HISTORY CHECKER AMAZON RECOVERY] Could not attach Discord audit metadata:', updated.error.message || updated.error);
+            else if (updated.data) order = updated.data;
+        }
+
+        const pending = order?.status === 'pending_email_verification' || order?.metadata?.email_verification_required === true;
+        const recoveryLog = await appendWebhookLogEntry({
+            type:'checkout',
+            source:'discord_checkout_recovery',
+            bot:'history checker',
+            status:result?.duplicate ? 'duplicate_skipped' : (pending ? 'pending_email_verification' : 'processed'),
+            site:'amazon',
+            product_type:'recovered_checkout',
+            product:normalized.product_name || entry.product_name || '',
+            sku:normalized.sku || entry.sku || '',
+            external_order_id:order?.external_order_id || entry.order_number || null,
+            error:result?.duplicate
+                ? 'Skipped duplicate recovered Discord checkout.'
+                : 'Recovered by the existing history checker bot. Waiting for one-to-one Amazon email confirmation before credits are charged or a public success is sent.',
+            payload:recoveryPayload,
+            parsed_items:(entry.items || []).map(item => ({
+                title:item.product_name || '',
+                price:item.price,
+                quantity:item.quantity || 1,
+                sku:item.sku || normalized.sku || '',
+                site:'amazon'
+            })),
+            fingerprint:`discord-recovery:${entry.source_key}`
+        }).catch(error => {
+            console.error('[HISTORY CHECKER AMAZON RECOVERY] Webhook Event Log write failed:', error.message || error);
+            return null;
+        });
+        if (order?.id && recoveryLog?.id) {
+            const logMetadata = { ...(order.metadata || {}), discord_recovery_webhook_log_id:recoveryLog.id };
+            const logged = await supabase.from('orders').update({ metadata:logMetadata }).eq('id', order.id).select('*').single();
+            if (logged.error) console.error('[HISTORY CHECKER AMAZON RECOVERY] Could not link recovery event log:', logged.error.message || logged.error);
+            else if (logged.data) order = logged.data;
+        }
+
+        if (pending) {
+            notifyCheckoutForOrderTracker(matchedUser.id, {
+                replaySinceAt:new Date(checkoutAt.getTime() - 10 * 60 * 1000).toISOString(),
+                onlyMailboxEmails:[entry.checkout_account_email],
+                force:true,
+                maxMessagesPerMailbox:500,
+                followUpDelaysMs:[150000, 600000, 1200000, 1800000]
+            });
+        }
+        return {
+            duplicate:Boolean(result?.duplicate),
+            order_id:order?.id || null,
+            user_id:matchedUser.id,
+            pending_email_verification:pending,
+            mailbox_scan_queued:pending
+        };
+    },
     confirmPendingAmazonCheckout: async ({ serviceOrder, amazonOrderNumber, messageId, eventAt, emailTotal, emailQuantity }) => {
         let metadata = { ...(serviceOrder.metadata || {}) };
         if (metadata.email_verified_at || Number(serviceOrder.credits_charged || 0) > 0) return { already_verified: true, order: serviceOrder };
@@ -13618,6 +13739,14 @@ registerOrderTracker({
             const discordResults = await sendCheckoutDiscordNotificationsForPayload(serviceOrder.raw_payload || {}, userResult.data || null, {
                 status: 'processed', order: { ...updatedOrder, status:'confirmed' }, credits_charged: credits, routingMode: 'public_and_admin_only'
             }).catch(err => [{ success: false, error: err.message || String(err) }]);
+            if (updatedOrder.metadata?.discord_recovery_webhook_log_id) {
+                await updateWebhookLogEntry(updatedOrder.metadata.discord_recovery_webhook_log_id, {
+                    status:'processed',
+                    external_order_id:amazonOrderNumber,
+                    error:`History checker recovery verified by Amazon confirmation email. Charged ${credits} catalog credit${credits === 1 ? '' : 's'} once and sent the public checkout.`,
+                    discord_targets:Array.isArray(discordResults) ? discordResults : []
+                }).catch(() => null);
+            }
             if (finalLifecycleStatus !== 'confirmed' && credits > 0) {
                 balanceAfter = await adjustUserCredits({
                     userId: serviceOrder.user_id, delta: credits, reason: 'amazon_late_confirmation_canceled_refund',
