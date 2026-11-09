@@ -18,6 +18,12 @@ assert(
   'each bounded mailbox batch must release parser/IMAP memory before continuing'
 );
 assert(
+  backendSource.includes('async function acquireEmailHeavyWork') &&
+    backendSource.includes("`retailer-reconcile:${reconcileJob.id}`") &&
+    backendSource.includes("`mailbox-scan:${userId || 'background'}`"),
+  'manual reconciliation, background scans, and historical repair must share one single-flight worker'
+);
+assert(
   backendSource.includes('attachment.content = null') && backendSource.includes('msg.source=null'),
   'raw MIME and attachment buffers must be released before long database work'
 );
@@ -32,6 +38,12 @@ assert(
 assert(
   backendSource.includes('safely saved…'),
   'the waiting display must preserve and report the durable mailbox count'
+);
+assert(
+  backendSource.includes('MICROSOFT_RATE_LIMIT_BACKOFF_MS') &&
+    backendSource.includes('microsoft_rate_limited_backoff') &&
+    backendSource.includes('recordMicrosoftRateLimit'),
+  'Microsoft AAD throttling must persist a backoff instead of reconnecting immediately'
 );
 
 console.log('Long-run reconciliation memory and resume tests passed');

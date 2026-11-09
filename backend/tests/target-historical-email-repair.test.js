@@ -168,6 +168,10 @@ function fakeSupabase(database) {
   assert.ok(targetPreflight > 0 && globalMailboxPass > targetPreflight, 'Target exact-order repair must run before the long global mailbox pass');
   assert.match(trackerSource, /onlyStore:'target'/, 'the early repair stage must not select Amazon, Pokemon Center, Walmart, Best Buy, or another store');
   assert.match(trackerSource, /target_lifecycle_repair:targetLifecycleRepair|result\.target_lifecycle_repair = targetLifecycleRepair/, 'Target repair diagnostics must be returned to the Order Tracker');
+  assert.match(trackerSource, /const priorTargetCheckpoint = resumeDurable && durableReconcile\.target_checkpoint/, 'Target mailbox progress must load from the durable reconciliation checkpoint');
+  assert.match(trackerSource, /await persistRetailerReconcileJob\(supabase, userId, reconcileJob\);\s*await releaseMailboxBatchMemory\(\);/, 'Target repair must persist and release memory after every mailbox');
+  assert.match(trackerSource, /const parsed = await parseMailboxMessage\(rawSource\);/, 'historical repair must discard attachment buffers through the memory-safe parser');
+  assert.doesNotMatch(trackerSource, /allowConcurrent\s*:\s*true/, 'no Target or retailer repair may bypass the single-flight email worker');
 
   console.log('Target historical email repair tests passed');
 })().catch(error => {

@@ -7,7 +7,7 @@ function loadHooks() {
   const filename = path.join(__dirname, '..', 'order-tracker.js');
   const source = fs.readFileSync(filename, 'utf8').replace(
     /module\.exports = \{ registerOrderTracker, scanAll, notifyCheckoutForOrderTracker \};\s*$/,
-    'module.exports = { __test: { mailboxCheckpointKey, serializableRetailerReconcileJob, retailerReconcileJobView, loadDurableRetailerReconcileJob, persistRetailerReconcileJob, durableRetailerJobCanResume } };'
+    'module.exports = { __test: { mailboxCheckpointKey, targetRepairMailboxKey, serializableRetailerReconcileJob, retailerReconcileJobView, loadDurableRetailerReconcileJob, persistRetailerReconcileJob, durableRetailerJobCanResume } };'
   );
   const module = { exports:{} };
   const sandbox = {
@@ -61,6 +61,10 @@ class AppSettingsQuery {
     id:'job-1', status:'running', stage:'all_email_scan', percent:22,
     message:'mailbox 120 of 660', started_at:now, heartbeat_at:now,
     stage_errors:[], resumed_from_checkpoint:true,
+    target_checkpoint:{
+      completed_count:151, total_mailboxes:660, updated_at:now, repair_complete:false,
+      results_by_key:{ 'user-1:target@example.com':{ mailbox:'target@example.com', checked_orders:2, matched_messages:4 } }
+    },
     scan_checkpoint:{
       completed_count:120, total_accounts:660, updated_at:now, scan_complete:false,
       results_by_key:{ 'user-1:a@example.com':{ email:'a@example.com', checked:3, archived:3 } }
@@ -71,14 +75,21 @@ class AppSettingsQuery {
   await hooks.persistRetailerReconcileJob(supabase, 'super-admin', job);
   const loaded=await hooks.loadDurableRetailerReconcileJob(supabase, 'super-admin');
   assert.strictEqual(loaded.id, 'job-1');
+  assert.strictEqual(loaded.target_checkpoint.completed_count, 151);
   assert.strictEqual(loaded.scan_checkpoint.completed_count, 120);
   assert.strictEqual(loaded.result, null, 'large final diagnostics must not be stored before completion');
   assert.strictEqual(hooks.durableRetailerJobCanResume(loaded), true);
   assert.strictEqual(hooks.retailerReconcileJobView(loaded).resumed_mailboxes, 120);
+  assert.strictEqual(hooks.retailerReconcileJobView(loaded).resumed_target_mailboxes, 151);
 
   const stableA=hooks.mailboxCheckpointKey({ user_id:'user-1', archive_user_id:'importer-a', email:'A@Example.com' });
   const stableB=hooks.mailboxCheckpointKey({ user_id:'user-1', archive_user_id:'importer-b', email:'a@example.com' });
   assert.strictEqual(stableA, stableB, 'changing importer representation must not reset a mailbox cursor');
+  assert.strictEqual(
+    hooks.targetRepairMailboxKey({ user_id:'user-1', source_email:'Target@Example.com', profile_id:'profile-a' }),
+    'user-1:target@example.com',
+    'Target checkpoints must use a stable physical-mailbox key'
+  );
 
   const stale={ ...loaded, heartbeat_at:new Date(Date.now() - 8 * 24 * 60 * 60 * 1000).toISOString() };
   assert.strictEqual(hooks.durableRetailerJobCanResume(stale), false, 'an old abandoned run must not hide newly arrived mail forever');

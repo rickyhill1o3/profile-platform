@@ -67,6 +67,17 @@ const RECONCILE_MEMORY_BATCH_SIZE = Math.max(
   5,
   Math.min(100, Number(process.env.RECONCILE_MEMORY_BATCH_SIZE || 20))
 );
+// Target exact-order repair deliberately advances one physical mailbox at a time. A mailbox may
+// contain several Target orders, but only one MIME/IMAP connection is allowed in a repair batch so
+// the durable checkpoint can move after every account and Render's small heap can be reclaimed.
+const TARGET_REPAIR_MAILBOX_BATCH_SIZE = Math.max(
+  1,
+  Math.min(3, Number(process.env.TARGET_REPAIR_MAILBOX_BATCH_SIZE || 1))
+);
+const MICROSOFT_RATE_LIMIT_BACKOFF_MS = Math.max(
+  5 * 60 * 1000,
+  Math.min(2 * 60 * 60 * 1000, Number(process.env.MICROSOFT_RATE_LIMIT_BACKOFF_MS || 20 * 60 * 1000))
+);
 // Render can restart a long reconciliation while hundreds of mailboxes are being scanned. Keep
 // the mailbox-completion cursor in the existing durable app_settings table so a new process (or a
 // later button click) resumes the same run instead of presenting mailbox 1 again. A checkpoint is
@@ -94,6 +105,80 @@ const checkoutScanTimers = new Map();
 let historicalRepairRunning = false;
 let historicalRepairCandidateCursor = 0;
 const orderEmailRepairJobs = new Map();
+let emailHeavyWorkLease = null;
+const microsoftBackoffUntilByMailbox = new Map();
+
+const waitMs = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+function isMicrosoftMailbox(account = {}) {
+  const provider = lower(account.provider?.name || account.provider || '');
+  const email = lower(account.email || '');
+  return /microsoft|outlook|hotmail|office365|live/.test(provider) || /@(outlook|hotmail|live|msn)\./.test(email);
+}
+
+function isMicrosoftRateLimitError(error) {
+  const message = lower(describeImapError(error));
+  return /aadsts90055|excessive request rate|too many requests|rate.?limit|temporarily throttled/.test(message);
+}
+
+function microsoftBackoffRemainingMs(account = {}) {
+  if (!isMicrosoftMailbox(account)) return 0;
+  const key = lower(account.email);
+  let until = Number(microsoftBackoffUntilByMailbox.get(key) || 0);
+  const lastError = clean(account.last_error || '');
+  const lastAttempt = new Date(account.last_scan_at || account.updated_at || 0).getTime();
+  if (lastError && /aadsts90055|excessive request rate|too many requests|rate.?limit|temporarily throttled/i.test(lastError) && Number.isFinite(lastAttempt)) {
+    until = Math.max(until, lastAttempt + MICROSOFT_RATE_LIMIT_BACKOFF_MS);
+  }
+  if (until <= Date.now()) {
+    microsoftBackoffUntilByMailbox.delete(key);
+    return 0;
+  }
+  return until - Date.now();
+}
+
+async function recordMicrosoftRateLimit(supabase, account, error) {
+  if (!isMicrosoftMailbox(account) || !isMicrosoftRateLimitError(error)) return false;
+  const now = new Date().toISOString();
+  const message = `Microsoft rate limit; retry after ${Math.ceil(MICROSOFT_RATE_LIMIT_BACKOFF_MS / 60000)} minutes. ${describeImapError(error)}`.slice(0, 1000);
+  microsoftBackoffUntilByMailbox.set(lower(account.email), Date.now() + MICROSOFT_RATE_LIMIT_BACKOFF_MS);
+  try {
+    await upsertScanState(supabase, account, { last_scan_at:now, last_error:message, is_enabled:true });
+  } catch (_) {}
+  return true;
+}
+
+// Full mailbox scans and exact historical repairs share one process-wide lease. A caller that
+// already owns the lease passes its token into nested scan/repair helpers; every scheduled job is
+// non-blocking and simply defers when a manual reconciliation owns the worker.
+async function acquireEmailHeavyWork(owner, options = {}) {
+  const inheritedToken = clean(options.token || '');
+  if (emailHeavyWorkLease && inheritedToken && emailHeavyWorkLease.token === inheritedToken) {
+    return { token:inheritedToken, release:() => {}, inherited:true };
+  }
+  const shouldWait = options.wait === true;
+  const timeoutMs = Math.max(1000, Number(options.timeoutMs || 30 * 60 * 1000));
+  const startedAt = Date.now();
+  while (emailHeavyWorkLease) {
+    if (!shouldWait || Date.now() - startedAt >= timeoutMs) return null;
+    if (typeof options.onWait === 'function') {
+      try { options.onWait({ owner:emailHeavyWorkLease.owner, waitedMs:Date.now() - startedAt }); } catch (_) {}
+    }
+    await waitMs(1000);
+  }
+  const token = crypto.randomUUID();
+  emailHeavyWorkLease = { token, owner:clean(owner || 'email-work'), started_at:new Date().toISOString() };
+  let released = false;
+  return {
+    token,
+    inherited:false,
+    release() {
+      if (released) return;
+      released = true;
+      if (emailHeavyWorkLease?.token === token) emailHeavyWorkLease = null;
+    }
+  };
+}
 
 function updateRetailerReconcileJob(job, stage, percent, message, details = {}) {
   if (!job) return;
@@ -119,6 +204,8 @@ function retailerReconcileJobView(job) {
     error:job.error,
     stage_errors:Array.isArray(job.stage_errors) ? job.stage_errors : [],
     resumed_from_checkpoint:Boolean(job.resumed_from_checkpoint),
+    resumed_target_mailboxes:Number(job.target_checkpoint?.completed_count || 0),
+    total_target_mailboxes:Number(job.target_checkpoint?.total_mailboxes || 0),
     resumed_mailboxes:Number(job.scan_checkpoint?.completed_count || 0),
     total_mailboxes:Number(job.scan_checkpoint?.total_accounts || 0),
     result:job.status === 'complete' ? job.result : null
@@ -136,6 +223,13 @@ function mailboxCheckpointKey(account = {}) {
   return `${String(account.user_id || account.archive_user_id || '')}:${lower(account.email)}`;
 }
 
+function targetRepairMailboxKey(order = {}) {
+  const owner = String(order.user_id || '');
+  const email = lower(order.source_email || '');
+  if (email && email.includes('@')) return `${owner}:${email}`;
+  return `${owner}:profile:${String(order.profile_id || order.id || 'unmapped')}`;
+}
+
 function serializableRetailerReconcileJob(job = {}) {
   return {
     id:job.id,
@@ -149,6 +243,7 @@ function serializableRetailerReconcileJob(job = {}) {
     error:job.error || null,
     stage_errors:Array.isArray(job.stage_errors) ? job.stage_errors.slice(-100) : [],
     resumed_from_checkpoint:Boolean(job.resumed_from_checkpoint),
+    target_checkpoint:job.target_checkpoint || null,
     scan_checkpoint:job.scan_checkpoint || null,
     result:job.status === 'complete' ? (job.result || null) : null
   };
@@ -1245,7 +1340,10 @@ async function loadImportedScanAccounts(supabase, onlyUserId = null) {
       app_password_enc: row.app_password_enc,
       password_enc: row.password_enc,
       folders: row.folders,
-      folder_state: row.folder_state || {}
+      folder_state: row.folder_state || {},
+      last_error: row.last_error || null,
+      last_scan_at: row.last_scan_at || null,
+      updated_at: row.updated_at || null
     });
   }
   return out;
@@ -3859,6 +3957,12 @@ async function markAmazonGhostCandidates(supabase, account) {
 async function scanImportedAccount(supabase, account, adjustCredits = null, onProgress = null, confirmPendingAmazonCheckout = null, options = {}) {
   const { data: row, error: rowError } = await supabase.from('imported_mail_accounts').select('*').eq('id', account.imported_account_id).maybeSingle();
   if (rowError || !row) throw rowError || new Error('Imported mailbox row no longer exists.');
+  const effectiveAccount = { ...account, last_error:row.last_error, last_scan_at:row.last_scan_at, updated_at:row.updated_at };
+  const microsoftBackoffMs = microsoftBackoffRemainingMs(effectiveAccount);
+  if (microsoftBackoffMs > 0) {
+    if (onProgress) onProgress({ checked:0,total:0,saved:0,rateLimited:true,retryAfterMs:microsoftBackoffMs });
+    return { checked:0,total:0,saved:0,archived:0,skipped_rate_limited:true,retry_after_ms:microsoftBackoffMs };
+  }
   const lastSuccessMs = row.last_success_at ? new Date(row.last_success_at).getTime() : 0;
   if (!options.force && MIN_RESCAN_INTERVAL_MS > 0 && lastSuccessMs && Date.now() - lastSuccessMs < MIN_RESCAN_INTERVAL_MS) {
     if (onProgress) onProgress({ checked:0,total:0,saved:0,skippedRecent:true });
@@ -3952,6 +4056,7 @@ async function scanImportedAccount(supabase, account, adjustCredits = null, onPr
     console.error(`[DIRECT IMAP] FAILED ${account.email}: ${describeImapError(effectiveError, activeMailbox)}`);
     const now=new Date().toISOString();
     try{await supabase.from('imported_mail_accounts').update({last_scan_at:now,last_error:String(effectiveError.message||effectiveError).slice(0,1000),status:'error',updated_at:now}).eq('id',account.imported_account_id);}catch(_){}
+    await recordMicrosoftRateLimit(supabase, { ...account, last_scan_at:now }, effectiveError);
     throw effectiveError;
   } finally {
     clearTimeout(deadlineTimer);
@@ -3964,6 +4069,11 @@ async function scanAccount(supabase, account, adjustCredits = null, onProgress =
   const stateOwnerId = account.archive_user_id || account.user_id;
   const stateResp = await supabase.from('imap_scan_accounts').select('*').eq('user_id', stateOwnerId).eq('email', account.email).maybeSingle();
   const state = stateResp.data || {};
+  const microsoftBackoffMs = microsoftBackoffRemainingMs({ ...account, last_error:state.last_error, last_scan_at:state.last_scan_at, updated_at:state.updated_at });
+  if (microsoftBackoffMs > 0) {
+    if (onProgress) onProgress({ checked:0,total:0,saved:0,rateLimited:true,retryAfterMs:microsoftBackoffMs });
+    return { checked:0,total:0,saved:0,archived:0,skipped_rate_limited:true,retry_after_ms:microsoftBackoffMs };
+  }
   const lastSuccessMs = state.last_success_at ? new Date(state.last_success_at).getTime() : 0;
   if (!options.force && MIN_RESCAN_INTERVAL_MS > 0 && lastSuccessMs && Date.now() - lastSuccessMs < MIN_RESCAN_INTERVAL_MS) {
     if (onProgress) onProgress({ checked: 0, total: 0, saved: 0, skippedRecent: true });
@@ -4045,6 +4155,7 @@ async function scanAccount(supabase, account, adjustCredits = null, onProgress =
     const effectiveError = deadlineExpired ? new Error(`Mailbox scan exceeded ${Math.round(deadlineMs/1000)} seconds.`) : err;
     console.error(`[DIRECT IMAP] FAILED ${account.email}: ${describeImapError(effectiveError, 'INBOX')}`);
     await upsertScanState(supabase, account, { last_scan_at: new Date().toISOString(), last_error: describeImapError(effectiveError, 'INBOX').slice(0, 1000), last_seen_uid: highestUid, scan_started_at: scanStartedAt });
+    await recordMicrosoftRateLimit(supabase, account, effectiveError);
     throw effectiveError;
   } finally {
     clearTimeout(deadlineTimer);
@@ -4722,6 +4833,106 @@ async function targetOrdersNeedingLifecycleRepair(supabase, userId = null, limit
     .slice(0, max);
 }
 
+async function runCheckpointedTargetRepair(
+  supabase,
+  userId,
+  orders,
+  reconcileJob,
+  adjustCredits,
+  confirmPendingAmazonCheckout,
+  emailWorkToken
+) {
+  const targetGroups = new Map();
+  for (const order of orders || []) {
+    const key = targetRepairMailboxKey(order);
+    if (!targetGroups.has(key)) targetGroups.set(key, []);
+    targetGroups.get(key).push(order);
+  }
+  const checkpointResults = reconcileJob.target_checkpoint?.results_by_key || {};
+  const attemptedIds = new Set();
+  const summary = {
+    checked_orders:0, matched_messages:0, repaired_orders:0, mailbox_failures:0,
+    candidates:(orders || []).length, mailboxes_total:targetGroups.size,
+    mailboxes_completed:0, mailboxes_resumed:0, details:[]
+  };
+  const merge = (result = {}, resumed = false) => {
+    summary.checked_orders += Number(result.checked_orders || 0);
+    summary.matched_messages += Number(result.matched_messages || 0);
+    summary.repaired_orders += Number(result.repaired_orders || 0);
+    summary.mailbox_failures += Number(result.mailbox_failures || 0);
+    summary.mailboxes_completed++;
+    if (resumed) summary.mailboxes_resumed++;
+    if (!resumed && Array.isArray(result.details) && summary.details.length < 80) {
+      summary.details.push(...result.details.slice(0, 80 - summary.details.length));
+    }
+  };
+
+  let mailboxIndex = 0;
+  for (const [checkpointKey, mailboxOrders] of targetGroups.entries()) {
+    mailboxIndex++;
+    for (const order of mailboxOrders) attemptedIds.add(String(order.id));
+    if (checkpointResults[checkpointKey]) {
+      merge(checkpointResults[checkpointKey], true);
+      continue;
+    }
+    updateRetailerReconcileJob(
+      reconcileJob,
+      'target_lifecycle_repair',
+      4,
+      `Target exact-order repair · mailbox ${mailboxIndex} of ${targetGroups.size} · ${lower(mailboxOrders[0]?.source_email) || 'linked profile mailbox'}…`
+    );
+    const result = await runHistoricalOrderEmailRepair(
+      supabase,
+      userId,
+      adjustCredits,
+      confirmPendingAmazonCheckout,
+      {
+        maxOrders:Math.max(1, mailboxOrders.length),
+        forceLinked:true,
+        onlyStore:'target',
+        priorityOrderIds:mailboxOrders.map(order => String(order.id)),
+        emailWorkToken,
+        waitForEmailWork:true
+      }
+    );
+    merge(result, false);
+    checkpointResults[checkpointKey] = {
+      mailbox:lower(mailboxOrders[0]?.source_email),
+      order_ids:mailboxOrders.map(order => String(order.id)),
+      checked_orders:Number(result.checked_orders || 0),
+      matched_messages:Number(result.matched_messages || 0),
+      repaired_orders:Number(result.repaired_orders || 0),
+      mailbox_failures:Number(result.mailbox_failures || 0),
+      skipped:Boolean(result.skipped),
+      reason:clean(result.reason || ''),
+      completed_at:new Date().toISOString()
+    };
+    reconcileJob.target_checkpoint = {
+      ...(reconcileJob.target_checkpoint || {}),
+      completed_count:Object.keys(checkpointResults).length,
+      total_mailboxes:targetGroups.size,
+      results_by_key:checkpointResults,
+      updated_at:new Date().toISOString(),
+      repair_complete:false
+    };
+    // This write is intentionally inside the mailbox loop. If Render restarts after mailbox 151,
+    // the next run starts at 152 instead of reconnecting to the first Target account.
+    await persistRetailerReconcileJob(supabase, userId, reconcileJob);
+    await releaseMailboxBatchMemory();
+  }
+
+  reconcileJob.target_checkpoint = {
+    ...(reconcileJob.target_checkpoint || {}),
+    completed_count:Object.keys(checkpointResults).length,
+    total_mailboxes:targetGroups.size,
+    results_by_key:checkpointResults,
+    updated_at:new Date().toISOString(),
+    repair_complete:true
+  };
+  await persistRetailerReconcileJob(supabase, userId, reconcileJob);
+  return { result:summary, attemptedIds };
+}
+
 async function amazonOrdersMissingConfirmation(supabase, userId = null, limit = 100) {
   const rows = await fetchAllSupabaseRows(() => {
     let query = supabase.from('tracked_orders')
@@ -5017,9 +5228,26 @@ async function repairHistoricalOrderEmails(supabase, userId = null, adjustCredit
       });
     }
   }
+  let mailboxesSinceMemoryRelease = 0;
   for (const { account, orders } of byMailbox.values()) {
     let client = null;
     try {
+      const microsoftBackoffMs = microsoftBackoffRemainingMs(account);
+      if (microsoftBackoffMs > 0) {
+        mailboxFailures++;
+        for (const order of orders) {
+          checkedOrders++;
+          const replay = archiveReplayByOrder.get(String(order.id));
+          details.push({
+            tracked_order_id:order.id, order_number:clean(order.order_number), mailbox:lower(account.email),
+            store:lower(order.store), profile_id:account.profile_id || order.profile_id || null,
+            result:replay?.saved ? 'archive_mime_processed' : 'microsoft_rate_limited_backoff',
+            messages_found:replay?.found || 0, messages_processed:replay?.processed || 0,
+            saved_messages:replay?.saved || 0, retry_after_ms:microsoftBackoffMs
+          });
+        }
+        continue;
+      }
       client = createGuardedImapFlow({
         host:account.provider.host, port:account.provider.port, secure:account.provider.secure,
         auth:await imapAuthForAccount(supabase,account), logger:false,
@@ -5100,9 +5328,11 @@ async function repairHistoricalOrderEmails(supabase, userId = null, adjustCredit
                     if (!fallbackUidRange) continue;
                     for await (const candidate of client.fetch(fallbackUidRange, { uid:true, source:true, envelope:true }, { uid:true })) {
                       detail.fallback_candidates_scanned++;
-                      const exactOrderMatch = rawMessageContainsOrderNumber(orderNumber, candidate.envelope, candidate.source, order.store);
-                      const amazonConfirmation = amazonTimeRecovery && rawMessageLooksLikeAmazonConfirmation(candidate.envelope, candidate.source);
-                      const macysConfirmation = macysTimeRecovery && rawMessageLooksLikeMacysConfirmation(candidate.envelope, candidate.source);
+                      const candidateSource = candidate.source;
+                      candidate.source = null;
+                      const exactOrderMatch = rawMessageContainsOrderNumber(orderNumber, candidate.envelope, candidateSource, order.store);
+                      const amazonConfirmation = amazonTimeRecovery && rawMessageLooksLikeAmazonConfirmation(candidate.envelope, candidateSource);
+                      const macysConfirmation = macysTimeRecovery && rawMessageLooksLikeMacysConfirmation(candidate.envelope, candidateSource);
                       if (exactOrderMatch || amazonConfirmation || macysConfirmation) {
                         uidSet.add(Number(candidate.uid));
                         if (amazonConfirmation) detail.amazon_time_window_candidates = Number(detail.amazon_time_window_candidates || 0) + 1;
@@ -5133,10 +5363,15 @@ async function repairHistoricalOrderEmails(supabase, userId = null, adjustCredit
             for await (const msg of client.fetch(uidRange,{uid:true,source:true,envelope:true},{uid:true})) {
               detail.messages_processed++;
               try {
-                const parsed = await simpleParser(msg.source);
+                const rawSource = msg.source;
+                msg.source = null;
+                const parsed = await parseMailboxMessage(rawSource);
                 const result = await saveParsedMessage(supabase,account,parsed,msg.uid,adjustCredits,confirmPendingAmazonCheckout);
+                parsed.text = null;
+                parsed.html = null;
                 if (result?.saved) { matchedMessages++; detail.saved_messages++; liveMessagesSaved++; }
               } catch (parseError) {
+                msg.source = null;
                 detail.error = clean(parseError.message || parseError).slice(0,500);
                 console.warn(`[ORDER REPAIR] Parse/link failed ${account.email} folder=${mailboxName} uid=${msg.uid}: ${parseError.message || parseError}`);
               }
@@ -5181,6 +5416,7 @@ async function repairHistoricalOrderEmails(supabase, userId = null, adjustCredit
     } catch (mailboxError) {
       mailboxFailures++;
       console.warn(`[ORDER REPAIR] FAILED ${account.email}: ${describeImapError(mailboxError)}`);
+      await recordMicrosoftRateLimit(supabase, account, mailboxError);
       for (const order of orders) {
         if (details.some(detail => String(detail.tracked_order_id) === String(order.id))) continue;
         checkedOrders++;
@@ -5193,25 +5429,38 @@ async function repairHistoricalOrderEmails(supabase, userId = null, adjustCredit
           saved_messages:replay?.saved || 0, error:describeImapError(mailboxError)
         });
       }
-    } finally { if (client) { try { await client.logout(); } catch (_) {} } }
+    } finally {
+      await disposeImapClient(client);
+      mailboxesSinceMemoryRelease++;
+      if (mailboxesSinceMemoryRelease >= TARGET_REPAIR_MAILBOX_BATCH_SIZE) {
+        mailboxesSinceMemoryRelease = 0;
+        await releaseMailboxBatchMemory();
+      }
+    }
   }
+  if (mailboxesSinceMemoryRelease) await releaseMailboxBatchMemory();
   repairedOrders = repairedOrderIds.size;
   return { checked_orders:checkedOrders, matched_messages:matchedMessages, repaired_orders:repairedOrders, mailbox_failures:mailboxFailures, candidates:candidates.length, identity_corrected:identityRepair.corrected, wrong_links_removed:identityRepair.unlinked, walmart_archive_metadata_scanned:walmartArchiveDiscovery.metadata_scanned || 0, walmart_archive_candidates:walmartArchiveDiscovery.candidates_found || 0, walmart_archive_error:walmartArchiveDiscovery.error || null, details };
 }
 
 async function runHistoricalOrderEmailRepair(supabase, userId = null, adjustCredits = null, confirmPendingAmazonCheckout = null, options = {}) {
-  // Background repair remains single-flight, but a user-clicked targeted reconciliation must not
-  // be silently skipped just because the scheduled repair happens to be running. Targeted repair
-  // uses its own IMAP connections and idempotent message/order upserts, so it is safe to run in
-  // parallel and is far preferable to returning repair_already_running without checking a mailbox.
-  const allowConcurrent = options.allowConcurrent === true;
-  if (historicalRepairRunning && !allowConcurrent) return { skipped:true, reason:'repair_already_running' };
-  if (!allowConcurrent) historicalRepairRunning = true;
+  const lease = await acquireEmailHeavyWork(`historical-repair:${userId || 'background'}`, {
+    token:options.emailWorkToken,
+    wait:options.waitForEmailWork === true,
+    timeoutMs:options.emailWorkWaitMs,
+    onWait:options.onEmailWorkWait
+  });
+  if (!lease) return { skipped:true, reason:'email_work_running' };
+  if (historicalRepairRunning) {
+    lease.release();
+    return { skipped:true, reason:'repair_already_running' };
+  }
+  historicalRepairRunning = true;
   try {
-    const result = await repairHistoricalOrderEmails(supabase, userId, adjustCredits, confirmPendingAmazonCheckout, options);
-    return { ...result, concurrent_with_background_repair: allowConcurrent && historicalRepairRunning };
+    return await repairHistoricalOrderEmails(supabase, userId, adjustCredits, confirmPendingAmazonCheckout, options);
   } finally {
-    if (!allowConcurrent) historicalRepairRunning = false;
+    historicalRepairRunning = false;
+    lease.release();
   }
 }
 
@@ -5233,15 +5482,28 @@ async function syncRecentServiceOrdersForBackground(supabase, accounts = []) {
 
 let scanRunning = false;
 async function scanAll(supabase, userId = null, adjustCredits = null, onProgress = null, confirmPendingAmazonCheckout = null, options = {}) {
+  const lease = await acquireEmailHeavyWork(`mailbox-scan:${userId || 'background'}`, {
+    token:options.emailWorkToken,
+    wait:options.waitForEmailWork === true,
+    timeoutMs:options.emailWorkWaitMs,
+    onWait:options.onEmailWorkWait
+  });
+  if (!lease) return { skipped:true, reason:'email_work_running' };
   if (scanRunning && !userId) {
-    if (!options.waitForGlobalScan) return { skipped:true, reason:'global_scan_running' };
+    if (!options.waitForGlobalScan) {
+      lease.release();
+      return { skipped:true, reason:'global_scan_running' };
+    }
     const waitStartedAt = Date.now();
     const maxWaitMs = Math.max(60 * 1000, Number(options.globalScanWaitMs || 30 * 60 * 1000));
     while (scanRunning && Date.now() - waitStartedAt < maxWaitMs) {
       if (onProgress) onProgress({ phase:'waiting_for_global_scan', accountIndex:0, accountTotal:0, checked:0, total:0 });
       await new Promise(resolve => setTimeout(resolve, 1000));
     }
-    if (scanRunning) throw new Error('The scheduled global mailbox scan is still running. This reconciliation checkpoint was preserved; retry to continue.');
+    if (scanRunning) {
+      lease.release();
+      throw new Error('The scheduled global mailbox scan is still running. This reconciliation checkpoint was preserved; retry to continue.');
+    }
   }
   if (!userId) scanRunning = true;
   try {
@@ -5388,7 +5650,10 @@ async function scanAll(supabase, userId = null, adjustCredits = null, onProgress
       loader_diagnostics:loaderDiagnostics,
       results:completeResults
     };
-  } finally { if (!userId) scanRunning = false; }
+  } finally {
+    if (!userId) scanRunning = false;
+    lease.release();
+  }
 }
 
 function scanJobView(job) {
@@ -5664,12 +5929,12 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
       // confirmation/shipping/delivery evidence in bounded background batches. Every batch is
       // idempotent, so a Render restart can be followed by the normal Reconcile button safely.
       if (repairIds.length) setImmediate(async () => {
-        for (let i = 0; i < repairIds.length; i += 100) {
+        for (let i = 0; i < repairIds.length; i += 10) {
           try {
             await runHistoricalOrderEmailRepair(supabase, userId, adjustUserCredits, confirmPendingAmazonCheckout, {
-              maxOrders:100,
-              priorityOrderIds:repairIds.slice(i, i + 100),
-              allowConcurrent:true
+              maxOrders:10,
+              priorityOrderIds:repairIds.slice(i, i + 10),
+              waitForEmailWork:true
             });
           } catch (error) {
             console.error('[DISCORD HISTORY] Exact historical email repair failed:', error.message || error);
@@ -6648,6 +6913,9 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
     const priorCheckpoint = resumeDurable && durableReconcile.scan_checkpoint
       ? durableReconcile.scan_checkpoint
       : { completed_count:0, total_accounts:0, results_by_key:{} };
+    const priorTargetCheckpoint = resumeDurable && durableReconcile.target_checkpoint
+      ? durableReconcile.target_checkpoint
+      : { completed_count:0, total_mailboxes:0, results_by_key:{} };
     const reconcileJob = {
       id:resumeDurable ? durableReconcile.id : crypto.randomUUID(),
       status:'running', stage:'starting', percent:resumeDurable ? Math.max(1, Number(durableReconcile.percent || 1)) : 1,
@@ -6659,6 +6927,15 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
       finished_at:null, result:null, error:null,
       stage_errors:Array.isArray(durableReconcile?.stage_errors) ? durableReconcile.stage_errors.slice(-100) : [],
       resumed_from_checkpoint:resumeDurable,
+      target_checkpoint:{
+        completed_count:Number(priorTargetCheckpoint.completed_count || 0),
+        total_mailboxes:Number(priorTargetCheckpoint.total_mailboxes || 0),
+        results_by_key:priorTargetCheckpoint.results_by_key && typeof priorTargetCheckpoint.results_by_key === 'object'
+          ? { ...priorTargetCheckpoint.results_by_key }
+          : {},
+        updated_at:priorTargetCheckpoint.updated_at || null,
+        repair_complete:false
+      },
       scan_checkpoint:{
         completed_count:Number(priorCheckpoint.completed_count || 0),
         total_accounts:Number(priorCheckpoint.total_accounts || 0),
@@ -6683,7 +6960,20 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
     // though the server is still working. The frontend polls the status endpoint below instead.
     res.status(202).json({ success:true, job:retailerReconcileJobView(reconcileJob) });
     setImmediate(async () => {
+    let reconcileEmailLease = null;
     try {
+      reconcileEmailLease = await acquireEmailHeavyWork(`retailer-reconcile:${reconcileJob.id}`, {
+        wait:true,
+        timeoutMs:60 * 60 * 1000,
+        onWait:({ owner }) => updateRetailerReconcileJob(
+          reconcileJob,
+          'waiting_for_email_worker',
+          Math.max(1, Number(reconcileJob.percent || 1)),
+          `Waiting for the current email task (${owner || 'mailbox scan'}) to finish; saved checkpoints are unchanged…`
+        )
+      });
+      if (!reconcileEmailLease) throw new Error('The email worker stayed busy for too long. The saved Target and mailbox checkpoints will resume on the next click.');
+      const emailWorkToken = reconcileEmailLease.token;
       const recordStageError = (stage, error) => {
         const item = { stage, error:clean(error?.message || error).slice(0,1000) };
         reconcileJob.stage_errors.push(item);
@@ -6719,20 +7009,12 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
         );
         await yieldReconcileTurn();
         if (targetLifecycleOrders.length) {
-          targetLifecycleRepair = await runHistoricalOrderEmailRepair(
-            supabase,
-            req.user_id,
-            adjustUserCredits,
-            confirmPendingAmazonCheckout,
-            {
-              maxOrders:requestedTargetRepairs,
-              forceLinked:true,
-              onlyStore:'target',
-              priorityOrderIds:targetLifecycleOrders.map(order => String(order.id)),
-              allowConcurrent:true
-            }
+          const checkpointedTargetRepair = await runCheckpointedTargetRepair(
+            supabase, req.user_id, targetLifecycleOrders, reconcileJob,
+            adjustUserCredits, confirmPendingAmazonCheckout, emailWorkToken
           );
-          for (const order of targetLifecycleOrders) targetLifecycleAttemptedIds.add(String(order.id));
+          targetLifecycleRepair = checkpointedTargetRepair.result;
+          for (const orderId of checkpointedTargetRepair.attemptedIds) targetLifecycleAttemptedIds.add(String(orderId));
         }
       } catch (e) {
         console.warn('[TARGET LIFECYCLE PREFLIGHT REPAIR]', e.message || e);
@@ -6821,6 +7103,7 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
           },
           confirmPendingAmazonCheckout,
           {
+            emailWorkToken,
             force:true,
             concurrency:FULL_EMAIL_SCAN_CONCURRENCY,
             maxMessagesPerMailbox:RECONCILE_MAX_MESSAGES_PER_MAILBOX,
@@ -7230,9 +7513,7 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
         const requested = Math.max(Number(req.body?.repair_orders || 20), retailerPriorityOrderIds.length);
         repair = await runHistoricalOrderEmailRepair(supabase, req.user_id, adjustUserCredits, confirmPendingAmazonCheckout, {
           maxOrders: Math.min(120, requested), forceLinked: true, priorityOrderIds: retailerPriorityOrderIds,
-          // A manual repair is allowed to run beside the scheduled background repair. All writes
-          // are keyed/upserted by message/order identity, so this avoids a false skip safely.
-          allowConcurrent: true
+          emailWorkToken, waitForEmailWork:true
         });
       } catch (repairError) {
         console.warn('[RECONCILE TARGETED REPAIR]', repairError.message || repairError);
@@ -7259,6 +7540,8 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
       Object.assign(reconcileJob, { status:'error', finished_at:new Date().toISOString(), error:error.message || String(error) });
       try { await persistRetailerReconcileJob(supabase, req.user_id, reconcileJob); }
       catch (checkpointError) { console.warn('[RECONCILE CHECKPOINT ERROR]', checkpointError.message || checkpointError); }
+    } finally {
+      reconcileEmailLease?.release();
     }
     });
   });
@@ -7620,7 +7903,7 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
         } else {
           repair = await runHistoricalOrderEmailRepair(
             supabase, req.user_id, adjustUserCredits, confirmPendingAmazonCheckout,
-            { maxOrders:1, forceLinked:true, priorityOrderIds:[order.id], allowConcurrent:true }
+            { maxOrders:1, forceLinked:true, priorityOrderIds:[order.id], waitForEmailWork:true }
           );
         }
         const confirmationLinked = await trackedOrderHasConfirmation(supabase, order.id);
