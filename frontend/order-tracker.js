@@ -602,6 +602,10 @@ Mailboxes with more messages saved for the next reconcile pass: ${j.all_email_sc
 Failed mailbox list:
 ${(j.all_email_scan?.results||[]).filter(x=>x.error).map(x=>`${x.email||'-'} · ${x.error}`).join('\n')||'None'}
 Saved Target/Pokemon Center payment alerts rebuilt: ${j.payment_alert_sync?.saved||0}
+Target order histories selected for exact IMAP repair: ${j.target_lifecycle_candidates||0}
+Target lifecycle messages found and linked: ${j.target_lifecycle_repair?.matched_messages||0}
+Target orders repaired: ${j.target_lifecycle_repair?.repaired_orders||0}
+Target mailbox connection failures: ${j.target_lifecycle_repair?.mailbox_failures||0}
 Recoverable stage errors: ${(j.stage_errors||[]).length}
 ${(j.stage_errors||[]).map(x=>`${x.stage||'stage'} · ${x.error||'unknown error'}`).join('\n')||'None'}
 Supreme user-owned mailboxes selected: ${j.supreme_live?.profile_mailboxes||0}

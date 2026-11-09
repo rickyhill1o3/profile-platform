@@ -2,12 +2,13 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
+const { parseRetailEmail } = require('../retailer-reconciliation');
 
 function loadTestHooks() {
   const filename = path.join(__dirname, '..', 'order-tracker.js');
   const source = fs.readFileSync(filename, 'utf8').replace(
     /module\.exports = \{ registerOrderTracker, scanAll, notifyCheckoutForOrderTracker \};\s*$/,
-    'module.exports = { __test: { detectStatus, extractOrderNumbers, extractAmounts, targetOrdersMissingConfirmation, rawMessageContainsOrderNumber, resolveExactProfileMailbox, resolveHistoricalDiscordMailboxIdentity } };'
+    'module.exports = { __test: { detectStatus, extractOrderNumbers, extractAmounts, targetOrdersMissingConfirmation, targetOrdersNeedingLifecycleRepair, targetLifecycleNeedsRepair, rawMessageContainsOrderNumber, resolveExactProfileMailbox, resolveHistoricalDiscordMailboxIdentity } };'
   );
   const module = { exports:{} };
   const sandbox = {
@@ -61,13 +62,23 @@ function fakeSupabase(database) {
 }
 
 (async () => {
-  const { detectStatus, extractOrderNumbers, extractAmounts, targetOrdersMissingConfirmation, rawMessageContainsOrderNumber, resolveExactProfileMailbox, resolveHistoricalDiscordMailboxIdentity } = loadTestHooks();
+  const { detectStatus, extractOrderNumbers, extractAmounts, targetOrdersMissingConfirmation, targetOrdersNeedingLifecycleRepair, targetLifecycleNeedsRepair, rawMessageContainsOrderNumber, resolveExactProfileMailbox, resolveHistoricalDiscordMailboxIdentity } = loadTestHooks();
 
   assert.strictEqual(detectStatus("Thanks for shopping with us! Here's your order #102003237489716.", ''), 'confirmed');
   assert.strictEqual(detectStatus('Get ready for something special! An item from order #102003237489716 is about to ship.', ''), 'shipped');
   assert.strictEqual(detectStatus('Your order arrives today! Order #102003237489716', ''), 'shipped');
-  assert.strictEqual(detectStatus('An item has arrived from order #102003237489716!', ''), 'delivered');
+  assert.strictEqual(detectStatus('Items have arrived from order #912003685973236!', ''), 'delivered');
+  assert.strictEqual(detectStatus('Please update your payment soon. Order #912003760814819.', "We're holding your order for now."), 'payment_needed');
   assert.strictEqual(detectStatus("You've successfully canceled items from your order ending in 0776.", ''), 'canceled');
+
+  const shippedReceipt = parseRetailEmail(
+    'target',
+    'shipped',
+    'Get ready for something special! Items from order #912003685973236 are about to ship.',
+    'Order #912003685973236\nShipping label created\nUnited Parcel Service Tracking # 1ZWY0657YW00367490'
+  );
+  assert.strictEqual(shippedReceipt.order_number, '912003685973236');
+  assert.strictEqual(shippedReceipt.tracking_number, '1ZWY0657YW00367490');
 
   assert.deepStrictEqual(
     Array.from(extractOrderNumbers('target', 'Your order arrives today! Order #102003237489716', '')),
@@ -128,6 +139,35 @@ function fakeSupabase(database) {
   };
   const missing = await targetOrdersMissingConfirmation(fakeSupabase(database), 'admin', 100);
   assert.deepStrictEqual(Array.from(missing, row => row.id), ['missing-old']);
+
+  assert.strictEqual(targetLifecycleNeedsRepair({ status:'delivered' }, ['confirmed','shipped','delivered']), true, 'a delivered Target card with only three lifecycle emails must be rechecked for the arriving-today message');
+  assert.strictEqual(targetLifecycleNeedsRepair({ status:'delivered' }, ['confirmed','shipped','shipped','delivered']), false, 'the complete four-message Target lifecycle must not be requeued');
+  assert.strictEqual(targetLifecycleNeedsRepair({ status:'canceled' }, ['confirmed','canceled']), false, 'Target cancellation behavior is unchanged');
+
+  database.tracked_orders.push(
+    { id:'stale-confirmed', user_id:'admin', store:'target', order_number:'912003685973236', status:'confirmed', total:36.49, order_date:'2026-08-18T00:00:00Z' },
+    { id:'thin-delivered', user_id:'admin', store:'target', order_number:'912003802827778', status:'delivered', total:149.43, order_date:'2026-10-09T00:00:00Z' },
+    { id:'complete-delivered', user_id:'admin', store:'target', order_number:'912003685973237', status:'delivered', total:36.49, order_date:'2026-08-18T00:00:00Z' },
+    { id:'amazon-stale', user_id:'admin', store:'amazon', order_number:'113-1234567-1234567', status:'confirmed', total:45, order_date:'2026-08-18T00:00:00Z' }
+  );
+  database.tracked_order_emails.push(
+    { order_id:'stale-confirmed', event_type:'confirmed' },
+    { order_id:'thin-delivered', event_type:'confirmed' },
+    { order_id:'thin-delivered', event_type:'delivered' },
+    { order_id:'complete-delivered', event_type:'confirmed' },
+    { order_id:'complete-delivered', event_type:'shipped' },
+    { order_id:'complete-delivered', event_type:'shipped' },
+    { order_id:'complete-delivered', event_type:'delivered' }
+  );
+  const lifecycle = await targetOrdersNeedingLifecycleRepair(fakeSupabase(database), 'admin', 100);
+  assert.deepStrictEqual(Array.from(lifecycle, row => row.id), ['missing-old','already-confirmed','stale-confirmed','thin-delivered']);
+
+  const trackerSource = fs.readFileSync(path.join(__dirname, '..', 'order-tracker.js'), 'utf8');
+  const targetPreflight = trackerSource.indexOf("'target_lifecycle_repair'");
+  const globalMailboxPass = trackerSource.indexOf("'all_email_scan'", targetPreflight);
+  assert.ok(targetPreflight > 0 && globalMailboxPass > targetPreflight, 'Target exact-order repair must run before the long global mailbox pass');
+  assert.match(trackerSource, /onlyStore:'target'/, 'the early repair stage must not select Amazon, Pokemon Center, Walmart, Best Buy, or another store');
+  assert.match(trackerSource, /target_lifecycle_repair:targetLifecycleRepair|result\.target_lifecycle_repair = targetLifecycleRepair/, 'Target repair diagnostics must be returned to the Order Tracker');
 
   console.log('Target historical email repair tests passed');
 })().catch(error => {

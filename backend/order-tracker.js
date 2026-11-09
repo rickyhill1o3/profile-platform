@@ -4673,6 +4673,55 @@ async function targetOrdersMissingConfirmation(supabase, userId = null, limit = 
   }).slice(0, max);
 }
 
+function targetLifecycleNeedsRepair(order = {}, eventTypes = []) {
+  const status = lower(order.status || '');
+  const events = (eventTypes || []).map(lower).filter(Boolean);
+  const confirmed = events.filter(event => event === 'confirmed').length;
+  const shipped = events.filter(event => event === 'shipped').length;
+  const delivered = events.filter(event => event === 'delivered').length;
+
+  // This is deliberately Target-only. A Target order normally produces four useful messages:
+  // confirmation, label/shipping, arriving-today/out-for-delivery, and delivered. Revisit every
+  // non-final order so a message that arrived after the last UID checkpoint can advance it. Also
+  // revisit delivered cards with a thin history, which is the specific "delivered but only two
+  // emails" failure this repair path is intended to backfill.
+  if (status === 'waiting_confirmation') return true;
+  if (['confirmed','processing'].includes(status)) return confirmed < 1 || events.length < 4;
+  if (status === 'shipped') return confirmed < 1 || shipped < 2 || events.length < 4;
+  if (status === 'delivered') return confirmed < 1 || shipped < 2 || delivered < 1 || events.length < 4;
+  return false;
+}
+
+async function targetOrdersNeedingLifecycleRepair(supabase, userId = null, limit = 250) {
+  const rows = await fetchAllSupabaseRows(() => {
+    let query = supabase.from('tracked_orders')
+      .select('id,user_id,source_order_id,profile_id,source_email,store,order_number,order_date,status,total,reconciliation_status')
+      .eq('store','target')
+      .not('order_number','is',null)
+      .order('order_date',{ascending:false});
+    if (userId) query = query.eq('user_id', userId);
+    return query;
+  }, 500);
+  if (!rows.length) return [];
+
+  const eventsByOrder = new Map(rows.map(order => [String(order.id), []]));
+  const ids = rows.map(order => order.id).filter(Boolean);
+  for (let i = 0; i < ids.length; i += 100) {
+    const result = await supabase.from('tracked_order_emails')
+      .select('order_id,event_type')
+      .in('order_id', ids.slice(i, i + 100));
+    if (result.error) throw result.error;
+    for (const event of result.data || []) {
+      const key = String(event.order_id || '');
+      if (eventsByOrder.has(key)) eventsByOrder.get(key).push(event.event_type);
+    }
+  }
+
+  const max = Math.max(1, Math.min(500, Number(limit || 250)));
+  return rows.filter(order => targetLifecycleNeedsRepair(order, eventsByOrder.get(String(order.id)) || []))
+    .slice(0, max);
+}
+
 async function amazonOrdersMissingConfirmation(supabase, userId = null, limit = 100) {
   const rows = await fetchAllSupabaseRows(() => {
     let query = supabase.from('tracked_orders')
@@ -4794,6 +4843,7 @@ async function reconcileHistoricalOrderProfileIdentity(supabase, rows = []) {
 
 async function repairHistoricalOrderEmails(supabase, userId = null, adjustCredits = null, confirmPendingAmazonCheckout = null, options = {}) {
   const maxOrders = Math.max(1, Math.min(500, Number(options.maxOrders || 20)));
+  const onlyStore = normalizeStoreKey(options.onlyStore || '');
   const priorityIds = [...new Set((options.priorityOrderIds || []).map(String).filter(Boolean))];
   const rowsById = new Map();
 
@@ -4856,7 +4906,8 @@ async function repairHistoricalOrderEmails(supabase, userId = null, adjustCredit
 
   const validRows = (rows || []).filter(order => {
     const email = lower(order.source_email);
-    return email && email !== 'waiting-for-imap@local' && email.includes('@') && clean(order.order_number);
+    return (!onlyStore || normalizeStoreKey(order.store || '') === onlyStore) &&
+      email && email !== 'waiting-for-imap@local' && email.includes('@') && clean(order.order_number);
   });
   const linked = await linkedTrackedOrderIds(supabase, validRows.map(order => order.id));
   // Normally historical repair only touches orders with no linked mail. Manual retailer
@@ -6649,6 +6700,45 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
       const targetManualLimit = Math.min(maxMessages, 120);
       const archiveColumns='id,user_id,mailbox_email,source_type,subject,from_text,to_text,cc_text,body_text,body_html,snippet,received_at,message_id,imap_uid,store,linked_order_id,email_type,order_number';
 
+      // Repair Target first, before the complete 600+ mailbox pass. Exact Target order-number
+      // searches ignore an advanced UID checkpoint and find confirmation, shipping-label,
+      // arriving-today, delivered, and payment-needed messages in the order's own mailbox. This
+      // keeps a long global scan from delaying the visible Target order updates the user clicked
+      // Reconcile to recover. No other retailer is selected by this stage.
+      let targetLifecycleOrders = [];
+      let targetLifecycleRepair = null;
+      const targetLifecycleAttemptedIds = new Set();
+      try {
+        const requestedTargetRepairs = Math.max(25, Math.min(500, Number(req.body?.target_repair_orders || 250)));
+        targetLifecycleOrders = await targetOrdersNeedingLifecycleRepair(supabase, req.user_id, requestedTargetRepairs);
+        updateRetailerReconcileJob(
+          reconcileJob,
+          'target_lifecycle_repair',
+          4,
+          `Searching the exact mailboxes for ${targetLifecycleOrders.length} incomplete Target order histor${targetLifecycleOrders.length === 1 ? 'y' : 'ies'}…`
+        );
+        await yieldReconcileTurn();
+        if (targetLifecycleOrders.length) {
+          targetLifecycleRepair = await runHistoricalOrderEmailRepair(
+            supabase,
+            req.user_id,
+            adjustUserCredits,
+            confirmPendingAmazonCheckout,
+            {
+              maxOrders:requestedTargetRepairs,
+              forceLinked:true,
+              onlyStore:'target',
+              priorityOrderIds:targetLifecycleOrders.map(order => String(order.id)),
+              allowConcurrent:true
+            }
+          );
+          for (const order of targetLifecycleOrders) targetLifecycleAttemptedIds.add(String(order.id));
+        }
+      } catch (e) {
+        console.warn('[TARGET LIFECYCLE PREFLIGHT REPAIR]', e.message || e);
+        recordStageError('target_lifecycle_repair', e);
+      }
+
       // Collect new mail from every connected account before retailer-specific replay begins.
       // Workers run in a small pool, each mailbox has a hard deadline, and this click performs one
       // bounded pass per mailbox. Saved UID checkpoints make another click resume any backlog.
@@ -7120,7 +7210,7 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
         ).slice(0, 30);
       } catch (e) { console.warn('[RECONCILE OTHER RETAILER QUERY]', e.message || e); recordStageError('other_retailer_orders', e); }
       const targetPriorityOrderIds = [...new Set([
-        ...unresolvedTargetOrders.map(order => String(order.id)),
+        ...unresolvedTargetOrders.map(order => String(order.id)).filter(id => !targetLifecycleAttemptedIds.has(id)),
         ...damagedLinkedOrderIds.map(String)
       ])].slice(0, 100);
       const amazonPriorityOrderIds = unresolvedAmazonOrders.map(order => String(order.id)).slice(0, 30);
@@ -7154,6 +7244,9 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
       updateRetailerReconcileJob(reconcileJob, 'finishing', 96, 'Saving reconciliation results and mailbox checkpoints…');
       await yieldReconcileTurn();
       const result = {success:true,checked,matched,ignored,failed,payment_alert_sync:paymentAlertSync,walmart_problem_orders:walmartProblemOrders.length,walmart_archive_messages:walmartArchiveRows.length,walmart_linked_replay_messages:walmartLinkedReplayRows.length,walmart_targeted_archive_messages:repair?.walmart_archive_candidates||0,target_delivered_alias_replay_messages:targetDeliveredReplayRows.length,general_archive_discovery:{metadata_scanned:generalArchiveDiscovery.metadata_scanned||0,candidates_found:generalArchiveDiscovery.candidates_found||0},pokemon_archive_messages:pokemonArchiveRows.length,pokemon_live_discovery:pokemonLiveDiscovery,pokemon_stats:pokemonStats,pokemon_debug:pokemonDebug,supreme_rebuild:supremeRebuild,supreme_live:supremeLive,supreme_debug:[...(supremeLive?.debug||[]).slice(-120), ...serviceOrdersForSupreme.slice(0,40).map((o,i)=>`Service order ${i+1}: id=${o.id} site=${o.site||'-'} metadata.site=${o.metadata?.site||'-'} payload site/store=${extractNamedPayloadValue(o.raw_payload||{},['site','store'])||'-'} normalized=${normalizeStoreKey(o.site || o.metadata?.site || extractNamedPayloadValue(o.raw_payload||{},['site','store']))||'-'}`)],supreme_discovery:{metadata_scanned:supremeDiscovery?.metadata_scanned||0,candidates_found:supremeDiscovery?.candidates_found||0,windows:supremeDiscovery?.windows||0},damaged_target_orders:damagedLinkedOrderIds.length,unresolved_target_orders:unresolvedTargetOrders.length,target_priority_orders:targetPriorityOrderIds.length,unresolved_amazon_orders:unresolvedAmazonOrders.length,amazon_priority_orders:amazonPriorityOrderIds.length,other_retailer_priority_orders:otherRetailerOrders.length,retailer_priority_orders:retailerPriorityOrderIds.length,repair,message:`Scanned ${generalArchiveDiscovery.metadata_scanned||0} saved email metadata row(s) and replayed ${generalArchiveDiscovery.candidates_found||0} additional retailer lifecycle candidate(s). Searched ${amazonPriorityOrderIds.length} Amazon order(s) by exact order number plus their webhook-time window; replayed ${walmartLinkedReplayRows.length} already-linked Walmart message(s), recovered ${repair?.walmart_archive_candidates||0} exact previously-unlinked Walmart archive message(s), and prioritized ${Math.min(30,walmartProblemOrders.length)} Walmart order(s); replayed ${targetDeliveredReplayRows.length} linked Target delivery message(s); restored ${paymentAlertSync.saved||0} Target/Pokemon Center payment warning(s) from saved email; searched ${pokemonLiveDiscovery.mailboxes_checked||0} live website mailbox(es), matched ${pokemonLiveDiscovery.messages_matched||0} exact Pokemon Center lifecycle message(s), and saved ${pokemonLiveDiscovery.payment_alerts_saved||0} payment warning(s); replayed ${pokemonArchiveRows.length} Pokemon Center archive message(s); rebuilt ${supremeRebuild?.assigned||0} Supreme confirmation assignment(s); included ${otherRetailerOrders.length} other waiting retailer order(s); then included ${Math.min(30,targetPriorityOrderIds.length)} Target order(s) in the live repair queue.`};
+      result.target_lifecycle_candidates = targetLifecycleOrders.length;
+      result.target_lifecycle_repair = targetLifecycleRepair;
+      result.message = `Target first searched ${targetLifecycleOrders.length} incomplete order histor${targetLifecycleOrders.length === 1 ? 'y' : 'ies'} by exact order number and linked ${targetLifecycleRepair?.matched_messages || 0} lifecycle message(s). ${result.message}`;
       result.all_email_scan = allEmailScan;
       result.message = `Completed ${allEmailScan.completed || 0} of ${allEmailScan.accounts || 0} connected mailbox scans, archived ${allEmailScan.archived || 0} collected message(s), and recorded ${allEmailScan.failed || 0} mailbox failure(s) without stopping the run. ${result.message}`;
       Object.assign(result, { stage_errors:reconcileJob.stage_errors.slice() });
