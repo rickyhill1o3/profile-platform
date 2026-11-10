@@ -308,6 +308,10 @@ function notifyCheckoutForOrderTracker(userId, options = {}) {
 
 function clean(v) { return String(v || '').trim(); }
 function lower(v) { return clean(v).toLowerCase(); }
+function normalizeUsPostalCode(value) {
+  const match = clean(value).match(/(?:^|\D)(\d{5})(?:-\d{4})?(?:\D|$)/);
+  return match ? match[1] : '';
+}
 
 async function parseMailboxMessage(source) {
   const parsed = await simpleParser(source);
@@ -6268,6 +6272,20 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
     }
     const itemMap = new Map(ids.map(id => [String(id), []]));
     const shipmentMap = new Map(ids.map(id => [String(id), []]));
+    const shippingZipByProfile = new Map();
+    const profileIds = [...new Set((orders || []).map(order => order.profile_id).filter(Boolean).map(String))];
+    // Pokemon Center's public order-details page needs only the P-order number and shipping ZIP.
+    // Return that single address field with the user's own order; never expose the full address.
+    try {
+      for (let i = 0; i < profileIds.length; i += 100) {
+        const r = await supabase.from('addresses').select('profile_id,zip').in('profile_id', profileIds.slice(i, i + 100));
+        if (r.error) throw r.error;
+        for (const row of r.data || []) {
+          const zip = normalizeUsPostalCode(row.zip);
+          if (zip && !shippingZipByProfile.has(String(row.profile_id))) shippingZipByProfile.set(String(row.profile_id), zip);
+        }
+      }
+    } catch (_) { /* Optional enrichment; the UI can ask for the ZIP if an old order has no profile. */ }
     try {
       for (let i=0;i<ids.length;i+=100) {
         const r=await supabase.from('tracked_order_items').select('*').in('order_id',ids.slice(i,i+100)).order('created_at');
@@ -6296,6 +6314,7 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
       const trackingNumber = normalizeTrackingNumber(o.tracking_number);
       return {
         ...o,
+        shipping_zip:normalizeUsPostalCode(o.shipping_zip || shippingZipByProfile.get(String(o.profile_id || ''))) || null,
         tracking_number:trackingNumber || null,
         email_counts:emailCounts,
         has_linked_email:Number(emailCounts.total || 0) > 0,
@@ -7958,14 +7977,29 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
   app.post('/orders/tracked/:id/mark-delivered', auth, async (req, res) => {
     const { data: existing, error: lookupError } = await supabase
       .from('tracked_orders')
-      .select('id,status')
+      .select('id,status,store,source_order_id,order_number,last_message_id,receipt_html,receipt_text')
       .eq('id', req.params.id)
       .eq('user_id', req.user_id)
       .maybeSingle();
     if (lookupError) return res.status(500).json({ error: lookupError.message });
     if (!existing) return res.status(404).json({ error: 'Order not found' });
-    if (lower(existing.status) !== 'shipped') {
-      return res.status(409).json({ error: 'Only shipped orders can be manually marked delivered.' });
+    const previousStatus = lower(existing.status);
+    const isPokemonCenter = normalizeStoreKey(existing.store || '') === 'pokemoncenter';
+    const allowed = previousStatus === 'shipped' ||
+      (isPokemonCenter && ['confirmed','processing'].includes(previousStatus));
+    if (!allowed) {
+      return res.status(409).json({
+        error:isPokemonCenter
+          ? 'This Pokemon Center order must be confirmed, processing, or shipped before it can be manually marked delivered.'
+          : 'Only shipped orders can be manually marked delivered.'
+      });
+    }
+    // A manually uploaded Pokemon Center receipt counts as confirmation. A yellow waiting card
+    // without any confirmation evidence cannot jump directly to delivered.
+    const hasManualReceipt = clean(existing.last_message_id).startsWith('manual-pdf:') &&
+      Boolean(clean(existing.receipt_html) || clean(existing.receipt_text));
+    if (isPokemonCenter && previousStatus !== 'shipped' && !hasManualReceipt && !await trackedOrderHasConfirmation(supabase, existing.id)) {
+      return res.status(409).json({ error:'Attach or find the Pokemon Center confirmation before marking this order delivered.' });
     }
 
     const now = new Date().toISOString();
@@ -7974,7 +8008,7 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
       .update({ status: 'delivered', last_status_at: now, updated_at: now })
       .eq('id', existing.id)
       .eq('user_id', req.user_id)
-      .eq('status', 'shipped')
+      .eq('status', existing.status)
       .select()
       .single();
     if (error) return res.status(500).json({ error: error.message });
@@ -7987,7 +8021,28 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
       .eq('order_id', existing.id)
       .neq('status', 'delivered');
 
-    res.json({ order: data, manually_marked_delivered: true });
+    // Keep the source checkout in step and retain an audit marker. This metadata does not invent
+    // an IMAP message or retailer delivery email.
+    if (existing.source_order_id) {
+      try {
+        const sourceResult = await supabase.from('orders').select('id,metadata')
+          .eq('id', existing.source_order_id).eq('user_id', req.user_id).maybeSingle();
+        if (!sourceResult.error && sourceResult.data) {
+          await supabase.from('orders').update({
+            status:'delivered',
+            metadata:{
+              ...(sourceResult.data.metadata || {}),
+              manual_delivery_confirmed:true,
+              manual_delivery_confirmed_at:now,
+              manual_delivery_confirmed_by:req.user_id,
+              manual_delivery_previous_status:previousStatus
+            }
+          }).eq('id', sourceResult.data.id).eq('user_id', req.user_id);
+        }
+      } catch (_) {}
+    }
+
+    res.json({ order: data, manually_marked_delivered: true, previous_status:previousStatus });
   });
 
   app.delete('/orders/tracked/:id', auth, async (req, res) => {

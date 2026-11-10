@@ -114,9 +114,38 @@ async function bootstrap(){const j=await api('/orders/bootstrap');isSuperAdmin=B
 async function loadOrders(){const qs=new URLSearchParams();if($('statusFilter').value)qs.set('status',$('statusFilter').value);if($('yearFilter').value)qs.set('year',$('yearFilter').value);const [j]=await Promise.all([api('/orders/tracked?'+qs),loadRetailerPaymentAlerts().catch(()=>null)]);applyOrders(j.orders||[],j.summary||{})}
 function isPokemonCenterOrder(o){const store=String(o.store||'').toLowerCase().replace(/[^a-z0-9]/g,'');return store==='pokemon'||store==='pokemoncenter'}
 function hasPokemonConfirmationEmail(o){const c=o.email_counts||{};return Boolean(o.has_confirmation_email)||Number(c.confirmed||0)>0||(String(o.last_message_id||'').startsWith('manual-pdf:')&&Boolean(o.receipt_html||o.receipt_text))}
+function normalizePokemonPostalCode(value){const match=String(value||'').match(/(?:^|\D)(\d{5})(?:-\d{4})?(?:\D|$)/);return match?match[1]:''}
+function pokemonCenterOrderUrl(o,postalOverride=''){
+  if(!isPokemonCenterOrder(o))return '';
+  const orderNumber=String(o.order_number||'').trim().toUpperCase();
+  const postalCode=normalizePokemonPostalCode(postalOverride||o.shipping_zip);
+  if(!/^P\d{6,12}$/.test(orderNumber)||!postalCode)return '';
+  return `https://www.pokemoncenter.com/orders/${encodeURIComponent(orderNumber)}?postalCode=${encodeURIComponent(postalCode)}`
+}
+function openPokemonCenterOrder(id){
+  const o=allOrders.find(order=>String(order.id)===String(id));if(!o)return;
+  let postalCode=normalizePokemonPostalCode(o.shipping_zip);
+  if(!postalCode)postalCode=normalizePokemonPostalCode(prompt('Enter the 5-digit shipping ZIP for this Pokemon Center order:','')||'');
+  const url=pokemonCenterOrderUrl(o,postalCode);
+  if(!url){alert('A valid Pokemon Center P-order number and 5-digit shipping ZIP are required.');return}
+  const win=window.open(url,'_blank');if(win)win.opener=null
+}
+function canManuallyMarkDelivered(o){
+  const status=String(o.status||'').toLowerCase();
+  return status==='shipped'||(isPokemonCenterOrder(o)&&['confirmed','processing'].includes(status)&&hasPokemonConfirmationEmail(o))
+}
+function pokemonCenterOrderButtons(o){
+  if(!isPokemonCenterOrder(o)||!/^P\d{6,12}$/i.test(String(o.order_number||'').trim()))return '';
+  const url=pokemonCenterOrderUrl(o);
+  const view=url
+    ? `<a class="btn" href="${esc(url)}" target="_blank" rel="noopener noreferrer">View Pokémon Center confirmation</a>`
+    : `<button class="btn" onclick="openPokemonCenterOrder('${o.id}')">View Pokémon Center confirmation</button>`;
+  const status=String(o.status||'').toLowerCase();
+  return view+(['confirmed','processing'].includes(status)&&hasPokemonConfirmationEmail(o)?`<button class="btn" onclick="markDelivered('${o.id}')">Mark delivered</button>`:'')
+}
 function displayOrderStatus(o){const s=String(o.status||'waiting_confirmation').toLowerCase();if(isPokemonCenterOrder(o)&&['confirmed','processing','waiting_confirmation'].includes(s)&&!hasPokemonConfirmationEmail(o))return 'waiting_confirmation';return s}
 function statusCardClass(o){const s=displayOrderStatus(o);if(s==='canceled'||s==='refunded')return 'order-canceled';if(s==='delivered')return 'order-delivered';if(s==='shipped')return 'order-shipped';if(s==='confirmed'||s==='processing')return 'order-confirmed';return 'order-waiting'}
-function emailButtons(o){const c=o.email_counts||{};const buttons=[];const hasConfirmation=hasPokemonConfirmationEmail(o)||(!isPokemonCenterOrder(o)&&Boolean(o.receipt_html||o.receipt_text));const total=Math.max(Number(c.total||0),hasConfirmation?1:0);if(hasConfirmation)buttons.push(`<button class="btn" onclick="openOrderEmails('${o.id}','confirmed')">View confirmed receipt</button>`);if(Number(c.shipped||0)>0)buttons.push(`<button class="btn" onclick="openOrderEmails('${o.id}','shipped')">View tracking confirmation</button>`);if(Number(c.delivered||0)>0)buttons.push(`<button class="btn" onclick="openOrderEmails('${o.id}','delivered')">View delivered confirmation</button>`);if(Number(c.canceled||0)>0)buttons.push(`<button class="btn" onclick="openOrderEmails('${o.id}','canceled')">View cancellation</button>`);else if(Number(c.refunded||0)>0)buttons.push(`<button class="btn" onclick="openOrderEmails('${o.id}','refunded')">View refund confirmation</button>`);if(total>0)buttons.push(`<button class="btn" onclick="openOrderEmails('${o.id}','all')">View all order emails (${total})</button>`);if(!hasConfirmation){buttons.push(`<button class="btn" onclick="findOrderEmails('${o.id}',this)">Find confirmation email</button>`);if(isSuperAdmin&&isPokemonCenterOrder(o))buttons.push(`<button class="btn" onclick="choosePokemonReceiptPdf('${o.id}',this)">Upload order receipt PDF</button>`)}return buttons.join('')}
+function emailButtons(o){const c=o.email_counts||{};const buttons=[];const hasConfirmation=hasPokemonConfirmationEmail(o)||(!isPokemonCenterOrder(o)&&Boolean(o.receipt_html||o.receipt_text));const total=Math.max(Number(c.total||0),hasConfirmation?1:0);if(hasConfirmation)buttons.push(`<button class="btn" onclick="openOrderEmails('${o.id}','confirmed')">View confirmed receipt</button>`);if(Number(c.shipped||0)>0)buttons.push(`<button class="btn" onclick="openOrderEmails('${o.id}','shipped')">View tracking confirmation</button>`);if(Number(c.delivered||0)>0)buttons.push(`<button class="btn" onclick="openOrderEmails('${o.id}','delivered')">View delivered confirmation</button>`);if(Number(c.canceled||0)>0)buttons.push(`<button class="btn" onclick="openOrderEmails('${o.id}','canceled')">View cancellation</button>`);else if(Number(c.refunded||0)>0)buttons.push(`<button class="btn" onclick="openOrderEmails('${o.id}','refunded')">View refund confirmation</button>`);if(total>0)buttons.push(`<button class="btn" onclick="openOrderEmails('${o.id}','all')">View all order emails (${total})</button>`);if(!hasConfirmation){buttons.push(`<button class="btn" onclick="findOrderEmails('${o.id}',this)">Find confirmation email</button>`);if(isSuperAdmin&&isPokemonCenterOrder(o))buttons.push(`<button class="btn" onclick="choosePokemonReceiptPdf('${o.id}',this)">Upload order receipt PDF</button>`)}return buttons.join('')+pokemonCenterOrderButtons(o)}
 
 function renderItems(o){
   const items=Array.isArray(o.items)?o.items:[]; if(!items.length)return '';
@@ -236,8 +265,11 @@ async function openReceipt(id){return openOrderEmails(id,'confirmed')}
 async function editOrder(id){const o=allOrders.find(x=>x.id===id);const status=prompt('Status: waiting_confirmation, confirmed, processing, shipped, delivered, canceled, refunded',o.status);if(!status)return;const credits=prompt('Credits spent for this order',o.credits_spent||0);await api('/orders/tracked/'+id,{method:'PATCH',body:JSON.stringify({status,credits_spent:Number(credits||0)})});loadOrders()}
 async function markDelivered(id){
   const o=allOrders.find(x=>x.id===id);
-  if(!o||String(o.status||'').toLowerCase()!=='shipped')return;
-  if(!confirm('Mark this shipped order as delivered? This will also mark all known packages for the order as delivered.'))return;
+  if(!o||!canManuallyMarkDelivered(o))return;
+  const question=isPokemonCenterOrder(o)
+    ? 'Mark this entire Pokemon Center order as delivered manually? Use this only after you have confirmed the package was delivered. This does not create a fake IMAP email.'
+    : 'Mark this shipped order as delivered? This will also mark all known packages for the order as delivered.';
+  if(!confirm(question))return;
   try{
     await api('/orders/tracked/'+id+'/mark-delivered',{method:'POST',body:'{}'});
     await loadOrders();
