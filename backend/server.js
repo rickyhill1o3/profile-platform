@@ -145,6 +145,14 @@ const {
     validateGroupedUspsRandomizationPlan
 } = require("./target-usps-secondary-randomizer");
 const {
+    TARGET_BOT_SPLIT_BOTS,
+    DEFAULT_ACTIVE_TARGET_SPLIT_BOTS,
+    normalizeSplitBot,
+    normalizeActiveSplitBots,
+    buildBalancedTargetBotSplit,
+    isSplitCurrent
+} = require("./target-bot-split");
+const {
     CREDIT_AUTO_PAUSE_THRESHOLD,
     STORE_REACTIVATION_MINIMUM_BALANCE,
     shouldAutoPauseStores,
@@ -12601,6 +12609,12 @@ app.get("/admin/export/profiles-json", auth, admin, async (req, res) => {
         const { user_id, group } = req.query;
         const filename = (req.query.filename || "profiles").replace(/[^a-zA-Z0-9-_]/g, "");
         const activeOnly = String(req.query.active_only || "") === "1";
+        const splitBotRequested = String(req.query.target_bot_split || '').trim();
+        const splitBot = normalizeSplitBot(splitBotRequested);
+        if (splitBotRequested && splitBot !== 'refract') return res.status(400).json({ error: 'This export accepts only the Refract Target split.' });
+        if (splitBot && currentUser.role !== 'super_admin') return res.status(403).json({ error: 'Super admin only.' });
+        if (splitBot && normalizeProfileAccountType(group || '') !== 'target') return res.status(400).json({ error: 'Bot split exports are Target-only.' });
+        if (splitBot && user_id && String(user_id) !== String(currentUser.id)) return res.status(403).json({ error: 'Bot split exports include only your own super-admin profiles.' });
 
         let query = supabase
             .from("profiles")
@@ -12612,7 +12626,9 @@ app.get("/admin/export/profiles-json", auth, admin, async (req, res) => {
             `)
             .order("created_at", { ascending: false });
 
-        if (currentUser.role === "super_admin") {
+        if (splitBot) {
+            query = query.eq("user_id", currentUser.id);
+        } else if (currentUser.role === "super_admin") {
             if (user_id) query = query.eq("user_id", user_id);
         } else {
             const ownedUserIds = await getScopeUserIdsForAdmin(currentUser);
@@ -12636,7 +12652,8 @@ app.get("/admin/export/profiles-json", auth, admin, async (req, res) => {
 
         let exportProfiles = await attachAndFilterProfilesByStore(profiles || [], group || "");
         exportProfiles = await filterProfilesByActiveRunStatus(exportProfiles, group || "", activeOnly);
-        if (currentUser.role === 'super_admin') exportProfiles = await appendAssignedTargetExtraProfiles(exportProfiles, group || '');
+        if (splitBot) exportProfiles = await filterProfilesForOwnTargetBotSplit(currentUser.id, exportProfiles, splitBot);
+        else if (currentUser.role === 'super_admin') exportProfiles = await appendAssignedTargetExtraProfiles(exportProfiles, group || '');
 
         const rows = exportProfiles.map((profile) => {
             const address = profile.addresses?.[0] || {};
@@ -12853,6 +12870,165 @@ function csvLine(values) {
     return values.map(csvCell).join(",");
 }
 
+function targetBotSplitSettingKey(userId) {
+    return `target_bot_split:${userId}`;
+}
+
+async function loadOwnTargetProfilesForBotSplit(userId) {
+    const { data: profiles, error } = await supabase
+        .from('profiles')
+        .select(`
+            *,
+            addresses(*),
+            payments(*),
+            accounts(*)
+        `)
+        .eq('user_id', userId)
+        .order('created_at', { ascending: false });
+    if (error) throw new Error(error.message);
+    const targetProfiles = await attachAndFilterProfilesByStore(profiles || [], 'target');
+    return targetProfiles.filter((profile) => String(profile.user_id || '') === String(userId));
+}
+
+function buildTargetBotSplitRows(profiles = []) {
+    const rowsByProfileId = new Map();
+    const { addressDistribution } = buildPhysicalAddressDistribution(profiles, []);
+    for (const group of addressDistribution || []) {
+        for (const profileId of group.profile_ids || []) {
+            rowsByProfileId.set(String(profileId), {
+                address_key: group.group_key || `profile:${profileId}`,
+                address_label: group.label || 'Address unavailable'
+            });
+        }
+    }
+    return (Array.isArray(profiles) ? profiles : []).map((profile) => {
+        const id = String(profile.id || '');
+        const grouped = rowsByProfileId.get(id);
+        const address = profile.addresses?.[0] || {};
+        return {
+            id,
+            profile_name: profile.profile_name || '',
+            address_key: grouped?.address_key || targetPhysicalAddressKey(address) || `profile:${id}`,
+            address_label: grouped?.address_label || targetPhysicalAddressLabel(address) || 'Address unavailable'
+        };
+    }).filter((row) => row.id);
+}
+
+function summarizeTargetBotSplit(split = {}, rows = []) {
+    const assignments = split.assignments && typeof split.assignments === 'object' ? split.assignments : {};
+    const activeBots = normalizeActiveSplitBots(split.active_bots, DEFAULT_ACTIVE_TARGET_SPLIT_BOTS);
+    const counts = Object.fromEntries(TARGET_BOT_SPLIT_BOTS.map((bot) => [bot, 0]));
+    const addresses = new Map();
+    for (const row of rows) {
+        const bot = normalizeSplitBot(assignments[row.id]);
+        if (!bot) continue;
+        counts[bot] += 1;
+        if (!addresses.has(row.address_key)) {
+            addresses.set(row.address_key, {
+                address_key: row.address_key,
+                address_label: row.address_label,
+                total: 0,
+                counts: Object.fromEntries(TARGET_BOT_SPLIT_BOTS.map((name) => [name, 0]))
+            });
+        }
+        const address = addresses.get(row.address_key);
+        address.total += 1;
+        address.counts[bot] += 1;
+    }
+    return {
+        version: 1,
+        revision: Math.max(0, Number.parseInt(split.revision, 10) || 0),
+        active_bots: activeBots,
+        updated_at: split.updated_at || null,
+        assignments,
+        total_profiles: rows.length,
+        counts,
+        address_breakdown: [...addresses.values()].sort((a, b) => b.total - a.total || a.address_label.localeCompare(b.address_label))
+    };
+}
+
+async function ensureOwnTargetBotSplit(userId, { forceRebalance = false, activeBots = null } = {}) {
+    const profiles = await loadOwnTargetProfilesForBotSplit(userId);
+    const rows = buildTargetBotSplitRows(profiles);
+    const saved = await getAppSetting(targetBotSplitSettingKey(userId), {});
+    const requestedActiveBots = activeBots == null
+        ? normalizeActiveSplitBots(saved?.active_bots, DEFAULT_ACTIVE_TARGET_SPLIT_BOTS)
+        : normalizeActiveSplitBots(activeBots, []);
+    if (!requestedActiveBots.length) throw new Error('Select at least one bot for this week.');
+    const needsRefresh = forceRebalance || !isSplitCurrent(saved, rows, requestedActiveBots);
+    let split = saved;
+    if (needsRefresh) {
+        const priorRevision = Math.max(0, Number.parseInt(saved?.revision, 10) || 0);
+        const revision = forceRebalance ? priorRevision + 1 : priorRevision;
+        split = {
+            ...buildBalancedTargetBotSplit(rows, { revision, activeBots: requestedActiveBots }),
+            updated_at: new Date().toISOString()
+        };
+        await setAppSetting(targetBotSplitSettingKey(userId), split);
+    }
+    return {
+        profiles,
+        rows,
+        split: summarizeTargetBotSplit(split, rows),
+        auto_updated: needsRefresh && !forceRebalance,
+        rebalanced: forceRebalance
+    };
+}
+
+function targetBotSplitStatusPayload(result) {
+    const { assignments, ...status } = result.split;
+    return {
+        ...status,
+        bots: TARGET_BOT_SPLIT_BOTS,
+        scope: 'signed_in_super_admin_target_profiles_only',
+        auto_updated: Boolean(result.auto_updated),
+        rebalanced: Boolean(result.rebalanced)
+    };
+}
+
+async function filterProfilesForOwnTargetBotSplit(userId, profiles = [], bot = '') {
+    const normalizedBot = normalizeSplitBot(bot);
+    if (!normalizedBot) throw new Error('Choose Refract, Valor, Shikari, or Polar for the Target split export.');
+    const result = await ensureOwnTargetBotSplit(userId);
+    if (!result.split.active_bots.includes(normalizedBot)) {
+        throw new Error(`${normalizedBot} is not active in this week's Target bot split.`);
+    }
+    return (Array.isArray(profiles) ? profiles : []).filter((profile) =>
+        result.split.assignments[String(profile.id || '')] === normalizedBot
+    );
+}
+
+app.get('/admin/target-bot-split', auth, admin, async (req, res) => {
+    try {
+        const currentUser = await getCurrentUser(req);
+        if (currentUser.role !== 'super_admin') {
+            return res.status(403).json({ error: 'Only the signed-in super admin can split their own Target profiles.' });
+        }
+        const result = await ensureOwnTargetBotSplit(currentUser.id);
+        res.json(targetBotSplitStatusPayload(result));
+    } catch (err) {
+        res.status(500).json({ error: err.message || 'Could not load the Target bot split.' });
+    }
+});
+
+app.post('/admin/target-bot-split/rebalance', auth, admin, async (req, res) => {
+    try {
+        const currentUser = await getCurrentUser(req);
+        if (currentUser.role !== 'super_admin') {
+            return res.status(403).json({ error: 'Only the signed-in super admin can rebalance their own Target profiles.' });
+        }
+        if (!Array.isArray(req.body?.active_bots)) {
+            return res.status(400).json({ error: 'Choose at least one active bot.' });
+        }
+        const activeBots = normalizeActiveSplitBots(req.body.active_bots, []);
+        if (!activeBots.length) return res.status(400).json({ error: 'Choose at least one active bot.' });
+        const result = await ensureOwnTargetBotSplit(currentUser.id, { forceRebalance: true, activeBots });
+        res.json(targetBotSplitStatusPayload(result));
+    } catch (err) {
+        res.status(500).json({ error: err.message || 'Could not rebalance the Target bot split.' });
+    }
+});
+
 
 
 function countryForPolar(value) {
@@ -12900,6 +13076,12 @@ app.get("/admin/export/profiles-polar-json", auth, admin, async (req, res) => {
         const { user_id, group } = req.query;
         const filename = (req.query.filename || "polar-profiles").replace(/[^a-zA-Z0-9-_]/g, "");
         const activeOnly = String(req.query.active_only || "") === "1";
+        const splitBotRequested = String(req.query.target_bot_split || '').trim();
+        const splitBot = normalizeSplitBot(splitBotRequested);
+        if (splitBotRequested && splitBot !== 'polar') return res.status(400).json({ error: 'This export accepts only the Polar Target split.' });
+        if (splitBot && currentUser.role !== 'super_admin') return res.status(403).json({ error: 'Super admin only.' });
+        if (splitBot && normalizeProfileAccountType(group || '') !== 'target') return res.status(400).json({ error: 'Bot split exports are Target-only.' });
+        if (splitBot && user_id && String(user_id) !== String(currentUser.id)) return res.status(403).json({ error: 'Bot split exports include only your own super-admin profiles.' });
 
         let query = supabase
             .from("profiles")
@@ -12911,7 +13093,9 @@ app.get("/admin/export/profiles-polar-json", auth, admin, async (req, res) => {
             `)
             .order("created_at", { ascending: false });
 
-        if (currentUser.role === "super_admin") {
+        if (splitBot) {
+            query = query.eq("user_id", currentUser.id);
+        } else if (currentUser.role === "super_admin") {
             if (user_id) query = query.eq("user_id", user_id);
         } else {
             const ownedUserIds = await getScopeUserIdsForAdmin(currentUser);
@@ -12929,7 +13113,8 @@ app.get("/admin/export/profiles-polar-json", auth, admin, async (req, res) => {
 
         let exportProfiles = await attachAndFilterProfilesByStore(profiles || [], group || "");
         exportProfiles = await filterProfilesByActiveRunStatus(exportProfiles, group || "", activeOnly);
-        if (currentUser.role === 'super_admin') exportProfiles = await appendAssignedTargetExtraProfiles(exportProfiles, group || '');
+        if (splitBot) exportProfiles = await filterProfilesForOwnTargetBotSplit(currentUser.id, exportProfiles, splitBot);
+        else if (currentUser.role === 'super_admin') exportProfiles = await appendAssignedTargetExtraProfiles(exportProfiles, group || '');
 
         const rows = exportProfiles.map((profile) => {
             const address = profile.addresses?.[0] || {};
@@ -13017,6 +13202,12 @@ app.get("/admin/export/profiles-valor-json", auth, admin, async (req, res) => {
         const { user_id, group } = req.query;
         const filename = (req.query.filename || "valor-profiles").replace(/[^a-zA-Z0-9-_]/g, "");
         const activeOnly = String(req.query.active_only || "") === "1";
+        const splitBotRequested = String(req.query.target_bot_split || '').trim();
+        const splitBot = normalizeSplitBot(splitBotRequested);
+        if (splitBotRequested && splitBot !== 'valor') return res.status(400).json({ error: 'This export accepts only the Valor Target split.' });
+        if (splitBot && currentUser.role !== 'super_admin') return res.status(403).json({ error: 'Super admin only.' });
+        if (splitBot && normalizeProfileAccountType(group || '') !== 'target') return res.status(400).json({ error: 'Bot split exports are Target-only.' });
+        if (splitBot && user_id && String(user_id) !== String(currentUser.id)) return res.status(403).json({ error: 'Bot split exports include only your own super-admin profiles.' });
 
         let query = supabase
             .from("profiles")
@@ -13028,7 +13219,9 @@ app.get("/admin/export/profiles-valor-json", auth, admin, async (req, res) => {
             `)
             .order("created_at", { ascending: false });
 
-        if (currentUser.role === "super_admin") {
+        if (splitBot) {
+            query = query.eq("user_id", currentUser.id);
+        } else if (currentUser.role === "super_admin") {
             if (user_id) query = query.eq("user_id", user_id);
         } else {
             const ownedUserIds = await getScopeUserIdsForAdmin(currentUser);
@@ -13046,7 +13239,8 @@ app.get("/admin/export/profiles-valor-json", auth, admin, async (req, res) => {
 
         let exportProfiles = await attachAndFilterProfilesByStore(profiles || [], group || "");
         exportProfiles = await filterProfilesByActiveRunStatus(exportProfiles, group || "", activeOnly);
-        if (currentUser.role === 'super_admin') exportProfiles = await appendAssignedTargetExtraProfiles(exportProfiles, group || '');
+        if (splitBot) exportProfiles = await filterProfilesForOwnTargetBotSplit(currentUser.id, exportProfiles, splitBot);
+        else if (currentUser.role === 'super_admin') exportProfiles = await appendAssignedTargetExtraProfiles(exportProfiles, group || '');
 
         const payload = buildValorProfileExport(exportProfiles, { decrypt });
         res.setHeader("Content-Type", "application/json");
@@ -13150,6 +13344,12 @@ app.get("/admin/export/profiles-shikari-csv", auth, admin, async (req, res) => {
         const { user_id, group } = req.query;
         const filename = (req.query.filename || "shikari-profiles").replace(/[^a-zA-Z0-9-_]/g, "");
         const activeOnly = String(req.query.active_only || "") === "1";
+        const splitBotRequested = String(req.query.target_bot_split || '').trim();
+        const splitBot = normalizeSplitBot(splitBotRequested);
+        if (splitBotRequested && splitBot !== 'shikari') return res.status(400).json({ error: 'This export accepts only the Shikari Target split.' });
+        if (splitBot && currentUser.role !== 'super_admin') return res.status(403).json({ error: 'Super admin only.' });
+        if (splitBot && normalizeProfileAccountType(group || '') !== 'target') return res.status(400).json({ error: 'Bot split exports are Target-only.' });
+        if (splitBot && user_id && String(user_id) !== String(currentUser.id)) return res.status(403).json({ error: 'Bot split exports include only your own super-admin profiles.' });
 
         let query = supabase
             .from("profiles")
@@ -13161,7 +13361,9 @@ app.get("/admin/export/profiles-shikari-csv", auth, admin, async (req, res) => {
             `)
             .order("created_at", { ascending: false });
 
-        if (currentUser.role === "super_admin") {
+        if (splitBot) {
+            query = query.eq("user_id", currentUser.id);
+        } else if (currentUser.role === "super_admin") {
             if (user_id) query = query.eq("user_id", user_id);
         } else {
             const ownedUserIds = await getScopeUserIdsForAdmin(currentUser);
@@ -13185,7 +13387,8 @@ app.get("/admin/export/profiles-shikari-csv", auth, admin, async (req, res) => {
 
         let exportProfiles = await attachAndFilterProfilesByStore(profiles || [], group || "");
         exportProfiles = await filterProfilesByActiveRunStatus(exportProfiles, group || "", activeOnly);
-        if (currentUser.role === 'super_admin') exportProfiles = await appendAssignedTargetExtraProfiles(exportProfiles, group || '');
+        if (splitBot) exportProfiles = await filterProfilesForOwnTargetBotSplit(currentUser.id, exportProfiles, splitBot);
+        else if (currentUser.role === 'super_admin') exportProfiles = await appendAssignedTargetExtraProfiles(exportProfiles, group || '');
 
         const headers = [
             "profile_name", "first_name", "last_name", "email", "phone_num",

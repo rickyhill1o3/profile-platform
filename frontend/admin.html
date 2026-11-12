@@ -730,6 +730,48 @@ placeholder="Enter one SKU per line&#10;12345678&#10;87654321"></textarea>
                 <button class="btn" type="button" id="adminRunStatusExportValorProfilesButton">Export Active Valor Profiles</button>
               </div>
             </div>
+            <div id="adminTargetBotSplitPanel" class="banner banner-soft target-bot-split-panel" style="display:none;margin:12px 0;">
+              <div class="toolbar-row toolbar-row--spread">
+                <div>
+                  <h3>Target Weekly Bot Split — My Super Admin Profiles</h3>
+                  <p class="subtle-text">Choose the bots you are running this week. Your own Target profiles are divided evenly only between the selected bots; admin and user profiles are never included.</p>
+                </div>
+                <button class="btn btn-primary" type="button" id="adminTargetBotSplitRebalanceButton">Save Weekly Bots &amp; Rebalance</button>
+              </div>
+              <div class="target-bot-weekly-selector" aria-label="Bots active this week">
+                <label><input type="checkbox" data-target-bot-split-active="refract" /> <span>Refract</span></label>
+                <label><input type="checkbox" data-target-bot-split-active="valor" /> <span>Valor</span></label>
+                <label><input type="checkbox" data-target-bot-split-active="shikari" /> <span>Shikari</span></label>
+                <label><input type="checkbox" data-target-bot-split-active="polar" /> <span>Polar</span></label>
+              </div>
+              <div class="target-bot-split-grid">
+                <article class="stat-card" data-target-bot-split-card="refract">
+                  <span>Refract</span>
+                  <strong id="adminTargetBotSplitRefractCount">0 profiles</strong>
+                  <button class="btn" type="button" data-target-bot-split-export="refract">Download Refract List</button>
+                </article>
+                <article class="stat-card" data-target-bot-split-card="valor">
+                  <span>Valor</span>
+                  <strong id="adminTargetBotSplitValorCount">0 profiles</strong>
+                  <button class="btn" type="button" data-target-bot-split-export="valor">Download Valor List</button>
+                </article>
+                <article class="stat-card" data-target-bot-split-card="shikari">
+                  <span>Shikari</span>
+                  <strong id="adminTargetBotSplitShikariCount">0 profiles</strong>
+                  <button class="btn" type="button" data-target-bot-split-export="shikari">Download Shikari List</button>
+                </article>
+                <article class="stat-card" data-target-bot-split-card="polar">
+                  <span>Polar</span>
+                  <strong id="adminTargetBotSplitPolarCount">0 profiles</strong>
+                  <button class="btn" type="button" data-target-bot-split-export="polar">Download Polar List</button>
+                </article>
+              </div>
+              <div id="adminTargetBotSplitMessage" class="subtle-text target-bot-split-message">Choose Target above to load your saved split.</div>
+              <details class="target-bot-split-details">
+                <summary>View split by physical address</summary>
+                <div id="adminTargetBotSplitAddressTable" class="table-wrap"></div>
+              </details>
+            </div>
             <div id="adminProfileSyncStatusBanner" class="export-sync-banner export-sync-banner--neutral" style="margin:12px 0;">Choose a store and user to review profile update status.</div>
             <div id="adminRunStatusSummary" class="subtle-text"></div>
             <div id="adminRunStatusPanel" class="table-wrap table-wrap--admin-scroll"></div>

@@ -6426,11 +6426,21 @@ async function initAdminStoreRunStatus() {
     const summary = document.getElementById('adminRunStatusSummary');
     const syncBanner = document.getElementById('adminProfileSyncStatusBanner');
     const acknowledgeButton = document.getElementById('adminProfileSyncAcknowledgeButton');
+    const targetBotSplitPanel = document.getElementById('adminTargetBotSplitPanel');
+    const targetBotSplitMessage = document.getElementById('adminTargetBotSplitMessage');
+    const targetBotSplitAddressTable = document.getElementById('adminTargetBotSplitAddressTable');
+    const targetBotSplitRebalanceButton = document.getElementById('adminTargetBotSplitRebalanceButton');
+    const targetBotSplitExportButtons = document.querySelectorAll('[data-target-bot-split-export]');
+    const targetBotSplitActiveInputs = document.querySelectorAll('[data-target-bot-split-active]');
+    const targetBotSplitCards = document.querySelectorAll('[data-target-bot-split-card]');
     if (!panel || !storeFilter || !userFilter) return;
 
     let lastUsers = [];
     let optionUsers = [];
     let lastData = null;
+    let lastTargetBotSplitData = null;
+    const targetBotOrder = ['refract', 'valor', 'shikari', 'polar'];
+    const targetBotLabels = { refract: 'Refract', valor: 'Valor', shikari: 'Shikari', polar: 'Polar' };
 
     const renderUserOptions = (users) => {
         const current = userFilter.value;
@@ -6540,6 +6550,103 @@ async function initAdminStoreRunStatus() {
         }
     };
 
+    const targetBotSplitIsAvailable = () =>
+        storeFilter.value === 'target' && lastData?.current_user?.role === 'super_admin';
+
+    const renderTargetBotSplit = (data) => {
+        if (!targetBotSplitPanel) return;
+        lastTargetBotSplitData = data;
+        const counts = data?.counts || {};
+        const total = Number(data?.total_profiles || 0);
+        const activeBots = targetBotOrder.filter((bot) => (data?.active_bots || []).includes(bot));
+        const activeSet = new Set(activeBots);
+        const setCount = (id, bot) => {
+            const element = document.getElementById(id);
+            if (element) element.textContent = `${Number(counts[bot] || 0)} profile${Number(counts[bot] || 0) === 1 ? '' : 's'}`;
+        };
+        setCount('adminTargetBotSplitRefractCount', 'refract');
+        setCount('adminTargetBotSplitValorCount', 'valor');
+        setCount('adminTargetBotSplitShikariCount', 'shikari');
+        setCount('adminTargetBotSplitPolarCount', 'polar');
+        targetBotSplitActiveInputs.forEach((input) => {
+            input.checked = activeSet.has(input.dataset.targetBotSplitActive);
+        });
+        targetBotSplitCards.forEach((card) => {
+            card.classList.toggle('is-inactive', !activeSet.has(card.dataset.targetBotSplitCard));
+        });
+        targetBotSplitExportButtons.forEach((button) => {
+            const bot = button.dataset.targetBotSplitExport;
+            button.disabled = !activeSet.has(bot) || !Number(counts[bot] || 0);
+        });
+        if (targetBotSplitMessage) {
+            const updated = data?.updated_at ? ` Saved ${formatDateTimeShort(data.updated_at)}.` : '';
+            const refreshed = data?.auto_updated ? ' The saved split was refreshed because your Target profile list changed.' : '';
+            const activeNames = activeBots.map((bot) => targetBotLabels[bot]).join(', ');
+            const distribution = activeBots.length === 1
+                ? `All ${total} profiles are in one ${activeNames} list.`
+                : `${total} profiles are divided evenly across ${activeBots.length} lists: ${activeNames}.`;
+            targetBotSplitMessage.textContent = `${distribution} Each physical address is also spread evenly between the active bots.${updated}${refreshed}`;
+        }
+        if (targetBotSplitAddressTable) {
+            const rows = Array.isArray(data?.address_breakdown) ? data.address_breakdown : [];
+            targetBotSplitAddressTable.innerHTML = rows.length ? `
+                <table class="admin-table" style="margin-top:10px;">
+                    <thead><tr><th>Physical address</th><th>Total</th>${activeBots.map((bot) => `<th>${escapeHTML(targetBotLabels[bot])}</th>`).join('')}</tr></thead>
+                    <tbody>${rows.map((row) => `
+                        <tr>
+                            <td>${escapeHTML(row.address_label || 'Address unavailable')}</td>
+                            <td>${Number(row.total || 0)}</td>
+                            ${activeBots.map((bot) => `<td>${Number(row.counts?.[bot] || 0)}</td>`).join('')}
+                        </tr>
+                    `).join('')}</tbody>
+                </table>
+            ` : '<div class="empty-card"><p>No Target profiles were found in your super-admin account.</p></div>';
+        }
+    };
+
+    const loadTargetBotSplit = async () => {
+        if (!targetBotSplitPanel) return;
+        if (!targetBotSplitIsAvailable()) {
+            targetBotSplitPanel.style.display = 'none';
+            return;
+        }
+        targetBotSplitPanel.style.display = '';
+        if (targetBotSplitMessage) targetBotSplitMessage.textContent = 'Loading your saved Target bot split...';
+        try {
+            const data = await authJSON(API + '/admin/target-bot-split');
+            renderTargetBotSplit(data);
+        } catch (err) {
+            if (targetBotSplitMessage) targetBotSplitMessage.textContent = err.message || 'Could not load your Target bot split.';
+        }
+    };
+
+    const exportTargetBotSplit = async (bot) => {
+        const exportsByBot = {
+            refract: { endpoint: '/admin/export/profiles-json', prefix: 'refract-target-weekly-list', ext: '.json' },
+            valor: { endpoint: '/admin/export/profiles-valor-json', prefix: 'valor-target-weekly-list', ext: '.json' },
+            shikari: { endpoint: '/admin/export/profiles-shikari-csv', prefix: 'shikari-target-weekly-list', ext: '.csv' },
+            polar: { endpoint: '/admin/export/profiles-polar-json', prefix: 'polar-target-weekly-list', ext: '.json' }
+        };
+        const config = exportsByBot[bot];
+        if (!config || !targetBotSplitIsAvailable() || !(lastTargetBotSplitData?.active_bots || []).includes(bot)) return;
+        const button = [...targetBotSplitExportButtons].find((item) => item.dataset.targetBotSplitExport === bot);
+        if (button) button.disabled = true;
+        try {
+            const filename = `${config.prefix}-${new Date().toISOString().slice(0, 10)}`;
+            const params = new URLSearchParams({
+                group: 'target',
+                target_bot_split: bot,
+                filename
+            });
+            await downloadExportFile(API + config.endpoint + '?' + params.toString(), filename + config.ext);
+        } catch (err) {
+            alert(err.message || `Could not export the ${bot} Target split.`);
+        } finally {
+            if (button) button.disabled = !(lastTargetBotSplitData?.active_bots || []).includes(bot)
+                || !Number(lastTargetBotSplitData?.counts?.[bot] || 0);
+        }
+    };
+
     if (exportProfilesButton) exportProfilesButton.addEventListener('click', () => exportActive('/admin/export/profiles-json', 'refract-profiles', '.json'));
     if (exportStellarProfilesButton) exportStellarProfilesButton.addEventListener('click', () => exportActive('/admin/export/profiles-stellar-json', 'stellar-profiles', '.json'));
     if (exportShikariProfilesButton) exportShikariProfilesButton.addEventListener('click', () => exportActive('/admin/export/profiles-shikari-csv', 'shikari-profiles', '.csv'));
@@ -6549,6 +6656,46 @@ async function initAdminStoreRunStatus() {
     if (exportStellarAmazonAccountsButton) exportStellarAmazonAccountsButton.addEventListener('click', exportActiveStellarAmazonAccounts);
     if (exportCostcoAccountsButton) exportCostcoAccountsButton.addEventListener('click', exportActiveCostcoAccounts);
     if (exportGmailButton) exportGmailButton.addEventListener('click', () => exportActive('/admin/export/gmail-imap-txt', 'shikari-imap', '.csv'));
+    targetBotSplitExportButtons.forEach((button) => {
+        button.addEventListener('click', () => exportTargetBotSplit(button.dataset.targetBotSplitExport));
+    });
+    targetBotSplitActiveInputs.forEach((input) => {
+        input.addEventListener('change', () => {
+            if (targetBotSplitMessage) targetBotSplitMessage.textContent = 'Weekly bot selection changed. Click Save Weekly Bots & Rebalance to apply it and create the new lists.';
+        });
+    });
+    if (targetBotSplitRebalanceButton) targetBotSplitRebalanceButton.addEventListener('click', async () => {
+        if (!targetBotSplitIsAvailable()) return;
+        const activeBots = [...targetBotSplitActiveInputs]
+            .filter((input) => input.checked)
+            .map((input) => input.dataset.targetBotSplitActive)
+            .filter((bot) => targetBotOrder.includes(bot));
+        if (!activeBots.length) {
+            alert('Select at least one bot for this week.');
+            return;
+        }
+        const activeNames = activeBots.map((bot) => targetBotLabels[bot]).join(', ');
+        const description = activeBots.length === 1
+            ? `All of your Target profiles will go into one ${activeNames} list.`
+            : `Your Target profiles will be divided evenly across ${activeBots.length} lists: ${activeNames}.`;
+        if (!window.confirm(`${description} Save this weekly setup and replace the current split?`)) return;
+        targetBotSplitRebalanceButton.disabled = true;
+        try {
+            const data = await authJSON(API + '/admin/target-bot-split/rebalance', {
+                method: 'POST',
+                body: JSON.stringify({ active_bots: activeBots })
+            });
+            renderTargetBotSplit(data);
+            if (targetBotSplitMessage) {
+                const names = (data.active_bots || []).map((bot) => targetBotLabels[bot]).join(', ');
+                targetBotSplitMessage.textContent = `${Number(data.total_profiles || 0)} Target profiles were rebalanced and saved for ${names}. Download each active list before this week's run.`;
+            }
+        } catch (err) {
+            alert(err.message || 'Could not rebalance your Target profiles.');
+        } finally {
+            targetBotSplitRebalanceButton.disabled = false;
+        }
+    });
 
     const load = async () => {
         panel.innerHTML = '<div class="empty-card"><p>Loading store run status...</p></div>';
@@ -6579,6 +6726,7 @@ async function initAdminStoreRunStatus() {
             const activeSummary = STORE_RUN_STATUS_OPTIONS.map((store) => `${store.label}: ${Number(data.summary?.[store.site] || 0)} active`).join(' • ');
             if (summary) summary.textContent = activeSummary;
             updateProfileSyncBanner();
+            await loadTargetBotSplit();
 
             if (!users.length) {
                 panel.innerHTML = '<div class="empty-card"><p>No users found for this filter.</p></div>';
