@@ -63,6 +63,8 @@ assert.match(routesSource, /refreshTargetCatalogProduct\(supabase, sku\)/, 'ente
 assert.match(routesSource, /extractTargetRetailPrice\(/, 'Target lookup must extract and save live retail pricing');
 assert.match(routesSource, /fetchTargetRedskyProduct\(/, 'Target lookup must fall back to Target product pricing JSON when the HTML has no price');
 assert.match(routesSource, /target_redsky_pdp/, 'Target RedSky prices must be identified in saved catalog metadata');
+assert.match(routesSource, /target_rendered_page_lookup_error/, 'Target lookup failures must expose the exact rendered-browser error');
+assert.match(routesSource, /beginTargetCatalogWork/, 'Target browser batches must not overlap memory-heavy IMAP work');
 assert.match(routesSource, /app\.post\('\/admin\/catalog-products\/rescan-target-batch'/, 'the catalog must expose a resumable batch rescan route');
 assert.match(routesSource, /prices_found:/, 'the batch response must report how many Target retail prices were found');
 assert.match(routesSource, /prices_updated:/, 'the batch response must report how many saved Target prices changed');
@@ -70,6 +72,7 @@ assert.match(routesSource, /status:\s*'skipped_grouped'/, 'grouped multi-SKU pro
 assert.match(serverSource, /const preferTargetCatalog = next\.site === 'target' && !!next\.sku/);
 assert.match(serverSource, /next\.title = preferTargetCatalog \? \(catalog\.title \|\| next\.title\)/, 'Target monitor alerts must prefer the official catalog title');
 assert.match(frontendSource, /targetCatalogRescanOffset/, 'the browser must keep a checkpoint so a stopped full rescan can resume');
+assert.match(frontendSource, /waiting for the current email scan/, 'a busy IMAP worker must pause and retry the same Target batch');
 assert.match(frontendSource, /retail prices found for/, 'the rescan result must clearly report retail price coverage');
 assert.match(adminHtml, /Rescan all Target catalog products/);
 assert.match(adminHtml, /Credit cost is never changed/);

@@ -62,6 +62,11 @@ async function run() {
   const fs = require('fs');
   const path = require('path');
   const serverSource = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+assert.match(
+  serverSource,
+  /name\.endsWith\('\.json'\) && name !== alertCacheName/,
+  'the outage announcement-target cache must not be replayed as a tokenless checkout webhook'
+);
   assert.match(serverSource, /sendAnnouncementFileToAllWebhooks\(animation,/);
   assert.doesNotMatch(serverSource, /function releaseRecapEmbed\(/);
   assert.doesNotMatch(serverSource, /sendAnnouncementToAllWebhooks\(webhookCaption/);

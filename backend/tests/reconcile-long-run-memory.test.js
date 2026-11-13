@@ -14,6 +14,17 @@ assert(
   'long reconciliation must divide mailbox workers into bounded memory batches'
 );
 assert(
+  backendSource.includes('IMAP_MAX_MESSAGES_PER_SCAN || 75') &&
+    backendSource.includes('FULL_EMAIL_SCAN_CONCURRENCY || 1') &&
+    backendSource.includes('!userId ? 1 : RECONCILE_MEMORY_BATCH_SIZE'),
+  'the default 256 MB Render worker must parse small message batches and release memory after every background mailbox'
+);
+assert(
+  backendSource.includes("require('./runtime-workload')") &&
+    backendSource.includes('isTargetCatalogWorkActive()'),
+  'background IMAP must defer while Chromium is scanning the Target catalog'
+);
+assert(
   backendSource.includes('await releaseMailboxBatchMemory();'),
   'each bounded mailbox batch must release parser/IMAP memory before continuing'
 );
