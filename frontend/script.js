@@ -4015,6 +4015,154 @@ function initAdminSidebar() {
     activate(active);
 }
 
+let releaseRecapPreviewData = null;
+let latestReleaseRecapData = null;
+
+function releaseRecapLocalInputValue(date) {
+    const pad = value => String(value).padStart(2, '0');
+    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+function setReleaseRecapLast18Hours(force = true) {
+    const fromInput = document.getElementById('releaseRecapFrom');
+    const toInput = document.getElementById('releaseRecapTo');
+    if (!fromInput || !toInput) return;
+    if (!force && fromInput.value && toInput.value) return;
+    const to = new Date();
+    const from = new Date(to.getTime() - 18 * 60 * 60 * 1000);
+    fromInput.value = releaseRecapLocalInputValue(from);
+    toInput.value = releaseRecapLocalInputValue(to);
+    releaseRecapPreviewData = null;
+    const sendButton = document.getElementById('sendReleaseRecapButton');
+    if (sendButton) sendButton.disabled = true;
+}
+
+function releaseRecapRangePayload() {
+    const fromValue = document.getElementById('releaseRecapFrom')?.value || '';
+    const toValue = document.getElementById('releaseRecapTo')?.value || '';
+    const from = new Date(fromValue);
+    const to = new Date(toValue);
+    if (!fromValue || !toValue || !Number.isFinite(from.getTime()) || !Number.isFinite(to.getTime())) throw new Error('Choose a valid release start and end time.');
+    if (from >= to) throw new Error('The release end time must be after the start time.');
+    return { from: from.toISOString(), to: to.toISOString() };
+}
+
+function releaseRecapMoney(value) {
+    return Number(value || 0).toLocaleString('en-US', { style: 'currency', currency: 'USD' });
+}
+
+function renderReleaseRecapSummary(summary = {}, { sent = false, targetCount = null } = {}) {
+    const wrap = document.getElementById('releaseRecapPreview');
+    if (!wrap) return;
+    const products = Array.isArray(summary.products) ? summary.products : [];
+    const warning = Number(summary.unresolved_checkout_count || 0) > 0 || Number(summary.catalog_estimated_checkout_count || 0) > 0;
+    wrap.className = `release-recap-preview ${warning ? 'is-warning' : 'is-ready'}`;
+    if (!Number(summary.checkout_count || 0)) {
+        wrap.innerHTML = '<strong>No successful checkouts found.</strong><div>Adjust the release window and preview again.</div>';
+        return;
+    }
+    const productCards = products.slice(0, 10).map(product => {
+        const image = String(product.image || '').trim();
+        return `<div class="release-recap-product">${image ? `<img src="${escapeHTML(image)}" alt="" onerror="this.style.display='none'" />` : ''}<div><strong>${escapeHTML(product.product || product.sku || 'Checkout product')}</strong><span>${Number(product.item_count || 0)} item${Number(product.item_count || 0) === 1 ? '' : 's'} • ${Number(product.checkout_count || 0)} checkout${Number(product.checkout_count || 0) === 1 ? '' : 's'}</span></div></div>`;
+    }).join('');
+    const pricingNote = warning
+        ? `<div class="banner banner-soft"><strong>Pricing check:</strong> ${Number(summary.retailer_confirmed_checkout_count || 0)} checkout total${Number(summary.retailer_confirmed_checkout_count || 0) === 1 ? '' : 's'} came from IMAP-confirmed orders. ${Number(summary.catalog_estimated_checkout_count || 0)} used saved catalog pricing, and ${Number(summary.unresolved_checkout_count || 0)} still could not be fully priced.</div>`
+        : `<div class="banner banner--success"><strong>All spend is retailer-confirmed.</strong> These totals came from the order tracker, including tax and shipping when saved on the order.</div>`;
+    wrap.innerHTML = `
+        <div class="release-recap-stats">
+          <div class="release-recap-stat"><span>Total spend</span><strong>${escapeHTML(releaseRecapMoney(summary.total_spend))}</strong></div>
+          <div class="release-recap-stat"><span>IMAP confirmed</span><strong>${escapeHTML(releaseRecapMoney(summary.retailer_confirmed_spend))}</strong></div>
+          <div class="release-recap-stat"><span>Catalog estimate</span><strong>${escapeHTML(releaseRecapMoney(summary.catalog_estimated_spend))}</strong></div>
+          <div class="release-recap-stat"><span>Checkouts / items</span><strong>${Number(summary.checkout_count || 0)} / ${Number(summary.item_count || 0)}</strong></div>
+        </div>
+        <strong>${sent ? 'Latest sent recap' : 'Preview'} • ${escapeHTML(summary.range_label || 'Selected release window')}</strong>
+        ${targetCount === null ? '' : `<div class="subtle-text">${Number(targetCount || 0)} announcement channel${Number(targetCount || 0) === 1 ? '' : 's'} will receive this recap.</div>`}
+        ${pricingNote}
+        <div class="release-recap-products">${productCards}</div>
+        ${products.length > 10 ? `<div class="subtle-text" style="margin-top:8px">The animation also includes ${products.length - 10} more product${products.length - 10 === 1 ? '' : 's'}.</div>` : ''}`;
+}
+
+function showReleaseRecapCopyActions(recap) {
+    latestReleaseRecapData = recap || null;
+    const actions = document.getElementById('releaseRecapCopyActions');
+    if (actions) actions.style.display = recap?.animation_url ? '' : 'none';
+}
+
+async function loadLatestReleaseRecap() {
+    const wrap = document.getElementById('releaseRecapPreview');
+    if (!wrap) return;
+    const data = await authJSON(API + '/admin/announcements/release-recap/latest');
+    if (!data.recap) return;
+    showReleaseRecapCopyActions(data.recap);
+    if (!releaseRecapPreviewData && data.recap.summary) renderReleaseRecapSummary(data.recap.summary, { sent: true, targetCount: data.recap.target_count });
+}
+
+async function previewReleaseRecap() {
+    const msg = document.getElementById('releaseRecapMessage');
+    const sendButton = document.getElementById('sendReleaseRecapButton');
+    try {
+        const range = releaseRecapRangePayload();
+        if (msg) msg.textContent = 'Checking successful webhooks and IMAP-confirmed order totals...';
+        if (sendButton) sendButton.disabled = true;
+        const data = await authJSON(API + '/admin/announcements/release-recap/preview', {
+            method: 'POST',
+            body: JSON.stringify(range)
+        });
+        releaseRecapPreviewData = { ...data, range };
+        renderReleaseRecapSummary(data.summary || {}, { targetCount: data.announcement_target_count });
+        if (sendButton) sendButton.disabled = !Number(data.summary?.checkout_count || 0);
+        if (msg) msg.textContent = Number(data.summary?.checkout_count || 0) ? 'Preview ready. Nothing has been sent yet.' : 'No successful checkouts were found in this window.';
+    } catch (err) {
+        releaseRecapPreviewData = null;
+        if (sendButton) sendButton.disabled = true;
+        if (msg) msg.textContent = err.message || 'Failed to preview the release recap.';
+    }
+}
+
+async function sendReleaseRecap() {
+    const msg = document.getElementById('releaseRecapMessage');
+    const sendButton = document.getElementById('sendReleaseRecapButton');
+    try {
+        const range = releaseRecapRangePayload();
+        if (!releaseRecapPreviewData || releaseRecapPreviewData.range?.from !== range.from || releaseRecapPreviewData.range?.to !== range.to) {
+            if (msg) msg.textContent = 'The release window changed. Preview it again before sending.';
+            if (sendButton) sendButton.disabled = true;
+            return;
+        }
+        const channelCount = Number(releaseRecapPreviewData.announcement_target_count || 0);
+        if (!window.confirm(`Send this animated recap to ${channelCount} announcement channel${channelCount === 1 ? '' : 's'}?`)) return;
+        if (sendButton) sendButton.disabled = true;
+        if (msg) msg.textContent = 'Building the animation and sending the recap...';
+        const data = await authJSON(API + '/admin/announcements/release-recap/send', {
+            method: 'POST',
+            body: JSON.stringify(range)
+        });
+        const recap = data.recap || null;
+        showReleaseRecapCopyActions(recap);
+        if (recap?.summary) renderReleaseRecapSummary(recap.summary, { sent: true, targetCount: recap.target_count });
+        if (msg) msg.textContent = data.already_sent
+            ? 'This exact recap was already sent. Its copy links are ready below.'
+            : `Recap sent to ${Number(recap?.sent || 0)} channel(s). ${Number(recap?.failed || 0)} failed.`;
+    } catch (err) {
+        if (sendButton) sendButton.disabled = false;
+        if (msg) msg.textContent = err.message || 'Failed to send the release recap.';
+    }
+}
+
+async function copyReleaseRecapPost() {
+    const msg = document.getElementById('releaseRecapMessage');
+    if (!latestReleaseRecapData?.share_text) return;
+    await copyTextToClipboard(latestReleaseRecapData.share_text);
+    if (msg) msg.textContent = 'Recap post copied. Paste it into another Discord to share the animated post.';
+}
+
+async function copyReleaseRecapAnimationLink() {
+    const msg = document.getElementById('releaseRecapMessage');
+    if (!latestReleaseRecapData?.animation_url) return;
+    await copyTextToClipboard(latestReleaseRecapData.animation_url);
+    if (msg) msg.textContent = 'Animation link copied.';
+}
+
 
 async function loadAnnouncementSettings() {
     const input = document.getElementById('announcementWebhookUrl');
@@ -4029,6 +4177,10 @@ async function loadAnnouncementSettings() {
         if (roleMention) roleMention.value = data.announcement_role_mention || '';
         const panel = document.getElementById('superAdminAnnouncementPanel');
         if (panel) panel.style.display = data.is_super_admin ? '' : 'none';
+        if (data.is_super_admin) {
+            setReleaseRecapLast18Hours(false);
+            try { await loadLatestReleaseRecap(); } catch (_) { }
+        }
         if (msg) msg.textContent = data.announcement_webhook_url ? 'Announcement webhook loaded.' : 'No announcement webhook saved yet.';
     } catch (err) {
         if (msg) msg.textContent = err.message || 'Failed to load announcement settings.';

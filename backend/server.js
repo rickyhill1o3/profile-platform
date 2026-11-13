@@ -94,6 +94,13 @@ const cheerio = require("cheerio");
 const registerProductCatalogRoutes = require("./product-catalog-routes");
 const registerShopRoutes = require("./shop-routes");
 const registerSuccessNetwork = require("./success-network");
+const {
+    RECAP_TIME_ZONE,
+    checkoutEventIsSuccessful,
+    buildReleaseRecapSummary,
+    buildReleaseRecapGif,
+    buildReleaseRecapCaption
+} = require("./release-success-recap");
 const { registerOrderTracker, notifyCheckoutForOrderTracker } = require("./order-tracker");
 const { buildShikariAccountsCsv, buildShikariImapCsv } = require("./shikari-credential-exports");
 const { buildStellarAmazonAccountsText } = require("./stellar-amazon-account-export");
@@ -7380,6 +7387,197 @@ ${payloadChunks[i] || ''}`.trim() : payloadChunks[i];
     return { sent, failed, target_count: routes.length, results };
 }
 
+function parseReleaseRecapRange(body = {}) {
+    const from = new Date(body.from || '');
+    const to = new Date(body.to || '');
+    if (!Number.isFinite(from.getTime()) || !Number.isFinite(to.getTime())) {
+        const error = new Error('Choose a valid recap start and end time.');
+        error.status = 400;
+        throw error;
+    }
+    if (from >= to) {
+        const error = new Error('The recap end time must be after the start time.');
+        error.status = 400;
+        throw error;
+    }
+    const durationMs = to.getTime() - from.getTime();
+    if (durationMs > 72 * 60 * 60 * 1000) {
+        const error = new Error('A release recap can cover at most 72 hours.');
+        error.status = 400;
+        throw error;
+    }
+    if (to.getTime() > Date.now() + 5 * 60 * 1000) {
+        const error = new Error('The recap end time cannot be in the future.');
+        error.status = 400;
+        throw error;
+    }
+    return { from: from.toISOString(), to: to.toISOString() };
+}
+
+function releaseRecapOrderRefs(order = {}) {
+    const values = [
+        order.external_order_id,
+        order.metadata?.purchase_id,
+        order.metadata?.order_number,
+        order.raw_payload?.external_order_id,
+        order.raw_payload?.purchase_id,
+        order.raw_payload?.purchaseId,
+        order.raw_payload?.order_id,
+        order.raw_payload?.order_number
+    ];
+    return new Set(values.map(value => String(value || '').trim()).filter(Boolean));
+}
+
+function releaseRecapTrackedTotal(row = {}) {
+    const direct = Number(row.total);
+    if (Number.isFinite(direct) && direct > 0) return Math.round(direct * 100) / 100;
+    const parts = [row.subtotal, row.tax, row.shipping].map(Number).filter(Number.isFinite);
+    if (parts.length && parts.some(value => value > 0)) return Math.round(parts.reduce((sum, value) => sum + value, 0) * 100) / 100;
+    return null;
+}
+
+async function loadReleaseRecapEvents(from, to) {
+    const result = await fetchAllSupabaseRows(() => supabase.from('webhook_events')
+        .select('id,site,product,product_name,sku,parsed_items,payload,created_at,status,type,webhook_type,error,error_message,external_order_id')
+        .gte('created_at', from)
+        .lte('created_at', to)
+        .order('created_at', { ascending: true }), 1000);
+    if (result.error) throw new Error(result.error.message);
+    return (result.data || []).filter(checkoutEventIsSuccessful);
+}
+
+async function loadReleaseRecapCatalogRows() {
+    const result = await fetchAllSupabaseRows(() => supabase.from('catalog_products')
+        .select('site,sku,product_name,image_url,default_max_price')
+        .order('created_at', { ascending: true }), 1000);
+    if (result.error) throw new Error(result.error.message);
+    return result.data || [];
+}
+
+function releaseRecapOrderMatchScore(event, normalizedEvent, order) {
+    const eventTime = new Date(event.created_at || 0).getTime();
+    const orderTime = new Date(order.created_at || 0).getTime();
+    const timeDiff = Math.abs(eventTime - orderTime);
+    if (!Number.isFinite(timeDiff) || timeDiff > 20 * 60 * 1000) return -1;
+    const normalizedOrder = normalizeIncomingOrderPayload(order.raw_payload || {});
+    let score = Math.max(0, 20 - Math.floor(timeDiff / 60000));
+    if (normalizeProfileAccountType(order.site || normalizedOrder.site) === normalizeProfileAccountType(event.site || normalizedEvent.site)) score += 25;
+    if (normalizedEvent.sku && normalizedOrder.sku && String(normalizedEvent.sku).trim().toLowerCase() === String(normalizedOrder.sku).trim().toLowerCase()) score += 35;
+    if (normalizedEvent.account_email && normalizedOrder.account_email && normalizedEvent.account_email === normalizedOrder.account_email) score += 50;
+    if (normalizeProductMatchText(normalizedEvent.product_name) && normalizeProductMatchText(normalizedEvent.product_name) === normalizeProductMatchText(order.product_name || normalizedOrder.product_name)) score += 20;
+    return score;
+}
+
+async function loadReleaseRecapTrackedTotals(events, from, to) {
+    if (!events.length) return new Map();
+    const paddedFrom = new Date(new Date(from).getTime() - 60 * 60 * 1000).toISOString();
+    const paddedTo = new Date(new Date(to).getTime() + 60 * 60 * 1000).toISOString();
+    const orderResult = await fetchAllSupabaseRows(() => supabase.from('orders')
+        .select('id,external_order_id,site,sku,product_name,raw_payload,metadata,created_at,status')
+        .gte('created_at', paddedFrom)
+        .lte('created_at', paddedTo)
+        .order('created_at', { ascending: true }), 1000);
+    if (orderResult.error) throw new Error(orderResult.error.message);
+    const orders = orderResult.data || [];
+    const ordersByRef = new Map();
+    for (const order of orders) for (const ref of releaseRecapOrderRefs(order)) if (!ordersByRef.has(ref)) ordersByRef.set(ref, order);
+
+    const orderByEventId = new Map();
+    const claimedOrderIds = new Set();
+    for (const event of events) {
+        const normalizedEvent = normalizeIncomingOrderPayload(event.payload || {});
+        const refs = [event.external_order_id, normalizedEvent.external_order_id, normalizedEvent.purchase_id, normalizedEvent.order_number]
+            .map(value => String(value || '').trim()).filter(Boolean);
+        let order = refs.map(ref => ordersByRef.get(ref)).find(candidate => candidate?.id && !claimedOrderIds.has(String(candidate.id))) || null;
+        if (!order) {
+            let best = null;
+            let bestScore = -1;
+            for (const candidate of orders) {
+                if (!candidate?.id || claimedOrderIds.has(String(candidate.id))) continue;
+                const score = releaseRecapOrderMatchScore(event, normalizedEvent, candidate);
+                if (score > bestScore) { bestScore = score; best = candidate; }
+            }
+            if (bestScore >= 40) order = best;
+        }
+        if (order?.id) {
+            orderByEventId.set(String(event.id), order);
+            claimedOrderIds.add(String(order.id));
+        }
+    }
+
+    const orderIds = [...new Set([...orderByEventId.values()].map(order => order.id).filter(Boolean))];
+    if (!orderIds.length) return new Map();
+    const trackedResult = await fetchAllSupabaseRowsInBatches(orderIds, batch => supabase.from('tracked_orders')
+        .select('source_order_id,status,total,subtotal,tax,shipping,updated_at')
+        .in('source_order_id', batch), { batchSize: 100, pageSize: 1000 });
+    if (trackedResult.error) throw new Error(trackedResult.error.message);
+    const trackedBySource = new Map();
+    for (const row of trackedResult.data || []) {
+        const key = String(row.source_order_id || '');
+        const current = trackedBySource.get(key);
+        if (!current || new Date(row.updated_at || 0) > new Date(current.updated_at || 0)) trackedBySource.set(key, row);
+    }
+
+    const totals = new Map();
+    for (const [eventId, order] of orderByEventId.entries()) {
+        const tracked = trackedBySource.get(String(order.id));
+        if (!tracked) continue;
+        totals.set(eventId, {
+            total: releaseRecapTrackedTotal(tracked),
+            status: String(tracked.status || '')
+        });
+    }
+    return totals;
+}
+
+async function buildReleaseRecapData(range) {
+    const [events, catalogRows, routes] = await Promise.all([
+        loadReleaseRecapEvents(range.from, range.to),
+        loadReleaseRecapCatalogRows(),
+        getAnnouncementRoutes()
+    ]);
+    const trackedTotalsByEventId = await loadReleaseRecapTrackedTotals(events, range.from, range.to);
+    const summary = buildReleaseRecapSummary({
+        events,
+        catalogRows,
+        trackedTotalsByEventId,
+        from: range.from,
+        to: range.to,
+        timeZone: RECAP_TIME_ZONE
+    });
+    const rangeFingerprint = crypto.createHash('sha256').update(JSON.stringify({
+        from: range.from,
+        to: range.to,
+        checkout_count: summary.checkout_count,
+        item_count: summary.item_count,
+        total_spend: summary.total_spend,
+        retailer_confirmed_spend: summary.retailer_confirmed_spend,
+        catalog_estimated_spend: summary.catalog_estimated_spend,
+        unresolved_checkout_count: summary.unresolved_checkout_count,
+        products: summary.products.map(product => [product.site, product.sku, product.product, product.item_count])
+    })).digest('hex').slice(0, 24);
+    return { summary, range_fingerprint: rangeFingerprint, announcement_target_count: routes.length };
+}
+
+function releaseRecapEmbed(summary, animationUrl) {
+    const money = value => Number(value || 0).toLocaleString('en-US', { style: 'currency', currency: 'USD' });
+    return {
+        title: 'The Shore Shack Release Recap',
+        description: `${summary.checkout_count} checkouts • ${summary.item_count} items • ${summary.unique_product_count} unique products`,
+        color: 0x4f46e5,
+        fields: [
+            { name: 'Total spend', value: money(summary.total_spend), inline: true },
+            { name: 'Retailer-confirmed', value: `${money(summary.retailer_confirmed_spend)} • ${summary.retailer_confirmed_checkout_count} checkout${summary.retailer_confirmed_checkout_count === 1 ? '' : 's'}`, inline: true },
+            { name: 'Catalog-estimated', value: `${money(summary.catalog_estimated_spend)} • ${summary.catalog_estimated_checkout_count} checkout${summary.catalog_estimated_checkout_count === 1 ? '' : 's'}`, inline: true },
+            { name: 'Release window', value: summary.range_label || 'Selected release window', inline: false },
+            ...(summary.unresolved_checkout_count ? [{ name: 'Still missing a total', value: `${summary.unresolved_checkout_count} checkout${summary.unresolved_checkout_count === 1 ? '' : 's'} could not yet be fully priced.`, inline: false }] : [])
+        ],
+        image: { url: animationUrl },
+        footer: { text: 'Community totals only • no customer information' },
+        timestamp: new Date().toISOString()
+    };
+}
+
 function formatAnnouncementProductLine(product) {
     const sku = String(product.sku || '').trim();
     const name = String(product.product_name || product.name || product.title || '').trim();
@@ -7537,6 +7735,87 @@ app.post('/admin/announcements/settings', auth, admin, async (req, res) => {
         res.json({ success: true, announcement_webhook_url: announcementWebhookUrl, announcement_ping_mode: announcementPingMode, announcement_role_mention: announcementRoleMention });
     } catch (err) {
         res.status(500).json({ error: err.message });
+    }
+});
+
+app.post('/admin/announcements/release-recap/preview', auth, admin, async (req, res) => {
+    try {
+        const currentUser = await getCurrentUser(req);
+        if (currentUser.role !== 'super_admin') return res.status(403).json({ error: 'Only super admin can preview release recaps.' });
+        const range = parseReleaseRecapRange(req.body || {});
+        const data = await buildReleaseRecapData(range);
+        res.json({ success: true, ...data });
+    } catch (err) {
+        res.status(err.status || 500).json({ error: err.message });
+    }
+});
+
+app.get('/admin/announcements/release-recap/latest', auth, admin, async (req, res) => {
+    try {
+        const currentUser = await getCurrentUser(req);
+        if (currentUser.role !== 'super_admin') return res.status(403).json({ error: 'Only super admin can view release recaps.' });
+        const recap = await getAppSetting('announcement_release_recap_last', null);
+        res.json({ success: true, recap });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.post('/admin/announcements/release-recap/send', auth, admin, async (req, res) => {
+    try {
+        const currentUser = await getCurrentUser(req);
+        if (currentUser.role !== 'super_admin') return res.status(403).json({ error: 'Only super admin can send release recaps.' });
+        const range = parseReleaseRecapRange(req.body || {});
+        const data = await buildReleaseRecapData(range);
+        const { summary } = data;
+        if (!summary.checkout_count || !summary.products.length) {
+            return res.status(400).json({ error: 'No successful checkout products were found in that release window.' });
+        }
+
+        const previous = await getAppSetting('announcement_release_recap_last', null).catch(() => null);
+        if (previous?.range_fingerprint === data.range_fingerprint && previous?.animation_url) {
+            return res.json({ success: true, already_sent: true, recap: previous });
+        }
+
+        const animation = await buildReleaseRecapGif(summary);
+        const recapId = crypto.randomBytes(16).toString('hex');
+        const datePart = new Date(range.from).toISOString().slice(0, 10);
+        const bucket = String(process.env.COMMUNITY_SUCCESS_BUCKET || 'community-success').trim();
+        const storagePath = `release-recaps/${datePart}-${recapId}.gif`;
+        const upload = await supabase.storage.from(bucket).upload(storagePath, animation, {
+            contentType: 'image/gif',
+            cacheControl: '31536000',
+            upsert: false
+        });
+        if (upload.error) throw new Error(`Could not save the recap animation: ${upload.error.message}`);
+        const publicData = supabase.storage.from(bucket).getPublicUrl(storagePath);
+        const animationUrl = String(publicData?.data?.publicUrl || '').trim();
+        if (!animationUrl) throw new Error('The recap animation was saved, but no public link was returned.');
+
+        const webhookCaption = buildReleaseRecapCaption(summary);
+        const shareText = buildReleaseRecapCaption(summary, animationUrl);
+        const delivery = await sendAnnouncementToAllWebhooks(webhookCaption, [releaseRecapEmbed(summary, animationUrl)]);
+        const recap = {
+            id: recapId,
+            range_fingerprint: data.range_fingerprint,
+            from: range.from,
+            to: range.to,
+            summary,
+            animation_url: animationUrl,
+            storage_path: storagePath,
+            share_text: shareText,
+            sent_at: new Date().toISOString(),
+            sent: delivery.sent,
+            failed: delivery.failed,
+            target_count: delivery.target_count
+        };
+        await Promise.all([
+            setAppSetting('announcement_release_recap_last', recap),
+            setAppSetting(`announcement_release_recap:${recapId}`, recap)
+        ]);
+        res.json({ success: true, already_sent: false, recap });
+    } catch (err) {
+        res.status(err.status || 500).json({ error: err.message });
     }
 });
 
