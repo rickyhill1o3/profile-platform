@@ -3889,7 +3889,7 @@ async function initCatalogTools() {
                 }
                 localStorage.removeItem(checkpointKey);
                 const failureSuffix = failures.length
-                    ? ` ${failures.length} need manual review: ${failures.slice(0, 8).map((row) => row.sku).join(', ')}${failures.length > 8 ? '…' : ''}.`
+                    ? ` ${failures.length} need manual review: ${failures.slice(0, 8).map((row) => row.sku).join(', ')}${failures.length > 8 ? '…' : ''}. First lookup error: ${String(failures[0]?.error || 'Unknown Target lookup error').slice(0, 240)}.`
                     : '';
                 if (targetCatalogRescanAllProgress) {
                     targetCatalogRescanAllProgress.textContent = `Target catalog rescan finished: retail prices found for ${pricesFound} products and ${pricesUpdated} prices changed. ${added} added, ${updated} updated, ${unchanged} already current, ${skippedGrouped} grouped SKU rows skipped.${failureSuffix}`;

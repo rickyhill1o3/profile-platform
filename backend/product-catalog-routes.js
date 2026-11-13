@@ -58,6 +58,7 @@ const {
     extractTargetRedskyKey,
     extractTargetRedskyProduct
 } = require('./target-retail-price');
+const { scrapeTargetRenderedProductPrice } = require('./target-browser-price');
 
 const SUPPORTED_SITES = new Set(["amazon", "target", "walmart", "samsclub", "crunchyroll", "general", "supreme", "pokemon"]);
 const REQUESTABLE_SITES = new Set(["amazon", "target", "walmart", "samsclub", "crunchyroll", "general", "supreme", "pokemon"]);
@@ -499,26 +500,38 @@ async function lookupTargetByTcin(sku) {
         domPrice: $('[data-test="product-price"]').first().text(),
         html
     });
-    const priceResult = Number(redskyProduct?.price) > 0
+    let priceResult = Number(redskyProduct?.price) > 0
         ? { price: Number(redskyProduct.price), source: 'target_redsky_pdp' }
         : pagePriceResult;
+    let renderedProduct = null;
+    let renderedPageLookupError = '';
+    if (!(Number(priceResult.price) > 0)) {
+        try {
+            renderedProduct = await scrapeTargetRenderedProductPrice(cleanSku);
+            priceResult = { price: renderedProduct.price, source: renderedProduct.source };
+        } catch (error) {
+            renderedPageLookupError = String(error?.message || error);
+        }
+    }
     const price = priceResult.price;
     return {
         sku: cleanSku,
-        product_name: title || cleanSku,
+        product_name: title || renderedProduct?.title || cleanSku,
         brand: String(redskyProduct?.brand || jsonLd.brand?.name || jsonLd.brand || 'Target').trim() || 'Target',
-        product_url: absoluteUrl('https://www.target.com', canonical),
+        product_url: absoluteUrl('https://www.target.com', renderedProduct?.product_url || canonical),
         image_url: image,
         default_max_price: price,
         metadata: {
-            source: title ? 'target_direct_product' : 'target_direct_fallback',
+            source: (title || renderedProduct?.title) ? 'target_direct_product' : 'target_direct_fallback',
             lookup_url: directUrl,
-            lookup_failed: !title,
+            lookup_failed: !(title || renderedProduct?.title),
             target_retail_price: price,
             target_retail_price_source: priceResult.source,
             target_retail_price_checked_at: new Date().toISOString(),
             target_page_lookup_error: pageLookupError || null,
-            target_redsky_lookup_error: redskyLookupError || null
+            target_redsky_lookup_error: redskyLookupError || null,
+            target_rendered_page_lookup_error: renderedPageLookupError || null,
+            target_rendered_price_selector: renderedProduct?.selector || null
         }
     };
 }
