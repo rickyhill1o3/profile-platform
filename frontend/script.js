@@ -4181,7 +4181,35 @@ async function copyReleaseRecapAnimationLink() {
     const msg = document.getElementById('releaseRecapMessage');
     if (!latestReleaseRecapData?.animation_url) return;
     await copyTextToClipboard(latestReleaseRecapData.animation_url);
-    if (msg) msg.textContent = 'Animation link copied.';
+    if (msg) msg.textContent = 'Animation link copied. It will preview in a normal Discord message with Embed Links enabled, but another bot cannot expand a link inside its own embed. Use Download GIF for Discord in that case.';
+}
+
+async function downloadReleaseRecapAnimation() {
+    const msg = document.getElementById('releaseRecapMessage');
+    const animationUrl = String(latestReleaseRecapData?.animation_url || '').trim();
+    if (!animationUrl) return;
+    try {
+        if (msg) msg.textContent = 'Downloading the animation file...';
+        const response = await fetch(animationUrl, { mode: 'cors', cache: 'no-store' });
+        if (!response.ok) throw new Error(`Animation download failed (HTTP ${response.status}).`);
+        const sourceBlob = await response.blob();
+        const gifBlob = sourceBlob.type === 'image/gif'
+            ? sourceBlob
+            : new Blob([await sourceBlob.arrayBuffer()], { type: 'image/gif' });
+        const objectUrl = URL.createObjectURL(gifBlob);
+        const anchor = document.createElement('a');
+        const datePart = String(latestReleaseRecapData?.from || new Date().toISOString()).slice(0, 10);
+        anchor.href = objectUrl;
+        anchor.download = `shore-shack-release-recap-${datePart}.gif`;
+        document.body.appendChild(anchor);
+        anchor.click();
+        anchor.remove();
+        setTimeout(() => URL.revokeObjectURL(objectUrl), 15000);
+        if (msg) msg.textContent = 'GIF downloaded. Upload that file directly in the other Discord and the animation will appear instead of a link.';
+    } catch (error) {
+        if (msg) msg.textContent = `${error.message || 'Could not download the GIF.'} The direct animation link was opened in a new tab so you can save it manually.`;
+        window.open(animationUrl, '_blank', 'noopener,noreferrer');
+    }
 }
 
 
