@@ -3869,10 +3869,22 @@ async function initCatalogTools() {
                     if (targetCatalogRescanAllProgress) {
                         targetCatalogRescanAllProgress.textContent = `${resuming ? 'Resuming' : 'Scanning'} at product ${offset + 1}... Updated ${updated}; unchanged ${unchanged}; failed ${failures.length}.`;
                     }
-                    const data = await authJSON(API + '/admin/catalog-products/rescan-target-batch', {
-                        method: 'POST',
-                        body: JSON.stringify({ offset, limit: 6 })
-                    });
+                    let data;
+                    for (;;) {
+                        try {
+                            data = await authJSON(API + '/admin/catalog-products/rescan-target-batch', {
+                                method: 'POST',
+                                body: JSON.stringify({ offset, limit: 2 })
+                            });
+                            break;
+                        } catch (batchError) {
+                            if (!String(batchError?.message || batchError).includes('waiting for the current email scan')) throw batchError;
+                            if (targetCatalogRescanAllProgress) {
+                                targetCatalogRescanAllProgress.textContent = 'Waiting for the current email scan to finish; the same Target batch will retry in 10 seconds...';
+                            }
+                            await new Promise((resolve) => setTimeout(resolve, 10000));
+                        }
+                    }
                     added += Number(data.added || 0);
                     updated += Number(data.updated || 0);
                     unchanged += Number(data.unchanged || 0);

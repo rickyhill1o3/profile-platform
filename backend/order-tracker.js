@@ -8,6 +8,7 @@ const { encrypt, decrypt } = require('./encryption');
 const { parseRetailEmail, expectedWebhookItems, matchScore, mainItemMatch, targetSingleLineDeliveryAlias, deriveOverallStatus, parseSupremeWebhookCheckoutAt, norm: reconcileNorm } = require('./retailer-reconciliation');
 const { registerDiscordHistoryImport } = require('./discord-history-import');
 const { registerDiscordCheckoutRecovery } = require('./discord-checkout-recovery');
+const { beginEmailHeavyWork, isTargetCatalogWorkActive } = require('./runtime-workload');
 
 
 function createGuardedImapFlow(options = {}, label = 'IMAP') {
@@ -32,7 +33,7 @@ async function disposeImapClient(client) {
 const SCAN_INTERVAL_MS = Math.max(60 * 1000, Number(process.env.IMAP_SCAN_INTERVAL_MS || 5 * 60 * 1000));
 const INITIAL_LOOKBACK_DAYS = Math.max(7, Number(process.env.IMAP_INITIAL_LOOKBACK_DAYS || 365));
 const INITIAL_SCAN_START = process.env.IMAP_INITIAL_SCAN_START || '2026-01-01T00:00:00.000Z';
-const MAX_MESSAGES_PER_SCAN = Math.max(25, Number(process.env.IMAP_MAX_MESSAGES_PER_SCAN || 250));
+const MAX_MESSAGES_PER_SCAN = Math.max(25, Number(process.env.IMAP_MAX_MESSAGES_PER_SCAN || 75));
 const MAX_ACCOUNTS_PER_CYCLE = Math.max(1, Number(process.env.IMAP_MAX_ACCOUNTS_PER_CYCLE || 50));
 const MIN_RESCAN_INTERVAL_MS = Math.max(0, Number(process.env.IMAP_MIN_RESCAN_INTERVAL_MS || 2 * 60 * 1000));
 const AMAZON_GHOST_GRACE_MS = Math.max(10 * 60 * 1000, Number(process.env.AMAZON_GHOST_GRACE_MS || 20 * 60 * 1000));
@@ -51,9 +52,9 @@ const MACYS_EMAIL_MATCH_WINDOW_MS = Math.max(
 const ORDER_REPAIR_FALLBACK_MAX_MESSAGES = Math.max(50, Math.min(5000, Number(process.env.ORDER_REPAIR_FALLBACK_MAX_MESSAGES || 1000)));
 const RECONCILE_IMAP_CONCURRENCY = Math.max(1, Math.min(4, Number(process.env.RECONCILE_IMAP_CONCURRENCY || 2)));
 // Keep full-account scans inside Render's memory budget. Retailer messages can contain very large
-// HTML/MIME bodies, so eight simultaneous parsers can restart the service before the browser sees
-// a completed job. Three workers still cover the whole mailbox inventory without the memory spike.
-const FULL_EMAIL_SCAN_CONCURRENCY = Math.max(1, Math.min(6, Number(process.env.FULL_EMAIL_SCAN_CONCURRENCY || 3)));
+// HTML/MIME bodies can exceed Render's 256 MB heap. The safe default parses one mailbox at a time;
+// larger services can opt into more workers with FULL_EMAIL_SCAN_CONCURRENCY.
+const FULL_EMAIL_SCAN_CONCURRENCY = Math.max(1, Math.min(6, Number(process.env.FULL_EMAIL_SCAN_CONCURRENCY || 1)));
 const IMAP_ACCOUNT_SCAN_DEADLINE_MS = Math.max(30000, Math.min(10 * 60 * 1000, Number(process.env.IMAP_ACCOUNT_SCAN_DEADLINE_MS || 120000)));
 // Manual reconcile is an incremental catch-up pass, not a request to hydrate years of mail into
 // one process. Every connected mailbox is visited, while at most this many new messages are parsed
@@ -64,8 +65,8 @@ const RECONCILE_MAX_MESSAGES_PER_MAILBOX = Math.max(25, Math.min(500, Number(pro
 // With --expose-gc (see package.json), the explicit collection prevents a long scan from slowly
 // filling a small Render instance even when most inboxes contain only one new message.
 const RECONCILE_MEMORY_BATCH_SIZE = Math.max(
-  5,
-  Math.min(100, Number(process.env.RECONCILE_MEMORY_BATCH_SIZE || 20))
+  1,
+  Math.min(100, Number(process.env.RECONCILE_MEMORY_BATCH_SIZE || 4))
 );
 // Target exact-order repair deliberately advances one physical mailbox at a time. A mailbox may
 // contain several Target orders, but only one MIME/IMAP connection is allowed in a repair batch so
@@ -159,14 +160,15 @@ async function acquireEmailHeavyWork(owner, options = {}) {
   const shouldWait = options.wait === true;
   const timeoutMs = Math.max(1000, Number(options.timeoutMs || 30 * 60 * 1000));
   const startedAt = Date.now();
-  while (emailHeavyWorkLease) {
+  while (emailHeavyWorkLease || isTargetCatalogWorkActive()) {
     if (!shouldWait || Date.now() - startedAt >= timeoutMs) return null;
     if (typeof options.onWait === 'function') {
-      try { options.onWait({ owner:emailHeavyWorkLease.owner, waitedMs:Date.now() - startedAt }); } catch (_) {}
+      try { options.onWait({ owner:emailHeavyWorkLease?.owner || 'target-catalog-scan', waitedMs:Date.now() - startedAt }); } catch (_) {}
     }
     await waitMs(1000);
   }
   const token = crypto.randomUUID();
+  const releaseRuntimeWork = beginEmailHeavyWork();
   emailHeavyWorkLease = { token, owner:clean(owner || 'email-work'), started_at:new Date().toISOString() };
   let released = false;
   return {
@@ -176,6 +178,7 @@ async function acquireEmailHeavyWork(owner, options = {}) {
       if (released) return;
       released = true;
       if (emailHeavyWorkLease?.token === token) emailHeavyWorkLease = null;
+      releaseRuntimeWork();
     }
   };
 }
@@ -5623,7 +5626,7 @@ async function scanAll(supabase, userId = null, adjustCredits = null, onProgress
     };
     const memoryBatchSize = options.memorySafeBatches === false
       ? Math.max(1, pendingEntries.length)
-      : RECONCILE_MEMORY_BATCH_SIZE;
+      : (!userId ? 1 : RECONCILE_MEMORY_BATCH_SIZE);
     for (let batchStart = 0; batchStart < pendingEntries.length; batchStart += memoryBatchSize) {
       const batchEntries = pendingEntries.slice(batchStart, batchStart + memoryBatchSize);
       let nextBatchIndex = 0;

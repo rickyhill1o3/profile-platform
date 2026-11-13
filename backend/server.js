@@ -2983,8 +2983,11 @@ async function queueWebhookForReplay({ type = 'unknown', token = '', originalUrl
 
 function listQueuedWebhookFiles() {
     ensureFailsafeQueueDir();
+    const alertCacheName = path.basename(FAILSAFE_ALERT_TARGETS_FILE);
     return fs.readdirSync(FAILSAFE_QUEUE_DIR)
-        .filter((name) => name.endsWith('.json'))
+        // This JSON file caches Discord announcement destinations for outage notices. It is
+        // metadata, not an inbound checkout job, and must never be replayed through /webhooks/orders.
+        .filter((name) => name.endsWith('.json') && name !== alertCacheName)
         .map((name) => path.join(FAILSAFE_QUEUE_DIR, name))
         .sort();
 }

@@ -59,6 +59,7 @@ const {
     extractTargetRedskyProduct
 } = require('./target-retail-price');
 const { scrapeTargetRenderedProductPrice } = require('./target-browser-price');
+const { beginTargetCatalogWork, isEmailHeavyWorkActive } = require('./runtime-workload');
 
 const SUPPORTED_SITES = new Set(["amazon", "target", "walmart", "samsclub", "crunchyroll", "general", "supreme", "pokemon"]);
 const REQUESTABLE_SITES = new Set(["amazon", "target", "walmart", "samsclub", "crunchyroll", "general", "supreme", "pokemon"]);
@@ -491,7 +492,7 @@ async function lookupTargetByTcin(sku) {
         ''
     ).replace(/\s*:\s*Target\s*$/i, '').trim();
     const imageValue = Array.isArray(jsonLd.image) ? jsonLd.image[0] : jsonLd.image;
-    const image = absoluteUrl('https://www.target.com', redskyProduct?.image || imageValue || $('meta[property="og:image"]').attr('content') || $('meta[name="twitter:image"]').attr('content'));
+    let image = absoluteUrl('https://www.target.com', redskyProduct?.image || imageValue || $('meta[property="og:image"]').attr('content') || $('meta[name="twitter:image"]').attr('content'));
     const canonical = $('link[rel="canonical"]').attr('href') || $('meta[property="og:url"]').attr('content') || directUrl;
     const pagePriceResult = extractTargetRetailPrice({
         sku: cleanSku,
@@ -509,6 +510,7 @@ async function lookupTargetByTcin(sku) {
         try {
             renderedProduct = await scrapeTargetRenderedProductPrice(cleanSku);
             priceResult = { price: renderedProduct.price, source: renderedProduct.source };
+            if (!image && renderedProduct.image) image = absoluteUrl('https://www.target.com', renderedProduct.image);
         } catch (error) {
             renderedPageLookupError = String(error?.message || error);
         }
@@ -517,7 +519,7 @@ async function lookupTargetByTcin(sku) {
     return {
         sku: cleanSku,
         product_name: title || renderedProduct?.title || cleanSku,
-        brand: String(redskyProduct?.brand || jsonLd.brand?.name || jsonLd.brand || 'Target').trim() || 'Target',
+        brand: String(redskyProduct?.brand || renderedProduct?.brand || jsonLd.brand?.name || jsonLd.brand || 'Target').trim() || 'Target',
         product_url: absoluteUrl('https://www.target.com', renderedProduct?.product_url || canonical),
         image_url: image,
         default_max_price: price,
@@ -726,11 +728,21 @@ async function refreshTargetCatalogProduct(supabase, sku) {
 
     const lookup = await lookupTargetByTcin(cleanSku);
     const refresh = buildTargetCatalogRefreshPatch(existing, lookup);
+    const lookupPrice = Number(lookup.default_max_price) > 0 ? Number(lookup.default_max_price) : null;
+    const existingPrice = Number(existing.default_max_price) > 0 ? Number(existing.default_max_price) : null;
+    const lookupErrors = [
+        lookup?.metadata?.target_rendered_page_lookup_error,
+        lookup?.metadata?.target_redsky_lookup_error,
+        lookup?.metadata?.target_page_lookup_error
+    ].filter(Boolean);
     if (!refresh.lookupUsable) {
-        throw new Error('Target did not return a usable product name, image, or price. The saved product was not changed.');
+        throw new Error(`Target did not return a usable product name, image, or price. ${lookupErrors[0] || 'The saved product was not changed.'}`);
+    }
+    if (!lookupPrice && !existingPrice) {
+        throw new Error(`Target returned the product but no retail price. ${lookupErrors[0] || 'The product needs manual price review.'}`);
     }
     if (!refresh.changedFields.length) {
-        return { status: 'unchanged', product: existing, retail_price: Number(lookup.default_max_price) > 0 ? Number(lookup.default_max_price) : null, changed_fields: [] };
+        return { status: 'unchanged', product: existing, retail_price: lookupPrice || existingPrice, changed_fields: [] };
     }
 
     const { data, error } = await supabase
@@ -1509,6 +1521,13 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
 
     app.post('/admin/catalog-products/rescan-target-batch', auth, admin, async (req, res) => {
         if (!requireSuperAdmin(req, res)) return;
+        const releaseTargetCatalogWork = beginTargetCatalogWork();
+        if (isEmailHeavyWorkActive()) {
+            releaseTargetCatalogWork();
+            return res.status(409).json({
+                error: 'Target catalog scan is waiting for the current email scan to finish. This batch will retry automatically.'
+            });
+        }
         try {
             const offset = Math.max(0, Math.floor(Number(req.body?.offset || 0)));
             const limit = Math.max(1, Math.min(10, Math.floor(Number(req.body?.limit || 6))));
@@ -1565,6 +1584,8 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
             });
         } catch (err) {
             res.status(500).json({ error: String(err?.message || err) });
+        } finally {
+            releaseTargetCatalogWork();
         }
     });
 

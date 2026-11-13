@@ -4,7 +4,10 @@
   "description": "",
   "main": "server.js",
   "scripts": {
+    "prestart": "node scripts/install-playwright-chromium.js",
     "start": "node --expose-gc server.js",
+    "postinstall": "node scripts/install-playwright-chromium.js",
+    "render-build": "npm ci --no-audit --no-fund",
     "pretest": "node tests/target-extra-accounts.test.js",
     "test:target-extra": "node tests/target-extra-accounts.test.js && node tests/target-superadmin-account-sharing.test.js",
     "test:target-retail": "node tests/target-retail-price.test.js && node tests/target-browser-price.test.js && node tests/target-catalog-rescan.test.js",
@@ -30,7 +33,7 @@
     "nodemailer": "^6.10.0",
     "pdf-parse": "^2.4.5",
     "pg": "^8.20.0",
-    "playwright-core": "^1.58.2",
+    "playwright": "^1.58.2",
     "sharp": "^0.34.4",
     "stripe": "^18.1.1",
     "uuid": "^13.0.0"
