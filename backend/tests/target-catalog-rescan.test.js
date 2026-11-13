@@ -61,6 +61,8 @@ const adminHtml = fs.readFileSync(path.join(projectRoot, 'frontend', 'admin.html
 
 assert.match(routesSource, /refreshTargetCatalogProduct\(supabase, sku\)/, 'entered existing Target SKUs must be rescanned');
 assert.match(routesSource, /extractTargetRetailPrice\(/, 'Target lookup must extract and save live retail pricing');
+assert.match(routesSource, /fetchTargetRedskyProduct\(/, 'Target lookup must fall back to Target product pricing JSON when the HTML has no price');
+assert.match(routesSource, /target_redsky_pdp/, 'Target RedSky prices must be identified in saved catalog metadata');
 assert.match(routesSource, /app\.post\('\/admin\/catalog-products\/rescan-target-batch'/, 'the catalog must expose a resumable batch rescan route');
 assert.match(routesSource, /prices_found:/, 'the batch response must report how many Target retail prices were found');
 assert.match(routesSource, /prices_updated:/, 'the batch response must report how many saved Target prices changed');

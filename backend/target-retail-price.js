@@ -26,6 +26,7 @@ const PRICE_KEYS = [
 ];
 
 const SKU_KEYS = new Set(['tcin', 'sku', 'product_id', 'productId', 'item_id', 'itemId']);
+const DEFAULT_TARGET_REDSKY_KEY = '9f36aeafbe60771e321a7cc95a78140772ab3e96';
 
 function objectContainsSku(value, sku) {
   if (!value || typeof value !== 'object') return false;
@@ -129,8 +130,47 @@ function extractTargetRetailPrice({ sku, offerPrice, metaPrice, domPrice, html }
   return { price: null, source: 'not_found' };
 }
 
+function extractTargetRedskyKey(html) {
+  const text = String(html || '')
+    .replace(/&amp;/gi, '&')
+    .replace(/\\u0026/gi, '&')
+    .replace(/\\\//g, '/');
+  const patterns = [
+    /pdp_client_v1[^\s"']{0,1500}?[?&]key=([a-f0-9]{32,64})/i,
+    /["'](?:redskyApiKey|redsky_api_key|apiKey)["']\s*:\s*["']([a-f0-9]{32,64})["']/i,
+    /[?&]key=([a-f0-9]{40})(?:&|\\u0026|$)/i
+  ];
+  for (const pattern of patterns) {
+    const match = pattern.exec(text);
+    if (match?.[1]) return match[1];
+  }
+  return '';
+}
+
+function extractTargetRedskyProduct(payload, sku) {
+  const product = payload?.data?.product;
+  if (!product || typeof product !== 'object') return null;
+  const cleanSku = String(sku || '').trim();
+  const returnedSku = String(product.tcin || product.item?.tcin || '').trim();
+  if (!cleanSku || !returnedSku || returnedSku !== cleanSku) return null;
+  const price = findPriceInStructuredData(product, cleanSku);
+  const title = String(product.item?.product_description?.title || '').trim();
+  const brand = String(product.item?.primary_brand?.name || '').trim();
+  const images = product.item?.enrichment?.images || {};
+  const image = String(
+    images.primary_image_url ||
+    images.primary_image?.url ||
+    images.alternate_image_urls?.[0] ||
+    ''
+  ).trim();
+  return { sku: returnedSku, price, title, brand, image, raw: product };
+}
+
 module.exports = {
+  DEFAULT_TARGET_REDSKY_KEY,
   parseRetailMoney,
   findPriceInStructuredData,
-  extractTargetRetailPrice
+  extractTargetRetailPrice,
+  extractTargetRedskyKey,
+  extractTargetRedskyProduct
 };

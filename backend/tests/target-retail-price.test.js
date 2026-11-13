@@ -4,7 +4,9 @@ const assert = require('assert');
 const {
   parseRetailMoney,
   findPriceInStructuredData,
-  extractTargetRetailPrice
+  extractTargetRetailPrice,
+  extractTargetRedskyKey,
+  extractTargetRedskyProduct
 } = require('../target-retail-price');
 
 assert.strictEqual(parseRetailMoney('$1,249.99'), 1249.99);
@@ -42,5 +44,26 @@ assert.strictEqual(extractTargetRetailPrice({
 }).price, null);
 
 assert.deepStrictEqual(extractTargetRetailPrice({ sku: '1012944745', html: '<html>No product data</html>' }), { price: null, source: 'not_found' });
+
+assert.strictEqual(
+  extractTargetRedskyKey('<script>fetch("https://redsky.target.com/redsky_aggregations/v1/web/pdp_client_v1?key=9f36aeafbe60771e321a7cc95a78140772ab3e96&tcin=1012944745")</script>'),
+  '9f36aeafbe60771e321a7cc95a78140772ab3e96'
+);
+const redsky = extractTargetRedskyProduct({
+  data: {
+    product: {
+      tcin: '1012944745',
+      price: { current_retail: 29.99, formatted_current_price: '$29.99' },
+      item: {
+        product_description: { title: 'Mega Forces Tin - Darkrai ex' },
+        primary_brand: { name: 'Pokémon' },
+        enrichment: { images: { primary_image_url: 'https://target.scene7.com/example.jpg' } }
+      }
+    }
+  }
+}, '1012944745');
+assert.strictEqual(redsky.price, 29.99);
+assert.strictEqual(redsky.title, 'Mega Forces Tin - Darkrai ex');
+assert.strictEqual(extractTargetRedskyProduct({ data: { product: { tcin: 'WRONG', price: { current_retail: 1 } } } }, '1012944745'), null);
 
 console.log('Target retail price tests passed.');

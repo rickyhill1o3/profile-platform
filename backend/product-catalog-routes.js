@@ -52,7 +52,12 @@ const {
     groupPokemonUsersByComparedSkus
 } = require('./pokemon-sku-user-groups');
 const { buildTargetCatalogRefreshPatch } = require('./target-catalog-refresh');
-const { extractTargetRetailPrice } = require('./target-retail-price');
+const {
+    DEFAULT_TARGET_REDSKY_KEY,
+    extractTargetRetailPrice,
+    extractTargetRedskyKey,
+    extractTargetRedskyProduct
+} = require('./target-retail-price');
 
 const SUPPORTED_SITES = new Set(["amazon", "target", "walmart", "samsclub", "crunchyroll", "general", "supreme", "pokemon"]);
 const REQUESTABLE_SITES = new Set(["amazon", "target", "walmart", "samsclub", "crunchyroll", "general", "supreme", "pokemon"]);
@@ -368,6 +373,64 @@ async function fetchHtml(url) {
     return await response.text();
 }
 
+async function fetchTargetRedskyProduct(sku, pageHtml = '') {
+    const cleanSku = String(sku || '').trim();
+    const apiKey = String(
+        process.env.TARGET_REDSKY_KEY ||
+        extractTargetRedskyKey(pageHtml) ||
+        DEFAULT_TARGET_REDSKY_KEY
+    ).trim();
+    const pricingStoreId = String(process.env.TARGET_PRICING_STORE_ID || '1859').trim();
+    const visitorId = `${Date.now().toString(16)}${Math.random().toString(16).slice(2)}`.padEnd(32, '0').slice(0, 32).toUpperCase();
+    const params = new URLSearchParams({
+        key: apiKey,
+        tcin: cleanSku,
+        is_bot: 'false',
+        pricing_store_id: pricingStoreId,
+        store_id: pricingStoreId,
+        has_pricing_store_id: 'true',
+        has_store_id: 'true',
+        has_financing_options: 'true',
+        include_obsolete: 'true',
+        skip_personalized: 'true',
+        visitor_id: visitorId,
+        channel: 'WEB',
+        page: `/p/A-${cleanSku}`
+    });
+    const url = `https://redsky.target.com/redsky_aggregations/v1/web/pdp_client_v1?${params.toString()}`;
+    let lastError = null;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+        try {
+            const response = await fetch(url, {
+                headers: {
+                    'accept': 'application/json',
+                    'accept-language': 'en-US,en;q=0.9',
+                    'origin': 'https://www.target.com',
+                    'referer': `https://www.target.com/p/-/A-${cleanSku}`,
+                    'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36',
+                    'redsky-client-name': 'pdp',
+                    'redsky-client-version': '1.0.0'
+                }
+            });
+            if (!response.ok) {
+                const error = new Error(`Target pricing lookup failed with status ${response.status}`);
+                error.status = response.status;
+                throw error;
+            }
+            const payload = await response.json();
+            const product = extractTargetRedskyProduct(payload, cleanSku);
+            if (!product) throw new Error('Target pricing response did not contain the requested product.');
+            return product;
+        } catch (error) {
+            lastError = error;
+            const retryable = Number(error?.status || 0) === 429 || Number(error?.status || 0) >= 500;
+            if (!retryable || attempt === 2) break;
+            await new Promise((resolve) => setTimeout(resolve, 900 * (2 ** attempt)));
+        }
+    }
+    throw lastError || new Error('Target pricing lookup failed.');
+}
+
 
 function absoluteUrl(origin, value) {
     const raw = String(value || '').trim();
@@ -401,11 +464,25 @@ function findJsonLdProduct($) {
 async function lookupTargetByTcin(sku) {
     const cleanSku = String(sku || '').trim();
     const directUrl = `https://www.target.com/p/-/A-${encodeURIComponent(cleanSku)}`;
-    const html = await fetchHtml(directUrl);
+    let html = '';
+    let pageLookupError = '';
+    try {
+        html = await fetchHtml(directUrl);
+    } catch (error) {
+        pageLookupError = String(error?.message || error);
+    }
     const $ = cheerio.load(html);
     const jsonLd = findJsonLdProduct($) || {};
     const offers = Array.isArray(jsonLd.offers) ? jsonLd.offers[0] : (jsonLd.offers || {});
+    let redskyProduct = null;
+    let redskyLookupError = '';
+    try {
+        redskyProduct = await fetchTargetRedskyProduct(cleanSku, html);
+    } catch (error) {
+        redskyLookupError = String(error?.message || error);
+    }
     const title = String(
+        redskyProduct?.title ||
         jsonLd.name ||
         $('meta[property="og:title"]').attr('content') ||
         $('meta[name="twitter:title"]').attr('content') ||
@@ -413,20 +490,23 @@ async function lookupTargetByTcin(sku) {
         ''
     ).replace(/\s*:\s*Target\s*$/i, '').trim();
     const imageValue = Array.isArray(jsonLd.image) ? jsonLd.image[0] : jsonLd.image;
-    const image = absoluteUrl('https://www.target.com', imageValue || $('meta[property="og:image"]').attr('content') || $('meta[name="twitter:image"]').attr('content'));
+    const image = absoluteUrl('https://www.target.com', redskyProduct?.image || imageValue || $('meta[property="og:image"]').attr('content') || $('meta[name="twitter:image"]').attr('content'));
     const canonical = $('link[rel="canonical"]').attr('href') || $('meta[property="og:url"]').attr('content') || directUrl;
-    const priceResult = extractTargetRetailPrice({
+    const pagePriceResult = extractTargetRetailPrice({
         sku: cleanSku,
         offerPrice: offers.price || offers.lowPrice,
         metaPrice: $('meta[property="product:price:amount"]').attr('content'),
         domPrice: $('[data-test="product-price"]').first().text(),
         html
     });
+    const priceResult = Number(redskyProduct?.price) > 0
+        ? { price: Number(redskyProduct.price), source: 'target_redsky_pdp' }
+        : pagePriceResult;
     const price = priceResult.price;
     return {
         sku: cleanSku,
         product_name: title || cleanSku,
-        brand: String(jsonLd.brand?.name || jsonLd.brand || 'Target').trim() || 'Target',
+        brand: String(redskyProduct?.brand || jsonLd.brand?.name || jsonLd.brand || 'Target').trim() || 'Target',
         product_url: absoluteUrl('https://www.target.com', canonical),
         image_url: image,
         default_max_price: price,
@@ -436,7 +516,9 @@ async function lookupTargetByTcin(sku) {
             lookup_failed: !title,
             target_retail_price: price,
             target_retail_price_source: priceResult.source,
-            target_retail_price_checked_at: new Date().toISOString()
+            target_retail_price_checked_at: new Date().toISOString(),
+            target_page_lookup_error: pageLookupError || null,
+            target_redsky_lookup_error: redskyLookupError || null
         }
     };
 }
