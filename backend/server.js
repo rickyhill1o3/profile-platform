@@ -7417,7 +7417,7 @@ async function sendAnnouncementFileToAllWebhooks(fileBytes, fileName) {
     return { sent, failed, target_count: routes.length, results };
 }
 
-const RELEASE_RECAP_RENDER_VERSION = 'animation-only-retail-price-v1';
+const RELEASE_RECAP_RENDER_VERSION = 'animation-only-retail-price-hd-v2';
 
 function parseReleaseRecapRange(body = {}) {
     const from = new Date(body.from || '');
@@ -7787,7 +7787,9 @@ app.post('/admin/announcements/release-recap/send', auth, admin, async (req, res
         }
 
         const previous = await getAppSetting('announcement_release_recap_last', null).catch(() => null);
-        if (previous?.range_fingerprint === data.range_fingerprint && previous?.animation_url) {
+        if (previous?.range_fingerprint === data.range_fingerprint
+            && previous?.animation_url
+            && previous?.render_version === RELEASE_RECAP_RENDER_VERSION) {
             return res.json({ success: true, already_sent: true, recap: previous });
         }
 
