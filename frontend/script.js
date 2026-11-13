@@ -3860,6 +3860,7 @@ async function initCatalogTools() {
             let skippedGrouped = 0;
             let pricesFound = 0;
             let pricesUpdated = 0;
+            let connectionRetries = 0;
             const failures = [];
             targetCatalogRescanAllButton.disabled = true;
             targetCatalogRescanAllButton.textContent = resuming ? 'Resuming Target rescan...' : 'Rescanning Target catalog...';
@@ -3874,15 +3875,26 @@ async function initCatalogTools() {
                         try {
                             data = await authJSON(API + '/admin/catalog-products/rescan-target-batch', {
                                 method: 'POST',
-                                body: JSON.stringify({ offset, limit: 2 })
+                                body: JSON.stringify({ offset, limit: 1 })
                             });
+                            connectionRetries = 0;
                             break;
                         } catch (batchError) {
-                            if (!String(batchError?.message || batchError).includes('waiting for the current email scan')) throw batchError;
-                            if (targetCatalogRescanAllProgress) {
-                                targetCatalogRescanAllProgress.textContent = 'Waiting for the current email scan to finish; the same Target batch will retry in 10 seconds...';
+                            const batchMessage = String(batchError?.message || batchError);
+                            const waitingForEmail = batchMessage.includes('Target requested priority') || batchMessage.includes('waiting for the current email scan');
+                            const connectionDropped = /failed to fetch|networkerror|load failed|network request failed/i.test(batchMessage);
+                            if (!waitingForEmail && !connectionDropped) throw batchError;
+                            if (connectionDropped) connectionRetries += 1;
+                            if (connectionRetries > 12) {
+                                throw new Error('Render did not recover after 12 connection retries. Open the latest Render log to check for an out-of-memory restart.');
                             }
-                            await new Promise((resolve) => setTimeout(resolve, 10000));
+                            const retryDelay = waitingForEmail ? 10000 : 30000;
+                            if (targetCatalogRescanAllProgress) {
+                                targetCatalogRescanAllProgress.textContent = waitingForEmail
+                                    ? 'Stopping the email scan after its current mailbox; the same Target product will retry in 10 seconds...'
+                                    : `The Render connection restarted while opening Target. The same Target product will retry automatically in 30 seconds (${connectionRetries}/12)...`;
+                            }
+                            await new Promise((resolve) => setTimeout(resolve, retryDelay));
                         }
                     }
                     added += Number(data.added || 0);

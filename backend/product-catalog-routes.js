@@ -59,7 +59,12 @@ const {
     extractTargetRedskyProduct
 } = require('./target-retail-price');
 const { scrapeTargetRenderedProductPrice } = require('./target-browser-price');
-const { beginTargetCatalogWork, isEmailHeavyWorkActive } = require('./runtime-workload');
+const {
+    beginTargetCatalogWork,
+    clearTargetCatalogPriority,
+    isEmailHeavyWorkActive,
+    requestTargetCatalogPriority
+} = require('./runtime-workload');
 
 const SUPPORTED_SITES = new Set(["amazon", "target", "walmart", "samsclub", "crunchyroll", "general", "supreme", "pokemon"]);
 const REQUESTABLE_SITES = new Set(["amazon", "target", "walmart", "samsclub", "crunchyroll", "general", "supreme", "pokemon"]);
@@ -1521,16 +1526,23 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
 
     app.post('/admin/catalog-products/rescan-target-batch', auth, admin, async (req, res) => {
         if (!requireSuperAdmin(req, res)) return;
+        // Give Target priority over the continuous background mailbox cycle. The email worker
+        // cooperatively stops after its current mailbox and releases its saved checkpoint.
+        requestTargetCatalogPriority();
         const releaseTargetCatalogWork = beginTargetCatalogWork();
         if (isEmailHeavyWorkActive()) {
             releaseTargetCatalogWork();
             return res.status(409).json({
-                error: 'Target catalog scan is waiting for the current email scan to finish. This batch will retry automatically.'
+                error: 'Target requested priority. The email scan is stopping after its current mailbox; this Target batch will retry automatically.'
             });
         }
+        let targetCatalogFinished = false;
+        let targetCatalogFailed = false;
         try {
             const offset = Math.max(0, Math.floor(Number(req.body?.offset || 0)));
-            const limit = Math.max(1, Math.min(10, Math.floor(Number(req.body?.limit || 6))));
+            // One product per HTTP transaction keeps Chromium below Render's memory limit and
+            // creates a durable database/checkpoint boundary after every Target product.
+            const limit = 1;
             const { data: rows, error } = await fetchAllSupabaseRows(() => supabase
                 .from('catalog_products')
                 .select('id, site, sku, product_name, image_url, product_url, default_max_price, brand, metadata, is_enabled, created_at')
@@ -1542,37 +1554,35 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
             const batch = products.slice(offset, offset + limit);
             const results = [];
 
-            for (let index = 0; index < batch.length; index += 2) {
-                const group = batch.slice(index, index + 2);
-                const groupResults = await Promise.all(group.map(async (row) => {
-                    const skuParts = parseCatalogSkuParts(row.sku);
-                    if (skuParts.length !== 1) {
-                        return { ok: true, status: 'skipped_grouped', sku: row.sku, product_name: row.product_name };
-                    }
-                    try {
-                        const refreshed = await refreshTargetCatalogProduct(supabase, skuParts[0]);
-                        return {
-                            ok: true,
-                            sku: skuParts[0],
-                            status: refreshed.status,
-                            changed_fields: refreshed.changed_fields || [],
-                            retail_price: Number(refreshed.retail_price) > 0 ? Number(refreshed.retail_price) : null
-                        };
-                    } catch (lookupError) {
-                        return { ok: false, sku: skuParts[0], error: String(lookupError?.message || lookupError) };
-                    }
-                }));
-                results.push(...groupResults);
+            for (const row of batch) {
+                const skuParts = parseCatalogSkuParts(row.sku);
+                if (skuParts.length !== 1) {
+                    results.push({ ok: true, status: 'skipped_grouped', sku: row.sku, product_name: row.product_name });
+                    continue;
+                }
+                try {
+                    const refreshed = await refreshTargetCatalogProduct(supabase, skuParts[0]);
+                    results.push({
+                        ok: true,
+                        sku: skuParts[0],
+                        status: refreshed.status,
+                        changed_fields: refreshed.changed_fields || [],
+                        retail_price: Number(refreshed.retail_price) > 0 ? Number(refreshed.retail_price) : null
+                    });
+                } catch (lookupError) {
+                    results.push({ ok: false, sku: skuParts[0], error: String(lookupError?.message || lookupError) });
+                }
             }
 
             const nextOffset = offset + batch.length;
+            targetCatalogFinished = nextOffset >= products.length;
             res.json({
                 success: true,
                 total: products.length,
                 offset,
                 processed: batch.length,
                 next_offset: nextOffset,
-                done: nextOffset >= products.length,
+                done: targetCatalogFinished,
                 added: results.filter((row) => row.status === 'added').length,
                 updated: results.filter((row) => row.status === 'updated').length,
                 unchanged: results.filter((row) => row.status === 'unchanged').length,
@@ -1583,9 +1593,13 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
                 results
             });
         } catch (err) {
+            targetCatalogFailed = true;
             res.status(500).json({ error: String(err?.message || err) });
         } finally {
             releaseTargetCatalogWork();
+            if (targetCatalogFinished || targetCatalogFailed) {
+                clearTargetCatalogPriority({ resumeEmail: true });
+            }
         }
     });
 

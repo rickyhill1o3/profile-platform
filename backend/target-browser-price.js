@@ -11,8 +11,14 @@ const {
 } = require('./target-retail-price');
 
 let browserPromise = null;
-let browserIdleTimer = null;
 let serialQueue = Promise.resolve();
+
+function releaseNodeMemory() {
+  if (typeof global.gc !== 'function') return;
+  try {
+    global.gc();
+  } catch (_) {}
+}
 
 function browserlessEndpoint() {
   return String(
@@ -56,6 +62,9 @@ function localChromiumLaunchOptions() {
       '--disable-background-networking',
       '--disable-background-timer-throttling',
       '--disable-renderer-backgrounding',
+      '--disable-site-isolation-trials',
+      '--no-zygote',
+      '--renderer-process-limit=1',
       '--disable-features=Translate,BackForwardCache,AcceptCHFrame,MediaRouter,OptimizationHints',
       '--no-first-run',
       '--no-default-browser-check',
@@ -77,6 +86,7 @@ function localChromiumLaunchOptions() {
 async function getBrowser() {
   const endpoint = browserlessEndpoint();
   if (!browserPromise) {
+    releaseNodeMemory();
     const chromium = loadChromium();
     const openBrowser = endpoint
       ? chromium.connectOverCDP(endpointWithBrowserOptions(endpoint))
@@ -89,10 +99,6 @@ async function getBrowser() {
       throw error;
     });
   }
-  if (browserIdleTimer) {
-    clearTimeout(browserIdleTimer);
-    browserIdleTimer = null;
-  }
   const browser = await browserPromise;
   if (!browser.isConnected()) {
     browserPromise = null;
@@ -101,20 +107,16 @@ async function getBrowser() {
   return browser;
 }
 
-function scheduleBrowserClose() {
-  if (browserIdleTimer) clearTimeout(browserIdleTimer);
-  const idleMs = Math.max(5000, Math.min(120000, Number(process.env.TARGET_PRICE_BROWSER_IDLE_MS || 30000)));
-  browserIdleTimer = setTimeout(async () => {
-    const pendingBrowser = browserPromise;
-    browserPromise = null;
-    browserIdleTimer = null;
-    if (!pendingBrowser) return;
+async function closeTargetPriceBrowser() {
+  const pendingBrowser = browserPromise;
+  browserPromise = null;
+  if (pendingBrowser) {
     try {
       const browser = await pendingBrowser;
       await browser.close();
     } catch (_) {}
-  }, idleMs);
-  if (typeof browserIdleTimer.unref === 'function') browserIdleTimer.unref();
+  }
+  releaseNodeMemory();
 }
 
 function isTargetBlockPage(title, bodyText) {
@@ -130,6 +132,7 @@ async function scrapeTargetPriceUnlocked(sku) {
   const context = existingContext || await browser.newContext({
     locale: 'en-US',
     viewport: { width: 1365, height: 900 },
+    serviceWorkers: 'block',
     userAgent: String(process.env.TARGET_PRICE_USER_AGENT || '').trim() || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.0.0 Safari/537.36'
   });
   const page = await context.newPage();
@@ -157,7 +160,7 @@ async function scrapeTargetPriceUnlocked(sku) {
   try {
     await page.route('**/*', async (route) => {
       const type = route.request().resourceType();
-      if (['image', 'media', 'font'].includes(type)) return route.abort();
+      if (['image', 'media', 'font', 'stylesheet'].includes(type)) return route.abort();
       return route.continue();
     });
     await page.goto(directUrl, { waitUntil: 'domcontentloaded', timeout });
@@ -185,7 +188,8 @@ async function scrapeTargetPriceUnlocked(sku) {
         priceText: String(matchedPrice?.element?.getAttribute?.('content') || matchedPrice?.element?.textContent || '').trim(),
         priceSelector: matchedPrice?.selector || '',
         finalUrl: location.href,
-        hasExpectedSku: document.documentElement.innerHTML.includes(expectedSku)
+        hasExpectedSku: location.href.includes(`A-${expectedSku}`) || Array.from(document.querySelectorAll('meta'))
+          .some((element) => String(element.getAttribute('content') || '').includes(expectedSku))
       };
     }, { selectors: priceSelectors, expectedSku: cleanSku });
 
@@ -214,7 +218,10 @@ async function scrapeTargetPriceUnlocked(sku) {
   } finally {
     await page.close().catch(() => null);
     if (!existingContext) await context.close().catch(() => null);
-    scheduleBrowserClose();
+    // A local Chromium instance is the largest process in this workload. Close it before the
+    // HTTP batch returns so the next Target request (or resumed IMAP work) starts with clean RAM.
+    // Remote Browserless sessions are also closed because each product is an isolated job.
+    await closeTargetPriceBrowser();
   }
 }
 
@@ -230,5 +237,6 @@ module.exports = {
   browserlessEndpoint,
   endpointWithBrowserOptions,
   localChromiumLaunchOptions,
+  closeTargetPriceBrowser,
   scrapeTargetRenderedProductPrice
 };
