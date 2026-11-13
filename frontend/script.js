@@ -3858,6 +3858,8 @@ async function initCatalogTools() {
             let updated = 0;
             let unchanged = 0;
             let skippedGrouped = 0;
+            let pricesFound = 0;
+            let pricesUpdated = 0;
             const failures = [];
             targetCatalogRescanAllButton.disabled = true;
             targetCatalogRescanAllButton.textContent = resuming ? 'Resuming Target rescan...' : 'Rescanning Target catalog...';
@@ -3875,6 +3877,8 @@ async function initCatalogTools() {
                     updated += Number(data.updated || 0);
                     unchanged += Number(data.unchanged || 0);
                     skippedGrouped += Number(data.skipped_grouped || 0);
+                    pricesFound += Number(data.prices_found || 0);
+                    pricesUpdated += Number(data.prices_updated || 0);
                     if (Array.isArray(data.failed)) failures.push(...data.failed);
                     offset = Number(data.next_offset || offset);
                     done = !!data.done || Number(data.processed || 0) === 0;
@@ -3888,9 +3892,9 @@ async function initCatalogTools() {
                     ? ` ${failures.length} need manual review: ${failures.slice(0, 8).map((row) => row.sku).join(', ')}${failures.length > 8 ? '…' : ''}.`
                     : '';
                 if (targetCatalogRescanAllProgress) {
-                    targetCatalogRescanAllProgress.textContent = `Target catalog rescan finished: ${added} added, ${updated} updated, ${unchanged} already current, ${skippedGrouped} grouped SKU rows skipped.${failureSuffix}`;
+                    targetCatalogRescanAllProgress.textContent = `Target catalog rescan finished: retail prices found for ${pricesFound} products and ${pricesUpdated} prices changed. ${added} added, ${updated} updated, ${unchanged} already current, ${skippedGrouped} grouped SKU rows skipped.${failureSuffix}`;
                 }
-                message.textContent = `Target catalog rescan complete. ${updated} products updated and ${unchanged} left unchanged.`;
+                message.textContent = `Target catalog rescan complete. Retail prices were found for ${pricesFound} products; ${pricesUpdated} saved prices changed.`;
                 await loadCatalogProducts();
             } catch (err) {
                 localStorage.setItem(checkpointKey, String(offset));
@@ -4055,7 +4059,7 @@ function renderReleaseRecapSummary(summary = {}, { sent = false, targetCount = n
     const wrap = document.getElementById('releaseRecapPreview');
     if (!wrap) return;
     const products = Array.isArray(summary.products) ? summary.products : [];
-    const warning = Number(summary.unresolved_checkout_count || 0) > 0 || Number(summary.catalog_estimated_checkout_count || 0) > 0;
+    const warning = Number(summary.unresolved_checkout_count || 0) > 0;
     wrap.className = `release-recap-preview ${warning ? 'is-warning' : 'is-ready'}`;
     if (!Number(summary.checkout_count || 0)) {
         wrap.innerHTML = '<strong>No successful checkouts found.</strong><div>Adjust the release window and preview again.</div>';
@@ -4066,14 +4070,14 @@ function renderReleaseRecapSummary(summary = {}, { sent = false, targetCount = n
         return `<div class="release-recap-product">${image ? `<img src="${escapeHTML(image)}" alt="" onerror="this.style.display='none'" />` : ''}<div><strong>${escapeHTML(product.product || product.sku || 'Checkout product')}</strong><span>${Number(product.item_count || 0)} item${Number(product.item_count || 0) === 1 ? '' : 's'} • ${Number(product.checkout_count || 0)} checkout${Number(product.checkout_count || 0) === 1 ? '' : 's'}</span></div></div>`;
     }).join('');
     const pricingNote = warning
-        ? `<div class="banner banner-soft"><strong>Pricing check:</strong> ${Number(summary.retailer_confirmed_checkout_count || 0)} checkout total${Number(summary.retailer_confirmed_checkout_count || 0) === 1 ? '' : 's'} came from IMAP-confirmed orders. ${Number(summary.catalog_estimated_checkout_count || 0)} used saved catalog pricing, and ${Number(summary.unresolved_checkout_count || 0)} still could not be fully priced.</div>`
-        : `<div class="banner banner--success"><strong>All spend is retailer-confirmed.</strong> These totals came from the order tracker, including tax and shipping when saved on the order.</div>`;
+        ? `<div class="banner banner-soft"><strong>${Number(summary.unresolved_checkout_count || 0)} checkout${Number(summary.unresolved_checkout_count || 0) === 1 ? '' : 's'} still need a saved order total or Target retail price.</strong> They are not included in the displayed total yet.</div>`
+        : `<div class="banner banner--success"><strong>Total spend is ready.</strong> Saved order totals are used first, with saved Target retail prices filling any checkout that does not have an order total.</div>`;
     wrap.innerHTML = `
         <div class="release-recap-stats">
           <div class="release-recap-stat"><span>Total spend</span><strong>${escapeHTML(releaseRecapMoney(summary.total_spend))}</strong></div>
-          <div class="release-recap-stat"><span>IMAP confirmed</span><strong>${escapeHTML(releaseRecapMoney(summary.retailer_confirmed_spend))}</strong></div>
-          <div class="release-recap-stat"><span>Catalog estimate</span><strong>${escapeHTML(releaseRecapMoney(summary.catalog_estimated_spend))}</strong></div>
-          <div class="release-recap-stat"><span>Checkouts / items</span><strong>${Number(summary.checkout_count || 0)} / ${Number(summary.item_count || 0)}</strong></div>
+          <div class="release-recap-stat"><span>Checkouts</span><strong>${Number(summary.checkout_count || 0)}</strong></div>
+          <div class="release-recap-stat"><span>Items</span><strong>${Number(summary.item_count || 0)}</strong></div>
+          <div class="release-recap-stat"><span>Unique products</span><strong>${Number(summary.unique_product_count || 0)}</strong></div>
         </div>
         <strong>${sent ? 'Latest sent recap' : 'Preview'} • ${escapeHTML(summary.range_label || 'Selected release window')}</strong>
         ${targetCount === null ? '' : `<div class="subtle-text">${Number(targetCount || 0)} announcement channel${Number(targetCount || 0) === 1 ? '' : 's'} will receive this recap.</div>`}
@@ -4147,13 +4151,6 @@ async function sendReleaseRecap() {
         if (sendButton) sendButton.disabled = false;
         if (msg) msg.textContent = err.message || 'Failed to send the release recap.';
     }
-}
-
-async function copyReleaseRecapPost() {
-    const msg = document.getElementById('releaseRecapMessage');
-    if (!latestReleaseRecapData?.share_text) return;
-    await copyTextToClipboard(latestReleaseRecapData.share_text);
-    if (msg) msg.textContent = 'Recap post copied. Paste it into another Discord to share the animated post.';
 }
 
 async function copyReleaseRecapAnimationLink() {

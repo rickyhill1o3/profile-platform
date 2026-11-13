@@ -60,11 +60,15 @@ const frontendSource = fs.readFileSync(path.join(projectRoot, 'frontend', 'scrip
 const adminHtml = fs.readFileSync(path.join(projectRoot, 'frontend', 'admin.html'), 'utf8');
 
 assert.match(routesSource, /refreshTargetCatalogProduct\(supabase, sku\)/, 'entered existing Target SKUs must be rescanned');
+assert.match(routesSource, /extractTargetRetailPrice\(/, 'Target lookup must extract and save live retail pricing');
 assert.match(routesSource, /app\.post\('\/admin\/catalog-products\/rescan-target-batch'/, 'the catalog must expose a resumable batch rescan route');
+assert.match(routesSource, /prices_found:/, 'the batch response must report how many Target retail prices were found');
+assert.match(routesSource, /prices_updated:/, 'the batch response must report how many saved Target prices changed');
 assert.match(routesSource, /status:\s*'skipped_grouped'/, 'grouped multi-SKU products must be preserved instead of being overwritten by one item');
 assert.match(serverSource, /const preferTargetCatalog = next\.site === 'target' && !!next\.sku/);
 assert.match(serverSource, /next\.title = preferTargetCatalog \? \(catalog\.title \|\| next\.title\)/, 'Target monitor alerts must prefer the official catalog title');
 assert.match(frontendSource, /targetCatalogRescanOffset/, 'the browser must keep a checkpoint so a stopped full rescan can resume');
+assert.match(frontendSource, /retail prices found for/, 'the rescan result must clearly report retail price coverage');
 assert.match(adminHtml, /Rescan all Target catalog products/);
 assert.match(adminHtml, /Credit cost is never changed/);
 

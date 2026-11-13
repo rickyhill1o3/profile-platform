@@ -52,6 +52,7 @@ const {
     groupPokemonUsersByComparedSkus
 } = require('./pokemon-sku-user-groups');
 const { buildTargetCatalogRefreshPatch } = require('./target-catalog-refresh');
+const { extractTargetRetailPrice } = require('./target-retail-price');
 
 const SUPPORTED_SITES = new Set(["amazon", "target", "walmart", "samsclub", "crunchyroll", "general", "supreme", "pokemon"]);
 const REQUESTABLE_SITES = new Set(["amazon", "target", "walmart", "samsclub", "crunchyroll", "general", "supreme", "pokemon"]);
@@ -414,7 +415,14 @@ async function lookupTargetByTcin(sku) {
     const imageValue = Array.isArray(jsonLd.image) ? jsonLd.image[0] : jsonLd.image;
     const image = absoluteUrl('https://www.target.com', imageValue || $('meta[property="og:image"]').attr('content') || $('meta[name="twitter:image"]').attr('content'));
     const canonical = $('link[rel="canonical"]').attr('href') || $('meta[property="og:url"]').attr('content') || directUrl;
-    const price = parseMoney(offers.price || offers.lowPrice || $('meta[property="product:price:amount"]').attr('content') || $('[data-test="product-price"]').first().text());
+    const priceResult = extractTargetRetailPrice({
+        sku: cleanSku,
+        offerPrice: offers.price || offers.lowPrice,
+        metaPrice: $('meta[property="product:price:amount"]').attr('content'),
+        domPrice: $('[data-test="product-price"]').first().text(),
+        html
+    });
+    const price = priceResult.price;
     return {
         sku: cleanSku,
         product_name: title || cleanSku,
@@ -425,7 +433,10 @@ async function lookupTargetByTcin(sku) {
         metadata: {
             source: title ? 'target_direct_product' : 'target_direct_fallback',
             lookup_url: directUrl,
-            lookup_failed: !title
+            lookup_failed: !title,
+            target_retail_price: price,
+            target_retail_price_source: priceResult.source,
+            target_retail_price_checked_at: new Date().toISOString()
         }
     };
 }
@@ -610,7 +621,7 @@ async function refreshTargetCatalogProduct(supabase, sku) {
     const existing = await firstRowOrNull(supabase, 'target', cleanSku);
     if (!existing?.id) {
         const product = await upsertCatalogProductByLookup(supabase, 'target', cleanSku);
-        return { status: 'added', product, changed_fields: ['name', 'image', 'url', 'price'].filter((field) => {
+        return { status: 'added', product, retail_price: Number(product?.metadata?.target_retail_price) > 0 ? Number(product.metadata.target_retail_price) : null, changed_fields: ['name', 'image', 'url', 'price'].filter((field) => {
             if (field === 'name') return product?.product_name && product.product_name !== cleanSku;
             if (field === 'image') return !!product?.image_url;
             if (field === 'url') return !!product?.product_url;
@@ -624,7 +635,7 @@ async function refreshTargetCatalogProduct(supabase, sku) {
         throw new Error('Target did not return a usable product name, image, or price. The saved product was not changed.');
     }
     if (!refresh.changedFields.length) {
-        return { status: 'unchanged', product: existing, changed_fields: [] };
+        return { status: 'unchanged', product: existing, retail_price: Number(lookup.default_max_price) > 0 ? Number(lookup.default_max_price) : null, changed_fields: [] };
     }
 
     const { data, error } = await supabase
@@ -634,7 +645,7 @@ async function refreshTargetCatalogProduct(supabase, sku) {
         .select('*')
         .single();
     if (error) throw new Error(error.message);
-    return { status: 'updated', product: data, changed_fields: refresh.changedFields };
+    return { status: 'updated', product: data, retail_price: Number(lookup.default_max_price) > 0 ? Number(lookup.default_max_price) : null, changed_fields: refresh.changedFields };
 }
 
 async function syncTargetPricingFromAmazon(supabase) {
@@ -1426,7 +1437,13 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
                     }
                     try {
                         const refreshed = await refreshTargetCatalogProduct(supabase, skuParts[0]);
-                        return { ok: true, sku: skuParts[0], status: refreshed.status, changed_fields: refreshed.changed_fields || [] };
+                        return {
+                            ok: true,
+                            sku: skuParts[0],
+                            status: refreshed.status,
+                            changed_fields: refreshed.changed_fields || [],
+                            retail_price: Number(refreshed.retail_price) > 0 ? Number(refreshed.retail_price) : null
+                        };
                     } catch (lookupError) {
                         return { ok: false, sku: skuParts[0], error: String(lookupError?.message || lookupError) };
                     }
@@ -1445,6 +1462,8 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
                 added: results.filter((row) => row.status === 'added').length,
                 updated: results.filter((row) => row.status === 'updated').length,
                 unchanged: results.filter((row) => row.status === 'unchanged').length,
+                prices_found: results.filter((row) => row.ok && Number(row.retail_price) > 0).length,
+                prices_updated: results.filter((row) => row.ok && Array.isArray(row.changed_fields) && row.changed_fields.includes('price')).length,
                 skipped_grouped: results.filter((row) => row.status === 'skipped_grouped').length,
                 failed: results.filter((row) => !row.ok),
                 results

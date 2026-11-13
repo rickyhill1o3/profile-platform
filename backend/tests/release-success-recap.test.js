@@ -56,10 +56,15 @@ async function run() {
   assert.strictEqual(summary.total_spend, 98.32);
 
   const caption = buildReleaseRecapCaption(summary, 'https://cdn.example.com/release.gif');
-  assert.match(caption, /retailer-confirmed/);
-  assert.match(caption, /catalog-estimated/);
-  assert.match(caption, /release\.gif/);
+  assert.strictEqual(caption, 'https://cdn.example.com/release.gif', 'the manual share value should contain only the animation link');
   assert.ok(!caption.includes('customer@example.com'));
+
+  const fs = require('fs');
+  const path = require('path');
+  const serverSource = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  assert.match(serverSource, /sendAnnouncementFileToAllWebhooks\(animation,/);
+  assert.doesNotMatch(serverSource, /function releaseRecapEmbed\(/);
+  assert.doesNotMatch(serverSource, /sendAnnouncementToAllWebhooks\(webhookCaption/);
 
   const gifSummary = {
     ...summary,

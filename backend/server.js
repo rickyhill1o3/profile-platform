@@ -98,8 +98,7 @@ const {
     RECAP_TIME_ZONE,
     checkoutEventIsSuccessful,
     buildReleaseRecapSummary,
-    buildReleaseRecapGif,
-    buildReleaseRecapCaption
+    buildReleaseRecapGif
 } = require("./release-success-recap");
 const { registerOrderTracker, notifyCheckoutForOrderTracker } = require("./order-tracker");
 const { buildShikariAccountsCsv, buildShikariImapCsv } = require("./shikari-credential-exports");
@@ -7387,6 +7386,36 @@ ${payloadChunks[i] || ''}`.trim() : payloadChunks[i];
     return { sent, failed, target_count: routes.length, results };
 }
 
+async function postAnnouncementDiscordWebhookFile(webhookUrl, fileBytes, fileName) {
+    const trimmed = String(webhookUrl || '').trim();
+    if (!trimmed) return { success: false, error: 'Webhook URL is missing' };
+    const form = new FormData();
+    form.append('payload_json', JSON.stringify({ username: 'The Shore Shack Announcements' }));
+    form.append('files[0]', new Blob([fileBytes], { type: 'image/gif' }), String(fileName || 'release-recap.gif'));
+    const response = await globalThis.fetch(trimmed, { method: 'POST', body: form });
+    if (!response.ok) {
+        const body = await response.text().catch(() => '');
+        return { success: false, status: response.status, error: body || response.statusText };
+    }
+    return { success: true, status: response.status };
+}
+
+async function sendAnnouncementFileToAllWebhooks(fileBytes, fileName) {
+    const routes = await getAnnouncementRoutes();
+    let sent = 0;
+    let failed = 0;
+    const results = [];
+    for (const route of routes) {
+        const result = await postAnnouncementDiscordWebhookFile(route.webhook_url, fileBytes, fileName)
+            .catch((err) => ({ success: false, error: err.message || String(err) }));
+        if (result.success) sent += 1; else failed += 1;
+        results.push({ key: route.key, success: !!result.success, error: result.error || '', status: result.status || null });
+    }
+    return { sent, failed, target_count: routes.length, results };
+}
+
+const RELEASE_RECAP_RENDER_VERSION = 'animation-only-retail-price-v1';
+
 function parseReleaseRecapRange(body = {}) {
     const from = new Date(body.from || '');
     const to = new Date(body.to || '');
@@ -7546,6 +7575,7 @@ async function buildReleaseRecapData(range) {
         timeZone: RECAP_TIME_ZONE
     });
     const rangeFingerprint = crypto.createHash('sha256').update(JSON.stringify({
+        render_version: RELEASE_RECAP_RENDER_VERSION,
         from: range.from,
         to: range.to,
         checkout_count: summary.checkout_count,
@@ -7557,25 +7587,6 @@ async function buildReleaseRecapData(range) {
         products: summary.products.map(product => [product.site, product.sku, product.product, product.item_count])
     })).digest('hex').slice(0, 24);
     return { summary, range_fingerprint: rangeFingerprint, announcement_target_count: routes.length };
-}
-
-function releaseRecapEmbed(summary, animationUrl) {
-    const money = value => Number(value || 0).toLocaleString('en-US', { style: 'currency', currency: 'USD' });
-    return {
-        title: 'The Shore Shack Release Recap',
-        description: `${summary.checkout_count} checkouts • ${summary.item_count} items • ${summary.unique_product_count} unique products`,
-        color: 0x4f46e5,
-        fields: [
-            { name: 'Total spend', value: money(summary.total_spend), inline: true },
-            { name: 'Retailer-confirmed', value: `${money(summary.retailer_confirmed_spend)} • ${summary.retailer_confirmed_checkout_count} checkout${summary.retailer_confirmed_checkout_count === 1 ? '' : 's'}`, inline: true },
-            { name: 'Catalog-estimated', value: `${money(summary.catalog_estimated_spend)} • ${summary.catalog_estimated_checkout_count} checkout${summary.catalog_estimated_checkout_count === 1 ? '' : 's'}`, inline: true },
-            { name: 'Release window', value: summary.range_label || 'Selected release window', inline: false },
-            ...(summary.unresolved_checkout_count ? [{ name: 'Still missing a total', value: `${summary.unresolved_checkout_count} checkout${summary.unresolved_checkout_count === 1 ? '' : 's'} could not yet be fully priced.`, inline: false }] : [])
-        ],
-        image: { url: animationUrl },
-        footer: { text: 'Community totals only • no customer information' },
-        timestamp: new Date().toISOString()
-    };
 }
 
 function formatAnnouncementProductLine(product) {
@@ -7792,11 +7803,11 @@ app.post('/admin/announcements/release-recap/send', auth, admin, async (req, res
         const animationUrl = String(publicData?.data?.publicUrl || '').trim();
         if (!animationUrl) throw new Error('The recap animation was saved, but no public link was returned.');
 
-        const webhookCaption = buildReleaseRecapCaption(summary);
-        const shareText = buildReleaseRecapCaption(summary, animationUrl);
-        const delivery = await sendAnnouncementToAllWebhooks(webhookCaption, [releaseRecapEmbed(summary, animationUrl)]);
+        const shareText = animationUrl;
+        const delivery = await sendAnnouncementFileToAllWebhooks(animation, `shore-shack-release-recap-${datePart}.gif`);
         const recap = {
             id: recapId,
+            render_version: RELEASE_RECAP_RENDER_VERSION,
             range_fingerprint: data.range_fingerprint,
             from: range.from,
             to: range.to,
