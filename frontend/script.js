@@ -4375,7 +4375,17 @@ async function recheckAmazonWebhookImap(orderId, button) {
         const waitStarted = Date.now();
         let job = started.job;
         while (job?.status === 'running') {
-            if (button) button.textContent = `${Math.max(0, Math.min(99, Number(job.percent || 0)))}% · Checking IMAP...`;
+            if (button) {
+                const percent = Math.max(0, Math.min(99, Number(job.percent || 0)));
+                const labels = {
+                    waiting_for_amazon_recheck: 'Waiting for prior recheck...',
+                    waiting_for_email_worker: 'Waiting for email worker...',
+                    mapping_mailboxes: `${percent}% · Finding mailbox...`,
+                    scanning: `${percent}% · Checking IMAP...`
+                };
+                button.textContent = labels[job.stage] || `${percent}% · Preparing...`;
+                button.title = String(job.message || '');
+            }
             await new Promise(resolve => setTimeout(resolve, 1800));
             const response = await authJSON(API + `/orders/amazon-pending-recheck/status?job_id=${encodeURIComponent(jobId)}`);
             job = response?.job || {};

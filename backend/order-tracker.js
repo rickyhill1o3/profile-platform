@@ -124,6 +124,7 @@ let checkoutScanRuntime = null;
 const checkoutScanTimers = new Map();
 const amazonPendingRecheckJobs = new Map();
 let amazonPendingRecheckRunning = false;
+let amazonManualRecheckPriority = null;
 let historicalRepairRunning = false;
 let historicalRepairCandidateCursor = 0;
 const orderEmailRepairJobs = new Map();
@@ -131,6 +132,15 @@ let emailHeavyWorkLease = null;
 const microsoftBackoffUntilByMailbox = new Map();
 
 const waitMs = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+function amazonManualRecheckPriorityActive() {
+  if (!amazonManualRecheckPriority) return false;
+  if (Date.now() - Number(amazonManualRecheckPriority.requested_at || 0) > 30 * 60 * 1000) {
+    amazonManualRecheckPriority = null;
+    return false;
+  }
+  return true;
+}
 
 function isMicrosoftMailbox(account = {}) {
   const provider = lower(account.provider?.name || account.provider || '');
@@ -5521,6 +5531,14 @@ async function scanAll(supabase, userId = null, adjustCredits = null, onProgress
     onWait:options.onEmailWorkWait
   });
   if (!lease) return { skipped:true, reason:'email_work_running' };
+  // A super-admin button click should not sit behind a hundreds-mailbox background cycle. The
+  // background scan cooperatively yields; its UID checkpoints are already durable, so the next
+  // scheduled cycle resumes without losing or duplicating email.
+  if (!userId && amazonManualRecheckPriorityActive()) {
+    console.log('[ORDER TRACKER] Background IMAP cycle yielded before loading mailboxes for a manual Amazon recheck.');
+    lease.release();
+    return { skipped:true, reason:'manual_amazon_recheck_priority' };
+  }
   if (scanRunning && !userId) {
     if (!options.waitForGlobalScan) {
       lease.release();
@@ -5540,11 +5558,19 @@ async function scanAll(supabase, userId = null, adjustCredits = null, onProgress
   if (!userId) scanRunning = true;
   try {
     let accounts = await loadScanAccounts(supabase, userId);
+    if (!userId && amazonManualRecheckPriorityActive()) {
+      console.log('[ORDER TRACKER] Background IMAP cycle yielded after mailbox discovery for a manual Amazon recheck.');
+      return { skipped:true, reason:'manual_amazon_recheck_priority' };
+    }
     const loaderDiagnostics = accounts.loaderDiagnostics || {};
     const onlyMailboxEmails = new Set((Array.isArray(options.onlyMailboxEmails) ? options.onlyMailboxEmails : []).map(lower).filter(Boolean));
     if (onlyMailboxEmails.size) accounts = accounts.filter(account => onlyMailboxEmails.has(lower(account.email)));
     if (userId) await syncServiceOrders(supabase, userId, accounts);
     else await syncRecentServiceOrdersForBackground(supabase, accounts);
+    if (!userId && amazonManualRecheckPriorityActive()) {
+      console.log('[ORDER TRACKER] Background IMAP cycle yielded after order sync for a manual Amazon recheck.');
+      return { skipped:true, reason:'manual_amazon_recheck_priority' };
+    }
     // Mailboxes referenced by pending checkouts are always scanned first so a 500-account
     // imported AYCD pool does not delay a fresh retailer confirmation behind the round-robin queue.
     let pendingEmails = new Set();
@@ -5652,11 +5678,21 @@ async function scanAll(supabase, userId = null, adjustCredits = null, onProgress
     const memoryBatchSize = options.memorySafeBatches === false
       ? Math.max(1, pendingEntries.length)
       : RECONCILE_MEMORY_BATCH_SIZE;
+    let interruptedForAmazonPriority = false;
     for (let batchStart = 0; batchStart < pendingEntries.length; batchStart += memoryBatchSize) {
+      if (!userId && amazonManualRecheckPriorityActive()) {
+        interruptedForAmazonPriority = true;
+        console.log(`[ORDER TRACKER] Background IMAP cycle paused after ${completed} mailbox(es) for a manual Amazon recheck.`);
+        break;
+      }
       const batchEntries = pendingEntries.slice(batchStart, batchStart + memoryBatchSize);
       let nextBatchIndex = 0;
       const scanWorker = async () => {
         for (;;) {
+          if (!userId && amazonManualRecheckPriorityActive()) {
+            interruptedForAmazonPriority = true;
+            return;
+          }
           const entry = batchEntries[nextBatchIndex++];
           if (!entry) return;
           await scanEntry(entry);
@@ -5680,6 +5716,7 @@ async function scanAll(supabase, userId = null, adjustCredits = null, onProgress
       backlog_mailboxes:completeResults.filter(result => result.more_pending).length,
       resumed_mailboxes:completeResults.filter(result => result.resumed).length,
       loader_diagnostics:loaderDiagnostics,
+      interrupted_for_amazon_priority:interruptedForAmazonPriority,
       results:completeResults
     };
   } finally {
@@ -5797,18 +5834,33 @@ async function runPendingAmazonVerificationRecheck(
   confirmPendingAmazonCheckout,
   options = {}
 ) {
+  const job = options.job || null;
+  if (!job && amazonManualRecheckPriorityActive()) {
+    console.log('[AMAZON IMAP RECHECK] Scheduled pending-order sweep yielded to a manual request before starting.');
+    return { skipped:true, reason:'manual_amazon_recheck_priority' };
+  }
   if (amazonPendingRecheckRunning && options.waitForExisting === true) {
     const waitStartedAt = Date.now();
+    let lastWaitLogAt = 0;
     while (amazonPendingRecheckRunning && Date.now() - waitStartedAt < 20 * 60 * 1000) {
-      if (options.job) options.job.message = 'Another small Amazon mailbox recheck is finishing; this request is next…';
+      if (job) {
+        job.stage = 'waiting_for_amazon_recheck';
+        job.percent = Math.max(4, Number(job.percent || 0));
+        job.message = 'Another Amazon mailbox recheck is finishing; this manual request is next…';
+      }
+      if (Date.now() - lastWaitLogAt >= 15000) {
+        console.log(`[AMAZON IMAP RECHECK] Manual job ${job?.id || 'unknown'} is waiting for the active Amazon recheck to yield.`);
+        lastWaitLogAt = Date.now();
+      }
       await waitMs(1000);
     }
   }
   if (amazonPendingRecheckRunning) return { skipped:true, reason:'amazon_recheck_running' };
   amazonPendingRecheckRunning = true;
-  const job = options.job || null;
   try {
+    console.log(`[AMAZON IMAP RECHECK] START ${job ? `manual job=${job.id}` : 'scheduled sweep'} requested_orders=${Array.isArray(options.orderIds) && options.orderIds.length ? options.orderIds.join(',') : 'all-pending'}`);
     const pendingOrders = await loadPendingAmazonVerificationOrders(supabase, options);
+    console.log(`[AMAZON IMAP RECHECK] ${job ? `Manual job ${job.id}` : 'Scheduled sweep'} found ${pendingOrders.length} pending Amazon checkout(s).`);
     if (job) {
       job.pending_found = pendingOrders.length;
       job.stage = 'mapping_mailboxes';
@@ -5818,6 +5870,10 @@ async function runPendingAmazonVerificationRecheck(
         : 'No recent pending Amazon checkout needs another IMAP pass.';
     }
     if (!pendingOrders.length) return { pending_found:0, confirmed:0, still_pending:0, mailboxes_scanned:0, mailbox_failures:0, missing_mailbox:0, details:[] };
+    if (!job && amazonManualRecheckPriorityActive()) {
+      console.log('[AMAZON IMAP RECHECK] Scheduled pending-order sweep yielded to a manual request after loading pending orders.');
+      return { skipped:true, reason:'manual_amazon_recheck_priority' };
+    }
 
     const trackedEmailBySource = new Map();
     const sourceIds = pendingOrders.map(order => order.id).filter(Boolean);
@@ -5831,6 +5887,14 @@ async function runPendingAmazonVerificationRecheck(
         }
       }
     }
+    if (job) {
+      job.percent = 12;
+      job.message = 'Loaded tracked-order email details; matching the checkout to a connected mailbox…';
+    }
+    if (!job && amazonManualRecheckPriorityActive()) {
+      console.log('[AMAZON IMAP RECHECK] Scheduled pending-order sweep yielded to a manual request after loading tracked-order email details.');
+      return { skipped:true, reason:'manual_amazon_recheck_priority' };
+    }
 
     const groups = new Map();
     const unmapped = [];
@@ -5841,8 +5905,20 @@ async function runPendingAmazonVerificationRecheck(
       ordersByUser.get(key).push(order);
     }
     for (const [userId, userOrders] of ordersByUser.entries()) {
+      if (!job && amazonManualRecheckPriorityActive()) {
+        console.log('[AMAZON IMAP RECHECK] Scheduled pending-order sweep yielded to a manual request during mailbox mapping.');
+        return { skipped:true, reason:'manual_amazon_recheck_priority' };
+      }
       if (!userId) { unmapped.push(...userOrders); continue; }
+      if (job) {
+        job.percent = Math.max(14, Number(job.percent || 0));
+        job.message = `Loading connected mailboxes for the pending Amazon checkout${pendingOrders.length === 1 ? '' : 's'}…`;
+      }
       const accounts = await loadScanAccounts(supabase, userId);
+      if (!job && amazonManualRecheckPriorityActive()) {
+        console.log('[AMAZON IMAP RECHECK] Scheduled pending-order sweep yielded to a manual request after mailbox discovery.');
+        return { skipped:true, reason:'manual_amazon_recheck_priority' };
+      }
       const accountByEmail = new Map(accounts.map(account => [lower(account.email), account]));
       for (const order of userOrders) {
         const candidates = amazonCheckoutMailboxCandidates(order, trackedEmailBySource.get(String(order.id)) || '');
@@ -5862,19 +5938,41 @@ async function runPendingAmazonVerificationRecheck(
     if (job) {
       job.mailboxes_total = groups.size;
       job.stage = 'scanning';
+      job.percent = groups.size ? 20 : 100;
       job.message = groups.size
         ? `Replaying ${groups.size} exact Amazon mailbox time window${groups.size === 1 ? '' : 's'}…`
         : 'The pending checkouts do not have a matching connected IMAP mailbox.';
     }
+    console.log(`[AMAZON IMAP RECHECK] ${job ? `Manual job ${job.id}` : 'Scheduled sweep'} mapped ${groups.size} mailbox(es); ${unmapped.length} checkout(s) have no connected mailbox match.`);
 
     const details = [];
     let completed = 0;
     for (const group of groups.values()) {
+      if (!job && amazonManualRecheckPriorityActive()) {
+        console.log(`[AMAZON IMAP RECHECK] Scheduled pending-order sweep yielded after ${completed} mailbox(es) for a manual request.`);
+        return { skipped:true, reason:'manual_amazon_recheck_priority', mailboxes_scanned:completed };
+      }
       const earliest = Math.min(...group.orders.map(order => new Date(order.created_at || Date.now()).getTime()).filter(Number.isFinite));
       const replaySinceAt = new Date((Number.isFinite(earliest) ? earliest : Date.now()) - 15 * 60 * 1000).toISOString();
       let result;
+      let lastEmailWorkerWaitLogAt = 0;
       try {
-        result = await scanAll(supabase, group.userId, adjustCredits, null, confirmPendingAmazonCheckout, {
+        if (job) {
+          job.stage = 'waiting_for_email_worker';
+          job.percent = Math.max(22, Number(job.percent || 0));
+          job.message = `Waiting for the email worker, then checking Amazon mailbox ${completed + 1} of ${groups.size}…`;
+        }
+        console.log(`[AMAZON IMAP RECHECK] ${job ? `Manual job ${job.id}` : 'Scheduled sweep'} preparing mailbox ${completed + 1}/${groups.size}: ${group.email}.`);
+        result = await scanAll(supabase, group.userId, adjustCredits, progress => {
+          if (!job) return;
+          job.stage = progress.phase === 'waiting_for_global_scan' ? 'waiting_for_email_worker' : 'scanning';
+          const accountTotal = Math.max(1, Number(progress.accountTotal || groups.size || 1));
+          const accountIndex = Math.max(0, Number(progress.accountIndex || 0));
+          job.percent = Math.max(24, Math.min(90, 24 + Math.round((accountIndex / accountTotal) * 66)));
+          job.message = progress.email
+            ? `Checking Amazon mailbox ${completed + 1} of ${groups.size}: ${progress.email}`
+            : `Connected to the email worker; starting Amazon mailbox ${completed + 1} of ${groups.size}…`;
+        }, confirmPendingAmazonCheckout, {
           onlyMailboxEmails:[group.email],
           replaySinceAt,
           force:true,
@@ -5885,7 +5983,15 @@ async function runPendingAmazonVerificationRecheck(
           waitForEmailWork:options.waitForEmailWork === true,
           emailWorkWaitMs:20 * 60 * 1000,
           onEmailWorkWait:() => {
-            if (job) job.message = 'Waiting for the current mailbox batch to release the email worker; this Amazon recheck will start next…';
+            if (job) {
+              job.stage = 'waiting_for_email_worker';
+              job.percent = Math.max(22, Number(job.percent || 0));
+              job.message = 'The background IMAP batch is stopping at its next mailbox boundary; this Amazon mailbox is next…';
+            }
+            if (Date.now() - lastEmailWorkerWaitLogAt >= 15000) {
+              console.log(`[AMAZON IMAP RECHECK] ${job ? `Manual job ${job.id}` : 'Scheduled sweep'} waiting for the email worker to release ${group.email}.`);
+              lastEmailWorkerWaitLogAt = Date.now();
+            }
           }
         });
         const mailboxResult = Array.isArray(result?.results) ? result.results[0] : null;
@@ -5901,9 +6007,11 @@ async function runPendingAmazonVerificationRecheck(
           result:error ? 'failed' : (result?.skipped ? 'deferred' : 'scanned'),
           error
         });
+        console.log(`[AMAZON IMAP RECHECK] ${job ? `Manual job ${job.id}` : 'Scheduled sweep'} finished ${group.email}: checked=${Number(result?.checked || 0)} linked=${Number(result?.saved || 0)}${error ? ` error=${error}` : ''}.`);
       } catch (error) {
         details.push({ mailbox:group.email, orders:group.orders.length, checked:0, linked:0, error:error.message || String(error) });
         await stampPendingAmazonRecheck(supabase, group.orders, { result:'failed', error:error.message || String(error) });
+        console.error(`[AMAZON IMAP RECHECK] ${job ? `Manual job ${job.id}` : 'Scheduled sweep'} failed ${group.email}:`, error.message || error);
       }
       completed++;
       if (job) {
@@ -5912,6 +6020,11 @@ async function runPendingAmazonVerificationRecheck(
         job.message = `Checked Amazon mailbox ${completed} of ${groups.size}; verifying which pending checkouts finalized…`;
       }
       await releaseMailboxBatchMemory();
+    }
+
+    if (!job && amazonManualRecheckPriorityActive()) {
+      console.log(`[AMAZON IMAP RECHECK] Scheduled pending-order sweep yielded after ${completed} mailbox(es) for a manual request.`);
+      return { skipped:true, reason:'manual_amazon_recheck_priority', mailboxes_scanned:completed };
     }
 
     if (unmapped.length) await stampPendingAmazonRecheck(supabase, unmapped, { result:'mailbox_not_connected' });
@@ -5948,6 +6061,8 @@ function startPendingAmazonRecheckJob(supabase, adjustCredits, confirmPendingAma
     mailboxes_completed:0
   };
   amazonPendingRecheckJobs.set(job.id, job);
+  amazonManualRecheckPriority = { job_id:job.id, requested_at:Date.now() };
+  console.log(`[AMAZON IMAP RECHECK] Manual request ${job.id} queued${orderIds.length ? ` for order ${orderIds.join(',')}` : ' for all pending Amazon orders'}.`);
   setImmediate(async () => {
     try {
       job.result = await runPendingAmazonVerificationRecheck(supabase, adjustCredits, confirmPendingAmazonCheckout, {
@@ -5970,6 +6085,9 @@ function startPendingAmazonRecheckJob(supabase, adjustCredits, confirmPendingAma
       job.error = error.message || String(error);
       job.message = 'The pending Amazon recheck stopped before completion.';
       job.finished_at = new Date().toISOString();
+      console.error(`[AMAZON IMAP RECHECK] Manual job ${job.id} stopped:`, error.message || error);
+    } finally {
+      if (amazonManualRecheckPriority?.job_id === job.id) amazonManualRecheckPriority = null;
     }
   });
   return job;

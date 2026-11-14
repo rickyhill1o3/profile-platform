@@ -16,8 +16,12 @@ assert.match(tracker, /replaySinceAt,\s*force:true,\s*concurrency:1/, 'recheck m
 assert.match(tracker, /markAmazonGhostCandidates:false/, 'manual recheck must not turn an unmatched checkout into a ghost');
 assert.match(tracker, /setInterval\(runAmazonPendingSweep, AMAZON_PENDING_RECHECK_INTERVAL_MS\)/, 'recent pending Amazon orders must retry automatically');
 assert.match(tracker, /amazon_imap_recheck_last_at/, 'automatic retries need a durable per-order cooldown');
+assert.match(tracker, /amazonManualRecheckPriority/, 'manual Amazon rechecks need process-wide priority over background email work');
+assert.match(tracker, /manual_amazon_recheck_priority/, 'background email work must yield at a safe mailbox boundary');
+assert.match(tracker, /\[AMAZON IMAP RECHECK\] Manual request/, 'manual Amazon rechecks need an immediate Render log entry');
 assert.match(server, /order_id: order\?\.id \|\| null/, 'webhook rows must expose their source order for targeted IMAP rechecks');
 assert.match(admin, />Check Amazon IMAP<\/button>/, 'pending Amazon webhook rows need a manual IMAP button');
+assert.match(admin, /Waiting for email worker/, 'the manual button must explain when it is waiting behind background IMAP work');
 assert.match(admin, /<th>Time \(Eastern\)<\/th>/, 'webhook table must label its timezone');
 assert.match(trackerUi, /Recheck all pending Amazon IMAP/, 'Order Tracker needs the all-pending safety-net button');
 
