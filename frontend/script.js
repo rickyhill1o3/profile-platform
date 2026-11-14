@@ -4113,14 +4113,28 @@ function renderReleaseRecapSummary(summary = {}, { sent = false, targetCount = n
 function showReleaseRecapCopyActions(recap) {
     latestReleaseRecapData = recap || null;
     const actions = document.getElementById('releaseRecapCopyActions');
-    if (actions) actions.style.display = recap?.animation_url ? '' : 'none';
+    const copyButton = document.getElementById('copyReleaseRecapAnimationButton');
+    const downloadButton = document.getElementById('downloadReleaseRecapAnimationButton');
+    const status = document.getElementById('releaseRecapCopyStatus');
+    const hasAnimation = Boolean(String(recap?.animation_url || '').trim());
+    if (actions) actions.style.display = '';
+    if (copyButton) copyButton.disabled = !hasAnimation;
+    if (downloadButton) downloadButton.disabled = !hasAnimation;
+    if (status) {
+        status.textContent = hasAnimation
+            ? 'Latest generated GIF is ready to copy or download.'
+            : 'Latest generated GIF: send a recap to create it.';
+    }
 }
 
 async function loadLatestReleaseRecap() {
     const wrap = document.getElementById('releaseRecapPreview');
     if (!wrap) return;
     const data = await authJSON(API + '/admin/announcements/release-recap/latest');
-    if (!data.recap) return;
+    if (!data.recap) {
+        showReleaseRecapCopyActions(null);
+        return;
+    }
     showReleaseRecapCopyActions(data.recap);
     if (!releaseRecapPreviewData && data.recap.summary) renderReleaseRecapSummary(data.recap.summary, { sent: true, targetCount: data.recap.target_count });
 }

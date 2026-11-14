@@ -1043,9 +1043,10 @@ placeholder="Enter one SKU per line&#10;12345678&#10;87654321"></textarea>
                 <button class="btn btn-primary" id="sendReleaseRecapButton" type="button" onclick="sendReleaseRecap()" disabled>Send Recap to All Announcement Channels</button>
               </div>
               <div id="releaseRecapPreview" class="release-recap-preview subtle-text">Preview a release window before sending.</div>
-              <div class="panel-actions" id="releaseRecapCopyActions" style="display:none">
-                <button class="btn" type="button" onclick="copyReleaseRecapAnimationLink()">Copy Animation Link</button>
-                <button class="btn btn-primary" type="button" onclick="downloadReleaseRecapAnimation()">Download GIF for Discord</button>
+              <div class="panel-actions" id="releaseRecapCopyActions">
+                <span class="subtle-text" id="releaseRecapCopyStatus">Latest generated GIF: send a recap to create it.</span>
+                <button class="btn" id="copyReleaseRecapAnimationButton" type="button" onclick="copyReleaseRecapAnimationLink()" disabled>Copy GIF Link</button>
+                <button class="btn btn-primary" id="downloadReleaseRecapAnimationButton" type="button" onclick="downloadReleaseRecapAnimation()" disabled>Download GIF for Discord</button>
               </div>
               <div id="releaseRecapMessage" class="subtle-text"></div>
             </div>
