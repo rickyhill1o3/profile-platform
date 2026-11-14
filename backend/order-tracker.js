@@ -8,7 +8,6 @@ const { encrypt, decrypt } = require('./encryption');
 const { parseRetailEmail, expectedWebhookItems, matchScore, mainItemMatch, targetSingleLineDeliveryAlias, deriveOverallStatus, parseSupremeWebhookCheckoutAt, norm: reconcileNorm } = require('./retailer-reconciliation');
 const { registerDiscordHistoryImport } = require('./discord-history-import');
 const { registerDiscordCheckoutRecovery } = require('./discord-checkout-recovery');
-const { beginEmailHeavyWork, isTargetCatalogWorkActive } = require('./runtime-workload');
 
 
 function createGuardedImapFlow(options = {}, label = 'IMAP') {
@@ -33,7 +32,7 @@ async function disposeImapClient(client) {
 const SCAN_INTERVAL_MS = Math.max(60 * 1000, Number(process.env.IMAP_SCAN_INTERVAL_MS || 5 * 60 * 1000));
 const INITIAL_LOOKBACK_DAYS = Math.max(7, Number(process.env.IMAP_INITIAL_LOOKBACK_DAYS || 365));
 const INITIAL_SCAN_START = process.env.IMAP_INITIAL_SCAN_START || '2026-01-01T00:00:00.000Z';
-const MAX_MESSAGES_PER_SCAN = Math.max(25, Number(process.env.IMAP_MAX_MESSAGES_PER_SCAN || 75));
+const MAX_MESSAGES_PER_SCAN = Math.max(25, Number(process.env.IMAP_MAX_MESSAGES_PER_SCAN || 250));
 const MAX_ACCOUNTS_PER_CYCLE = Math.max(1, Number(process.env.IMAP_MAX_ACCOUNTS_PER_CYCLE || 50));
 const MIN_RESCAN_INTERVAL_MS = Math.max(0, Number(process.env.IMAP_MIN_RESCAN_INTERVAL_MS || 2 * 60 * 1000));
 const AMAZON_GHOST_GRACE_MS = Math.max(10 * 60 * 1000, Number(process.env.AMAZON_GHOST_GRACE_MS || 20 * 60 * 1000));
@@ -45,6 +44,26 @@ const AMAZON_EMAIL_MATCH_WINDOW_MS = Math.max(
   30 * 60 * 1000,
   Math.min(24 * 60 * 60 * 1000, Number(process.env.AMAZON_EMAIL_MATCH_WINDOW_MS || 6 * 60 * 60 * 1000))
 );
+// Amazon can deliver the confirmation well after the checkout webhook. A normal UID-based scan
+// cannot see that older time window again once another message advances the checkpoint, so a small
+// durable pending-order sweep replays only the exact affected mailbox. This is deliberately bounded
+// to recent Amazon orders and one mailbox at a time; it never starts a site-wide reconciliation.
+const AMAZON_PENDING_RECHECK_LOOKBACK_MS = Math.max(
+  6 * 60 * 60 * 1000,
+  Math.min(7 * 24 * 60 * 60 * 1000, Number(process.env.AMAZON_PENDING_RECHECK_LOOKBACK_MS || 36 * 60 * 60 * 1000))
+);
+const AMAZON_PENDING_RECHECK_INTERVAL_MS = Math.max(
+  5 * 60 * 1000,
+  Math.min(60 * 60 * 1000, Number(process.env.AMAZON_PENDING_RECHECK_INTERVAL_MS || 10 * 60 * 1000))
+);
+const AMAZON_PENDING_RECHECK_COOLDOWN_MS = Math.max(
+  5 * 60 * 1000,
+  Math.min(6 * 60 * 60 * 1000, Number(process.env.AMAZON_PENDING_RECHECK_COOLDOWN_MS || 15 * 60 * 1000))
+);
+const AMAZON_PENDING_RECHECK_MAX_ORDERS = Math.max(
+  1,
+  Math.min(100, Number(process.env.AMAZON_PENDING_RECHECK_MAX_ORDERS || 25))
+);
 const MACYS_EMAIL_MATCH_WINDOW_MS = Math.max(
   30 * 60 * 1000,
   Math.min(24 * 60 * 60 * 1000, Number(process.env.MACYS_EMAIL_MATCH_WINDOW_MS || 6 * 60 * 60 * 1000))
@@ -52,9 +71,9 @@ const MACYS_EMAIL_MATCH_WINDOW_MS = Math.max(
 const ORDER_REPAIR_FALLBACK_MAX_MESSAGES = Math.max(50, Math.min(5000, Number(process.env.ORDER_REPAIR_FALLBACK_MAX_MESSAGES || 1000)));
 const RECONCILE_IMAP_CONCURRENCY = Math.max(1, Math.min(4, Number(process.env.RECONCILE_IMAP_CONCURRENCY || 2)));
 // Keep full-account scans inside Render's memory budget. Retailer messages can contain very large
-// HTML/MIME bodies can exceed Render's 256 MB heap. The safe default parses one mailbox at a time;
-// larger services can opt into more workers with FULL_EMAIL_SCAN_CONCURRENCY.
-const FULL_EMAIL_SCAN_CONCURRENCY = Math.max(1, Math.min(6, Number(process.env.FULL_EMAIL_SCAN_CONCURRENCY || 1)));
+// HTML/MIME bodies, so eight simultaneous parsers can restart the service before the browser sees
+// a completed job. Three workers still cover the whole mailbox inventory without the memory spike.
+const FULL_EMAIL_SCAN_CONCURRENCY = Math.max(1, Math.min(6, Number(process.env.FULL_EMAIL_SCAN_CONCURRENCY || 3)));
 const IMAP_ACCOUNT_SCAN_DEADLINE_MS = Math.max(30000, Math.min(10 * 60 * 1000, Number(process.env.IMAP_ACCOUNT_SCAN_DEADLINE_MS || 120000)));
 // Manual reconcile is an incremental catch-up pass, not a request to hydrate years of mail into
 // one process. Every connected mailbox is visited, while at most this many new messages are parsed
@@ -65,8 +84,8 @@ const RECONCILE_MAX_MESSAGES_PER_MAILBOX = Math.max(25, Math.min(500, Number(pro
 // With --expose-gc (see package.json), the explicit collection prevents a long scan from slowly
 // filling a small Render instance even when most inboxes contain only one new message.
 const RECONCILE_MEMORY_BATCH_SIZE = Math.max(
-  1,
-  Math.min(100, Number(process.env.RECONCILE_MEMORY_BATCH_SIZE || 4))
+  5,
+  Math.min(100, Number(process.env.RECONCILE_MEMORY_BATCH_SIZE || 20))
 );
 // Target exact-order repair deliberately advances one physical mailbox at a time. A mailbox may
 // contain several Target orders, but only one MIME/IMAP connection is allowed in a repair batch so
@@ -103,6 +122,8 @@ const userScanJobs = new Map();
 const retailerReconcileJobs = new Map();
 let checkoutScanRuntime = null;
 const checkoutScanTimers = new Map();
+const amazonPendingRecheckJobs = new Map();
+let amazonPendingRecheckRunning = false;
 let historicalRepairRunning = false;
 let historicalRepairCandidateCursor = 0;
 const orderEmailRepairJobs = new Map();
@@ -160,15 +181,14 @@ async function acquireEmailHeavyWork(owner, options = {}) {
   const shouldWait = options.wait === true;
   const timeoutMs = Math.max(1000, Number(options.timeoutMs || 30 * 60 * 1000));
   const startedAt = Date.now();
-  while (emailHeavyWorkLease || isTargetCatalogWorkActive()) {
+  while (emailHeavyWorkLease) {
     if (!shouldWait || Date.now() - startedAt >= timeoutMs) return null;
     if (typeof options.onWait === 'function') {
-      try { options.onWait({ owner:emailHeavyWorkLease?.owner || 'target-catalog-scan', waitedMs:Date.now() - startedAt }); } catch (_) {}
+      try { options.onWait({ owner:emailHeavyWorkLease.owner, waitedMs:Date.now() - startedAt }); } catch (_) {}
     }
     await waitMs(1000);
   }
   const token = crypto.randomUUID();
-  const releaseRuntimeWork = beginEmailHeavyWork();
   emailHeavyWorkLease = { token, owner:clean(owner || 'email-work'), started_at:new Date().toISOString() };
   let released = false;
   return {
@@ -178,7 +198,6 @@ async function acquireEmailHeavyWork(owner, options = {}) {
       if (released) return;
       released = true;
       if (emailHeavyWorkLease?.token === token) emailHeavyWorkLease = null;
-      releaseRuntimeWork();
     }
   };
 }
@@ -4055,7 +4074,9 @@ async function scanImportedAccount(supabase, account, adjustCredits = null, onPr
     const now=new Date().toISOString();
     await supabase.from('imported_mail_accounts').update({folder_state:folderState,last_scan_at:now,last_success_at:now,last_error:null,status:'connected',updated_at:now}).eq('id',account.imported_account_id);
     await upsertScanState(supabase,account,{last_scan_at:now,last_success_at:now,last_error:null,is_enabled:true,scan_started_at:started,scanned_through_at:now,initial_scan_start_at:INITIAL_SCAN_START});
-    if (!morePending) await markAmazonGhostCandidates(supabase, account).catch(()=>{});
+    if (!morePending && options.markAmazonGhostCandidates !== false) {
+      await markAmazonGhostCandidates(supabase, account).catch(()=>{});
+    }
     console.log(`[DIRECT IMAP] COMPLETE ${account.email} checked=${checked} archived=${archived} linked=${saved} folders=${folders.length}`);
     return {checked,total,saved,archived,folders:folders.length,more_pending:morePending};
   } catch(err) {
@@ -4128,7 +4149,9 @@ async function scanAccount(supabase, account, adjustCredits = null, onProgress =
       if (!uids.length) {
         const now = new Date().toISOString();
         await upsertScanState(supabase, account, { last_scan_at: now, last_success_at: now, last_error: null, is_enabled: true, scan_started_at: scanStartedAt, scanned_through_at: now, initial_scan_start_at: state.initial_scan_start_at || INITIAL_SCAN_START });
-        await markAmazonGhostCandidates(supabase, account).catch(()=>{});
+        if (options.markAmazonGhostCandidates !== false) {
+          await markAmazonGhostCandidates(supabase, account).catch(()=>{});
+        }
         if (onProgress) onProgress({ checked: 0, total: 0, saved: 0, archived: 0 });
         return { checked: 0, total: 0, saved: 0, archived: 0 };
       }
@@ -4156,7 +4179,9 @@ async function scanAccount(supabase, account, adjustCredits = null, onProgress =
     } finally { lock.release(); }
     const now = new Date().toISOString();
     await upsertScanState(supabase, account, { last_scan_at: now, last_success_at: now, last_error: null, last_seen_uid: highestUid, is_enabled: true, scan_started_at: scanStartedAt, scanned_through_at: now, initial_scan_start_at: state.initial_scan_start_at || INITIAL_SCAN_START });
-    if (!morePending) await markAmazonGhostCandidates(supabase, account).catch(()=>{});
+    if (!morePending && options.markAmazonGhostCandidates !== false) {
+      await markAmazonGhostCandidates(supabase, account).catch(()=>{});
+    }
     return { checked, total, saved, archived, more_pending:morePending };
   } catch (err) {
     const effectiveError = deadlineExpired ? new Error(`Mailbox scan exceeded ${Math.round(deadlineMs/1000)} seconds.`) : err;
@@ -5626,7 +5651,7 @@ async function scanAll(supabase, userId = null, adjustCredits = null, onProgress
     };
     const memoryBatchSize = options.memorySafeBatches === false
       ? Math.max(1, pendingEntries.length)
-      : (!userId ? 1 : RECONCILE_MEMORY_BATCH_SIZE);
+      : RECONCILE_MEMORY_BATCH_SIZE;
     for (let batchStart = 0; batchStart < pendingEntries.length; batchStart += memoryBatchSize) {
       const batchEntries = pendingEntries.slice(batchStart, batchStart + memoryBatchSize);
       let nextBatchIndex = 0;
@@ -5661,6 +5686,293 @@ async function scanAll(supabase, userId = null, adjustCredits = null, onProgress
     if (!userId) scanRunning = false;
     lease.release();
   }
+}
+
+function pendingAmazonVerification(row = {}) {
+  const metadata = row.metadata || {};
+  const status = lower(row.status || metadata.confirmation_status);
+  if (metadata.email_verified_at || Number(row.credits_charged || 0) > 0) return false;
+  return status === 'pending_email_verification' || metadata.email_verification_required === true;
+}
+
+function amazonPendingRecheckJobView(job) {
+  if (!job) return { status:'idle' };
+  return {
+    id:job.id,
+    status:job.status,
+    stage:job.stage || 'preparing',
+    percent:Number(job.percent || 0),
+    message:job.message || '',
+    started_at:job.started_at || null,
+    finished_at:job.finished_at || null,
+    error:job.error || null,
+    pending_found:Number(job.pending_found || 0),
+    mailboxes_total:Number(job.mailboxes_total || 0),
+    mailboxes_completed:Number(job.mailboxes_completed || 0),
+    result:job.status === 'complete' ? (job.result || null) : null
+  };
+}
+
+function amazonCheckoutMailboxCandidates(order = {}, trackedEmail = '') {
+  const values = new Set();
+  const add = value => {
+    const email = lower(value);
+    if (email && email.includes('@')) values.add(email);
+  };
+  const metadata = order.metadata || {};
+  [
+    trackedEmail,
+    metadata.checkout_account_email,
+    metadata.account_email,
+    metadata.purchase_email,
+    metadata.login_email,
+    metadata.email,
+    findNamedPayloadValue(order.raw_payload || {}, ['checkoutaccountemail','accountemail','purchaseemail','loginemail','email','account'])
+  ].forEach(add);
+  for (const email of findEmailValues(order.raw_payload || {})) add(email);
+  for (const email of findEmailValues(metadata)) add(email);
+  return values;
+}
+
+async function loadPendingAmazonVerificationOrders(supabase, options = {}) {
+  const lookbackMs = Math.max(60 * 60 * 1000, Number(options.lookbackMs || AMAZON_PENDING_RECHECK_LOOKBACK_MS));
+  const maxOrders = Math.max(1, Math.min(100, Number(options.maxOrders || AMAZON_PENDING_RECHECK_MAX_ORDERS)));
+  const since = new Date(Date.now() - lookbackMs).toISOString();
+  let query = supabase.from('orders')
+    .select('id,user_id,site,status,credits_charged,created_at,external_order_id,metadata,raw_payload')
+    .gte('created_at', since)
+    .order('created_at', { ascending:true })
+    .limit(1000);
+  if (options.userId) query = query.eq('user_id', options.userId);
+  const response = await query;
+  if (response.error) throw response.error;
+  const now = Date.now();
+  const requestedOrderIds = new Set((Array.isArray(options.orderIds) ? options.orderIds : []).map(String).filter(Boolean));
+  return (response.data || []).filter(order => {
+    if (requestedOrderIds.size && !requestedOrderIds.has(String(order.id))) return false;
+    if (normalizeStoreKey(order.site || order.metadata?.site || findNamedPayloadValue(order.raw_payload || {}, ['site','store'])) !== 'amazon') return false;
+    if (!pendingAmazonVerification(order)) return false;
+    if (options.ignoreCooldown === true) return true;
+    const lastAttempt = new Date(order.metadata?.amazon_imap_recheck_last_at || 0).getTime();
+    return !Number.isFinite(lastAttempt) || lastAttempt <= 0 || now - lastAttempt >= AMAZON_PENDING_RECHECK_COOLDOWN_MS;
+  }).slice(0, maxOrders);
+}
+
+async function stampPendingAmazonRecheck(supabase, orders = [], detail = {}) {
+  const attemptedAt = new Date().toISOString();
+  for (const order of orders) {
+    const metadata = {
+      ...(order.metadata || {}),
+      amazon_imap_recheck_last_at:attemptedAt,
+      amazon_imap_recheck_attempts:Number(order.metadata?.amazon_imap_recheck_attempts || 0) + 1,
+      amazon_imap_recheck_last_result:clean(detail.result || 'scanned').slice(0, 120),
+      amazon_imap_recheck_last_error:detail.error ? clean(detail.error).slice(0, 500) : null
+    };
+    try {
+      // Do not overwrite metadata if an overlapping IMAP pass finalized the checkout while this
+      // audit stamp was being prepared. Matching the status observed at load time makes the write
+      // safe for both pending rows and older ghost-marked rows.
+      await supabase.from('orders').update({ metadata }).eq('id', order.id).eq('status', order.status);
+    } catch (_) {}
+  }
+}
+
+async function countPendingAmazonRecheckResults(supabase, sourceOrders = []) {
+  const ids = sourceOrders.map(order => order.id).filter(Boolean);
+  const current = [];
+  for (let i = 0; i < ids.length; i += 100) {
+    const response = await supabase.from('orders')
+      .select('id,status,credits_charged,metadata')
+      .in('id', ids.slice(i, i + 100));
+    if (response.error) throw response.error;
+    current.push(...(response.data || []));
+  }
+  const pending = current.filter(pendingAmazonVerification).length;
+  return { confirmed:Math.max(0, ids.length - pending), pending };
+}
+
+async function runPendingAmazonVerificationRecheck(
+  supabase,
+  adjustCredits,
+  confirmPendingAmazonCheckout,
+  options = {}
+) {
+  if (amazonPendingRecheckRunning && options.waitForExisting === true) {
+    const waitStartedAt = Date.now();
+    while (amazonPendingRecheckRunning && Date.now() - waitStartedAt < 20 * 60 * 1000) {
+      if (options.job) options.job.message = 'Another small Amazon mailbox recheck is finishing; this request is next…';
+      await waitMs(1000);
+    }
+  }
+  if (amazonPendingRecheckRunning) return { skipped:true, reason:'amazon_recheck_running' };
+  amazonPendingRecheckRunning = true;
+  const job = options.job || null;
+  try {
+    const pendingOrders = await loadPendingAmazonVerificationOrders(supabase, options);
+    if (job) {
+      job.pending_found = pendingOrders.length;
+      job.stage = 'mapping_mailboxes';
+      job.percent = pendingOrders.length ? 8 : 100;
+      job.message = pendingOrders.length
+        ? `Found ${pendingOrders.length} pending Amazon checkout${pendingOrders.length === 1 ? '' : 's'}; locating the exact checkout mailboxes…`
+        : 'No recent pending Amazon checkout needs another IMAP pass.';
+    }
+    if (!pendingOrders.length) return { pending_found:0, confirmed:0, still_pending:0, mailboxes_scanned:0, mailbox_failures:0, missing_mailbox:0, details:[] };
+
+    const trackedEmailBySource = new Map();
+    const sourceIds = pendingOrders.map(order => order.id).filter(Boolean);
+    for (let i = 0; i < sourceIds.length; i += 100) {
+      const response = await supabase.from('tracked_orders')
+        .select('source_order_id,source_email')
+        .in('source_order_id', sourceIds.slice(i, i + 100));
+      if (!response.error) {
+        for (const tracked of response.data || []) {
+          if (tracked.source_order_id && tracked.source_email) trackedEmailBySource.set(String(tracked.source_order_id), lower(tracked.source_email));
+        }
+      }
+    }
+
+    const groups = new Map();
+    const unmapped = [];
+    const ordersByUser = new Map();
+    for (const order of pendingOrders) {
+      const key = String(order.user_id || '');
+      if (!ordersByUser.has(key)) ordersByUser.set(key, []);
+      ordersByUser.get(key).push(order);
+    }
+    for (const [userId, userOrders] of ordersByUser.entries()) {
+      if (!userId) { unmapped.push(...userOrders); continue; }
+      const accounts = await loadScanAccounts(supabase, userId);
+      const accountByEmail = new Map(accounts.map(account => [lower(account.email), account]));
+      for (const order of userOrders) {
+        const candidates = amazonCheckoutMailboxCandidates(order, trackedEmailBySource.get(String(order.id)) || '');
+        const matchedEmails = [...candidates].filter(email => accountByEmail.has(email));
+        if (!matchedEmails.length) {
+          unmapped.push(order);
+          continue;
+        }
+        for (const email of matchedEmails) {
+          const key = `${userId}:${email}`;
+          if (!groups.has(key)) groups.set(key, { userId, email, orders:[] });
+          groups.get(key).orders.push(order);
+        }
+      }
+    }
+
+    if (job) {
+      job.mailboxes_total = groups.size;
+      job.stage = 'scanning';
+      job.message = groups.size
+        ? `Replaying ${groups.size} exact Amazon mailbox time window${groups.size === 1 ? '' : 's'}…`
+        : 'The pending checkouts do not have a matching connected IMAP mailbox.';
+    }
+
+    const details = [];
+    let completed = 0;
+    for (const group of groups.values()) {
+      const earliest = Math.min(...group.orders.map(order => new Date(order.created_at || Date.now()).getTime()).filter(Number.isFinite));
+      const replaySinceAt = new Date((Number.isFinite(earliest) ? earliest : Date.now()) - 15 * 60 * 1000).toISOString();
+      let result;
+      try {
+        result = await scanAll(supabase, group.userId, adjustCredits, null, confirmPendingAmazonCheckout, {
+          onlyMailboxEmails:[group.email],
+          replaySinceAt,
+          force:true,
+          concurrency:1,
+          maxMessagesPerMailbox:750,
+          mailboxDeadlineMs:3 * 60 * 1000,
+          markAmazonGhostCandidates:false,
+          waitForEmailWork:options.waitForEmailWork === true,
+          emailWorkWaitMs:20 * 60 * 1000,
+          onEmailWorkWait:() => {
+            if (job) job.message = 'Waiting for the current mailbox batch to release the email worker; this Amazon recheck will start next…';
+          }
+        });
+        const mailboxResult = Array.isArray(result?.results) ? result.results[0] : null;
+        const error = mailboxResult?.error || (result?.skipped ? result.reason : '');
+        details.push({
+          mailbox:group.email,
+          orders:group.orders.length,
+          checked:Number(result?.checked || 0),
+          linked:Number(result?.saved || 0),
+          error:error || null
+        });
+        await stampPendingAmazonRecheck(supabase, group.orders, {
+          result:error ? 'failed' : (result?.skipped ? 'deferred' : 'scanned'),
+          error
+        });
+      } catch (error) {
+        details.push({ mailbox:group.email, orders:group.orders.length, checked:0, linked:0, error:error.message || String(error) });
+        await stampPendingAmazonRecheck(supabase, group.orders, { result:'failed', error:error.message || String(error) });
+      }
+      completed++;
+      if (job) {
+        job.mailboxes_completed = completed;
+        job.percent = 10 + Math.round((completed / Math.max(1, groups.size)) * 82);
+        job.message = `Checked Amazon mailbox ${completed} of ${groups.size}; verifying which pending checkouts finalized…`;
+      }
+      await releaseMailboxBatchMemory();
+    }
+
+    if (unmapped.length) await stampPendingAmazonRecheck(supabase, unmapped, { result:'mailbox_not_connected' });
+    const counts = await countPendingAmazonRecheckResults(supabase, pendingOrders);
+    return {
+      pending_found:pendingOrders.length,
+      confirmed:counts.confirmed,
+      still_pending:counts.pending,
+      mailboxes_scanned:details.filter(detail => !detail.error).length,
+      mailbox_failures:details.filter(detail => detail.error).length,
+      missing_mailbox:unmapped.length,
+      details
+    };
+  } finally {
+    amazonPendingRecheckRunning = false;
+  }
+}
+
+function startPendingAmazonRecheckJob(supabase, adjustCredits, confirmPendingAmazonCheckout, options = {}) {
+  const orderIds = [...new Set((Array.isArray(options.orderIds) ? options.orderIds : []).map(String).filter(Boolean))];
+  const key = orderIds.length ? `orders:${orderIds.sort().join(',')}` : 'all-pending';
+  const current = [...amazonPendingRecheckJobs.values()].find(item => item.status === 'running' && item.key === key);
+  if (current?.status === 'running') return current;
+  const job = {
+    id:crypto.randomUUID(),
+    key,
+    status:'running',
+    stage:'preparing',
+    percent:2,
+    message:'Loading recent pending Amazon checkouts…',
+    started_at:new Date().toISOString(),
+    pending_found:0,
+    mailboxes_total:0,
+    mailboxes_completed:0
+  };
+  amazonPendingRecheckJobs.set(job.id, job);
+  setImmediate(async () => {
+    try {
+      job.result = await runPendingAmazonVerificationRecheck(supabase, adjustCredits, confirmPendingAmazonCheckout, {
+        job,
+        ignoreCooldown:true,
+        lookbackMs:72 * 60 * 60 * 1000,
+        maxOrders:100,
+        waitForEmailWork:true,
+        waitForExisting:true,
+        orderIds
+      });
+      job.status = 'complete';
+      job.stage = 'complete';
+      job.percent = 100;
+      job.finished_at = new Date().toISOString();
+      job.message = `Amazon recheck complete: ${job.result.confirmed || 0} checkout${Number(job.result.confirmed || 0) === 1 ? '' : 's'} confirmed; ${job.result.still_pending || 0} still waiting for a matching Amazon email.`;
+    } catch (error) {
+      job.status = 'error';
+      job.stage = 'error';
+      job.error = error.message || String(error);
+      job.message = 'The pending Amazon recheck stopped before completion.';
+      job.finished_at = new Date().toISOString();
+    }
+  });
+  return job;
 }
 
 function scanJobView(job) {
@@ -7595,6 +7907,27 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
     } catch(e){res.status(500).json({error:e.message||String(e)});}
   });
 
+  app.post('/orders/amazon-pending-recheck/start', auth, async (req, res) => {
+    if (req.role !== 'super_admin') return res.status(403).json({ error:'Super admin only.' });
+    try {
+      const orderId = clean(req.body?.order_id || '');
+      const job = startPendingAmazonRecheckJob(supabase, adjustUserCredits, confirmPendingAmazonCheckout, {
+        orderIds:orderId ? [orderId] : []
+      });
+      res.status(job.status === 'running' ? 202 : 200).json({ success:true, job:amazonPendingRecheckJobView(job) });
+    } catch (error) {
+      res.status(500).json({ error:error.message || String(error) });
+    }
+  });
+
+  app.get('/orders/amazon-pending-recheck/status', auth, async (req, res) => {
+    if (req.role !== 'super_admin') return res.status(403).json({ error:'Super admin only.' });
+    const requestedId = clean(req.query?.job_id || '');
+    const requested = requestedId ? amazonPendingRecheckJobs.get(requestedId) : null;
+    const latest = requested || [...amazonPendingRecheckJobs.values()].sort((a,b) => new Date(b.started_at || 0) - new Date(a.started_at || 0))[0];
+    res.json({ job:amazonPendingRecheckJobView(latest) });
+  });
+
   app.post('/orders/scan/start', auth, async (req, res) => {
     try {
       const job = startUserScanJob(supabase, req.user_id, adjustUserCredits, confirmPendingAmazonCheckout);
@@ -8470,6 +8803,26 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
   if (process.env.IMAP_ORDER_TRACKER_ENABLED !== 'false') {
     setTimeout(() => scanAll(supabase, null, adjustUserCredits, null, confirmPendingAmazonCheckout).catch(e => console.error('Initial IMAP order scan failed:', e.message)), 30000);
     setInterval(() => scanAll(supabase, null, adjustUserCredits, null, confirmPendingAmazonCheckout).catch(e => console.error('Scheduled IMAP order scan failed:', e.message)), SCAN_INTERVAL_MS);
+
+    const runAmazonPendingSweep = () => runPendingAmazonVerificationRecheck(
+      supabase,
+      adjustUserCredits,
+      confirmPendingAmazonCheckout,
+      {
+        maxOrders:AMAZON_PENDING_RECHECK_MAX_ORDERS,
+        lookbackMs:AMAZON_PENDING_RECHECK_LOOKBACK_MS,
+        waitForEmailWork:false
+      }
+    ).then(result => {
+      if (!result?.skipped && Number(result?.pending_found || 0) > 0) {
+        console.log(`[AMAZON IMAP RECHECK] pending=${result.pending_found} confirmed=${result.confirmed} still_pending=${result.still_pending} mailboxes=${result.mailboxes_scanned} failures=${result.mailbox_failures}`);
+      }
+    }).catch(error => console.error('[AMAZON IMAP RECHECK] failed:', error.message || error));
+    // Start after the initial lightweight mailbox cycle, then keep revisiting only recent pending
+    // Amazon checkout windows. The per-order cooldown is stored in metadata, so Render restarts do
+    // not cause the same inbox to be hammered repeatedly.
+    setTimeout(runAmazonPendingSweep, 2 * 60 * 1000);
+    setInterval(runAmazonPendingSweep, AMAZON_PENDING_RECHECK_INTERVAL_MS);
 
     // Slowly repair historical orders whose checkout email was recovered after their normal
     // IMAP checkpoint had already moved past the old message. The repair searches only for the

@@ -3858,9 +3858,6 @@ async function initCatalogTools() {
             let updated = 0;
             let unchanged = 0;
             let skippedGrouped = 0;
-            let pricesFound = 0;
-            let pricesUpdated = 0;
-            let connectionRetries = 0;
             const failures = [];
             targetCatalogRescanAllButton.disabled = true;
             targetCatalogRescanAllButton.textContent = resuming ? 'Resuming Target rescan...' : 'Rescanning Target catalog...';
@@ -3870,39 +3867,14 @@ async function initCatalogTools() {
                     if (targetCatalogRescanAllProgress) {
                         targetCatalogRescanAllProgress.textContent = `${resuming ? 'Resuming' : 'Scanning'} at product ${offset + 1}... Updated ${updated}; unchanged ${unchanged}; failed ${failures.length}.`;
                     }
-                    let data;
-                    for (;;) {
-                        try {
-                            data = await authJSON(API + '/admin/catalog-products/rescan-target-batch', {
-                                method: 'POST',
-                                body: JSON.stringify({ offset, limit: 1 })
-                            });
-                            connectionRetries = 0;
-                            break;
-                        } catch (batchError) {
-                            const batchMessage = String(batchError?.message || batchError);
-                            const waitingForEmail = batchMessage.includes('Target requested priority') || batchMessage.includes('waiting for the current email scan');
-                            const connectionDropped = /failed to fetch|networkerror|load failed|network request failed/i.test(batchMessage);
-                            if (!waitingForEmail && !connectionDropped) throw batchError;
-                            if (connectionDropped) connectionRetries += 1;
-                            if (connectionRetries > 12) {
-                                throw new Error('Render did not recover after 12 connection retries. Open the latest Render log to check for an out-of-memory restart.');
-                            }
-                            const retryDelay = waitingForEmail ? 10000 : 30000;
-                            if (targetCatalogRescanAllProgress) {
-                                targetCatalogRescanAllProgress.textContent = waitingForEmail
-                                    ? 'Stopping the email scan after its current mailbox; the same Target product will retry in 10 seconds...'
-                                    : `The Render connection restarted while opening Target. The same Target product will retry automatically in 30 seconds (${connectionRetries}/12)...`;
-                            }
-                            await new Promise((resolve) => setTimeout(resolve, retryDelay));
-                        }
-                    }
+                    const data = await authJSON(API + '/admin/catalog-products/rescan-target-batch', {
+                        method: 'POST',
+                        body: JSON.stringify({ offset, limit: 6 })
+                    });
                     added += Number(data.added || 0);
                     updated += Number(data.updated || 0);
                     unchanged += Number(data.unchanged || 0);
                     skippedGrouped += Number(data.skipped_grouped || 0);
-                    pricesFound += Number(data.prices_found || 0);
-                    pricesUpdated += Number(data.prices_updated || 0);
                     if (Array.isArray(data.failed)) failures.push(...data.failed);
                     offset = Number(data.next_offset || offset);
                     done = !!data.done || Number(data.processed || 0) === 0;
@@ -3913,12 +3885,12 @@ async function initCatalogTools() {
                 }
                 localStorage.removeItem(checkpointKey);
                 const failureSuffix = failures.length
-                    ? ` ${failures.length} need manual review: ${failures.slice(0, 8).map((row) => row.sku).join(', ')}${failures.length > 8 ? '…' : ''}. First lookup error: ${String(failures[0]?.error || 'Unknown Target lookup error').slice(0, 240)}.`
+                    ? ` ${failures.length} need manual review: ${failures.slice(0, 8).map((row) => row.sku).join(', ')}${failures.length > 8 ? '…' : ''}.`
                     : '';
                 if (targetCatalogRescanAllProgress) {
-                    targetCatalogRescanAllProgress.textContent = `Target catalog rescan finished: retail prices found for ${pricesFound} products and ${pricesUpdated} prices changed. ${added} added, ${updated} updated, ${unchanged} already current, ${skippedGrouped} grouped SKU rows skipped.${failureSuffix}`;
+                    targetCatalogRescanAllProgress.textContent = `Target catalog rescan finished: ${added} added, ${updated} updated, ${unchanged} already current, ${skippedGrouped} grouped SKU rows skipped.${failureSuffix}`;
                 }
-                message.textContent = `Target catalog rescan complete. Retail prices were found for ${pricesFound} products; ${pricesUpdated} saved prices changed.`;
+                message.textContent = `Target catalog rescan complete. ${updated} products updated and ${unchanged} left unchanged.`;
                 await loadCatalogProducts();
             } catch (err) {
                 localStorage.setItem(checkpointKey, String(offset));
@@ -4083,7 +4055,7 @@ function renderReleaseRecapSummary(summary = {}, { sent = false, targetCount = n
     const wrap = document.getElementById('releaseRecapPreview');
     if (!wrap) return;
     const products = Array.isArray(summary.products) ? summary.products : [];
-    const warning = Number(summary.unresolved_checkout_count || 0) > 0;
+    const warning = Number(summary.unresolved_checkout_count || 0) > 0 || Number(summary.catalog_estimated_checkout_count || 0) > 0;
     wrap.className = `release-recap-preview ${warning ? 'is-warning' : 'is-ready'}`;
     if (!Number(summary.checkout_count || 0)) {
         wrap.innerHTML = '<strong>No successful checkouts found.</strong><div>Adjust the release window and preview again.</div>';
@@ -4094,14 +4066,14 @@ function renderReleaseRecapSummary(summary = {}, { sent = false, targetCount = n
         return `<div class="release-recap-product">${image ? `<img src="${escapeHTML(image)}" alt="" onerror="this.style.display='none'" />` : ''}<div><strong>${escapeHTML(product.product || product.sku || 'Checkout product')}</strong><span>${Number(product.item_count || 0)} item${Number(product.item_count || 0) === 1 ? '' : 's'} • ${Number(product.checkout_count || 0)} checkout${Number(product.checkout_count || 0) === 1 ? '' : 's'}</span></div></div>`;
     }).join('');
     const pricingNote = warning
-        ? `<div class="banner banner-soft"><strong>${Number(summary.unresolved_checkout_count || 0)} checkout${Number(summary.unresolved_checkout_count || 0) === 1 ? '' : 's'} still need a saved order total or Target retail price.</strong> They are not included in the displayed total yet.</div>`
-        : `<div class="banner banner--success"><strong>Total spend is ready.</strong> Saved order totals are used first, with saved Target retail prices filling any checkout that does not have an order total.</div>`;
+        ? `<div class="banner banner-soft"><strong>Pricing check:</strong> ${Number(summary.retailer_confirmed_checkout_count || 0)} checkout total${Number(summary.retailer_confirmed_checkout_count || 0) === 1 ? '' : 's'} came from IMAP-confirmed orders. ${Number(summary.catalog_estimated_checkout_count || 0)} used saved catalog pricing, and ${Number(summary.unresolved_checkout_count || 0)} still could not be fully priced.</div>`
+        : `<div class="banner banner--success"><strong>All spend is retailer-confirmed.</strong> These totals came from the order tracker, including tax and shipping when saved on the order.</div>`;
     wrap.innerHTML = `
         <div class="release-recap-stats">
           <div class="release-recap-stat"><span>Total spend</span><strong>${escapeHTML(releaseRecapMoney(summary.total_spend))}</strong></div>
-          <div class="release-recap-stat"><span>Checkouts</span><strong>${Number(summary.checkout_count || 0)}</strong></div>
-          <div class="release-recap-stat"><span>Items</span><strong>${Number(summary.item_count || 0)}</strong></div>
-          <div class="release-recap-stat"><span>Unique products</span><strong>${Number(summary.unique_product_count || 0)}</strong></div>
+          <div class="release-recap-stat"><span>IMAP confirmed</span><strong>${escapeHTML(releaseRecapMoney(summary.retailer_confirmed_spend))}</strong></div>
+          <div class="release-recap-stat"><span>Catalog estimate</span><strong>${escapeHTML(releaseRecapMoney(summary.catalog_estimated_spend))}</strong></div>
+          <div class="release-recap-stat"><span>Checkouts / items</span><strong>${Number(summary.checkout_count || 0)} / ${Number(summary.item_count || 0)}</strong></div>
         </div>
         <strong>${sent ? 'Latest sent recap' : 'Preview'} • ${escapeHTML(summary.range_label || 'Selected release window')}</strong>
         ${targetCount === null ? '' : `<div class="subtle-text">${Number(targetCount || 0)} announcement channel${Number(targetCount || 0) === 1 ? '' : 's'} will receive this recap.</div>`}
@@ -4113,28 +4085,14 @@ function renderReleaseRecapSummary(summary = {}, { sent = false, targetCount = n
 function showReleaseRecapCopyActions(recap) {
     latestReleaseRecapData = recap || null;
     const actions = document.getElementById('releaseRecapCopyActions');
-    const copyButton = document.getElementById('copyReleaseRecapAnimationButton');
-    const downloadButton = document.getElementById('downloadReleaseRecapAnimationButton');
-    const status = document.getElementById('releaseRecapCopyStatus');
-    const hasAnimation = Boolean(String(recap?.animation_url || '').trim());
-    if (actions) actions.style.display = '';
-    if (copyButton) copyButton.disabled = !hasAnimation;
-    if (downloadButton) downloadButton.disabled = !hasAnimation;
-    if (status) {
-        status.textContent = hasAnimation
-            ? 'Latest generated GIF is ready to copy or download.'
-            : 'Latest generated GIF: send a recap to create it.';
-    }
+    if (actions) actions.style.display = recap?.animation_url ? '' : 'none';
 }
 
 async function loadLatestReleaseRecap() {
     const wrap = document.getElementById('releaseRecapPreview');
     if (!wrap) return;
     const data = await authJSON(API + '/admin/announcements/release-recap/latest');
-    if (!data.recap) {
-        showReleaseRecapCopyActions(null);
-        return;
-    }
+    if (!data.recap) return;
     showReleaseRecapCopyActions(data.recap);
     if (!releaseRecapPreviewData && data.recap.summary) renderReleaseRecapSummary(data.recap.summary, { sent: true, targetCount: data.recap.target_count });
 }
@@ -4191,39 +4149,18 @@ async function sendReleaseRecap() {
     }
 }
 
+async function copyReleaseRecapPost() {
+    const msg = document.getElementById('releaseRecapMessage');
+    if (!latestReleaseRecapData?.share_text) return;
+    await copyTextToClipboard(latestReleaseRecapData.share_text);
+    if (msg) msg.textContent = 'Recap post copied. Paste it into another Discord to share the animated post.';
+}
+
 async function copyReleaseRecapAnimationLink() {
     const msg = document.getElementById('releaseRecapMessage');
     if (!latestReleaseRecapData?.animation_url) return;
     await copyTextToClipboard(latestReleaseRecapData.animation_url);
-    if (msg) msg.textContent = 'Animation link copied. It will preview in a normal Discord message with Embed Links enabled, but another bot cannot expand a link inside its own embed. Use Download GIF for Discord in that case.';
-}
-
-async function downloadReleaseRecapAnimation() {
-    const msg = document.getElementById('releaseRecapMessage');
-    const animationUrl = String(latestReleaseRecapData?.animation_url || '').trim();
-    if (!animationUrl) return;
-    try {
-        if (msg) msg.textContent = 'Downloading the animation file...';
-        const response = await fetch(animationUrl, { mode: 'cors', cache: 'no-store' });
-        if (!response.ok) throw new Error(`Animation download failed (HTTP ${response.status}).`);
-        const sourceBlob = await response.blob();
-        const gifBlob = sourceBlob.type === 'image/gif'
-            ? sourceBlob
-            : new Blob([await sourceBlob.arrayBuffer()], { type: 'image/gif' });
-        const objectUrl = URL.createObjectURL(gifBlob);
-        const anchor = document.createElement('a');
-        const datePart = String(latestReleaseRecapData?.from || new Date().toISOString()).slice(0, 10);
-        anchor.href = objectUrl;
-        anchor.download = `shore-shack-release-recap-${datePart}.gif`;
-        document.body.appendChild(anchor);
-        anchor.click();
-        anchor.remove();
-        setTimeout(() => URL.revokeObjectURL(objectUrl), 15000);
-        if (msg) msg.textContent = 'GIF downloaded. Upload that file directly in the other Discord and the animation will appear instead of a link.';
-    } catch (error) {
-        if (msg) msg.textContent = `${error.message || 'Could not download the GIF.'} The direct animation link was opened in a new tab so you can save it manually.`;
-        window.open(animationUrl, '_blank', 'noopener,noreferrer');
-    }
+    if (msg) msg.textContent = 'Animation link copied.';
 }
 
 
@@ -4396,6 +4333,75 @@ function escapeHtml(value = '') {
         .replace(/'/g, '&#39;');
 }
 
+function parseWebhookUtcTimestamp(value) {
+    const raw = String(value || '').trim();
+    if (!raw) return null;
+    // Supabase timestamps are UTC. Older webhook rows were saved without a trailing Z, which makes
+    // browsers interpret 18:36 as 6:36 PM local instead of converting it to 1:36 PM Eastern.
+    const normalized = /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?$/.test(raw) ? `${raw.replace(' ', 'T')}Z` : raw;
+    const date = new Date(normalized);
+    return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function formatWebhookEasternTime(value) {
+    const date = parseWebhookUtcTimestamp(value);
+    if (!date) return String(value || '-');
+    return new Intl.DateTimeFormat('en-US', {
+        timeZone: 'America/New_York',
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: 'numeric',
+        minute: '2-digit',
+        second: '2-digit',
+        timeZoneName: 'short'
+    }).format(date);
+}
+
+async function recheckAmazonWebhookImap(orderId, button) {
+    if (!orderId) return;
+    const originalText = button ? button.textContent : 'Check Amazon IMAP';
+    try {
+        if (button) {
+            button.disabled = true;
+            button.textContent = 'Starting IMAP check...';
+        }
+        const started = await authJSON(API + '/orders/amazon-pending-recheck/start', {
+            method: 'POST',
+            body: JSON.stringify({ order_id: orderId })
+        });
+        const jobId = started?.job?.id;
+        if (!jobId) throw new Error('The server did not return an Amazon IMAP recheck job.');
+        const waitStarted = Date.now();
+        let job = started.job;
+        while (job?.status === 'running') {
+            if (button) button.textContent = `${Math.max(0, Math.min(99, Number(job.percent || 0)))}% · Checking IMAP...`;
+            await new Promise(resolve => setTimeout(resolve, 1800));
+            const response = await authJSON(API + `/orders/amazon-pending-recheck/status?job_id=${encodeURIComponent(jobId)}`);
+            job = response?.job || {};
+            if (Date.now() - waitStarted > 25 * 60 * 1000) throw new Error('The IMAP check is still waiting on the mailbox. Refresh this page to check its updated status.');
+        }
+        if (job?.status === 'error') throw new Error(job.error || 'The Amazon IMAP check failed.');
+        const result = job?.result || {};
+        alert(
+            `Amazon IMAP check complete.\n\n` +
+            `Confirmed and published: ${Number(result.confirmed || 0)}\n` +
+            `Still waiting for Amazon email: ${Number(result.still_pending || 0)}\n` +
+            `Mailbox failures: ${Number(result.mailbox_failures || 0)}\n` +
+            `Checkout mailbox not connected: ${Number(result.missing_mailbox || 0)}\n\n` +
+            `A confirmed checkout is charged and posted only once.`
+        );
+        await loadWebhookLogs();
+    } catch (err) {
+        alert(err.message || 'Failed to recheck Amazon IMAP.');
+    } finally {
+        if (button && document.body.contains(button)) {
+            button.disabled = false;
+            button.textContent = originalText;
+        }
+    }
+}
+
 async function resendWebhookLog(id, button) {
     if (!id) return;
     const originalText = button ? button.textContent : '';
@@ -4558,9 +4564,16 @@ async function loadWebhookLogs() {
             const productCell = isProductUrl
               ? `<a class="webhook-log-link" href="${escapeHtml(productValue)}" target="_blank" rel="noopener noreferrer" title="${escapeHtml(productValue)}">Open checkout link</a>`
               : `<span class="webhook-log-truncate" title="${escapeHtml(productValue)}">${escapeHtml(productValue)}</span>`;
+            const isPendingAmazonCheckout = String(item.type || '').toLowerCase() === 'checkout' &&
+                String(item.site || '').toLowerCase() === 'amazon' &&
+                !item.amazon_email_verified &&
+                (String(item.order_status || item.status || '').toLowerCase() === 'pending_email_verification' || String(item.status || '').toLowerCase() === 'pending_email_verification');
+            const amazonImapAction = isPendingAmazonCheckout && item.order_id
+                ? `<button class="secondary" type="button" onclick="recheckAmazonWebhookImap('${escapeHtml(item.order_id)}', this)">Check Amazon IMAP</button>`
+                : '';
             return `
             <tr>
-              <td class="webhook-log-time">${escapeHtml(new Date(item.created_at).toLocaleString())}</td>
+              <td class="webhook-log-time" title="Stored UTC: ${escapeHtml(item.created_at || '')}">${escapeHtml(formatWebhookEasternTime(item.created_at))}</td>
               <td>${escapeHtml(item.type || '-')}</td>
               <td><span class="webhook-log-status">${escapeHtml(item.status || '-')}</span></td>
               <td>${escapeHtml(item.site || '-')}</td>
@@ -4572,13 +4585,13 @@ async function loadWebhookLogs() {
               <td class="webhook-log-product">${productCell}</td>
               <td class="webhook-log-sku"><span class="webhook-log-truncate" title="${escapeHtml(item.sku || '-')}">${escapeHtml(item.sku || '-')}</span></td>
               <td class="webhook-log-debug"><div class="webhook-log-error">${escapeHtml(item.error || '')}</div>${details}${targetDetails}${payloadDetails}</td>
-              <td class="webhook-log-actions"><div class="webhook-log-action-buttons"><button class="secondary" type="button" onclick="resendWebhookLog('${escapeHtml(item.id || '')}', this)">Resend</button><button class="secondary" type="button" onclick="recheckWebhookCredits('${escapeHtml(item.id || '')}', this)">Recheck credits</button>${String(item.type || '').toLowerCase()==='checkout' ? `<button class="secondary" type="button" onclick="recheckWebhookAccountUser('${escapeHtml(item.id || '')}', this)">Recheck account user</button>` : ''}${String(item.type || '').toLowerCase()==='checkout' && productValue !== '-' && !isProductUrl ? `<button class="secondary" type="button" onclick='hideHomepageCheckoutProduct(${JSON.stringify(productValue)}, this)'>Hide from homepage</button>` : ''}</div></td>
+              <td class="webhook-log-actions"><div class="webhook-log-action-buttons"><button class="secondary" type="button" onclick="resendWebhookLog('${escapeHtml(item.id || '')}', this)">Resend</button>${amazonImapAction}<button class="secondary" type="button" onclick="recheckWebhookCredits('${escapeHtml(item.id || '')}', this)">Recheck credits</button>${String(item.type || '').toLowerCase()==='checkout' ? `<button class="secondary" type="button" onclick="recheckWebhookAccountUser('${escapeHtml(item.id || '')}', this)">Recheck account user</button>` : ''}${String(item.type || '').toLowerCase()==='checkout' && productValue !== '-' && !isProductUrl ? `<button class="secondary" type="button" onclick='hideHomepageCheckoutProduct(${JSON.stringify(productValue)}, this)'>Hide from homepage</button>` : ''}</div></td>
             </tr>`;
         }).join('');
         container.innerHTML = `
             <div class="webhook-log-scroll">
               <table class="admin-table webhook-log-table">
-                <thead><tr><th>Time</th><th>Type</th><th>Status</th><th>Site</th><th>Bot</th><th>User</th><th>Assigned To</th><th>Credits</th><th>Product Type</th><th>Product</th><th>SKU</th><th>Error / Debug</th><th>Actions</th></tr></thead>
+                <thead><tr><th>Time (Eastern)</th><th>Type</th><th>Status</th><th>Site</th><th>Bot</th><th>User</th><th>Assigned To</th><th>Credits</th><th>Product Type</th><th>Product</th><th>SKU</th><th>Error / Debug</th><th>Actions</th></tr></thead>
                 <tbody>${rows}</tbody>
               </table>
             </div>`;

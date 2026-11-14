@@ -49,6 +49,6 @@ assert.match(scriptSource, /ALL_EXCEPT_CURRENT_USER/);
 assert.match(serverSource, /current_user:\s*\{\s*id:\s*currentUser\.id,\s*role:\s*currentUser\.role\s*\}/);
 assert.ok((serverSource.match(/applyRequestedCurrentUserExclusion\(/g) || []).length >= 11,
     'store status and every active export route must use the same exclusion rule');
-assert.match(adminSource, /script\.js\?v=20261104-export-other-users/);
+assert.match(adminSource, /script\.js\?v=20261114-amazon-imap-eastern-time/);
 
 console.log('Admin export audience tests passed.');

@@ -343,6 +343,41 @@ function setDiscordRecoveryStatus(text,{error=false,progress=null}={}){
   if(progress!=null&&$('discordRecoveryProgressBar'))$('discordRecoveryProgressBar').style.width=`${Math.max(0,Math.min(100,Number(progress)||0))}%`;
 }
 
+function setAmazonPendingRecheckStatus(text,{error=false}={}){
+  const status=$('amazonPendingRecheckStatus');
+  if(status){status.textContent=String(text||'');status.className=`discord-history-status${error?' error':''}`}
+}
+
+async function pollAmazonPendingRecheck(jobId){
+  const started=Date.now();
+  while(true){
+    await wait(1800);
+    const response=await api(`/orders/amazon-pending-recheck/status?job_id=${encodeURIComponent(jobId)}`);
+    const job=response.job||{};
+    if(job.status==='error')throw new Error(job.error||'The Amazon IMAP recheck failed.');
+    setAmazonPendingRecheckStatus(job.message||'Checking pending Amazon mailboxes…');
+    if(job.status==='complete')return job;
+    if(job.status==='idle')throw new Error('The Amazon recheck job was lost after the server restarted. Click the button again to resume safely.');
+    if(Date.now()-started>30*60*1000)throw new Error('The Amazon recheck is still waiting on an IMAP mailbox. Refresh this page to reconnect to its status.');
+  }
+}
+
+if($('recheckPendingAmazon'))$('recheckPendingAmazon').onclick=async()=>{
+  const button=$('recheckPendingAmazon');
+  if(!confirm('Recheck the exact mailbox/time window for every recent pending Amazon checkout? Confirmed emails will charge the saved catalog credit cost once and publish the checkout. Unmatched orders stay private and uncharged.'))return;
+  button.disabled=true;button.textContent='Starting Amazon IMAP recheck…';
+  try{
+    const response=await api('/orders/amazon-pending-recheck/start',{method:'POST',body:'{}'});
+    const jobId=response.job?.id;
+    if(!jobId)throw new Error('The server did not return an Amazon recheck job ID.');
+    const job=await pollAmazonPendingRecheck(jobId);
+    const result=job.result||{};
+    setAmazonPendingRecheckStatus(`Complete: ${result.confirmed||0} confirmed and published; ${result.still_pending||0} still waiting; ${result.mailbox_failures||0} mailbox failure(s); ${result.missing_mailbox||0} checkout mailbox connection(s) missing.`,{error:Number(result.mailbox_failures||0)>0||Number(result.missing_mailbox||0)>0});
+    await loadOrders();
+  }catch(error){setAmazonPendingRecheckStatus(error.message||'The Amazon IMAP recheck failed.',{error:true})}
+  finally{button.disabled=false;button.textContent='Recheck all pending Amazon IMAP'}
+};
+
 function localDatetimeValue(date){
   const value=new Date(date);
   const local=new Date(value.getTime()-value.getTimezoneOffset()*60000);
