@@ -8,7 +8,7 @@ function loadTestHooks() {
   const filename = path.join(__dirname, '..', 'order-tracker.js');
   const source = fs.readFileSync(filename, 'utf8').replace(
     /module\.exports = \{ registerOrderTracker, scanAll, notifyCheckoutForOrderTracker \};\s*$/,
-    'module.exports = { __test: { detectStatus, extractOrderNumbers, extractAmounts, targetOrdersMissingConfirmation, targetOrdersNeedingLifecycleRepair, targetLifecycleNeedsRepair, rawMessageContainsOrderNumber, resolveExactProfileMailbox, resolveHistoricalDiscordMailboxIdentity } };'
+    'module.exports = { __test: { detectStatus, extractOrderNumbers, extractAmounts, targetOrdersMissingConfirmation, targetOrdersNeedingLifecycleRepair, targetLifecycleNeedsRepair, rawMessageContainsOrderNumber, resolveExactProfileMailbox, resolveHistoricalDiscordMailboxIdentity, archivedTargetCancellationMatchesOrder } };'
   );
   const module = { exports:{} };
   const sandbox = {
@@ -62,7 +62,7 @@ function fakeSupabase(database) {
 }
 
 (async () => {
-  const { detectStatus, extractOrderNumbers, extractAmounts, targetOrdersMissingConfirmation, targetOrdersNeedingLifecycleRepair, targetLifecycleNeedsRepair, rawMessageContainsOrderNumber, resolveExactProfileMailbox, resolveHistoricalDiscordMailboxIdentity } = loadTestHooks();
+  const { detectStatus, extractOrderNumbers, extractAmounts, targetOrdersMissingConfirmation, targetOrdersNeedingLifecycleRepair, targetLifecycleNeedsRepair, rawMessageContainsOrderNumber, resolveExactProfileMailbox, resolveHistoricalDiscordMailboxIdentity, archivedTargetCancellationMatchesOrder } = loadTestHooks();
 
   assert.strictEqual(detectStatus("Thanks for shopping with us! Here's your order #102003237489716.", ''), 'confirmed');
   assert.strictEqual(detectStatus('Get ready for something special! An item from order #102003237489716 is about to ship.', ''), 'shipped');
@@ -70,6 +70,41 @@ function fakeSupabase(database) {
   assert.strictEqual(detectStatus('Items have arrived from order #912003685973236!', ''), 'delivered');
   assert.strictEqual(detectStatus('Please update your payment soon. Order #912003760814819.', "We're holding your order for now."), 'payment_needed');
   assert.strictEqual(detectStatus("You've successfully canceled items from your order ending in 0776.", ''), 'canceled');
+
+  const cancellationText = `
+    Order #912003956322631
+    Your items have been canceled
+    As you requested, we have canceled the items below from your order #912003956322631.
+    Canceled items
+    Pokémon Trading Card Game: Mega Forces Tin - Darkrai ex Qty: 2
+  `;
+  const parsedCancellation = parseRetailEmail(
+    'target',
+    'canceled',
+    "You've successfully canceled items from your order ending in 2631.",
+    cancellationText
+  );
+  assert.strictEqual(parsedCancellation.order_number, '912003956322631');
+  assert.strictEqual(parsedCancellation.items.length, 1, 'inline Target Qty text must produce a cancellation item');
+  assert.strictEqual(parsedCancellation.items[0].quantity, 2);
+  assert.match(parsedCancellation.items[0].product_name, /Mega Forces Tin - Darkrai ex/);
+  assert.ok(parsedCancellation.cancellation_text.includes('Your items have been canceled'));
+  assert.strictEqual(archivedTargetCancellationMatchesOrder(
+    { order_number:'912003956322631' },
+    {
+      email_type:'canceled', order_number:'912003956322631',
+      subject:"You've successfully canceled items from your order ending in 2631.",
+      body_text:cancellationText
+    }
+  ), true, 'an exact linked Target cancellation must be eligible for projection repair');
+  assert.strictEqual(archivedTargetCancellationMatchesOrder(
+    { order_number:'912003956322632' },
+    {
+      email_type:'canceled', order_number:'912003956322631',
+      subject:"You've successfully canceled items from your order ending in 2631.",
+      body_text:cancellationText
+    }
+  ), false, 'a cancellation for another Target order must never be replayed onto this tracker card');
 
   const shippedReceipt = parseRetailEmail(
     'target',
@@ -146,12 +181,17 @@ function fakeSupabase(database) {
 
   database.tracked_orders.push(
     { id:'stale-confirmed', user_id:'admin', store:'target', order_number:'912003685973236', status:'confirmed', total:36.49, order_date:'2026-08-18T00:00:00Z' },
+    { id:'linked-cancel-still-blue', user_id:'admin', store:'target', order_number:'912003956322631', status:'confirmed', total:53.35, order_date:'2026-11-13T00:00:00Z' },
     { id:'thin-delivered', user_id:'admin', store:'target', order_number:'912003802827778', status:'delivered', total:149.43, order_date:'2026-10-09T00:00:00Z' },
     { id:'complete-delivered', user_id:'admin', store:'target', order_number:'912003685973237', status:'delivered', total:36.49, order_date:'2026-08-18T00:00:00Z' },
     { id:'amazon-stale', user_id:'admin', store:'amazon', order_number:'113-1234567-1234567', status:'confirmed', total:45, order_date:'2026-08-18T00:00:00Z' }
   );
   database.tracked_order_emails.push(
     { order_id:'stale-confirmed', event_type:'confirmed' },
+    { order_id:'linked-cancel-still-blue', event_type:'confirmed' },
+    { order_id:'linked-cancel-still-blue', event_type:'processing' },
+    { order_id:'linked-cancel-still-blue', event_type:'shipped' },
+    { order_id:'linked-cancel-still-blue', event_type:'canceled' },
     { order_id:'thin-delivered', event_type:'confirmed' },
     { order_id:'thin-delivered', event_type:'delivered' },
     { order_id:'complete-delivered', event_type:'confirmed' },
@@ -160,7 +200,7 @@ function fakeSupabase(database) {
     { order_id:'complete-delivered', event_type:'delivered' }
   );
   const lifecycle = await targetOrdersNeedingLifecycleRepair(fakeSupabase(database), 'admin', 100);
-  assert.deepStrictEqual(Array.from(lifecycle, row => row.id), ['missing-old','already-confirmed','stale-confirmed','thin-delivered']);
+  assert.deepStrictEqual(Array.from(lifecycle, row => row.id), ['missing-old','already-confirmed','stale-confirmed','linked-cancel-still-blue','thin-delivered']);
 
   const trackerSource = fs.readFileSync(path.join(__dirname, '..', 'order-tracker.js'), 'utf8');
   const targetPreflight = trackerSource.indexOf("'target_lifecycle_repair'");
@@ -172,6 +212,10 @@ function fakeSupabase(database) {
   assert.match(trackerSource, /await persistRetailerReconcileJob\(supabase, userId, reconcileJob\);\s*await releaseMailboxBatchMemory\(\);/, 'Target repair must persist and release memory after every mailbox');
   assert.match(trackerSource, /const parsed = await parseMailboxMessage\(rawSource\);/, 'historical repair must discard attachment buffers through the memory-safe parser');
   assert.doesNotMatch(trackerSource, /allowConcurrent\s*:\s*true/, 'no Target or retailer repair may bypass the single-flight email worker');
+  assert.match(trackerSource, /repairLinkedTargetCancellationStatuses/, 'background IMAP cycles must repair linked Target cancellation projections');
+  assert.match(trackerSource, /\[TARGET CANCELLATION REPAIR\]/, 'Target cancellation backfill must report its result in Render logs');
+  assert.match(trackerSource, /_platformSourceOrderId/, 'linked cancellation replay must retain the exact source checkout identity');
+  assert.match(trackerSource, /ledgerAlreadyRefunded/, 'a replay after a partial restart must not issue the same credit refund twice');
 
   console.log('Target historical email repair tests passed');
 })().catch(error => {

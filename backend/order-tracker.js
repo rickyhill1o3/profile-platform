@@ -94,6 +94,10 @@ const TARGET_REPAIR_MAILBOX_BATCH_SIZE = Math.max(
   1,
   Math.min(3, Number(process.env.TARGET_REPAIR_MAILBOX_BATCH_SIZE || 1))
 );
+const TARGET_CANCELLATION_REPAIR_MAX_ORDERS = Math.max(
+  10,
+  Math.min(500, Number(process.env.TARGET_CANCELLATION_REPAIR_MAX_ORDERS || 200))
+);
 const MICROSOFT_RATE_LIMIT_BACKOFF_MS = Math.max(
   5 * 60 * 1000,
   Math.min(2 * 60 * 60 * 1000, Number(process.env.MICROSOFT_RATE_LIMIT_BACKOFF_MS || 20 * 60 * 1000))
@@ -3288,6 +3292,42 @@ async function reconcileTrackedOrderItems(supabase, trackedOrder, serviceOrder, 
     throw error;
   }
 
+  // Some Target cancellation MIME alternatives visually contain the complete product block but
+  // flatten it in a way that parseTargetItems cannot turn into a Qty row. Use the title/SKU from
+  // the webhook only as evidence against the cancellation's own "Canceled items" section. This
+  // advances the intended main item without treating an unrelated filler cancellation as a full
+  // order cancellation.
+  if (lower(trackedOrder.store) === 'target' && status === 'canceled' && existing.length && expected.length) {
+    const rawCancellationText = String(retail?.cancellation_text || '');
+    const sectionMatch = rawCancellationText.match(/canceled items?([\s\S]*?)(?:\n\s*(?:help|returns|contact|find a store|terms of use|privacy|would these work instead|perfect pairings)\b|$)/i);
+    const cancellationSection = reconcileNorm(sectionMatch?.[1] || rawCancellationText);
+    const matchedExpected = expected.filter(expectedItem => {
+      if (parsedItems.some(item => mainItemMatch([expectedItem], item))) return true;
+      const title = reconcileNorm(expectedItem.product_name || '');
+      const sku = reconcileNorm(expectedItem.sku || '');
+      return Boolean(
+        (title.length >= 8 && cancellationSection.includes(title)) ||
+        (sku.length >= 4 && cancellationSection.includes(sku))
+      );
+    });
+    const eventMs = new Date(eventAt || 0).getTime();
+    for (const expectedItem of matchedExpected) {
+      const candidates = existing.filter(item => item.role === 'main' && (
+        mainItemMatch([expectedItem], item) || (expected.length === 1 && existing.filter(row => row.role === 'main').length === 1)
+      ));
+      for (const old of candidates) {
+        const oldMs = new Date(old.last_event_at || 0).getTime();
+        if (Number.isFinite(eventMs) && Number.isFinite(oldMs) && oldMs > eventMs) continue;
+        const r = await supabase.from('tracked_order_items').update({
+          status:'canceled', last_event_at:eventAt, last_email_id:emailId || null,
+          updated_at:new Date().toISOString()
+        }).eq('id', old.id).select().single();
+        if (r.error) throw r.error;
+        existing = existing.map(item => item.id === old.id ? r.data : item);
+      }
+    }
+  }
+
   // Target uses item-level cancellations for the shipping-threshold filler, but it also sends
   // a separate full-order cancellation when the entire checkout is killed. A full-order email
   // often has no item rows, so apply it to every known line item explicitly.
@@ -3641,6 +3681,17 @@ async function saveParsedMessage(supabase, account, parsed, uid, adjustCredits =
   // retailer while keeping the rest of the parser on readable text.
   const orderNumberSearchText = store === 'pokemoncenter' ? `${text}\n${String(parsed.html || '')}` : text;
   const orderNumbers = extractOrderNumbers(store, subject, orderNumberSearchText);
+  // Internal archive-repair jobs already have an exact tracked-order/source-order pair. Preserve
+  // that exact retailer reference when an older stored MIME copy contains only Target's
+  // "order ending in 2631" subject or a truncated preheader. This field is never accepted from a
+  // public route; it is attached only while replaying a cancellation already linked in our DB.
+  const forcedPlatformOrderNumber = clean(parsed._platformOrderNumber || '');
+  if (forcedPlatformOrderNumber && clean(parsed._platformSourceOrderId)) {
+    const forcedRef = normalizeOrderRef(forcedPlatformOrderNumber);
+    const existingIndex = orderNumbers.findIndex(value => normalizeOrderRef(value) === forcedRef);
+    if (existingIndex >= 0) orderNumbers.splice(existingIndex, 1);
+    orderNumbers.unshift(forcedPlatformOrderNumber);
+  }
   // The original RFC822 source sometimes contains the Pokemon P-number even when a malformed or
   // truncated text/html alternative does not. Live discovery may supply that exact fallback.
   // When it does, make that explicitly requested/matched P-number authoritative even if another
@@ -3681,6 +3732,16 @@ async function saveParsedMessage(supabase, account, parsed, uid, adjustCredits =
   if (store === 'supreme') { const di = bodyLinesForName.findIndex(x=>/^Dear\b/i.test(x)); if (di>=0) retail.customer_name = bodyLinesForName.slice(di,di+3).join(' ').replace(/^Dear\s*/i,'').replace(/,$/,'').trim(); }
   const receiptHtml = parsed.html ? sanitizeReceiptHtml(String(parsed.html).slice(0, 250000)) : `<pre>${htmlEscape(text.slice(0, 250000))}</pre>`;
   let serviceOrders = await loadServiceOrders(supabase, account.user_id);
+  const forcedPlatformSourceOrderId = clean(parsed._platformSourceOrderId || '');
+  if (forcedPlatformSourceOrderId && !serviceOrders.some(order => String(order.id) === forcedPlatformSourceOrderId)) {
+    try {
+      const forced = await supabase.from('orders').select('*')
+        .eq('id', forcedPlatformSourceOrderId)
+        .eq('user_id', account.user_id)
+        .maybeSingle();
+      if (!forced.error && forced.data?.id) serviceOrders = [forced.data, ...serviceOrders];
+    } catch (_) {}
+  }
   let pokemonGlobalOrder = null;
   if (store === 'pokemoncenter') {
     pokemonGlobalOrder = await findPokemonCenterServiceOrderGlobally(supabase, primaryOrderNumber);
@@ -3880,9 +3941,24 @@ async function saveParsedMessage(supabase, account, parsed, uid, adjustCredits =
     await ensureInvestmentRow(supabase, order, serviceOrder, !inactive);
     if (inactive && !existing.credits_refunded && Number(serviceOrder.credits_charged || 0) > 0 && typeof adjustCredits === 'function') {
       const refund = Number(serviceOrder.credits_charged || 0);
-      await adjustCredits({ userId: orderOwnerUserId, delta: refund, reason: 'imap_order_canceled_refund', note: `Credits refunded after ${store} order ${matchedOrderNumber} was ${effectiveStatus}`, metadata: { tracked_order_id: order.id, source_order_id: serviceOrder.id, imap_status: effectiveStatus }, orderId: serviceOrder.id });
+      // The tracker flag normally makes this one-shot. Check the credit ledger too so a process
+      // restart between adding credits and saving credits_refunded cannot issue the same refund a
+      // second time when the linked cancellation is replayed.
+      let ledgerAlreadyRefunded = false;
+      try {
+        const priorRefund = await supabase.from('credit_transactions')
+          .select('id')
+          .eq('user_id',orderOwnerUserId)
+          .eq('order_id',serviceOrder.id)
+          .eq('reason','imap_order_canceled_refund')
+          .limit(1);
+        if (!priorRefund.error) ledgerAlreadyRefunded = Boolean(priorRefund.data?.length);
+      } catch (_) {}
+      if (!ledgerAlreadyRefunded) {
+        await adjustCredits({ userId: orderOwnerUserId, delta: refund, reason: 'imap_order_canceled_refund', note: `Credits refunded after ${store} order ${matchedOrderNumber} was ${effectiveStatus}`, metadata: { tracked_order_id: order.id, source_order_id: serviceOrder.id, imap_status: effectiveStatus }, orderId: serviceOrder.id });
+      }
       await supabase.from('tracked_orders').update({ credits_refunded: true, credits_refunded_at: new Date().toISOString() }).eq('id', order.id);
-      await supabase.from('orders').update({ status: 'canceled', metadata: { ...sourceMetadata, imap_canceled_at: new Date().toISOString(), credits_refunded_by_imap: refund } }).eq('id', serviceOrder.id);
+      await supabase.from('orders').update({ status: 'canceled', metadata: { ...sourceMetadata, imap_canceled_at: new Date().toISOString(), credits_refunded_by_imap: refund, imap_refund_reused_existing_ledger: ledgerAlreadyRefunded } }).eq('id', serviceOrder.id);
     }
     results.push({ saved: true, order_id: order.id, status, order_number: matchedOrderNumber });
   }
@@ -4838,6 +4914,10 @@ function targetLifecycleNeedsRepair(order = {}, eventTypes = []) {
   // non-final order so a message that arrived after the last UID checkpoint can advance it. Also
   // revisit delivered cards with a thin history, which is the specific "delivered but only two
   // emails" failure this repair path is intended to backfill.
+  // A linked cancellation/refund is authoritative lifecycle evidence. If the card is still blue,
+  // its projection/refund step was interrupted and must be replayed even when the timeline already
+  // contains four or more messages.
+  if (events.some(event => event === 'canceled' || event === 'refunded') && !['canceled','refunded'].includes(status)) return true;
   if (status === 'waiting_confirmation') return true;
   if (['confirmed','processing'].includes(status)) return confirmed < 1 || events.length < 4;
   if (status === 'shipped') return confirmed < 1 || shipped < 2 || events.length < 4;
@@ -5522,6 +5602,190 @@ async function syncRecentServiceOrdersForBackground(supabase, accounts = []) {
   } catch (err) { console.warn('[ORDER TRACKER] Background recent-order sync skipped:', err.message || err); }
 }
 
+function archivedTargetCancellationMatchesOrder(order = {}, email = {}) {
+  const orderRef = normalizeOrderRef(order.order_number || '');
+  if (!orderRef) return false;
+  const text = archivedRetailerReadableText(email);
+  const status = lower(email.email_type) === 'canceled'
+    ? 'canceled'
+    : detectStatus(email.subject || '', text);
+  if (status !== 'canceled') return false;
+  const refs = new Set([
+    clean(email.order_number || ''),
+    ...extractOrderNumbers('target', email.subject || '', text)
+  ].map(normalizeOrderRef).filter(Boolean));
+  return refs.has(orderRef);
+}
+
+async function repairLinkedTargetCancellationStatuses(
+  supabase,
+  adjustCredits = null,
+  confirmPendingAmazonCheckout = null,
+  options = {}
+) {
+  const limit = Math.max(1, Math.min(
+    TARGET_CANCELLATION_REPAIR_MAX_ORDERS,
+    Number(options.limit || TARGET_CANCELLATION_REPAIR_MAX_ORDERS)
+  ));
+  const activeStatuses = ['waiting_confirmation','confirmed','processing','shipped','delivered'];
+  const candidateResult = await supabase.from('tracked_orders')
+    .select('id,user_id,source_order_id,profile_id,source_email,store,order_number,status,credits_refunded,last_status_at')
+    .eq('store','target')
+    .in('status', activeStatuses)
+    .not('source_order_id','is',null)
+    .order('order_date',{ ascending:false })
+    .limit(limit);
+  if (candidateResult.error) throw candidateResult.error;
+  const candidates = candidateResult.data || [];
+  if (!candidates.length) return { candidates:0, linked_cancellations:0, replayed:0, repaired:0, still_active:0, errors:0 };
+
+  const byId = new Map(candidates.map(order => [String(order.id), order]));
+  const links = new Map();
+  const addLink = (orderId, value = {}) => {
+    const key = String(orderId || '');
+    if (!byId.has(key)) return;
+    const emailKey = clean(value.email_id || value.message_id || '');
+    if (!emailKey) return;
+    const dedupe = `${key}:${emailKey}`;
+    if (!links.has(dedupe)) links.set(dedupe, { order_id:key, ...value });
+  };
+  const ids = [...byId.keys()];
+  for (let offset = 0; offset < ids.length; offset += 75) {
+    const chunk = ids.slice(offset, offset + 75);
+    try {
+      const result = await supabase.from('tracked_order_emails')
+        .select('order_id,email_id,event_type,event_at')
+        .eq('event_type','canceled')
+        .in('order_id',chunk);
+      if (!result.error) for (const row of result.data || []) addLink(row.order_id, {
+        email_id:row.email_id,
+        event_at:row.event_at,
+        evidence:'tracked_order_emails'
+      });
+    } catch (_) {}
+    try {
+      const result = await supabase.from('email_messages')
+        .select('id,message_id,linked_order_id,received_at')
+        .eq('email_type','canceled')
+        .in('linked_order_id',chunk);
+      if (!result.error) for (const row of result.data || []) addLink(row.linked_order_id, {
+        email_id:row.id,
+        message_id:row.message_id,
+        event_at:row.received_at,
+        evidence:'legacy_link'
+      });
+    } catch (_) {}
+    try {
+      const result = await supabase.from('tracked_order_events')
+        .select('order_id,message_id,event_at,status')
+        .eq('status','canceled')
+        .in('order_id',chunk);
+      if (!result.error) for (const row of result.data || []) addLink(row.order_id, {
+        message_id:row.message_id,
+        event_at:row.event_at,
+        evidence:'tracked_order_event'
+      });
+    } catch (_) {}
+  }
+
+  const orderedLinks = [...links.values()].sort((a,b) =>
+    new Date(a.event_at || 0).getTime() - new Date(b.event_at || 0).getTime()
+  );
+  const completedOrders = new Set();
+  const summary = {
+    candidates:candidates.length,
+    linked_cancellations:orderedLinks.length,
+    replayed:0,
+    repaired:0,
+    still_active:0,
+    errors:0,
+    details:[]
+  };
+  for (let index = 0; index < orderedLinks.length; index++) {
+    if (amazonManualRecheckPriorityActive()) break;
+    const link = orderedLinks[index];
+    if (completedOrders.has(link.order_id)) continue;
+    const order = byId.get(link.order_id);
+    if (!order?.source_order_id) continue;
+    try {
+      let email = null;
+      if (link.email_id) {
+        const result = await supabase.from('email_messages').select('*').eq('id',link.email_id).maybeSingle();
+        if (!result.error) email = result.data || null;
+      }
+      if (!email && link.message_id) {
+        const result = await supabase.from('email_messages').select('*')
+          .eq('message_id',link.message_id)
+          .order('received_at',{ ascending:false })
+          .limit(1);
+        if (!result.error) email = result.data?.[0] || null;
+      }
+      if (!email || !archivedTargetCancellationMatchesOrder(order,email)) continue;
+      const text = archivedRetailerReadableText(email);
+      const account = {
+        user_id:order.user_id,
+        archive_user_id:email.user_id || order.user_id,
+        profile_id:order.profile_id || null,
+        email:lower(email.mailbox_email || order.source_email || ''),
+        provider:providerForEmail(email.mailbox_email || order.source_email || '') || { name:'archive' },
+        ingestion_source:email.source_type || 'target_cancellation_replay'
+      };
+      const parsed = {
+        subject:email.subject || '',
+        from:{ text:email.from_text || '' },
+        to:{ text:email.to_text || '' },
+        cc:{ text:email.cc_text || '' },
+        text,
+        html:email.body_html || null,
+        date:new Date(email.received_at || link.event_at || Date.now()),
+        messageId:email.message_id || `target-cancel-replay:${email.id}`,
+        _platformOrderNumber:order.order_number,
+        _platformSourceOrderId:order.source_order_id
+      };
+      const replay = await saveParsedMessage(
+        supabase,
+        account,
+        parsed,
+        email.imap_uid || 0,
+        adjustCredits,
+        confirmPendingAmazonCheckout
+      );
+      summary.replayed++;
+      const refreshed = await supabase.from('tracked_orders')
+        .select('status,credits_refunded,last_status_at')
+        .eq('id',order.id)
+        .maybeSingle();
+      const finalStatus = lower(refreshed.data?.status || order.status);
+      const repaired = ['canceled','refunded'].includes(finalStatus);
+      if (repaired) {
+        summary.repaired++;
+        completedOrders.add(link.order_id);
+      } else {
+        summary.still_active++;
+      }
+      if (summary.details.length < 60) summary.details.push({
+        order_number:order.order_number,
+        prior_status:order.status,
+        final_status:finalStatus,
+        credits_refunded:Boolean(refreshed.data?.credits_refunded),
+        replay_saved:Boolean(replay?.saved),
+        evidence:link.evidence
+      });
+    } catch (error) {
+      summary.errors++;
+      if (summary.details.length < 60) summary.details.push({
+        order_number:order?.order_number || null,
+        prior_status:order?.status || null,
+        error:error.message || String(error),
+        evidence:link.evidence
+      });
+      console.warn(`[TARGET CANCELLATION REPAIR] ${order?.order_number || link.order_id}:`, error.message || error);
+    }
+    if ((index + 1) % 10 === 0) await releaseMailboxBatchMemory();
+  }
+  return summary;
+}
+
 let scanRunning = false;
 async function scanAll(supabase, userId = null, adjustCredits = null, onProgress = null, confirmPendingAmazonCheckout = null, options = {}) {
   const lease = await acquireEmailHeavyWork(`mailbox-scan:${userId || 'background'}`, {
@@ -5538,6 +5802,25 @@ async function scanAll(supabase, userId = null, adjustCredits = null, onProgress
     console.log('[ORDER TRACKER] Background IMAP cycle yielded before loading mailboxes for a manual Amazon recheck.');
     lease.release();
     return { skipped:true, reason:'manual_amazon_recheck_priority' };
+  }
+  if (!userId) {
+    try {
+      const cancellationRepair = await repairLinkedTargetCancellationStatuses(
+        supabase,
+        adjustCredits,
+        confirmPendingAmazonCheckout
+      );
+      if (cancellationRepair.linked_cancellations || cancellationRepair.repaired || cancellationRepair.errors) {
+        console.log(`[TARGET CANCELLATION REPAIR] candidates=${cancellationRepair.candidates} linked=${cancellationRepair.linked_cancellations} replayed=${cancellationRepair.replayed} repaired=${cancellationRepair.repaired} still_active=${cancellationRepair.still_active} errors=${cancellationRepair.errors}`);
+      }
+    } catch (error) {
+      console.warn('[TARGET CANCELLATION REPAIR] Background replay skipped:', error.message || error);
+    }
+    if (amazonManualRecheckPriorityActive()) {
+      console.log('[ORDER TRACKER] Background IMAP cycle yielded after Target cancellation repair for a manual Amazon recheck.');
+      lease.release();
+      return { skipped:true, reason:'manual_amazon_recheck_priority' };
+    }
   }
   if (scanRunning && !userId) {
     if (!options.waitForGlobalScan) {

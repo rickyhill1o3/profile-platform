@@ -66,8 +66,16 @@ function parseTargetItems(text,status){
   ls=ls.slice(start,end);
   const items=[];
   for(let i=0;i<ls.length;i++){
-    const qm=ls[i].match(/^(?:qty|quantity)\s*:\s*(\d+)/i); if(!qm)continue;
-    const name=candidateItemBeforeQty(ls,i); if(!name)continue;
+    // Target changes this block between `Qty: 2`, `Quantity 2`, and an inline
+    // `Product title Qty: 2` layout. Accept all three so two visually identical
+    // cancellation emails cannot produce different order statuses merely because
+    // their MIME/plain-text alternative wrapped the line differently.
+    const qm=ls[i].match(/\b(?:qty|quantity)\s*:?\s*(\d+)\b/i); if(!qm)continue;
+    const inlineName=clean(ls[i].slice(0,qm.index)).replace(/[|•·-]+$/g,'').trim();
+    const name=(inlineName.length>=4&&!/^(?:canceled items?|items? canceled)$/i.test(inlineName))
+      ? inlineName
+      : candidateItemBeforeQty(ls,i);
+    if(!name)continue;
     let price=null;
     for(let j=i+1;j<=Math.min(ls.length-1,i+5);j++){
       const pm=ls[j].match(/^\$([0-9,.]+)(?:\s*\/\s*ea)?$/i); if(pm){price=money(pm[1]);break;}
@@ -176,7 +184,17 @@ function parseRetailEmail(store,status,subject,text){
           ? ((hay.match(/\bOrder\s*(?:Number|No\.?|ID|#)?\s*[:#-]?\s*#?([A-Z0-9-]{4,30})\b/i)||[])[1]||'')
           : ((hay.match(/\bOrder\s*#?\s*(\d{10,20})\b/i)||[])[1]||'');
   const items=store==='target'?parseTargetItems(text,status):store==='supreme'?parseSupremeItems(text,status):[];
-  return {order_number:orderNumber,items,tracking_number:extractTracking(text),cancellation_scope:store==='target'?targetCancellationScope(subject,text,status):null,retailer_checkout_at:store==='supreme'?parseSupremeCheckoutAt(text):''};
+  return {
+    order_number:orderNumber,
+    items,
+    tracking_number:extractTracking(text),
+    cancellation_scope:store==='target'?targetCancellationScope(subject,text,status):null,
+    // Kept only in memory while projecting the message. It lets the tracker prove that a Target
+    // cancellation names the webhook's main product even when the plain-text MIME alternative
+    // wraps the title so badly that no structured Qty row can be recovered.
+    cancellation_text:store==='target'&&status==='canceled'?String(text||'').slice(0,20000):'',
+    retailer_checkout_at:store==='supreme'?parseSupremeCheckoutAt(text):''
+  };
 }
 
 function fieldPairs(payload={}){
