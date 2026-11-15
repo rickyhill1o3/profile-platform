@@ -5414,6 +5414,11 @@ app.post(["/webhooks/orders", "/webhooks/orders/:token"], async (req, res) => {
                 product_type: '',
                 product: String(normalized.product_name || payload.product_name || ''),
                 sku: String(normalized.sku || payload.sku || ''),
+                // Keep the bot's stable checkout reference on the durable webhook row. Amazon
+                // later replaces orders.external_order_id with the retailer order number after
+                // IMAP confirmation, but this original reference must continue to identify the
+                // webhook and its user.
+                external_order_id: normalized.external_order_id || null,
                 payload,
                 fingerprint,
                 error: `Skipped duplicate checkout webhook within ${dedupeWindowSeconds} seconds`,
@@ -5570,6 +5575,21 @@ app.post(["/webhooks/orders", "/webhooks/orders/:token"], async (req, res) => {
                         const result = await recordSuccessfulCheckout(assignmentEventPayload);
                         recordedOrder = result?.order || null;
                         recordedCreditsCharged = result?.order?.credits_charged ?? result?.credits_charged ?? null;
+                        if (recordedOrder?.id && logId && !result?.duplicate) {
+                            const associationMetadata = {
+                                ...(recordedOrder.metadata || {}),
+                                source_webhook_log_id:logId,
+                                webhook_checkout_reference:normalized.external_order_id || recordedOrder.external_order_id || null,
+                                webhook_matched_user_id:recordedOrder.user_id || resolvedUser.id,
+                                webhook_matched_user_email:resolvedUser.email || recordedOrder.metadata?.matched_user_email || null
+                            };
+                            const association = await supabase.from('orders').update({ metadata:associationMetadata })
+                                .eq('id',recordedOrder.id).select('*').maybeSingle();
+                            if (!association.error && association.data) recordedOrder = association.data;
+                            await updateWebhookLogEntry(logId, {
+                                external_order_id:normalized.external_order_id || recordedOrder.external_order_id || null
+                            }).catch(() => null);
+                        }
                         // Persist/refresh Order Tracker immediately after a checkout webhook. The user should
                         // never need to open Order Tracker to cause mailbox work or tracked-order creation.
                         notifyCheckoutForOrderTracker(resolvedUser.id);
@@ -6584,9 +6604,24 @@ app.get('/admin/webhooks/logs', auth, admin, async (req, res) => {
         const orderByExternalId = new Map();
         const userIds = new Set();
         if (orderIds.length) {
-            const { data: orderRows } = await supabase.from('orders').select('id,user_id,external_order_id,status,credits_charged,metadata').in('external_order_id', [...new Set(orderIds)]);
-            for (const order of orderRows || []) {
-                orderByExternalId.set(String(order.external_order_id), order);
+            const uniqueOrderIds = [...new Set(orderIds.map(String).filter(Boolean))];
+            const select = 'id,user_id,external_order_id,status,credits_charged,metadata,raw_payload';
+            const directResult = await fetchAllSupabaseRowsInBatches(uniqueOrderIds, batch => supabase.from('orders')
+                .select(select).in('external_order_id',batch), { batchSize:100, pageSize:1000 });
+            const foundOrders = [...(directResult.data || [])];
+            const directlyMatched = new Set(foundOrders.flatMap(order => [...releaseRecapOrderRefs(order)]));
+            const missingIds = uniqueOrderIds.filter(value => !directlyMatched.has(value));
+            if (missingIds.length) {
+                // IMAP-confirmed Amazon rows use the retailer number as external_order_id. The
+                // original bot reference is retained in metadata, so use it to keep the Webhooks
+                // page attached to the same user after confirmation and credit charging.
+                const amazonResult = await fetchAllSupabaseRowsInBatches(missingIds, batch => supabase.from('orders')
+                    .select(select).in('metadata->>amazon_webhook_reference',batch), { batchSize:100, pageSize:1000 });
+                if (!amazonResult.error) foundOrders.push(...(amazonResult.data || []));
+            }
+            const uniqueFoundOrders = new Map(foundOrders.filter(order => order?.id).map(order => [String(order.id),order]));
+            for (const order of uniqueFoundOrders.values()) {
+                for (const ref of releaseRecapOrderRefs(order)) orderByExternalId.set(String(ref), order);
                 if (order.user_id) userIds.add(order.user_id);
             }
         }
@@ -14224,6 +14259,14 @@ registerOrderTracker({
             const discordResults = await sendCheckoutDiscordNotificationsForPayload(serviceOrder.raw_payload || {}, userResult.data || null, {
                 status: 'processed', order: { ...updatedOrder, status:'confirmed' }, credits_charged: credits, routingMode: 'public_and_admin_only'
             }).catch(err => [{ success: false, error: err.message || String(err) }]);
+            if (updatedOrder.metadata?.source_webhook_log_id) {
+                await updateWebhookLogEntry(updatedOrder.metadata.source_webhook_log_id, {
+                    status:'processed',
+                    external_order_id:updatedOrder.metadata.amazon_webhook_reference || amazonOrderNumber,
+                    error:`Amazon checkout verified by IMAP as ${amazonOrderNumber}. Charged ${credits} catalog credit${credits === 1 ? '' : 's'}.`,
+                    discord_targets:Array.isArray(discordResults) ? discordResults : []
+                }).catch(() => null);
+            }
             if (updatedOrder.metadata?.discord_recovery_webhook_log_id) {
                 await updateWebhookLogEntry(updatedOrder.metadata.discord_recovery_webhook_log_id, {
                     status:'processed',

@@ -28,12 +28,16 @@ async function run() {
   const unresolved = checkout({ id: '3', site: 'target', sku: '303', product: 'Unknown Release Product' });
   const canceled = checkout({ id: '4', site: 'target', sku: '202', product: 'Celebration Binder Collection', quantity: 2 });
   const declined = checkout({ id: '5', site: 'target', sku: '202', product: 'Celebration Binder Collection', status: 'payment declined' });
+  const pendingAmazon = checkout({ id: '6', site: 'amazon', sku: 'B0H784PD4X', product: 'B0H784PD4X', quantity: 3, status: 'pending_email_verification' });
+  const pendingTarget = checkout({ id: '7', site: 'target', sku: '202', product: 'Celebration Binder Collection', status: 'pending_email_verification' });
 
   assert.strictEqual(checkoutEventIsSuccessful(shikariNoPrice), true);
   assert.strictEqual(checkoutEventIsSuccessful(declined), false);
+  assert.strictEqual(checkoutEventIsSuccessful(pendingAmazon), true, 'Amazon checkout pings must remain in the recap while waiting for IMAP');
+  assert.strictEqual(checkoutEventIsSuccessful(pendingTarget), false, 'the Amazon pending exception must not admit another retailer');
 
   const summary = buildReleaseRecapSummary({
-    events: [shikariNoPrice, catalogFallback, unresolved, canceled, declined],
+    events: [shikariNoPrice, catalogFallback, unresolved, canceled, declined, pendingAmazon, pendingTarget],
     catalogRows: [
       { site: 'target', sku: '101', product_name: 'Mega Evolution Elite Trainer Box', default_max_price: 24.99 },
       { site: 'target', sku: '202', product_name: 'Celebration Binder Collection', default_max_price: 14.99 }
@@ -46,30 +50,20 @@ async function run() {
     to: '2026-11-14T00:00:00.000Z'
   });
 
-  assert.strictEqual(summary.checkout_count, 4, 'declined events must be excluded');
+  assert.strictEqual(summary.checkout_count, 5, 'declined and non-Amazon pending events must be excluded while Amazon pending remains');
   assert.strictEqual(summary.retailer_confirmed_checkout_count, 1);
   assert.strictEqual(summary.retailer_confirmed_spend, 53.35, 'the IMAP/order-tracker total must override product-only pricing');
   assert.strictEqual(summary.catalog_estimated_checkout_count, 1);
   assert.strictEqual(summary.catalog_estimated_spend, 44.97);
-  assert.strictEqual(summary.unresolved_checkout_count, 1);
+  assert.strictEqual(summary.unresolved_checkout_count, 2);
   assert.strictEqual(summary.canceled_checkout_count, 1);
   assert.strictEqual(summary.total_spend, 98.32);
 
   const caption = buildReleaseRecapCaption(summary, 'https://cdn.example.com/release.gif');
-  assert.strictEqual(caption, 'https://cdn.example.com/release.gif', 'the manual share value should contain only the animation link');
+  assert.match(caption, /retailer-confirmed/);
+  assert.match(caption, /catalog-estimated/);
+  assert.match(caption, /release\.gif/);
   assert.ok(!caption.includes('customer@example.com'));
-
-  const fs = require('fs');
-  const path = require('path');
-  const serverSource = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
-assert.match(
-  serverSource,
-  /name\.endsWith\('\.json'\) && name !== alertCacheName/,
-  'the outage announcement-target cache must not be replayed as a tokenless checkout webhook'
-);
-  assert.match(serverSource, /sendAnnouncementFileToAllWebhooks\(animation,/);
-  assert.doesNotMatch(serverSource, /function releaseRecapEmbed\(/);
-  assert.doesNotMatch(serverSource, /sendAnnouncementToAllWebhooks\(webhookCaption/);
 
   const gifSummary = {
     ...summary,

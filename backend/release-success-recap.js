@@ -3,11 +3,8 @@ const dns = require('dns').promises;
 const sharp = require('sharp');
 
 const RECAP_TIME_ZONE = 'America/New_York';
-// Render 720p-class frames so Discord does not have to upscale the animation.
-// The SVG artwork still uses the original 800x450 coordinate system via viewBox.
-const FRAME_WIDTH = 1200;
-const FRAME_HEIGHT = 675;
-const DISCORD_SAFE_GIF_BYTES = Math.floor(9.5 * 1024 * 1024);
+const FRAME_WIDTH = 800;
+const FRAME_HEIGHT = 450;
 
 function cleanText(value, maxLength = 500) {
   return String(value || '')
@@ -68,11 +65,18 @@ function firstField(fields, names) {
 
 function checkoutEventIsSuccessful(row = {}) {
   const status = normalize(row.status);
-  if (['duplicate skipped', 'received', 'processing', 'pending email verification'].includes(status)) return false;
-  if (status.includes('error') || status.includes('failed') || status.includes('declined')) return false;
-
   const payload = row.payload && typeof row.payload === 'object' ? row.payload : {};
   const { embed, fields } = embedFields(payload);
+  const eventSite = normalizeSite(row.site || payload.site || payload.source || firstField(fields, ['site', 'store']));
+  // Amazon success pings are deliberately held at pending_email_verification until IMAP finds
+  // the one-to-one confirmation. They are still real checkout pings and already appear on the
+  // public homepage, so the release recap must count them too. If IMAP later confirms the order,
+  // this same durable webhook row remains the recap source instead of disappearing.
+  const pendingAmazonCheckout = status === 'pending email verification' && eventSite === 'amazon';
+  if (['duplicate skipped', 'received', 'processing'].includes(status)) return false;
+  if (status === 'pending email verification' && !pendingAmazonCheckout) return false;
+  if (status.includes('error') || status.includes('failed') || status.includes('declined')) return false;
+
   const type = normalize(`${row.type || ''} ${row.webhook_type || ''} ${row.category || ''}`);
   if (!type.includes('checkout')) return false;
   const haystack = normalize([
@@ -81,7 +85,8 @@ function checkoutEventIsSuccessful(row = {}) {
     payload.title, payload.status, payload.message, payload.error
   ].join(' '));
   if (/payment declined|decision manager|failed|failure|error|out of stock|cancelled|canceled|rejected|insufficient|login required|captcha|account locked|verification required/.test(haystack)) return false;
-  return ['processed', 'success', 'successful', 'confirmed', 'completed'].includes(status)
+  return pendingAmazonCheckout
+    || ['processed', 'success', 'successful', 'confirmed', 'completed'].includes(status)
     || /successful checkout|checkout success|successfully checked out|order confirmed|confirmed order|status success|status confirmed/.test(haystack);
 }
 
@@ -345,15 +350,18 @@ function textLinesSvg(lines, x, y, { size = 30, weight = 700, fill = '#f8fafc', 
 
 function summarySvg(summary) {
   const money = `$${Number(summary.total_spend || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-  const checkoutNote = `${summary.checkout_count} successful checkout${summary.checkout_count === 1 ? '' : 's'} in this release`;
-  return Buffer.from(`<svg width="${FRAME_WIDTH}" height="${FRAME_HEIGHT}" viewBox="0 0 800 450" xmlns="http://www.w3.org/2000/svg">
+  const priceNote = summary.catalog_estimated_checkout_count > 0
+    ? `${summary.retailer_confirmed_checkout_count} retailer-confirmed • ${summary.catalog_estimated_checkout_count} catalog-estimated`
+    : `${summary.retailer_confirmed_checkout_count} retailer-confirmed checkout${summary.retailer_confirmed_checkout_count === 1 ? '' : 's'}`;
+  const spendLabel = summary.catalog_estimated_spend > 0 ? 'TOTAL SPEND • CONFIRMED + ESTIMATED' : 'TOTAL RETAILER-CONFIRMED SPEND';
+  return Buffer.from(`<svg width="${FRAME_WIDTH}" height="${FRAME_HEIGHT}" xmlns="http://www.w3.org/2000/svg">
     <defs><linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#091426"/><stop offset="0.55" stop-color="#15245a"/><stop offset="1" stop-color="#4c1d95"/></linearGradient><radialGradient id="glow"><stop stop-color="#38bdf8" stop-opacity=".32"/><stop offset="1" stop-color="#38bdf8" stop-opacity="0"/></radialGradient></defs>
     <rect width="800" height="450" rx="28" fill="url(#bg)"/><circle cx="130" cy="80" r="220" fill="url(#glow)"/><text x="48" y="56" font-family="Arial" font-size="15" font-weight="800" fill="#7dd3fc" letter-spacing="2">THE SHORE SHACK • RELEASE RECAP</text>
-    <text x="48" y="136" font-family="Arial" font-size="58" font-weight="900" fill="#ffffff">${xmlEscape(money)}</text><text x="50" y="163" font-family="Arial" font-size="16" font-weight="700" fill="#cbd5e1">ACTUAL TOTAL SPEND</text>
+    <text x="48" y="136" font-family="Arial" font-size="58" font-weight="900" fill="#ffffff">${xmlEscape(money)}</text><text x="50" y="163" font-family="Arial" font-size="16" font-weight="700" fill="#cbd5e1">${xmlEscape(spendLabel)}</text>
     <g transform="translate(48 205)"><rect width="214" height="102" rx="18" fill="#ffffff" fill-opacity=".09"/><text x="22" y="36" font-family="Arial" font-size="13" font-weight="800" fill="#93c5fd">CHECKOUTS</text><text x="22" y="78" font-family="Arial" font-size="36" font-weight="900" fill="#fff">${summary.checkout_count}</text></g>
     <g transform="translate(278 205)"><rect width="214" height="102" rx="18" fill="#ffffff" fill-opacity=".09"/><text x="22" y="36" font-family="Arial" font-size="13" font-weight="800" fill="#93c5fd">TOTAL ITEMS</text><text x="22" y="78" font-family="Arial" font-size="36" font-weight="900" fill="#fff">${summary.item_count}</text></g>
     <g transform="translate(508 205)"><rect width="244" height="102" rx="18" fill="#ffffff" fill-opacity=".09"/><text x="22" y="36" font-family="Arial" font-size="13" font-weight="800" fill="#93c5fd">UNIQUE PRODUCTS</text><text x="22" y="78" font-family="Arial" font-size="36" font-weight="900" fill="#fff">${summary.unique_product_count}</text></g>
-    <text x="48" y="356" font-family="Arial" font-size="16" font-weight="700" fill="#e2e8f0">${xmlEscape(summary.range_label || '')}</text><text x="48" y="390" font-family="Arial" font-size="14" fill="#86efac">${xmlEscape(checkoutNote)}</text>
+    <text x="48" y="356" font-family="Arial" font-size="16" font-weight="700" fill="#e2e8f0">${xmlEscape(summary.range_label || '')}</text><text x="48" y="390" font-family="Arial" font-size="14" fill="${summary.unresolved_checkout_count ? '#fcd34d' : '#86efac'}">${xmlEscape(priceNote)}</text>
     <text x="752" y="418" text-anchor="end" font-family="Arial" font-size="12" fill="#94a3b8">Community totals • no customer information</text>
   </svg>`);
 }
@@ -394,8 +402,8 @@ async function fetchProductImageDataUrl(url) {
     const input = Buffer.from(await response.arrayBuffer());
     if (!input.length || input.length > 8 * 1024 * 1024) return '';
     const png = await sharp(input, { failOn: 'error', limitInputPixels: 25_000_000 })
-      .resize({ width: 640, height: 560, fit: 'contain', kernel: sharp.kernel.lanczos3, withoutEnlargement: false, background: { r: 255, g: 255, b: 255, alpha: 0 } })
-      .png({ compressionLevel: 9, adaptiveFiltering: true })
+      .resize({ width: 300, height: 280, fit: 'contain', withoutEnlargement: true, background: { r: 255, g: 255, b: 255, alpha: 0 } })
+      .png({ compressionLevel: 8 })
       .toBuffer();
     return `data:image/png;base64,${png.toString('base64')}`;
   } catch (_) {
@@ -405,18 +413,20 @@ async function fetchProductImageDataUrl(url) {
 
 function productSvg(summary, product, imageDataUrl, position) {
   const titleLines = wrapText(product.product, 30, 3);
-  const skuLine = product.sku ? `SKU ${product.sku}` : 'SUCCESSFUL CHECKOUTS';
+  const money = product.unresolved_item_count
+    ? 'Saved price needed'
+    : `$${Number(product.total_spend || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} product spend`;
   const image = imageDataUrl
     ? `<image href="${imageDataUrl}" x="58" y="103" width="315" height="282" preserveAspectRatio="xMidYMid meet"/>`
     : `<rect x="76" y="124" width="278" height="238" rx="24" fill="#fff" fill-opacity=".08"/><text x="215" y="237" text-anchor="middle" font-family="Arial" font-size="20" font-weight="800" fill="#94a3b8">PRODUCT IMAGE</text><text x="215" y="267" text-anchor="middle" font-family="Arial" font-size="14" fill="#64748b">not available</text>`;
-  return Buffer.from(`<svg width="${FRAME_WIDTH}" height="${FRAME_HEIGHT}" viewBox="0 0 800 450" xmlns="http://www.w3.org/2000/svg">
+  return Buffer.from(`<svg width="${FRAME_WIDTH}" height="${FRAME_HEIGHT}" xmlns="http://www.w3.org/2000/svg">
     <defs><linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#071426"/><stop offset=".55" stop-color="#0f2850"/><stop offset="1" stop-color="#312e81"/></linearGradient><radialGradient id="burst"><stop stop-color="#38bdf8" stop-opacity=".28"/><stop offset="1" stop-color="#38bdf8" stop-opacity="0"/></radialGradient></defs>
     <rect width="800" height="450" rx="28" fill="url(#bg)"/><circle cx="210" cy="235" r="250" fill="url(#burst)"/><rect x="36" y="82" width="356" height="326" rx="26" fill="#ffffff" fill-opacity=".94"/>${image}
     <text x="430" y="55" font-family="Arial" font-size="14" font-weight="800" fill="#7dd3fc" letter-spacing="1.5">CHECKOUT HIGHLIGHT ${position}/${summary.unique_product_count}</text>
     ${textLinesSvg(titleLines, 430, 112, { size: 30, lineHeight: 1.18 })}
     <rect x="430" y="234" width="${Math.max(96, 28 + product.site.length * 9)}" height="34" rx="17" fill="#2563eb"/><text x="445" y="257" font-family="Arial" font-size="14" font-weight="800" fill="#fff">${xmlEscape(product.site.toUpperCase())}</text>
     <text x="430" y="318" font-family="Arial" font-size="54" font-weight="900" fill="#86efac">×${product.item_count}</text><text x="430" y="347" font-family="Arial" font-size="14" font-weight="800" fill="#cbd5e1">ITEM${product.item_count === 1 ? '' : 'S'} • ${product.checkout_count} CHECKOUT${product.checkout_count === 1 ? '' : 'S'}</text>
-    <text x="430" y="390" font-family="Arial" font-size="16" font-weight="700" fill="#e2e8f0">${xmlEscape(skuLine)}</text>
+    <text x="430" y="390" font-family="Arial" font-size="16" font-weight="700" fill="${product.unresolved_item_count ? '#fcd34d' : '#e2e8f0'}">${xmlEscape(money)}</text>
     <circle cx="430" cy="418" r="4" fill="#38bdf8"/><text x="446" y="423" font-family="Arial" font-size="12" fill="#94a3b8">${xmlEscape(summary.range_label || '')}</text>
   </svg>`);
 }
@@ -429,44 +439,22 @@ async function buildReleaseRecapGif(summary = {}) {
     const imageDataUrl = await fetchProductImageDataUrl(product.image);
     frames.push(await sharp(productSvg(summary, product, imageDataUrl, index + 1)).png().toBuffer());
   }
-  const delay = [2400, ...summary.products.map(() => 1650)];
-  const encode = (inputFrames, options) => sharp(inputFrames, { join: { animated: true } })
-    .gif({ loop: 0, delay, effort: 7, ...options })
+  return sharp(frames, { join: { animated: true } })
+    .gif({ loop: 0, delay: [2400, ...summary.products.map(() => 1650)], colours: 128, effort: 4, interFrameMaxError: 12, interPaletteMaxError: 12 })
     .toBuffer();
-
-  // Prefer a full 256-colour palette with low palette/frame error. If a long release recap
-  // exceeds Discord's standard upload-safe size, retain the HD dimensions and make a modest
-  // palette compromise before falling back to a still-sharper-than-before 960x540 encode.
-  let animation = await encode(frames, {
-    colours: 256,
-    dither: 0.75,
-    interFrameMaxError: 3,
-    interPaletteMaxError: 3
-  });
-  if (animation.length <= DISCORD_SAFE_GIF_BYTES) return animation;
-
-  animation = await encode(frames, {
-    colours: 192,
-    dither: 0.65,
-    interFrameMaxError: 6,
-    interPaletteMaxError: 6
-  });
-  if (animation.length <= DISCORD_SAFE_GIF_BYTES) return animation;
-
-  const fallbackFrames = await Promise.all(frames.map(frame => sharp(frame)
-    .resize({ width: 960, height: 540, fit: 'fill', kernel: sharp.kernel.lanczos3 })
-    .png({ compressionLevel: 9, adaptiveFiltering: true })
-    .toBuffer()));
-  return encode(fallbackFrames, {
-    colours: 192,
-    dither: 0.65,
-    interFrameMaxError: 6,
-    interPaletteMaxError: 6
-  });
 }
 
 function buildReleaseRecapCaption(summary = {}, animationUrl = '') {
-  return String(animationUrl || '').trim();
+  const spend = `$${Number(summary.total_spend || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  const lines = [
+    `**The Shore Shack Release Recap**`,
+    `**${summary.checkout_count || 0}** checkouts • **${summary.item_count || 0}** items • **${summary.unique_product_count || 0}** unique products`,
+    `**${spend}** total spend${summary.catalog_estimated_spend > 0 ? ` (${Number(summary.retailer_confirmed_spend || 0).toLocaleString('en-US', { style: 'currency', currency: 'USD' })} retailer-confirmed + ${Number(summary.catalog_estimated_spend || 0).toLocaleString('en-US', { style: 'currency', currency: 'USD' })} catalog-estimated)` : ' from retailer confirmation emails'}`,
+    summary.range_label || ''
+  ];
+  if (summary.unresolved_checkout_count > 0) lines.push(`Price note: ${summary.unresolved_checkout_count} checkout${summary.unresolved_checkout_count === 1 ? '' : 's'} did not yet have an IMAP-confirmed order total or a complete saved catalog estimate and ${summary.unresolved_checkout_count === 1 ? 'is' : 'are'} not included in the spend total.`);
+  if (animationUrl) lines.push(animationUrl);
+  return lines.filter(Boolean).join('\n');
 }
 
 module.exports = {
