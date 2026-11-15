@@ -4035,6 +4035,7 @@ function setReleaseRecapLast18Hours(force = true) {
     releaseRecapPreviewData = null;
     const sendButton = document.getElementById('sendReleaseRecapButton');
     if (sendButton) sendButton.disabled = true;
+    setReleaseRecapActionVisibility({ canCopy: false, canDownload: false });
 }
 
 function releaseRecapRangePayload() {
@@ -4082,10 +4083,23 @@ function renderReleaseRecapSummary(summary = {}, { sent = false, targetCount = n
         ${products.length > 10 ? `<div class="subtle-text" style="margin-top:8px">The animation also includes ${products.length - 10} more product${products.length - 10 === 1 ? '' : 's'}.</div>` : ''}`;
 }
 
+function setReleaseRecapActionVisibility({ canCopy = false, canDownload = false } = {}) {
+    const actions = document.getElementById('releaseRecapCopyActions');
+    const copyPostButton = document.getElementById('copyReleaseRecapPostButton');
+    const copyLinkButton = document.getElementById('copyReleaseRecapAnimationLinkButton');
+    const downloadButton = document.getElementById('downloadReleaseRecapAnimationButton');
+    if (copyPostButton) copyPostButton.style.display = canCopy ? '' : 'none';
+    if (copyLinkButton) copyLinkButton.style.display = canCopy ? '' : 'none';
+    if (downloadButton) downloadButton.style.display = canDownload ? '' : 'none';
+    if (actions) actions.style.display = canCopy || canDownload ? '' : 'none';
+}
+
 function showReleaseRecapCopyActions(recap) {
     latestReleaseRecapData = recap || null;
-    const actions = document.getElementById('releaseRecapCopyActions');
-    if (actions) actions.style.display = recap?.animation_url ? '' : 'none';
+    setReleaseRecapActionVisibility({
+        canCopy: Boolean(recap?.animation_url),
+        canDownload: Boolean(recap?.animation_url)
+    });
 }
 
 async function loadLatestReleaseRecap() {
@@ -4110,11 +4124,23 @@ async function previewReleaseRecap() {
         });
         releaseRecapPreviewData = { ...data, range };
         renderReleaseRecapSummary(data.summary || {}, { targetCount: data.announcement_target_count });
-        if (sendButton) sendButton.disabled = !Number(data.summary?.checkout_count || 0);
-        if (msg) msg.textContent = Number(data.summary?.checkout_count || 0) ? 'Preview ready. Nothing has been sent yet.' : 'No successful checkouts were found in this window.';
+        const hasCheckouts = Number(data.summary?.checkout_count || 0) > 0;
+        const currentLinkMatchesPreview = Boolean(
+            hasCheckouts
+            && latestReleaseRecapData?.animation_url
+            && latestReleaseRecapData?.range_fingerprint === data.range_fingerprint
+        );
+        setReleaseRecapActionVisibility({ canCopy: currentLinkMatchesPreview, canDownload: hasCheckouts });
+        if (sendButton) sendButton.disabled = !hasCheckouts;
+        if (msg) msg.textContent = hasCheckouts
+            ? (currentLinkMatchesPreview
+                ? 'Preview ready. The copy link and Download GIF buttons match this preview.'
+                : 'Preview ready. Download GIF will build these exact results. Send the recap to create a new share link.')
+            : 'No successful checkouts were found in this window.';
     } catch (err) {
         releaseRecapPreviewData = null;
         if (sendButton) sendButton.disabled = true;
+        setReleaseRecapActionVisibility({ canCopy: false, canDownload: false });
         if (msg) msg.textContent = err.message || 'Failed to preview the release recap.';
     }
 }
@@ -4161,6 +4187,62 @@ async function copyReleaseRecapAnimationLink() {
     if (!latestReleaseRecapData?.animation_url) return;
     await copyTextToClipboard(latestReleaseRecapData.animation_url);
     if (msg) msg.textContent = 'Animation link copied.';
+}
+
+async function downloadReleaseRecapAnimation() {
+    const msg = document.getElementById('releaseRecapMessage');
+    const button = document.getElementById('downloadReleaseRecapAnimationButton');
+    let originalText = button?.textContent || 'Download GIF';
+    try {
+        const range = releaseRecapRangePayload();
+        const previewMatchesRange = releaseRecapPreviewData
+            && releaseRecapPreviewData.range?.from === range.from
+            && releaseRecapPreviewData.range?.to === range.to
+            && Number(releaseRecapPreviewData.summary?.checkout_count || 0) > 0;
+        if (!previewMatchesRange) throw new Error('Preview this release window before downloading its GIF.');
+
+        if (button) {
+            button.disabled = true;
+            button.textContent = 'Building GIF...';
+        }
+        if (msg) msg.textContent = 'Building a GIF from the exact checkout results shown in this preview...';
+
+        const response = await fetch(API + '/admin/announcements/release-recap/download', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                Authorization: 'Bearer ' + token()
+            },
+            body: JSON.stringify(range)
+        });
+        if (!response.ok) {
+            let message = 'Could not build the recap GIF.';
+            try {
+                const data = await response.json();
+                if (data.error) message = data.error;
+            } catch (_) { }
+            throw new Error(message);
+        }
+
+        const blob = await response.blob();
+        const downloadUrl = window.URL.createObjectURL(blob);
+        const anchor = document.createElement('a');
+        const datePart = String(range.from || '').slice(0, 10) || new Date().toISOString().slice(0, 10);
+        anchor.href = downloadUrl;
+        anchor.download = `shore-shack-release-recap-${datePart}.gif`;
+        document.body.appendChild(anchor);
+        anchor.click();
+        anchor.remove();
+        window.URL.revokeObjectURL(downloadUrl);
+        if (msg) msg.textContent = 'GIF downloaded. Upload the file directly in Discord to show the animation.';
+    } catch (err) {
+        if (msg) msg.textContent = err.message || 'Could not download the recap GIF.';
+    } finally {
+        if (button) {
+            button.disabled = false;
+            button.textContent = originalText;
+        }
+    }
 }
 
 

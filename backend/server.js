@@ -7799,6 +7799,28 @@ app.get('/admin/announcements/release-recap/latest', auth, admin, async (req, re
     }
 });
 
+app.post('/admin/announcements/release-recap/download', auth, admin, async (req, res) => {
+    try {
+        const currentUser = await getCurrentUser(req);
+        if (currentUser.role !== 'super_admin') return res.status(403).json({ error: 'Only super admin can download release recap animations.' });
+        const range = parseReleaseRecapRange(req.body || {});
+        const data = await buildReleaseRecapData(range);
+        const { summary } = data;
+        if (!summary.checkout_count || !summary.products.length) {
+            return res.status(400).json({ error: 'No successful checkout products were found in that release window.' });
+        }
+
+        const animation = await buildReleaseRecapGif(summary);
+        const datePart = new Date(range.from).toISOString().slice(0, 10);
+        res.setHeader('Content-Type', 'image/gif');
+        res.setHeader('Content-Disposition', `attachment; filename="shore-shack-release-recap-${datePart}.gif"`);
+        res.setHeader('Cache-Control', 'private, no-store');
+        res.send(animation);
+    } catch (err) {
+        res.status(err.status || 500).json({ error: err.message });
+    }
+});
+
 app.post('/admin/announcements/release-recap/send', auth, admin, async (req, res) => {
     try {
         const currentUser = await getCurrentUser(req);
