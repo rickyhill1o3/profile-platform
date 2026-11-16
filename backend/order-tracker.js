@@ -5,6 +5,7 @@ const crypto = require('crypto');
 const cheerio = require('cheerio');
 const zlib = require('zlib');
 const { encrypt, decrypt } = require('./encryption');
+const { resolveAssignmentAtTime } = require('./target-extra-accounts');
 const { parseRetailEmail, expectedWebhookItems, matchScore, mainItemMatch, targetSingleLineDeliveryAlias, deriveOverallStatus, parseSupremeWebhookCheckoutAt, norm: reconcileNorm } = require('./retailer-reconciliation');
 const { registerDiscordHistoryImport } = require('./discord-history-import');
 const { registerDiscordCheckoutRecovery } = require('./discord-checkout-recovery');
@@ -1252,6 +1253,69 @@ async function fetchSupremeArchiveCandidatesForOrders(supabase, userId, serviceO
   return { rows: hydrated, metadata_scanned: metadataScanned, candidates_found: ids.length, windows: windows.length };
 }
 
+function targetExtraOrderTrackerSchemaMissing(error) {
+  return /target_extra_|relation .* does not exist|schema cache/i.test(String(error?.message || error || ''));
+}
+
+async function loadTargetExtraMailboxAssignmentMap(supabase) {
+  try {
+    const [accounts, assignments] = await Promise.all([
+      fetchAllSupabaseRows(() => supabase.from('target_extra_accounts')
+        .select('id,login_email,status,source_profile_id')
+        .order('id', { ascending:true })),
+      fetchAllSupabaseRows(() => supabase.from('target_extra_account_assignments')
+        .select('id,account_id,user_id,template_profile_id,assigned_at,released_at')
+        .order('assigned_at', { ascending:true }))
+    ]);
+    const assignmentsByAccount = new Map();
+    for (const assignment of assignments || []) {
+      const key = String(assignment.account_id || '');
+      if (!key) continue;
+      const rows = assignmentsByAccount.get(key) || [];
+      rows.push(assignment);
+      assignmentsByAccount.set(key, rows);
+    }
+    const result = new Map();
+    for (const account of accounts || []) {
+      const email = lower(account.login_email);
+      if (!email) continue;
+      result.set(email, {
+        email,
+        target_extra_account_id:account.id,
+        status:lower(account.status),
+        source_profile_id:account.source_profile_id || null,
+        assignments:assignmentsByAccount.get(String(account.id)) || []
+      });
+    }
+    return result;
+  } catch (error) {
+    if (targetExtraOrderTrackerSchemaMissing(error)) return new Map();
+    throw error;
+  }
+}
+
+function resolveTargetExtraMailboxOwner(entry, eventAt = new Date()) {
+  if (!entry) return null;
+  const assignment = resolveAssignmentAtTime(entry.assignments || [], eventAt);
+  return {
+    email:entry.email,
+    user_id:assignment?.user_id || null,
+    profile_id:assignment?.template_profile_id || entry.source_profile_id || null,
+    is_target_extra_account:true,
+    target_extra_account_id:entry.target_extra_account_id || null,
+    target_extra_assignment_id:assignment?.id || null,
+    assignments:entry.assignments || []
+  };
+}
+
+function currentTargetExtraMailboxOwner(entry) {
+  if (!entry) return null;
+  const active = (entry.assignments || [])
+    .filter(assignment => !assignment.released_at)
+    .sort((a,b) => new Date(b.assigned_at || 0).getTime() - new Date(a.assigned_at || 0).getTime())[0];
+  return active ? resolveTargetExtraMailboxOwner(entry, active.assigned_at || new Date()) : null;
+}
+
 async function buildMailboxOwnerMap(supabase) {
   const profiles = await fetchAllSupabaseRows(() => supabase.from('profiles').select('id,user_id'));
   const pmap = new Map(profiles.map(p => [String(p.id), p]));
@@ -1278,6 +1342,19 @@ async function buildMailboxOwnerMap(supabase) {
     out.set(email, userIds.length === 1
       ? { match_status: 'matched', matched_user_id: userIds[0], matched_profile_id: profileIds.length === 1 ? profileIds[0] : null }
       : { match_status: userIds.length > 1 ? 'ambiguous' : 'unmatched', matched_user_id: null, matched_profile_id: null });
+  }
+  // Extra Target accounts are shared infrastructure rather than ordinary saved-profile
+  // credentials. Their active assignment is authoritative even when the same mailbox was
+  // imported by the super-admin or used by a different member in an earlier assignment round.
+  const extraMailboxes = await loadTargetExtraMailboxAssignmentMap(supabase);
+  for (const [email, entry] of extraMailboxes.entries()) {
+    const owner = currentTargetExtraMailboxOwner(entry);
+    if (!owner?.user_id) continue;
+    out.set(email, {
+      match_status:'matched',
+      matched_user_id:owner.user_id,
+      matched_profile_id:owner.profile_id || null
+    });
   }
   return out;
 }
@@ -1346,6 +1423,7 @@ async function imapAuthForAccount(supabase, account) {
 
 async function loadImportedScanAccounts(supabase, onlyUserId = null) {
   let data = [];
+  const extraMailboxes = await loadTargetExtraMailboxAssignmentMap(supabase);
   try {
     // The website-wide Pokemon Center repair can include more imported mailboxes than
     // PostgREST's single-response row limit. Page deterministically so a mailbox owned by a
@@ -1353,7 +1431,6 @@ async function loadImportedScanAccounts(supabase, onlyUserId = null) {
     data = await fetchAllSupabaseRows(() => {
       let q = supabase.from('imported_mail_accounts').select('*')
         .eq('is_enabled', true).eq('is_placeholder', false);
-      if (onlyUserId) q = q.or(`imported_by_user_id.eq.${onlyUserId},matched_user_id.eq.${onlyUserId}`);
       return q.order('id', { ascending: true });
     }, 500);
   } catch (error) {
@@ -1364,14 +1441,19 @@ async function loadImportedScanAccounts(supabase, onlyUserId = null) {
   for (const row of data) {
     const provider = providerFromImportedRow(row);
     if (!provider) continue;
-    const effectiveUserId = row.matched_user_id || row.imported_by_user_id;
+    const extraOwner = currentTargetExtraMailboxOwner(extraMailboxes.get(lower(row.email)));
+    const effectiveUserId = extraOwner?.user_id || row.matched_user_id || row.imported_by_user_id;
+    if (onlyUserId && String(effectiveUserId) !== String(onlyUserId) && String(row.imported_by_user_id) !== String(onlyUserId)) continue;
     out.push({
       user_id: effectiveUserId,
       archive_user_id: row.imported_by_user_id,
-      profile_id: row.matched_profile_id || null,
+      profile_id: extraOwner?.profile_id || row.matched_profile_id || null,
       email: lower(row.email),
       provider,
       ingestion_source: 'aycd_import',
+      is_target_extra_account:Boolean(extraOwner),
+      target_extra_account_id:extraOwner?.target_extra_account_id || null,
+      target_extra_assignment_id:extraOwner?.target_extra_assignment_id || null,
       imported_account_id: row.id,
       auth_method: lower(row.auth_method),
       refresh_token_enc: row.refresh_token_enc,
@@ -2337,6 +2419,72 @@ async function findPokemonCenterServiceOrderGlobally(supabase, orderNumber) {
   return legacyMatches.length === 1 ? legacyMatches[0] : null;
 }
 
+async function findTargetExtraServiceOrderGlobally(supabase, account, orderNumbers = []) {
+  if (!account?.is_target_extra_account) return null;
+  const mailbox = lower(account.email);
+  const refs = [...new Set((orderNumbers || []).map(normalizeOrderRef)
+    .filter(ref => /^\d{12,20}$/.test(ref)))];
+  if (!mailbox || !refs.length) return null;
+  const incoming = new Set(refs);
+
+  // The tracker row is the strongest index because it already binds the exact Target order,
+  // physical extra mailbox, and original website owner. This remains correct after the mailbox
+  // is released and reassigned to somebody else.
+  try {
+    const tracked = await fetchAllSupabaseRows(() => supabase.from('tracked_orders')
+      .select('source_order_id,user_id,source_email,store,order_number')
+      .eq('store', 'target')
+      .eq('source_email', mailbox)
+      .order('updated_at', { ascending:false }), 500);
+    const sourceIds = [...new Set((tracked || [])
+      .filter(row => incoming.has(normalizeOrderRef(row.order_number)))
+      .map(row => clean(row.source_order_id)).filter(Boolean))];
+    if (sourceIds.length === 1) {
+      const source = await supabase.from('orders').select('*').eq('id', sourceIds[0]).maybeSingle();
+      if (source.error) throw source.error;
+      const serviceOrder = source.data;
+      const serviceStore = normalizeStoreKey(serviceOrder?.site || serviceOrder?.metadata?.site ||
+        extractNamedPayloadValue(serviceOrder?.raw_payload || {}, ['site','store']));
+      if (serviceOrder && !isOrderTrackerDeleted(serviceOrder) && serviceStore === 'target' &&
+          collectOrderRefs(serviceOrder).some(ref => incoming.has(ref))) return serviceOrder;
+    } else if (sourceIds.length > 1) {
+      console.warn(`[TARGET EXTRA] Refusing ambiguous tracker match for ${mailbox}: ${sourceIds.length} source orders`);
+      return null;
+    }
+  } catch (error) {
+    console.warn(`[TARGET EXTRA] Tracker lookup failed for ${mailbox}: ${error.message || error}`);
+  }
+
+  // A brand-new checkout may not have a tracker row yet. Target order numbers are full-length and
+  // globally unique, so fall back only to exact external_order_id values and then verify both the
+  // retailer and the account email captured by the webhook whenever it is available.
+  const exact = await supabase.from('orders').select('*')
+    .in('external_order_id', refs)
+    .order('created_at', { ascending:false })
+    .limit(Math.max(20, refs.length * 4));
+  if (exact.error) throw exact.error;
+  const candidates = (exact.data || []).filter(order =>
+    !isOrderTrackerDeleted(order) &&
+    normalizeStoreKey(order.site || order.metadata?.site || extractNamedPayloadValue(order.raw_payload || {}, ['site','store'])) === 'target' &&
+    collectOrderRefs(order).some(ref => incoming.has(ref))
+  );
+  if (candidates.length === 1) return candidates[0];
+  const mailboxMatches = candidates.filter(order => {
+    const emails = findEmailValues(order.raw_payload || {});
+    [order.email, order.metadata?.checkout_account_email, order.metadata?.account_email,
+      order.metadata?.login_email, order.metadata?.email].forEach(value => {
+      const email = lower(value);
+      if (email) emails.add(email);
+    });
+    return emails.has(mailbox);
+  });
+  if (mailboxMatches.length === 1) return mailboxMatches[0];
+  if (candidates.length > 1) {
+    console.warn(`[TARGET EXTRA] Refusing ambiguous global order-number match for ${refs.join(',')}: ${candidates.length} service orders`);
+  }
+  return null;
+}
+
 async function mirrorPokemonCenterEmailToOrderOwner(supabase, archivedEmail, ownerUserId, trackedOrderId) {
   if (!archivedEmail?.id || !ownerUserId) return archivedEmail;
   if (String(archivedEmail.user_id || '') === String(ownerUserId)) return archivedEmail;
@@ -2346,6 +2494,20 @@ async function mirrorPokemonCenterEmailToOrderOwner(supabase, archivedEmail, own
   const { data, error } = await supabase.from('email_messages').upsert(copy, { onConflict:'user_id,message_id' }).select().single();
   if (error) {
     console.warn('[POKEMON CENTER] Could not mirror shared-mailbox email to checkout owner:', error.message || error);
+    return archivedEmail;
+  }
+  return data || archivedEmail;
+}
+
+async function mirrorTargetExtraEmailToOrderOwner(supabase, archivedEmail, ownerUserId, trackedOrderId) {
+  if (!archivedEmail?.id || !ownerUserId) return archivedEmail;
+  if (String(archivedEmail.user_id || '') === String(ownerUserId)) return archivedEmail;
+  const copy = { ...archivedEmail, user_id:ownerUserId, linked_order_id:trackedOrderId || archivedEmail.linked_order_id || null, updated_at:new Date().toISOString() };
+  delete copy.id;
+  delete copy.created_at;
+  const { data, error } = await supabase.from('email_messages').upsert(copy, { onConflict:'user_id,message_id' }).select().single();
+  if (error) {
+    console.warn('[TARGET EXTRA] Could not mirror shared-mailbox email to checkout owner:', error.message || error);
     return archivedEmail;
   }
   return data || archivedEmail;
@@ -3749,6 +3911,13 @@ async function saveParsedMessage(supabase, account, parsed, uid, adjustCredits =
       serviceOrders = [pokemonGlobalOrder, ...serviceOrders];
     }
   }
+  let targetExtraGlobalOrder = null;
+  if (store === 'target' && account.is_target_extra_account) {
+    targetExtraGlobalOrder = await findTargetExtraServiceOrderGlobally(supabase, account, orderNumbers);
+    if (targetExtraGlobalOrder?.id && !serviceOrders.some(order => String(order.id) === String(targetExtraGlobalOrder.id))) {
+      serviceOrders = [targetExtraGlobalOrder, ...serviceOrders];
+    }
+  }
 
   // Amazon confirmation emails are intentionally one-to-one with bot checkout pings. A burst
   // of 15 possible successes plus 2 actual Amazon confirmation emails must confirm exactly 2
@@ -3796,6 +3965,11 @@ async function saveParsedMessage(supabase, account, parsed, uid, adjustCredits =
   } else {
     const incomingRefs = new Set(orderNumbers.map(normalizeOrderRef).filter(Boolean));
     matchedServiceOrders = serviceOrders.filter(o => collectOrderRefs(o).some(ref => incomingRefs.has(ref)));
+    if (store === 'target' && targetExtraGlobalOrder?.id) {
+      // The full retailer order number is more durable than whichever member currently owns this
+      // rotating mailbox. Always update the original checkout owner.
+      matchedServiceOrders = [targetExtraGlobalOrder];
+    }
     if (store === 'walmart') {
       const exactTrackedSource = await findWalmartServiceOrderViaExactTracker(
         supabase, account, orderNumbers, serviceOrders
@@ -3815,12 +3989,19 @@ async function saveParsedMessage(supabase, account, parsed, uid, adjustCredits =
     const serviceRefs = collectOrderRefs(serviceOrder);
     const matchedOrderNumber = orderNumbers.find(n => serviceRefs.includes(normalizeOrderRef(n))) || primaryOrderNumber;
 
-    const orderOwnerUserId = store === 'pokemoncenter' ? serviceOrder.user_id : account.user_id;
+    const sharedMailboxOrder = store === 'pokemoncenter' || (store === 'target' && account.is_target_extra_account);
+    const orderOwnerUserId = sharedMailboxOrder ? serviceOrder.user_id : account.user_id;
     let { data: existing } = await supabase.from('tracked_orders').select('*').eq('source_order_id', serviceOrder.id).maybeSingle();
     if (!existing) {
-      // For Pokemon Center, create/sync the tracker under the webhook profile owner, not under
-      // whichever mailbox happened to receive Pokemon Center's confirmation email.
-      await syncServiceOrders(supabase, orderOwnerUserId, store === 'pokemoncenter' ? [] : [account]);
+      // Shared mailboxes must create/sync the tracker under the webhook checkout owner, not under
+      // whichever member currently owns or physically receives that mailbox.
+      const ownerAccount = { ...account, user_id:orderOwnerUserId };
+      await syncServiceOrders(
+        supabase,
+        orderOwnerUserId,
+        store === 'pokemoncenter' ? [] : [ownerAccount],
+        sharedMailboxOrder ? { serviceOrders:[serviceOrder] } : {}
+      );
       const lookup = await supabase.from('tracked_orders').select('*').eq('source_order_id', serviceOrder.id).maybeSingle();
       existing = lookup.data;
     }
@@ -3882,6 +4063,8 @@ async function saveParsedMessage(supabase, account, parsed, uid, adjustCredits =
     if (store === 'pokemoncenter' && archivedEmail?.id) {
       archivedEmail = await enforcePokemonCenterExactEmailOwnership(supabase, archivedEmail, order.id, matchedOrderNumber);
       effectiveArchivedEmail = await mirrorPokemonCenterEmailToOrderOwner(supabase, archivedEmail, orderOwnerUserId, order.id);
+    } else if (store === 'target' && account.is_target_extra_account && archivedEmail?.id) {
+      effectiveArchivedEmail = await mirrorTargetExtraEmailToOrderOwner(supabase, archivedEmail, orderOwnerUserId, order.id);
     }
     if (effectiveArchivedEmail?.id) {
       // Keep the legacy single-link populated for older UI/code, and also record the new
@@ -6792,11 +6975,15 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
       } catch (_) {}
       const provider = providerFromImportedRow(row);
       if (provider) {
-        const account = { user_id:row.matched_user_id||row.imported_by_user_id, archive_user_id:row.imported_by_user_id,
+        const dynamicAccounts = await loadImportedScanAccounts(supabase, null);
+        const account = dynamicAccounts.find(item => String(item.imported_account_id) === String(row.id)) || {
+          user_id:row.matched_user_id||row.imported_by_user_id, archive_user_id:row.imported_by_user_id,
           profile_id:row.matched_profile_id||null, email:lower(row.email), provider, imported_account_id:row.id,
           auth_method:lower(row.auth_method), refresh_token_enc:row.refresh_token_enc, client_id_enc:row.client_id_enc,
           client_secret_enc:row.client_secret_enc, app_password_enc:row.app_password_enc, password_enc:row.password_enc,
-          folders:row.folders, folder_state:{}, ingestion_source:'aycd_import' };
+          folders:row.folders, folder_state:{}, ingestion_source:'aycd_import'
+        };
+        account.folder_state = {};
         Promise.resolve().then(() => scanImportedAccount(supabase, account, adjustUserCredits, null, confirmPendingAmazonCheckout))
           .catch(err => console.error(`[DIRECT IMAP] History rescan failed ${row.email}:`, err.message || err));
       }
@@ -7369,7 +7556,7 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
     const add = row => {
       const email = lower(row?.login_email || row?.email);
       const profile = profileById.get(String(row?.profile_id));
-      if (email && profile && !map.has(email)) map.set(email, { profile_id: profile.id, email });
+      if (email && profile && !map.has(email)) map.set(email, { user_id:profile.user_id, profile_id: profile.id, email });
     };
     if (profileIds.length) {
       try {
@@ -7386,7 +7573,20 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
       // AYCD linkage is explicit. Legacy account rows are not included unless
       // the corresponding store credential has use_aycd_inbox enabled.
     }
+    // Extra Target accounts are not normal user-owned credentials, but AYCD exposes their
+    // physical mailboxes. Keep the full assignment history so each message can be attributed to
+    // the member who owned the account when that retailer event happened.
+    const extraMailboxes = await loadTargetExtraMailboxAssignmentMap(supabase);
+    for (const [email, entry] of extraMailboxes.entries()) {
+      if (!(entry.assignments || []).length) continue;
+      map.set(email, { ...entry, email, is_target_extra_account:true });
+    }
     return map;
+  }
+
+  function resolveAycdRecipient(entry, eventAt) {
+    if (!entry?.is_target_extra_account) return entry || null;
+    return resolveTargetExtraMailboxOwner(entry, eventAt);
   }
 
   function aycdMessageRecipients(item = {}) {
@@ -7404,6 +7604,7 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
     const recipientMap = await loadAycdRecipientMap(userId);
     const fallbackAccount = {
       user_id: userId,
+      archive_user_id: userId,
       profile_id: null,
       email: 'inbox@aycd.me',
       ingestion_source: 'aycd',
@@ -7420,11 +7621,29 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
       checked += 1;
       try {
         const directMailbox = lower(item.mailboxEmail);
-        const linked = (directMailbox ? recipientMap.get(directMailbox) : null) || aycdMessageRecipients(item).map(email => recipientMap.get(email)).find(Boolean);
+        const recipientEntry = (directMailbox ? recipientMap.get(directMailbox) : null) || aycdMessageRecipients(item).map(email => recipientMap.get(email)).find(Boolean);
+        const linked = resolveAycdRecipient(recipientEntry, item.date || new Date());
         const account = directMailbox
-          ? { ...fallbackAccount, profile_id: linked?.profile_id || null, email: directMailbox, provider: { ...fallbackAccount.provider, name: 'aycd-direct-account' } }
-          : (linked ? { ...fallbackAccount, profile_id: linked.profile_id, email: linked.email } : fallbackAccount);
-        if (linked) linkedProfiles += 1;
+          ? {
+              ...fallbackAccount,
+              user_id:linked?.user_id || userId,
+              profile_id:linked?.profile_id || null,
+              email:directMailbox,
+              provider:{ ...fallbackAccount.provider, name:'aycd-direct-account' },
+              is_target_extra_account:Boolean(recipientEntry?.is_target_extra_account),
+              target_extra_account_id:linked?.target_extra_account_id || recipientEntry?.target_extra_account_id || null,
+              target_extra_assignment_id:linked?.target_extra_assignment_id || null
+            }
+          : (linked ? {
+              ...fallbackAccount,
+              user_id:linked.user_id || userId,
+              profile_id:linked.profile_id || null,
+              email:linked.email,
+              is_target_extra_account:Boolean(recipientEntry?.is_target_extra_account),
+              target_extra_account_id:linked.target_extra_account_id || null,
+              target_extra_assignment_id:linked.target_extra_assignment_id || null
+            } : fallbackAccount);
+        if (linked?.user_id) linkedProfiles += 1;
         const parsed = {
           subject: clean(item.subject), from: { text: clean(item.from) },
           to: { text: clean(item.to) }, cc: { text: clean(item.cc) },
@@ -7496,6 +7715,14 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
             .eq('use_aycd_inbox', true);
           for (const item of r.data || []) add(item.login_email, 1, 'profile');
         } catch (_) {}
+      }
+
+      // Scan every physical extra Target inbox that has ever been assigned. Released accounts stay
+      // on this list because Target can send a shipment or cancellation days after reassignment;
+      // exact order-number matching below still routes that message to the original checkout owner.
+      const extraMailboxes = await loadTargetExtraMailboxAssignmentMap(supabase);
+      for (const entry of extraMailboxes.values()) {
+        if ((entry.assignments || []).length) add(entry.email, 2, 'target_extra_account');
       }
 
       // Historical AYCD recipients let the bridge recover and directly scan accounts
