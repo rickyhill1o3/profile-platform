@@ -1,4 +1,6 @@
 const assert = require('assert');
+const fs = require('fs');
+const path = require('path');
 const {
   parseRetailEmail,
   targetSingleLineDeliveryAlias,
@@ -99,5 +101,15 @@ assert.ok(targetSingleLineDeliveryAlias(
     product_name:'Pokémon Mega Evolution S2.5 Ascended Heroes Tech Sticker - Charmander'
   }]
 ));
+
+// Historical rows may already contain the same main product twice. The order-level rollup is
+// shipped until reconciliation projects the exact delivery onto both duplicate main rows.
+assert.strictEqual(deriveOverallStatus([
+  { role:'main', status:'delivered' },
+  { role:'main', status:'confirmed' }
+]), 'shipped');
+const trackerSource = fs.readFileSync(path.join(__dirname, '..', 'order-tracker.js'), 'utf8');
+assert.match(trackerSource, /duplicateMainRows\.length > 1/,
+  'Target delivery replay must repair duplicate historical main rows so the card can become delivered');
 
 console.log('Target delivered-title alias reconciliation tests passed');

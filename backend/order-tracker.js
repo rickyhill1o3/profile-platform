@@ -76,10 +76,14 @@ const RECONCILE_IMAP_CONCURRENCY = Math.max(1, Math.min(4, Number(process.env.RE
 // a completed job. Three workers still cover the whole mailbox inventory without the memory spike.
 const FULL_EMAIL_SCAN_CONCURRENCY = Math.max(1, Math.min(6, Number(process.env.FULL_EMAIL_SCAN_CONCURRENCY || 3)));
 const IMAP_ACCOUNT_SCAN_DEADLINE_MS = Math.max(30000, Math.min(10 * 60 * 1000, Number(process.env.IMAP_ACCOUNT_SCAN_DEADLINE_MS || 120000)));
-// Manual reconcile is an incremental catch-up pass, not a request to hydrate years of mail into
-// one process. Every connected mailbox is visited, while at most this many new messages are parsed
-// from each mailbox per click. Checkpoints preserve progress and the next click resumes the backlog.
+// Historical reconciliation remains memory-bounded even though it starts at the website's oldest
+// order. Every connected mailbox advances by at most this many messages per process pass; the
+// durable mailbox UID cursor and normal background scanner continue any remaining backlog.
 const RECONCILE_MAX_MESSAGES_PER_MAILBOX = Math.max(25, Math.min(500, Number(process.env.RECONCILE_MAX_MESSAGES_PER_MAILBOX || 100)));
+// Changing this value performs one automatic, resumable OAuth history replay for every mailbox
+// known to Target Extra Accounts. The marker is stored inside imported_mail_accounts.folder_state,
+// so no migration or user action is required and later scheduled scans keep their normal cursor.
+const TARGET_EXTRA_OAUTH_REPLAY_VERSION = 'target-extra-owner-v1';
 // A complete super-admin pass can touch 600+ inboxes. Keep each worker pool short-lived so
 // ImapFlow/mailparser objects from earlier mailboxes become collectible before the next group.
 // With --expose-gc (see package.json), the explicit collection prevents a long scan from slowly
@@ -241,6 +245,8 @@ function retailerReconcileJobView(job) {
     error:job.error,
     stage_errors:Array.isArray(job.stage_errors) ? job.stage_errors : [],
     resumed_from_checkpoint:Boolean(job.resumed_from_checkpoint),
+    scope:job.scope || 'user',
+    history_replay_since_at:job.history_replay_since_at || null,
     resumed_target_mailboxes:Number(job.target_checkpoint?.completed_count || 0),
     total_target_mailboxes:Number(job.target_checkpoint?.total_mailboxes || 0),
     resumed_mailboxes:Number(job.scan_checkpoint?.completed_count || 0),
@@ -280,10 +286,38 @@ function serializableRetailerReconcileJob(job = {}) {
     error:job.error || null,
     stage_errors:Array.isArray(job.stage_errors) ? job.stage_errors.slice(-100) : [],
     resumed_from_checkpoint:Boolean(job.resumed_from_checkpoint),
+    scope:job.scope || 'user',
+    history_replay_since_at:job.history_replay_since_at || null,
     target_checkpoint:job.target_checkpoint || null,
     scan_checkpoint:job.scan_checkpoint || null,
     result:job.status === 'complete' ? (job.result || null) : null
   };
+}
+
+async function websiteOrderHistoryStart(supabase, userId = null) {
+  const timestamps = [];
+  try {
+    let query = supabase.from('orders').select('created_at')
+      .not('created_at','is',null).order('created_at',{ ascending:true }).limit(1);
+    if (userId) query = query.eq('user_id', userId);
+    const result = await query;
+    if (!result.error && result.data?.[0]?.created_at) timestamps.push(new Date(result.data[0].created_at).getTime());
+  } catch (_) {}
+  try {
+    let query = supabase.from('tracked_orders').select('order_date,created_at')
+      .not('order_date','is',null).order('order_date',{ ascending:true }).limit(1);
+    if (userId) query = query.eq('user_id', userId);
+    const result = await query;
+    if (!result.error) {
+      const value = result.data?.[0]?.order_date || result.data?.[0]?.created_at;
+      if (value) timestamps.push(new Date(value).getTime());
+    }
+  } catch (_) {}
+  const valid = timestamps.filter(Number.isFinite).filter(value => value > 0);
+  const configured = new Date(INITIAL_SCAN_START).getTime();
+  const earliest = valid.length ? Math.min(...valid) : (Number.isFinite(configured) ? configured : Date.now() - INITIAL_LOOKBACK_DAYS * 86400000);
+  // Retailers occasionally send a checkout email shortly before the website webhook timestamp.
+  return new Date(Math.max(0, earliest - 7 * 86400000)).toISOString();
 }
 
 async function loadDurableRetailerReconcileJob(supabase, userId) {
@@ -642,9 +676,9 @@ async function fetchRecentEmailArchiveByStore(supabase, userId, store, columns, 
   // bodies in one statement. First fetch only primary keys through the indexed user/date path,
   // then hydrate those rows in small PK batches. This keeps each DB statement comfortably below
   // hosted statement_timeout even when some retailer emails contain very large HTML bodies.
-  const meta = await supabase.from('email_messages').select('id,received_at')
-    .eq('user_id', userId).eq('store', store)
-    .order('received_at', { ascending:false }).limit(limit);
+  let query = supabase.from('email_messages').select('id,received_at').eq('store', store);
+  if (userId) query = query.eq('user_id', userId);
+  const meta = await query.order('received_at', { ascending:false }).limit(limit);
   if (meta.error) throw meta.error;
   const ids = (meta.data || []).map(x => x.id).filter(Boolean);
   const rows = await fetchEmailArchiveRowsByIds(supabase, userId, ids, columns, 60);
@@ -687,12 +721,13 @@ async function fetchTargetDeliveredArchiveForStuckOrders(supabase, userId, colum
   // A Target delivery can already be linked while the order card remains confirmed/shipped when
   // Target substituted an internal fulfillment title. Fetch those exact linked delivery messages
   // independently of the newest-N archive window so manual reconciliation can repair old orders.
-  const stuck = await fetchAllSupabaseRows(() => supabase.from('tracked_orders')
-    .select('id')
-    .eq('user_id', userId)
-    .eq('store', 'target')
-    .in('status', ['waiting_confirmation','confirmed','processing','shipped'])
-    .order('order_date', { ascending:false }), 500);
+  const stuck = await fetchAllSupabaseRows(() => {
+    let query = supabase.from('tracked_orders').select('id')
+      .eq('store', 'target')
+      .in('status', ['waiting_confirmation','confirmed','processing','shipped']);
+    if (userId) query = query.eq('user_id', userId);
+    return query.order('order_date', { ascending:false });
+  }, 500);
   const orderIds = (stuck || []).map(row => row.id).filter(Boolean).slice(0, 1000);
   if (!orderIds.length) return [];
 
@@ -706,8 +741,10 @@ async function fetchTargetDeliveredArchiveForStuckOrders(supabase, userId, colum
       if (!links.error) for (const row of links.data || []) if (row.email_id) emailIds.add(String(row.email_id));
     } catch (_) {}
     try {
-      const events = await supabase.from('tracked_order_events').select('message_id')
-        .eq('user_id', userId).in('order_id', chunk).eq('status', 'delivered');
+      let query = supabase.from('tracked_order_events').select('message_id')
+        .in('order_id', chunk).eq('status', 'delivered');
+      if (userId) query = query.eq('user_id', userId);
+      const events = await query;
       if (!events.error) for (const row of events.data || []) if (row.message_id) messageIds.add(String(row.message_id));
     } catch (_) {}
   }
@@ -717,8 +754,10 @@ async function fetchTargetDeliveredArchiveForStuckOrders(supabase, userId, colum
   for (const row of byId) merged.set(String(row.id || row.message_id), row);
   const messageList = [...messageIds].slice(0, limit);
   for (let i = 0; i < messageList.length; i += 50) {
-    const result = await supabase.from('email_messages').select(columns)
-      .eq('user_id', userId).in('message_id', messageList.slice(i, i + 50));
+    let query = supabase.from('email_messages').select(columns)
+      .in('message_id', messageList.slice(i, i + 50));
+    if (userId) query = query.eq('user_id', userId);
+    const result = await query;
     if (result.error) throw result.error;
     for (const row of result.data || []) merged.set(String(row.id || row.message_id), row);
   }
@@ -743,13 +782,15 @@ async function fetchLinkedRetailerArchiveForOrders(supabase, userId, orderIds = 
       if (!links.error) for (const row of links.data || []) if (row.email_id) emailIds.add(String(row.email_id));
     } catch (_) {}
     try {
-      const events = await supabase.from('tracked_order_events').select('message_id')
-        .eq('user_id', userId).in('order_id', chunk);
+      let query = supabase.from('tracked_order_events').select('message_id').in('order_id', chunk);
+      if (userId) query = query.eq('user_id', userId);
+      const events = await query;
       if (!events.error) for (const row of events.data || []) if (row.message_id) messageIds.add(String(row.message_id));
     } catch (_) {}
     try {
-      const legacy = await supabase.from('email_messages').select('id,message_id')
-        .eq('user_id', userId).in('linked_order_id', chunk);
+      let query = supabase.from('email_messages').select('id,message_id').in('linked_order_id', chunk);
+      if (userId) query = query.eq('user_id', userId);
+      const legacy = await query;
       if (!legacy.error) for (const row of legacy.data || []) {
         if (row.id) emailIds.add(String(row.id));
         if (row.message_id) messageIds.add(String(row.message_id));
@@ -763,8 +804,9 @@ async function fetchLinkedRetailerArchiveForOrders(supabase, userId, orderIds = 
   const remaining = Math.max(0, limit - merged.size);
   const messages = remaining > 0 ? [...messageIds].slice(0, remaining) : [];
   for (let i = 0; i < messages.length; i += 50) {
-    const result = await supabase.from('email_messages').select(columns)
-      .eq('user_id', userId).in('message_id', messages.slice(i, i + 50));
+    let query = supabase.from('email_messages').select(columns).in('message_id', messages.slice(i, i + 50));
+    if (userId) query = query.eq('user_id', userId);
+    const result = await query;
     if (result.error) throw result.error;
     for (const row of result.data || []) merged.set(String(row.id || row.message_id), row);
   }
@@ -1310,10 +1352,16 @@ function resolveTargetExtraMailboxOwner(entry, eventAt = new Date()) {
 
 function currentTargetExtraMailboxOwner(entry) {
   if (!entry) return null;
-  const active = (entry.assignments || [])
-    .filter(assignment => !assignment.released_at)
+  const owner = resolveTargetExtraMailboxOwner(entry, new Date());
+  return owner?.user_id ? owner : null;
+}
+
+function latestTargetExtraMailboxOwner(entry) {
+  if (!entry) return null;
+  const latest = (entry.assignments || [])
+    .slice()
     .sort((a,b) => new Date(b.assigned_at || 0).getTime() - new Date(a.assigned_at || 0).getTime())[0];
-  return active ? resolveTargetExtraMailboxOwner(entry, active.assigned_at || new Date()) : null;
+  return latest ? resolveTargetExtraMailboxOwner(entry, latest.assigned_at || new Date()) : null;
 }
 
 async function buildMailboxOwnerMap(supabase) {
@@ -1441,19 +1489,44 @@ async function loadImportedScanAccounts(supabase, onlyUserId = null) {
   for (const row of data) {
     const provider = providerFromImportedRow(row);
     if (!provider) continue;
-    const extraOwner = currentTargetExtraMailboxOwner(extraMailboxes.get(lower(row.email)));
-    const effectiveUserId = extraOwner?.user_id || row.matched_user_id || row.imported_by_user_id;
+    const extraEntry = extraMailboxes.get(lower(row.email));
+    const currentExtraOwner = currentTargetExtraMailboxOwner(extraEntry);
+    const extraScanOwner = currentExtraOwner || latestTargetExtraMailboxOwner(extraEntry);
+    const effectiveUserId = extraScanOwner?.user_id || row.matched_user_id || row.imported_by_user_id;
+    // Persist the active assignment automatically. This makes the Email Center record agree with
+    // the scanner without asking the super-admin to open profiles or click Rematch accounts.
+    if (currentExtraOwner?.user_id && (
+      String(row.matched_user_id || '') !== String(currentExtraOwner.user_id) ||
+      String(row.matched_profile_id || '') !== String(currentExtraOwner.profile_id || '') ||
+      lower(row.match_status) !== 'matched'
+    )) {
+      const matchedAt = new Date().toISOString();
+      const rematch = await supabase.from('imported_mail_accounts').update({
+        matched_user_id:currentExtraOwner.user_id,
+        matched_profile_id:currentExtraOwner.profile_id || null,
+        match_status:'matched',
+        updated_at:matchedAt
+      }).eq('id', row.id);
+      if (rematch.error) console.warn(`[TARGET EXTRA OAUTH] Could not persist owner for ${lower(row.email)}: ${rematch.error.message || rematch.error}`);
+      else console.log(`[TARGET EXTRA OAUTH] Matched ${lower(row.email)} to assigned website user ${currentExtraOwner.user_id}.`);
+    }
     if (onlyUserId && String(effectiveUserId) !== String(onlyUserId) && String(row.imported_by_user_id) !== String(onlyUserId)) continue;
     out.push({
       user_id: effectiveUserId,
       archive_user_id: row.imported_by_user_id,
-      profile_id: extraOwner?.profile_id || row.matched_profile_id || null,
+      profile_id: extraScanOwner?.profile_id || row.matched_profile_id || null,
       email: lower(row.email),
       provider,
       ingestion_source: 'aycd_import',
-      is_target_extra_account:Boolean(extraOwner),
-      target_extra_account_id:extraOwner?.target_extra_account_id || null,
-      target_extra_assignment_id:extraOwner?.target_extra_assignment_id || null,
+      is_target_extra_account:Boolean(extraEntry),
+      target_extra_account_id:extraScanOwner?.target_extra_account_id || extraEntry?.target_extra_account_id || null,
+      target_extra_assignment_id:extraScanOwner?.target_extra_assignment_id || null,
+      target_extra_replay_since_at:(extraEntry?.assignments || [])
+        .map(assignment => new Date(assignment.assigned_at || 0).getTime())
+        .filter(Number.isFinite)
+        .filter(value => value > 0)
+        .sort((a,b) => a-b)
+        .map(value => new Date(Math.max(0, value - 2 * 24 * 60 * 60 * 1000)).toISOString())[0] || INITIAL_SCAN_START,
       imported_account_id: row.id,
       auth_method: lower(row.auth_method),
       refresh_token_enc: row.refresh_token_enc,
@@ -3555,6 +3628,30 @@ async function reconcileTrackedOrderItems(supabase, trackedOrder, serviceOrder, 
     if (saved?.id) matchedIds.push(saved.id);
   }
 
+  // Older Target builds could create the same intended product twice: one main row from the
+  // webhook/confirmation and another main row from a shortened fulfillment title. A later
+  // delivered email then updated only one duplicate, so deriveOverallStatus() correctly saw the
+  // mixed delivered+confirmed rows as merely shipped. For a one-product Target order, a delivery
+  // whose quantity matches the expected checkout is authoritative for every duplicate main row
+  // representing that same expected product.
+  if (lower(trackedOrder.store) === 'target' && status === 'delivered' && expected.length === 1 && parsedItems.length === 1) {
+    const expectedQuantity = Math.max(1, Number(expected[0].quantity || 1));
+    const deliveredQuantity = Math.max(1, Number(parsedItems[0].quantity || 1));
+    const duplicateMainRows = existing.filter(item => item.role === 'main' && mainItemMatch(expected, item));
+    if (deliveredQuantity === expectedQuantity && duplicateMainRows.length > 1) {
+      for (const duplicate of duplicateMainRows) {
+        if (lower(duplicate.status) === 'delivered') continue;
+        const result = await supabase.from('tracked_order_items').update({
+          status:'delivered', last_event_at:eventAt, last_email_id:emailId || null,
+          updated_at:new Date().toISOString()
+        }).eq('id', duplicate.id).select().single();
+        if (result.error) throw result.error;
+        existing = existing.map(item => item.id === duplicate.id ? result.data : item);
+        if (result.data?.id) matchedIds.push(result.data.id);
+      }
+    }
+  }
+
   // A Target confirmation containing only the filler is the critical ghost-success case.
   // Create an explicit missing main-item row so an unrelated filler cancellation cannot be
   // interpreted as a successful checkout or as a cancellation of the desired product.
@@ -4252,6 +4349,17 @@ async function markAmazonGhostCandidates(supabase, account) {
 async function scanImportedAccount(supabase, account, adjustCredits = null, onProgress = null, confirmPendingAmazonCheckout = null, options = {}) {
   const { data: row, error: rowError } = await supabase.from('imported_mail_accounts').select('*').eq('id', account.imported_account_id).maybeSingle();
   if (rowError || !row) throw rowError || new Error('Imported mailbox row no longer exists.');
+  const storedFolderState = row.folder_state && typeof row.folder_state === 'object' ? row.folder_state : {};
+  const targetExtraReplayMarker = account.is_target_extra_account
+    ? `${TARGET_EXTRA_OAUTH_REPLAY_VERSION}:${account.target_extra_account_id || lower(account.email)}:${account.target_extra_assignment_id || 'unassigned'}`
+    : '';
+  const targetExtraReplayNeeded = Boolean(targetExtraReplayMarker) &&
+    clean(storedFolderState.__target_extra_oauth_replay) !== targetExtraReplayMarker;
+  const sitewideReplayMarker = clean(options.historyReplayJobId)
+    ? `retailer-reconcile:${clean(options.historyReplayJobId)}`
+    : '';
+  const sitewideReplayNeeded = Boolean(sitewideReplayMarker) &&
+    clean(storedFolderState.__retailer_history_replay) !== sitewideReplayMarker;
   const effectiveAccount = { ...account, last_error:row.last_error, last_scan_at:row.last_scan_at, updated_at:row.updated_at };
   const microsoftBackoffMs = microsoftBackoffRemainingMs(effectiveAccount);
   if (microsoftBackoffMs > 0) {
@@ -4259,7 +4367,7 @@ async function scanImportedAccount(supabase, account, adjustCredits = null, onPr
     return { checked:0,total:0,saved:0,archived:0,skipped_rate_limited:true,retry_after_ms:microsoftBackoffMs };
   }
   const lastSuccessMs = row.last_success_at ? new Date(row.last_success_at).getTime() : 0;
-  if (!options.force && MIN_RESCAN_INTERVAL_MS > 0 && lastSuccessMs && Date.now() - lastSuccessMs < MIN_RESCAN_INTERVAL_MS) {
+  if (!targetExtraReplayNeeded && !sitewideReplayNeeded && !options.force && MIN_RESCAN_INTERVAL_MS > 0 && lastSuccessMs && Date.now() - lastSuccessMs < MIN_RESCAN_INTERVAL_MS) {
     if (onProgress) onProgress({ checked:0,total:0,saved:0,skippedRecent:true });
     return { checked:0,total:0,saved:0,skipped_recent:true };
   }
@@ -4278,9 +4386,21 @@ async function scanImportedAccount(supabase, account, adjustCredits = null, onPr
   let checked=0,saved=0,archived=0,total=0;
   let morePending=false;
   let activeMailbox = '';
-  const folderState = row.folder_state && typeof row.folder_state === 'object' ? { ...row.folder_state } : {};
+  const replayMarkers = {
+    ...(targetExtraReplayMarker ? { __target_extra_oauth_replay:targetExtraReplayMarker } : {}),
+    ...(sitewideReplayMarker ? { __retailer_history_replay:sitewideReplayMarker } : {})
+  };
+  const folderState = targetExtraReplayNeeded || sitewideReplayNeeded
+    ? replayMarkers
+    : { ...storedFolderState, ...replayMarkers };
   const started = new Date().toISOString();
   try {
+    if (targetExtraReplayNeeded) {
+      console.log(`[TARGET EXTRA OAUTH] Automatic history replay started for ${account.email}; assignment=${account.target_extra_assignment_id || 'unassigned'}.`);
+    }
+    if (sitewideReplayNeeded) {
+      console.log(`[RECONCILE HISTORY] Full OAuth history replay started for ${account.email} at ${options.replaySinceAt || INITIAL_SCAN_START}.`);
+    }
     console.log(`[DIRECT IMAP] START ${account.email}`);
     await client.connect();
     let boxes=[]; try{boxes=await client.list();}catch(_){}
@@ -4304,7 +4424,14 @@ async function scanImportedAccount(supabase, account, adjustCredits = null, onPr
         const prior=folderState[key]||{};
         let highestUid=Number(prior.last_seen_uid||0);
         let ids=[];
-        const replaySince = new Date(options.replaySinceAt || 0);
+        // A reconcile job's lookback applies only while its durable marker is first installed.
+        // Later passes use the saved UID cursor, so a large mailbox advances instead of repeatedly
+        // downloading its oldest page. The same job id survives a Render restart.
+        const explicitReplaySince = sitewideReplayMarker
+          ? (sitewideReplayNeeded ? options.replaySinceAt : null)
+          : options.replaySinceAt;
+        const automaticReplaySince = targetExtraReplayNeeded ? account.target_extra_replay_since_at : null;
+        const replaySince = new Date(explicitReplaySince || automaticReplaySince || 0);
         if(Number.isFinite(replaySince.getTime()) && replaySince.getTime() > 0) ids=await client.search({since:replaySince},{uid:true});
         else if(highestUid>0) ids=await client.search({uid:`${highestUid+1}:*`},{uid:true});
         else {
@@ -4346,8 +4473,8 @@ async function scanImportedAccount(supabase, account, adjustCredits = null, onPr
     if (!morePending && options.markAmazonGhostCandidates !== false) {
       await markAmazonGhostCandidates(supabase, account).catch(()=>{});
     }
-    console.log(`[DIRECT IMAP] COMPLETE ${account.email} checked=${checked} archived=${archived} linked=${saved} folders=${folders.length}`);
-    return {checked,total,saved,archived,folders:folders.length,more_pending:morePending};
+    console.log(`[DIRECT IMAP] COMPLETE ${account.email} checked=${checked} archived=${archived} linked=${saved} folders=${folders.length}${targetExtraReplayNeeded ? ' target-extra-replay=started' : ''}${sitewideReplayNeeded ? ' full-history-replay=started' : ''}`);
+    return {checked,total,saved,archived,folders:folders.length,more_pending:morePending,target_extra_replay_started:targetExtraReplayNeeded,full_history_replay_started:sitewideReplayNeeded};
   } catch(err) {
     const effectiveError = deadlineExpired ? new Error(`Mailbox scan exceeded ${Math.round(deadlineMs/1000)} seconds.`) : err;
     console.error(`[DIRECT IMAP] FAILED ${account.email}: ${describeImapError(effectiveError, activeMailbox)}`);
@@ -4388,9 +4515,15 @@ async function scanAccount(supabase, account, adjustCredits = null, onProgress =
     deadlineExpired = true;
     try { client.close(); } catch (_) {}
   }, deadlineMs);
-  let saved = 0, archived = 0, checked = 0, highestUid = Number(state.last_seen_uid || 0), total = 0, morePending = false;
+  const directHistoryReplay = Boolean(clean(options.historyReplayJobId));
+  let saved = 0, archived = 0, checked = 0,
+    highestUid = directHistoryReplay ? 0 : Number(state.last_seen_uid || 0),
+    total = 0, morePending = false;
   const scanStartedAt = new Date().toISOString();
   try {
+    if (directHistoryReplay) {
+      console.log(`[RECONCILE HISTORY] Full direct-mailbox history replay started for ${account.email} at ${options.replaySinceAt || INITIAL_SCAN_START}.`);
+    }
     await client.connect();
     let mailboxName = 'INBOX';
     if (account.provider.name === 'gmail') {
@@ -4402,7 +4535,7 @@ async function scanAccount(supabase, account, adjustCredits = null, onProgress =
     const lock = await client.getMailboxLock(mailboxName);
     try {
       let uids = [];
-      const replaySince = new Date(options.replaySinceAt || 0);
+      const replaySince = new Date(directHistoryReplay ? (options.replaySinceAt || INITIAL_SCAN_START) : (options.replaySinceAt || 0));
       if (Number.isFinite(replaySince.getTime()) && replaySince.getTime() > 0) {
         uids = await client.search({ since:replaySince }, { uid:true });
       } else if (highestUid > 0) {
@@ -6053,10 +6186,16 @@ async function scanAll(supabase, userId = null, adjustCredits = null, onProgress
         }
       }
     } catch (_) {}
-    accounts.sort((a,b) => Number(pendingEmails.has(b.email)) - Number(pendingEmails.has(a.email)));
+    // Extra Target OAuth mailboxes carry receipts for user checkouts even though the mailbox
+    // itself is connected by the super admin. Keep them at the front of every background cycle
+    // so automatic assignment repair and checkpoint replay cannot be starved by the regular
+    // mailbox round-robin queue.
+    const backgroundPriority = account =>
+      (account.is_target_extra_account ? 2 : 0) + (pendingEmails.has(account.email) ? 1 : 0);
+    accounts.sort((a,b) => backgroundPriority(b) - backgroundPriority(a));
     if (!userId && !options.allAccounts && accounts.length > MAX_ACCOUNTS_PER_CYCLE) {
-      const priority = accounts.filter(a => pendingEmails.has(a.email));
-      const regular = accounts.filter(a => !pendingEmails.has(a.email));
+      const priority = accounts.filter(a => a.is_target_extra_account || pendingEmails.has(a.email));
+      const regular = accounts.filter(a => !a.is_target_extra_account && !pendingEmails.has(a.email));
       const prioritySlice = priority.slice(0, MAX_ACCOUNTS_PER_CYCLE);
       const remainingSlots = Math.max(0, MAX_ACCOUNTS_PER_CYCLE - prioritySlice.length);
       const start = regular.length ? backgroundAccountCursor % regular.length : 0;
@@ -7556,7 +7695,7 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
     const add = row => {
       const email = lower(row?.login_email || row?.email);
       const profile = profileById.get(String(row?.profile_id));
-      if (email && profile && !map.has(email)) map.set(email, { user_id:profile.user_id, profile_id: profile.id, email });
+      if (email && profile && !map.has(email)) map.set(email, { profile_id: profile.id, email });
     };
     if (profileIds.length) {
       try {
@@ -7573,20 +7712,7 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
       // AYCD linkage is explicit. Legacy account rows are not included unless
       // the corresponding store credential has use_aycd_inbox enabled.
     }
-    // Extra Target accounts are not normal user-owned credentials, but AYCD exposes their
-    // physical mailboxes. Keep the full assignment history so each message can be attributed to
-    // the member who owned the account when that retailer event happened.
-    const extraMailboxes = await loadTargetExtraMailboxAssignmentMap(supabase);
-    for (const [email, entry] of extraMailboxes.entries()) {
-      if (!(entry.assignments || []).length) continue;
-      map.set(email, { ...entry, email, is_target_extra_account:true });
-    }
     return map;
-  }
-
-  function resolveAycdRecipient(entry, eventAt) {
-    if (!entry?.is_target_extra_account) return entry || null;
-    return resolveTargetExtraMailboxOwner(entry, eventAt);
   }
 
   function aycdMessageRecipients(item = {}) {
@@ -7604,7 +7730,6 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
     const recipientMap = await loadAycdRecipientMap(userId);
     const fallbackAccount = {
       user_id: userId,
-      archive_user_id: userId,
       profile_id: null,
       email: 'inbox@aycd.me',
       ingestion_source: 'aycd',
@@ -7621,29 +7746,11 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
       checked += 1;
       try {
         const directMailbox = lower(item.mailboxEmail);
-        const recipientEntry = (directMailbox ? recipientMap.get(directMailbox) : null) || aycdMessageRecipients(item).map(email => recipientMap.get(email)).find(Boolean);
-        const linked = resolveAycdRecipient(recipientEntry, item.date || new Date());
+        const linked = (directMailbox ? recipientMap.get(directMailbox) : null) || aycdMessageRecipients(item).map(email => recipientMap.get(email)).find(Boolean);
         const account = directMailbox
-          ? {
-              ...fallbackAccount,
-              user_id:linked?.user_id || userId,
-              profile_id:linked?.profile_id || null,
-              email:directMailbox,
-              provider:{ ...fallbackAccount.provider, name:'aycd-direct-account' },
-              is_target_extra_account:Boolean(recipientEntry?.is_target_extra_account),
-              target_extra_account_id:linked?.target_extra_account_id || recipientEntry?.target_extra_account_id || null,
-              target_extra_assignment_id:linked?.target_extra_assignment_id || null
-            }
-          : (linked ? {
-              ...fallbackAccount,
-              user_id:linked.user_id || userId,
-              profile_id:linked.profile_id || null,
-              email:linked.email,
-              is_target_extra_account:Boolean(recipientEntry?.is_target_extra_account),
-              target_extra_account_id:linked.target_extra_account_id || null,
-              target_extra_assignment_id:linked.target_extra_assignment_id || null
-            } : fallbackAccount);
-        if (linked?.user_id) linkedProfiles += 1;
+          ? { ...fallbackAccount, profile_id: linked?.profile_id || null, email: directMailbox, provider: { ...fallbackAccount.provider, name: 'aycd-direct-account' } }
+          : (linked ? { ...fallbackAccount, profile_id: linked.profile_id, email: linked.email } : fallbackAccount);
+        if (linked) linkedProfiles += 1;
         const parsed = {
           subject: clean(item.subject), from: { text: clean(item.from) },
           to: { text: clean(item.to) }, cc: { text: clean(item.cc) },
@@ -7715,14 +7822,6 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
             .eq('use_aycd_inbox', true);
           for (const item of r.data || []) add(item.login_email, 1, 'profile');
         } catch (_) {}
-      }
-
-      // Scan every physical extra Target inbox that has ever been assigned. Released accounts stay
-      // on this list because Target can send a shipment or cancellation days after reassignment;
-      // exact order-number matching below still routes that message to the original checkout owner.
-      const extraMailboxes = await loadTargetExtraMailboxAssignmentMap(supabase);
-      for (const entry of extraMailboxes.values()) {
-        if ((entry.assignments || []).length) add(entry.email, 2, 'target_extra_account');
       }
 
       // Historical AYCD recipients let the bridge recover and directly scan accounts
@@ -7859,6 +7958,8 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
 
   app.post('/orders/reconcile-retailer-emails', auth, async (req, res) => {
     const reconcileKey = String(req.user_id);
+    const sitewideReconcile = req.role === 'super_admin';
+    const scopeUserId = sitewideReconcile ? null : req.user_id;
     const existingReconcile = retailerReconcileJobs.get(reconcileKey);
     if (existingReconcile?.status === 'running') {
       return res.status(202).json({ success:true, job:retailerReconcileJobView(existingReconcile) });
@@ -7889,6 +7990,8 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
       finished_at:null, result:null, error:null,
       stage_errors:Array.isArray(durableReconcile?.stage_errors) ? durableReconcile.stage_errors.slice(-100) : [],
       resumed_from_checkpoint:resumeDurable,
+      scope:sitewideReconcile ? 'sitewide' : 'user',
+      history_replay_since_at:resumeDurable ? (durableReconcile.history_replay_since_at || null) : null,
       target_checkpoint:{
         completed_count:Number(priorTargetCheckpoint.completed_count || 0),
         total_mailboxes:Number(priorTargetCheckpoint.total_mailboxes || 0),
@@ -7942,6 +8045,10 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
         updateRetailerReconcileJob(reconcileJob, stage, reconcileJob.percent, `${stage} had a recoverable error; continuing with the other retailers.`);
       };
       updateRetailerReconcileJob(reconcileJob, 'preparing', 3, 'Loading saved retailer orders and archived email evidence…');
+      if (!reconcileJob.history_replay_since_at) {
+        reconcileJob.history_replay_since_at = await websiteOrderHistoryStart(supabase, scopeUserId);
+        await persistRetailerReconcileJob(supabase, req.user_id, reconcileJob);
+      }
       await yieldReconcileTurn();
       // Reprocess the already-indexed retailer archive across ALL of this user's connected
       // mailboxes. This intentionally ignores the webhook's previously guessed purchase email.
@@ -7962,7 +8069,7 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
       const targetLifecycleAttemptedIds = new Set();
       try {
         const requestedTargetRepairs = Math.max(25, Math.min(500, Number(req.body?.target_repair_orders || 250)));
-        targetLifecycleOrders = await targetOrdersNeedingLifecycleRepair(supabase, req.user_id, requestedTargetRepairs);
+        targetLifecycleOrders = await targetOrdersNeedingLifecycleRepair(supabase, scopeUserId, requestedTargetRepairs);
         updateRetailerReconcileJob(
           reconcileJob,
           'target_lifecycle_repair',
@@ -7972,7 +8079,7 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
         await yieldReconcileTurn();
         if (targetLifecycleOrders.length) {
           const checkpointedTargetRepair = await runCheckpointedTargetRepair(
-            supabase, req.user_id, targetLifecycleOrders, reconcileJob,
+            supabase, scopeUserId, targetLifecycleOrders, reconcileJob,
             adjustUserCredits, confirmPendingAmazonCheckout, emailWorkToken
           );
           targetLifecycleRepair = checkpointedTargetRepair.result;
@@ -8040,7 +8147,7 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
         );
         allEmailScan = await scanAll(
           supabase,
-          req.role === 'super_admin' ? null : req.user_id,
+          scopeUserId,
           adjustUserCredits,
           progress => {
             if (progress.phase === 'waiting_for_global_scan') {
@@ -8067,13 +8174,15 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
           {
             emailWorkToken,
             force:true,
+            historyReplayJobId:reconcileJob.id,
+            replaySinceAt:reconcileJob.history_replay_since_at,
             concurrency:FULL_EMAIL_SCAN_CONCURRENCY,
             maxMessagesPerMailbox:RECONCILE_MAX_MESSAGES_PER_MAILBOX,
             mailboxDeadlineMs:IMAP_ACCOUNT_SCAN_DEADLINE_MS,
             drainBacklog:false,
             maxPassesPerMailbox:1,
-            allAccounts:req.role === 'super_admin',
-            waitForGlobalScan:req.role === 'super_admin',
+            allAccounts:sitewideReconcile,
+            waitForGlobalScan:sitewideReconcile,
             memorySafeBatches:true,
             resumeCompletedKeys:Object.keys(checkpointResults),
             resumeResultsByKey:checkpointResults,
@@ -8110,31 +8219,31 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
       // same IDs are also prioritized for an exact live IMAP lookup below.
       let walmartProblemOrders = [];
       try {
-        walmartProblemOrders = await walmartOrdersNeedingRepair(supabase, req.user_id, 250);
+        walmartProblemOrders = await walmartOrdersNeedingRepair(supabase, scopeUserId, 250);
       } catch (e) { console.warn('[WALMART PROBLEM ORDER QUERY]', e.message || e); recordStageError('walmart_orders', e); }
       let walmartArchiveRows = [];
       try {
         walmartArchiveRows = await fetchRecentEmailArchiveByStore(
-          supabase, req.user_id, 'walmart', archiveColumns, Math.min(maxMessages, 240)
+          supabase, scopeUserId, 'walmart', archiveColumns, Math.min(maxMessages, 240)
         );
       } catch (e) { console.warn('[WALMART CLASSIFIED ARCHIVE]', e.message || e); recordStageError('walmart_archive', e); }
       let walmartLinkedReplayRows = [];
       try {
         walmartLinkedReplayRows = await fetchLinkedRetailerArchiveForOrders(
-          supabase, req.user_id, walmartProblemOrders.map(order => order.id), 'walmart', archiveColumns, 600
+          supabase, scopeUserId, walmartProblemOrders.map(order => order.id), 'walmart', archiveColumns, 600
         );
       } catch (e) { console.warn('[WALMART LINKED ARCHIVE REPLAY]', e.message || e); recordStageError('walmart_linked_replay', e); }
       // Target can still use the normal classified archive path.
       let targetArchiveRows = [];
       try {
         targetArchiveRows = await fetchRecentEmailArchiveByStore(
-          supabase, req.user_id, 'target', archiveColumns, targetManualLimit
+          supabase, scopeUserId, 'target', archiveColumns, sitewideReconcile ? Math.max(targetManualLimit, 600) : targetManualLimit
         );
       } catch (e) { console.warn('[TARGET CLASSIFIED ARCHIVE]', e.message || e); recordStageError('target_archive', e); }
       let targetDeliveredReplayRows = [];
       try {
         targetDeliveredReplayRows = await fetchTargetDeliveredArchiveForStuckOrders(
-          supabase, req.user_id, archiveColumns, 250
+          supabase, scopeUserId, archiveColumns, sitewideReconcile ? 1000 : 250
         );
       } catch (e) { console.warn('[TARGET DELIVERED ALIAS REPLAY]', e.message || e); recordStageError('target_delivery_replay', e); }
 
@@ -8142,7 +8251,7 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
       try {
         updateRetailerReconcileJob(reconcileJob, 'archive_discovery', 53, 'Finding previously unknown retailer orders across the complete saved-email index…');
         generalArchiveDiscovery = await fetchGeneralRetailerArchiveCandidates(
-          supabase, req.user_id, archiveColumns
+          supabase, scopeUserId, archiveColumns
         );
       } catch (e) {
         console.warn('[GENERAL RETAILER ARCHIVE DISCOVERY]', e.message || e);
@@ -8154,7 +8263,7 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
       // search begins, so a later retailer failure cannot hide an already-received urgent warning.
       let paymentAlertSync = { checked:0, saved:0 };
       try {
-        paymentAlertSync = await syncRetailerPaymentAlertsFromArchive(supabase, req.user_id, false);
+        paymentAlertSync = await syncRetailerPaymentAlertsFromArchive(supabase, req.user_id, sitewideReconcile);
       } catch (e) {
         console.warn('[RECONCILE PAYMENT ALERTS]', e.message || e);
         recordStageError('payment_alerts', e);
@@ -8194,7 +8303,7 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
           .order('order_date',{ascending:false}).limit(2000);
         if (pokemonTrackerMeta.error) throw pokemonTrackerMeta.error;
         pokemonArchiveDiscovery = await fetchPokemonCenterArchiveCandidates(
-          supabase, req.role === 'super_admin' ? null : req.user_id, archiveColumns, pokemonTrackerMeta.data || []
+          supabase, scopeUserId, archiveColumns, pokemonTrackerMeta.data || []
         );
         pokemonArchiveRows = pokemonArchiveDiscovery.rows || [];
       } catch (e) { console.warn('[POKEMON CENTER CLASSIFIED ARCHIVE]', e.message || e); recordStageError('pokemon_center', e); }
@@ -8244,7 +8353,7 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
       let supremeArchiveRows = [];
       try {
         supremeArchiveRows = await fetchRecentEmailArchiveByStore(
-          supabase, req.user_id, 'supreme', archiveColumns, Math.min(maxMessages, 1500)
+          supabase, scopeUserId, 'supreme', archiveColumns, Math.min(maxMessages, 1500)
         );
       } catch (e) { console.warn('[SUPREME CLASSIFIED ARCHIVE]', e.message || e); recordStageError('supreme_archive', e); }
 
@@ -8277,24 +8386,14 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
       let archiveOwnerMap = new Map();
       try { archiveOwnerMap = await buildRetailerPaymentAlertOwnerMap(supabase); }
       catch (e) { console.warn('[ARCHIVE RETAILER OWNER MAP]', e.message || e); recordStageError('archive_owner_map', e); }
+      let archiveTargetExtraMap = new Map();
+      try { archiveTargetExtraMap = await loadTargetExtraMailboxAssignmentMap(supabase); }
+      catch (e) { console.warn('[ARCHIVE TARGET EXTRA MAP]', e.message || e); recordStageError('archive_target_extra_map', e); }
       let supremeRebuild = null;
       try { supremeRebuild = await rebuildSupremeBatchAssignments(supabase, req.user_id, retailerEmails); }
       catch (e) { console.warn('[SUPREME BATCH REBUILD]', e.message || e); supremeRebuild = { error:e.message || String(e) }; recordStageError('supreme_assignments', e); }
-      // The targeted repair below performs the live OAuth2/IMAP lookup first. Do not start the
-      // broad background scan before it, because that could occupy the historical-repair guard
-      // at the exact moment the user asks to repair a damaged order. A normal scan is queued after.
-      if (req.role === 'super_admin') {
-        try {
-          const bridge = await supabase.from('aycd_bridge_devices').select('id,pending_command').eq('user_id',req.user_id).eq('is_paired',true).order('created_at',{ascending:false}).limit(1).maybeSingle();
-          if (bridge.data?.id && !clean(bridge.data.pending_command)) {
-            await supabase.from('aycd_bridge_devices').update({
-              pending_command:'scan', command_id:crypto.randomUUID(),
-              command_payload:{ lookbackDays:365, reason:'retailer_reconciliation' },
-              status:'scan_requested', last_error:null
-            }).eq('id',bridge.data.id);
-          }
-        } catch (_) {}
-      }
+      // The targeted repair below uses the website's directly connected OAuth/IMAP mailboxes.
+      // Reconciliation no longer queues an AYCD bridge command.
       pokemonDebug.push(...(pokemonLiveDiscovery.debug || []));
       pokemonDebug.push(`Pokemon discovery: metadata_scanned=${pokemonStats.metadata_scanned} order_email_candidates=${pokemonStats.candidates_found} hydrated=${pokemonStats.archive_rows} since=${pokemonStats.archive_since||'-'}`);
       for(const email of retailerEmails){
@@ -8337,7 +8436,20 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
           const resolvedOwner = archivedRetailerPaymentAlertOwner(email, archiveOwnerMap);
           const canUseResolvedOwner = req.role === 'super_admin' || String(resolvedOwner.user_id || '') === String(req.user_id);
           const effectiveOwnerUserId = canUseResolvedOwner && resolvedOwner.user_id ? resolvedOwner.user_id : archiveOwnerUserId;
-          const account={ user_id:effectiveOwnerUserId, archive_user_id:archiveOwnerUserId, profile_id:canUseResolvedOwner ? resolvedOwner.profile_id : null, email:lower(email.mailbox_email), provider:providerForEmail(email.mailbox_email)||{name:'archive'}, ingestion_source:email.source_type||'archive_reconcile' };
+          const mailboxEmail = lower(email.mailbox_email);
+          const extraEntry = archiveTargetExtraMap.get(mailboxEmail);
+          const extraOwner = currentTargetExtraMailboxOwner(extraEntry) || latestTargetExtraMailboxOwner(extraEntry);
+          const account={
+            user_id:effectiveOwnerUserId,
+            archive_user_id:archiveOwnerUserId,
+            profile_id:canUseResolvedOwner ? resolvedOwner.profile_id : null,
+            email:mailboxEmail,
+            provider:providerForEmail(email.mailbox_email)||{name:'archive'},
+            ingestion_source:email.source_type||'archive_reconcile',
+            is_target_extra_account:Boolean(extraEntry),
+            target_extra_account_id:extraEntry?.target_extra_account_id || null,
+            target_extra_assignment_id:extraOwner?.target_extra_assignment_id || null
+          };
           const parsed={ subject:email.subject||'', from:{text:email.from_text||''}, to:{text:email.to_text||''}, cc:{text:email.cc_text||''}, text:archivedText, html:email.body_html||null, date:new Date(email.received_at||Date.now()), messageId:email.message_id };
           if (isPokemon && /^P\d{8,12}$/i.test(clean(email.order_number || ''))) parsed._pokemonCenterOrderNumber = clean(email.order_number).toUpperCase();
           const result=await saveParsedMessage(supabase,account,parsed,email.imap_uid||0,adjustUserCredits,confirmPendingAmazonCheckout);
@@ -8400,9 +8512,11 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
       const targetCandidateIds = [...targetByOrder.keys()];
       const targetStateById = new Map();
       for (let i = 0; i < targetCandidateIds.length; i += 100) {
-        const tr = await supabase.from('tracked_orders')
+        let query = supabase.from('tracked_orders')
           .select('id,status,reconciliation_status,reconciliation_note,last_status_at,updated_at')
-          .eq('user_id', req.user_id).eq('store','target').in('id', targetCandidateIds.slice(i,i+100));
+          .eq('store','target').in('id', targetCandidateIds.slice(i,i+100));
+        if (scopeUserId) query = query.eq('user_id', scopeUserId);
+        const tr = await query;
         if (!tr.error) for (const row of tr.data || []) targetStateById.set(String(row.id), row);
       }
       for (const [orderId, rows] of targetByOrder.entries()) {
@@ -8423,8 +8537,12 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
       // reconciliation already recorded as matched/main_item_missing is complete and should never
       // be repeatedly re-fetched merely because an older damaged archive copy still exists.
       try {
-        const canceled = await fetchAllSupabaseRows(() => supabase.from('tracked_orders')
-          .select('id,reconciliation_status,reconciliation_note').eq('user_id',req.user_id).eq('store','target').eq('status','canceled'));
+        const canceled = await fetchAllSupabaseRows(() => {
+          let query = supabase.from('tracked_orders')
+            .select('id,reconciliation_status,reconciliation_note').eq('store','target').eq('status','canceled');
+          if (scopeUserId) query = query.eq('user_id', scopeUserId);
+          return query;
+        });
         for (const order of canceled) {
           const rs = lower(order.reconciliation_status || '');
           if (order.id && ['pending',''].includes(rs) && !targetByOrder.has(String(order.id))) damagedSet.add(String(order.id));
@@ -8433,11 +8551,11 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
       const damagedLinkedOrderIds = [...damagedSet];
       let unresolvedTargetOrders = [];
       try {
-        unresolvedTargetOrders = await targetOrdersMissingConfirmation(supabase, req.user_id, 250);
+        unresolvedTargetOrders = await targetOrdersMissingConfirmation(supabase, scopeUserId, 250);
       } catch (e) { console.warn('[RECONCILE TARGET CONFIRMATION QUERY]', e.message || e); recordStageError('target_orders', e); }
       let unresolvedAmazonOrders = [];
       try {
-        unresolvedAmazonOrders = await amazonOrdersMissingConfirmation(supabase, req.user_id, 250);
+        unresolvedAmazonOrders = await amazonOrdersMissingConfirmation(supabase, scopeUserId, 250);
       } catch (e) { console.warn('[RECONCILE AMAZON CONFIRMATION QUERY]', e.message || e); recordStageError('amazon_orders', e); }
       // Preserve the generic repair path for every other retailer already supported by the
       // parser (for example Macy's). The three high-volume stores below receive reserved slots,
@@ -8445,10 +8563,11 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
       // Amazon/Target/Walmart priority lists happen to fill the entire batch.
       let otherRetailerOrders = [];
       try {
-        const otherResult = await supabase.from('tracked_orders')
+        let query = supabase.from('tracked_orders')
           .select('id,store,status,order_number,order_date')
-          .eq('user_id', req.user_id).eq('status', 'waiting_confirmation')
-          .not('order_number', 'is', null).order('order_date', { ascending:false }).limit(150);
+          .eq('status', 'waiting_confirmation').not('order_number', 'is', null);
+        if (scopeUserId) query = query.eq('user_id', scopeUserId);
+        const otherResult = await query.order('order_date', { ascending:false }).limit(sitewideReconcile ? 500 : 150);
         if (otherResult.error) throw otherResult.error;
         otherRetailerOrders = (otherResult.data || []).filter(order =>
           !['amazon','walmart','target','pokemoncenter','supreme'].includes(normalizeStoreKey(order.store || ''))
@@ -8473,7 +8592,7 @@ function registerOrderTracker({ app, supabase, auth, admin, adjustUserCredits, c
         updateRetailerReconcileJob(reconcileJob, 'live_order_repair', 84, `Searching live mailboxes for ${retailerPriorityOrderIds.length} unresolved Amazon, Walmart, and Target order(s)…`);
         await yieldReconcileTurn();
         const requested = Math.max(Number(req.body?.repair_orders || 20), retailerPriorityOrderIds.length);
-        repair = await runHistoricalOrderEmailRepair(supabase, req.user_id, adjustUserCredits, confirmPendingAmazonCheckout, {
+        repair = await runHistoricalOrderEmailRepair(supabase, scopeUserId, adjustUserCredits, confirmPendingAmazonCheckout, {
           maxOrders: Math.min(120, requested), forceLinked: true, priorityOrderIds: retailerPriorityOrderIds,
           emailWorkToken, waitForEmailWork:true
         });

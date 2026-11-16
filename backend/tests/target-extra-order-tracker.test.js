@@ -17,25 +17,32 @@ assert.strictEqual(resolveAssignmentAtTime(assignmentHistory, '2026-11-10T12:00:
 assert.match(tracker, /loadTargetExtraMailboxAssignmentMap/);
 assert.match(tracker, /target_extra_accounts[\s\S]*target_extra_account_assignments/);
 assert.match(tracker, /resolveTargetExtraMailboxOwner\(entry, eventAt/);
-assert.match(tracker, /loadAycdRecipientMap[\s\S]*loadTargetExtraMailboxAssignmentMap/);
-assert.match(tracker, /source = 'history'[\s\S]*target_extra_account/);
-assert.match(tracker, /archive_user_id:\s*userId[\s\S]*is_target_extra_account/);
+assert.match(tracker, /loadImportedScanAccounts[\s\S]*loadTargetExtraMailboxAssignmentMap/);
+assert.match(tracker, /effectiveUserId = extraScanOwner\?\.user_id \|\| row\.matched_user_id/);
+assert.match(tracker, /archive_user_id: row\.imported_by_user_id/);
+assert.match(tracker, /auth_method === 'oauth2'[\s\S]*refreshImportedAccessToken/);
+assert.match(tracker, /scanImportedAccount[\s\S]*saveParsedMessage\(supabase,account,parsed,msg\.uid/);
+assert.match(tracker, /dynamicAccounts = await loadImportedScanAccounts\(supabase, null\)/);
+assert.match(tracker, /TARGET_EXTRA_OAUTH_REPLAY_VERSION/);
+assert.match(tracker, /matched_user_id:currentExtraOwner\.user_id/);
+assert.match(tracker, /targetExtraReplayNeeded[\s\S]*__target_extra_oauth_replay/);
+assert.match(tracker, /!targetExtraReplayNeeded && !sitewideReplayNeeded && !options\.force/);
+assert.match(tracker, /Automatic history replay started/);
+assert.match(tracker, /__retailer_history_replay/);
+assert.match(tracker, /Full OAuth history replay started/);
+assert.match(tracker, /a\.is_target_extra_account \|\| pendingEmails\.has\(a\.email\)/);
+assert.match(tracker, /!a\.is_target_extra_account && !pendingEmails\.has\(a\.email\)/);
 
 assert.match(tracker, /findTargetExtraServiceOrderGlobally/);
 assert.match(tracker, /\.eq\('source_email', mailbox\)/);
 assert.match(tracker, /store === 'target' && account\.is_target_extra_account/);
 assert.match(tracker, /sharedMailboxOrder \? serviceOrder\.user_id : account\.user_id/);
 assert.match(tracker, /mirrorTargetExtraEmailToOrderOwner/);
+assert.match(tracker, /archiveTargetExtraMap\.get\(mailboxEmail\)/);
 
 // Cancellation replays are safe: the original checkout owner is credited, and the ledger is
 // checked before any second replay can issue another refund.
 assert.match(tracker, /\.eq\('user_id',orderOwnerUserId\)[\s\S]*\.eq\('reason','imap_order_canceled_refund'\)/);
 assert.match(tracker, /if \(!ledgerAlreadyRefunded\)[\s\S]*userId: orderOwnerUserId/);
-
-const bridgeResultStart = tracker.indexOf("app.post('/orders/aycd/bridge/result'");
-const bridgeResultEnd = tracker.indexOf("app.post('/orders/aycd/scan-now'", bridgeResultStart);
-const bridgeResult = tracker.slice(bridgeResultStart, bridgeResultEnd > bridgeResultStart ? bridgeResultEnd : undefined);
-assert.strictEqual((bridgeResult.match(/ingestAycdMessages\(row\.user_id, req\.body\.messages\)/g) || []).length, 1,
-  'each AYCD upload chunk must be ingested only once');
 
 console.log('Target extra-account order-tracker tests passed.');
