@@ -44,11 +44,15 @@ const scriptSource = fs.readFileSync(path.join(root, 'frontend', 'script.js'), '
 const adminSource = fs.readFileSync(path.join(root, 'frontend', 'admin.html'), 'utf8');
 
 assert.match(scriptSource, /All Admins \+ Users — Exclude My Profiles/);
+assert.match(scriptSource, /Raffle Export/);
 assert.match(scriptSource, /exclude_current_user/);
 assert.match(scriptSource, /ALL_EXCEPT_CURRENT_USER/);
+assert.match(scriptSource, /RAFFLE_EXPORT/);
+assert.match(scriptSource, /raffle_export/);
+assert.match(serverSource, /appendOpenTargetExtraProfilesForRaffle/);
 assert.match(serverSource, /current_user:\s*\{\s*id:\s*currentUser\.id,\s*role:\s*currentUser\.role\s*\}/);
 assert.ok((serverSource.match(/applyRequestedCurrentUserExclusion\(/g) || []).length >= 11,
     'store status and every active export route must use the same exclusion rule');
-assert.match(adminSource, /script\.js\?v=20261114-amazon-imap-eastern-time/);
+assert.match(adminSource, /script\.js\?v=20261118-target-raffle-export/);
 
 console.log('Admin export audience tests passed.');

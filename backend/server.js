@@ -106,6 +106,7 @@ const { buildShikariAccountsCsv, buildShikariImapCsv } = require("./shikari-cred
 const { buildStellarAmazonAccountsText } = require("./stellar-amazon-account-export");
 const { buildValorProfileExport } = require("./valor-profile-export");
 const { applyExcludeCurrentUserFilter } = require("./admin-export-audience");
+const { validateTargetRaffleExport, buildTargetRaffleProfiles } = require("./target-raffle-export");
 const { buildStellarRowsFromImportedProfiles } = require("./shikari-pokemoncenter-stellar");
 const { registerMarketValueEngine } = require("./market-value-engine");
 const { registerMasterProductCatalog } = require("./master-product-catalog");
@@ -173,10 +174,13 @@ const {
     creditsNeededForRoleReactivation
 } = require("./credit-run-policy");
 const {
+    AUTO_PAUSE_SETTING_PREFIX,
+    loadCreditAutoPauseState,
     pauseStoresForCreditLimit,
     markCreditPurchaseRestorePending,
     restoreAutomaticallyPausedStores,
     forgetAutomaticallyPausedStore,
+    findCreditPurchaseRecovery,
     findLegacyRecoveryWindow,
     recoverLegacyAutomaticallyPausedStores
 } = require("./credit-store-lifecycle");
@@ -870,11 +874,11 @@ async function loadRecentCreditTransactions(userId) {
     const { data, error } = await maybeMany("credit_transactions", (qb) =>
         qb.select("id,user_id,amount_delta,reason,balance_after,created_at")
             .eq("user_id", userId)
-            .order("created_at", { ascending: true })
-            .limit(500)
+            .order("created_at", { ascending: false })
+            .limit(1000)
     );
     if (error) throw new Error(error.message);
-    return data || [];
+    return (data || []).reverse();
 }
 
 async function reconcileCreditStoreLifecycle(userId, balance, transactions = null) {
@@ -890,8 +894,80 @@ async function reconcileCreditStoreLifecycle(userId, balance, transactions = nul
     if (pendingResult.restored) return pendingResult;
 
     const history = Array.isArray(transactions) ? transactions : await loadRecentCreditTransactions(userId);
+    const purchaseRecovery = findCreditPurchaseRecovery(history);
+    if (purchaseRecovery) {
+        const state = await loadCreditAutoPauseState(supabase, userId);
+        if (state.sites.length) {
+            await markCreditPurchaseRestorePending(supabase, userId, balance, {
+                now: purchaseRecovery.recovered_at || new Date().toISOString()
+            });
+            const retried = await restoreCreditPausedStores(userId, balance, {
+                requirePending: true,
+                changeReason: "credit_purchase_reconciliation_restore"
+            });
+            if (retried.restored) return retried;
+        }
+    }
     if (!findLegacyRecoveryWindow(history)) return pendingResult;
     return recoverLegacyCreditPausedStores(userId, balance, history);
+}
+
+let creditRestoreRepairRunning = false;
+async function repairInterruptedCreditStoreRestorations(limit = 250) {
+    if (creditRestoreRepairRunning) return { skipped: true, reason: 'already_running' };
+    creditRestoreRepairRunning = true;
+    try {
+        const settingsResult = await supabase.from('app_settings')
+            .select('key,value_json')
+            .like('key', `${AUTO_PAUSE_SETTING_PREFIX}%`)
+            .limit(Math.max(1, Math.min(1000, Number(limit || 250))));
+        if (settingsResult.error) throw new Error(settingsResult.error.message);
+        const pending = (settingsResult.data || []).filter((row) =>
+            Array.isArray(row?.value_json?.sites) && row.value_json.sites.length
+        );
+        const provenanceUserIds = pending.map((row) =>
+            String(row.key || '').slice(AUTO_PAUSE_SETTING_PREFIX.length)
+        ).filter(Boolean);
+        // Also include recent positive Stripe purchasers. This covers an older deployment that
+        // paused stores but failed before saving the provenance marker. Legacy recovery still
+        // requires a real below-limit -> Stripe-positive ledger window and restores only store
+        // rows whose update timestamp falls inside that exact window.
+        let recentPurchaseUserIds = [];
+        try {
+            const purchaseResult = await supabase.from('credit_transactions')
+                .select('user_id')
+                .eq('reason', 'stripe_purchase')
+                .gte('created_at', new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString())
+                .order('created_at', { ascending: false })
+                .limit(Math.max(1, Math.min(500, Number(limit || 250))));
+            if (!purchaseResult.error) recentPurchaseUserIds = (purchaseResult.data || []).map((row) => String(row.user_id || '')).filter(Boolean);
+        } catch (_) {}
+        const userIds = [...new Set([...provenanceUserIds, ...recentPurchaseUserIds])];
+        if (!userIds.length) return { checked: 0, restored: 0, errors: 0 };
+
+        const balanceResult = await supabase.from('user_credit_balances')
+            .select('user_id,balance')
+            .in('user_id', userIds);
+        if (balanceResult.error) throw new Error(balanceResult.error.message);
+        const balances = new Map((balanceResult.data || []).map((row) => [String(row.user_id), asSignedCredits(row.balance, 0)]));
+        let restored = 0;
+        let errors = 0;
+        for (const userId of userIds) {
+            const balance = balances.get(userId);
+            if (!Number.isFinite(balance) || !canActivateStore(balance)) continue;
+            try {
+                const result = await reconcileCreditStoreLifecycle(userId, balance);
+                restored += Number(result?.restored_sites?.length || 0);
+            } catch (error) {
+                errors++;
+                console.warn(`[CREDIT RESTORE REPAIR] ${userId}:`, error.message || error);
+            }
+        }
+        if (restored || errors) console.log(`[CREDIT RESTORE REPAIR] checked=${userIds.length} restored=${restored} errors=${errors}`);
+        return { checked: userIds.length, restored, errors };
+    } finally {
+        creditRestoreRepairRunning = false;
+    }
 }
 
 
@@ -5028,6 +5104,10 @@ app.post("/webhooks/stripe", bodyParser.raw({ type: "application/json" }), async
 
             if (existing?.id) {
                 console.log("Stripe purchase already processed:", existing.id);
+                const balance = await getUserCreditBalance(user.id);
+                await reconcileCreditStoreLifecycle(user.id, balance).catch((error) => {
+                    console.warn('Stripe duplicate credit-store restoration retry failed:', error.message || error);
+                });
                 return res.json({ received: true, duplicate: true });
             }
 
@@ -8927,6 +9007,40 @@ async function appendAssignedTargetExtraProfiles(profiles, group = '') {
         if (isTargetExtraMigrationError(error)) return items;
         throw error;
     }
+}
+
+async function appendOpenTargetExtraProfilesForRaffle(profiles, currentUserId) {
+    const items = Array.isArray(profiles) ? profiles : [];
+    const [accountResult, assignmentResult, templates] = await Promise.all([
+        fetchAllSupabaseRows(() => supabase
+            .from('target_extra_accounts')
+            .select('id, login_email, password_encrypted, status')
+            .eq('status', 'available')
+            .order('login_email', { ascending: true })),
+        fetchAllSupabaseRows(() => supabase
+            .from('target_extra_account_assignments')
+            .select('account_id')
+            .is('released_at', null)),
+        loadOwnTargetProfilesForBotSplit(currentUserId)
+    ]);
+
+    if (accountResult.error) throw new Error(accountResult.error.message);
+    if (assignmentResult.error) throw new Error(assignmentResult.error.message);
+
+    const assignedAccountIds = new Set((assignmentResult.data || []).map((row) => String(row.account_id || '')).filter(Boolean));
+    const openAccounts = (accountResult.data || [])
+        .filter((account) => !assignedAccountIds.has(String(account.id || '')))
+        .map((account) => {
+            let loginPassword = '';
+            try {
+                loginPassword = decrypt(account.password_encrypted);
+            } catch (_) {
+                throw new Error(`Could not decrypt the saved password for extra Target account ${account.login_email || account.id}.`);
+            }
+            return { ...account, login_password: loginPassword };
+        });
+
+    return buildTargetRaffleProfiles({ profiles: items, openAccounts, templates });
 }
 
 function getProfileLimitForRole(role = "user", accountType = "general") {
@@ -12846,6 +12960,22 @@ function applyRequestedCurrentUserExclusion(query, req, currentUser, selectedUse
     });
 }
 
+function validateTargetRaffleExportRequest(req, res, currentUser, { group = '', userId = '', splitBot = '' } = {}) {
+    const validation = validateTargetRaffleExport({
+        requested: String(req.query.raffle_export || '') === '1',
+        currentUserRole: currentUser?.role,
+        group: normalizeProfileAccountType(group || ''),
+        userId,
+        excludeCurrentUser: String(req.query.exclude_current_user || '') === '1',
+        splitBot
+    });
+    if (!validation.ok) {
+        res.status(validation.status || 400).json({ error: validation.error || 'Invalid Raffle Export request.' });
+        return null;
+    }
+    return validation.requested;
+}
+
 app.get("/admin/export/accounts", auth, admin, async (req, res) => {
     try {
         const currentUser = await getCurrentUser(req);
@@ -12901,6 +13031,8 @@ app.get("/admin/export/count", auth, admin, async (req, res) => {
         const currentUser = await getCurrentUser(req);
         const { user_id, group } = req.query;
         const activeOnly = String(req.query.active_only || "") === "1";
+        const raffleExport = validateTargetRaffleExportRequest(req, res, currentUser, { group, userId: user_id });
+        if (raffleExport === null) return;
 
         let query = supabase
             .from("profiles")
@@ -12935,7 +13067,10 @@ app.get("/admin/export/count", auth, admin, async (req, res) => {
 
         let filtered = await attachAndFilterProfilesByStore(data || [], group || "");
         filtered = await filterProfilesByActiveRunStatus(filtered, group || "", activeOnly);
-        if (currentUser.role === 'super_admin') filtered = await appendAssignedTargetExtraProfiles(filtered, group || '');
+        if (currentUser.role === 'super_admin') {
+            filtered = await appendAssignedTargetExtraProfiles(filtered, group || '');
+            if (raffleExport) filtered = await appendOpenTargetExtraProfilesForRaffle(filtered, currentUser.id);
+        }
         res.json({ count: filtered.length });
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -12950,6 +13085,8 @@ app.get("/admin/export/profiles-json", auth, admin, async (req, res) => {
         const activeOnly = String(req.query.active_only || "") === "1";
         const splitBotRequested = String(req.query.target_bot_split || '').trim();
         const splitBot = normalizeSplitBot(splitBotRequested);
+        const raffleExport = validateTargetRaffleExportRequest(req, res, currentUser, { group, userId: user_id, splitBot });
+        if (raffleExport === null) return;
         if (splitBotRequested && splitBot !== 'refract') return res.status(400).json({ error: 'This export accepts only the Refract Target split.' });
         if (splitBot && currentUser.role !== 'super_admin') return res.status(403).json({ error: 'Super admin only.' });
         if (splitBot && normalizeProfileAccountType(group || '') !== 'target') return res.status(400).json({ error: 'Bot split exports are Target-only.' });
@@ -12992,7 +13129,10 @@ app.get("/admin/export/profiles-json", auth, admin, async (req, res) => {
         let exportProfiles = await attachAndFilterProfilesByStore(profiles || [], group || "");
         exportProfiles = await filterProfilesByActiveRunStatus(exportProfiles, group || "", activeOnly);
         if (splitBot) exportProfiles = await filterProfilesForOwnTargetBotSplit(currentUser.id, exportProfiles, splitBot);
-        else if (currentUser.role === 'super_admin') exportProfiles = await appendAssignedTargetExtraProfiles(exportProfiles, group || '');
+        else if (currentUser.role === 'super_admin') {
+            exportProfiles = await appendAssignedTargetExtraProfiles(exportProfiles, group || '');
+            if (raffleExport) exportProfiles = await appendOpenTargetExtraProfilesForRaffle(exportProfiles, currentUser.id);
+        }
 
         const rows = exportProfiles.map((profile) => {
             const address = profile.addresses?.[0] || {};
@@ -13417,6 +13557,8 @@ app.get("/admin/export/profiles-polar-json", auth, admin, async (req, res) => {
         const activeOnly = String(req.query.active_only || "") === "1";
         const splitBotRequested = String(req.query.target_bot_split || '').trim();
         const splitBot = normalizeSplitBot(splitBotRequested);
+        const raffleExport = validateTargetRaffleExportRequest(req, res, currentUser, { group, userId: user_id, splitBot });
+        if (raffleExport === null) return;
         if (splitBotRequested && splitBot !== 'polar') return res.status(400).json({ error: 'This export accepts only the Polar Target split.' });
         if (splitBot && currentUser.role !== 'super_admin') return res.status(403).json({ error: 'Super admin only.' });
         if (splitBot && normalizeProfileAccountType(group || '') !== 'target') return res.status(400).json({ error: 'Bot split exports are Target-only.' });
@@ -13453,7 +13595,10 @@ app.get("/admin/export/profiles-polar-json", auth, admin, async (req, res) => {
         let exportProfiles = await attachAndFilterProfilesByStore(profiles || [], group || "");
         exportProfiles = await filterProfilesByActiveRunStatus(exportProfiles, group || "", activeOnly);
         if (splitBot) exportProfiles = await filterProfilesForOwnTargetBotSplit(currentUser.id, exportProfiles, splitBot);
-        else if (currentUser.role === 'super_admin') exportProfiles = await appendAssignedTargetExtraProfiles(exportProfiles, group || '');
+        else if (currentUser.role === 'super_admin') {
+            exportProfiles = await appendAssignedTargetExtraProfiles(exportProfiles, group || '');
+            if (raffleExport) exportProfiles = await appendOpenTargetExtraProfilesForRaffle(exportProfiles, currentUser.id);
+        }
 
         const rows = exportProfiles.map((profile) => {
             const address = profile.addresses?.[0] || {};
@@ -13543,6 +13688,8 @@ app.get("/admin/export/profiles-valor-json", auth, admin, async (req, res) => {
         const activeOnly = String(req.query.active_only || "") === "1";
         const splitBotRequested = String(req.query.target_bot_split || '').trim();
         const splitBot = normalizeSplitBot(splitBotRequested);
+        const raffleExport = validateTargetRaffleExportRequest(req, res, currentUser, { group, userId: user_id, splitBot });
+        if (raffleExport === null) return;
         if (splitBotRequested && splitBot !== 'valor') return res.status(400).json({ error: 'This export accepts only the Valor Target split.' });
         if (splitBot && currentUser.role !== 'super_admin') return res.status(403).json({ error: 'Super admin only.' });
         if (splitBot && normalizeProfileAccountType(group || '') !== 'target') return res.status(400).json({ error: 'Bot split exports are Target-only.' });
@@ -13579,7 +13726,10 @@ app.get("/admin/export/profiles-valor-json", auth, admin, async (req, res) => {
         let exportProfiles = await attachAndFilterProfilesByStore(profiles || [], group || "");
         exportProfiles = await filterProfilesByActiveRunStatus(exportProfiles, group || "", activeOnly);
         if (splitBot) exportProfiles = await filterProfilesForOwnTargetBotSplit(currentUser.id, exportProfiles, splitBot);
-        else if (currentUser.role === 'super_admin') exportProfiles = await appendAssignedTargetExtraProfiles(exportProfiles, group || '');
+        else if (currentUser.role === 'super_admin') {
+            exportProfiles = await appendAssignedTargetExtraProfiles(exportProfiles, group || '');
+            if (raffleExport) exportProfiles = await appendOpenTargetExtraProfilesForRaffle(exportProfiles, currentUser.id);
+        }
 
         const payload = buildValorProfileExport(exportProfiles, { decrypt });
         res.setHeader("Content-Type", "application/json");
@@ -13628,6 +13778,8 @@ app.get("/admin/export/profiles-stellar-json", auth, admin, async (req, res) => 
         const { user_id, group } = req.query;
         const filename = (req.query.filename || "stellar-profiles").replace(/[^a-zA-Z0-9-_]/g, "");
         const activeOnly = String(req.query.active_only || "") === "1";
+        const raffleExport = validateTargetRaffleExportRequest(req, res, currentUser, { group, userId: user_id });
+        if (raffleExport === null) return;
 
         let query = supabase
             .from("profiles")
@@ -13663,7 +13815,10 @@ app.get("/admin/export/profiles-stellar-json", auth, admin, async (req, res) => 
 
         let exportProfiles = await attachAndFilterProfilesByStore(profiles || [], group || "");
         exportProfiles = await filterProfilesByActiveRunStatus(exportProfiles, group || "", activeOnly);
-        if (currentUser.role === 'super_admin') exportProfiles = await appendAssignedTargetExtraProfiles(exportProfiles, group || '');
+        if (currentUser.role === 'super_admin') {
+            exportProfiles = await appendAssignedTargetExtraProfiles(exportProfiles, group || '');
+            if (raffleExport) exportProfiles = await appendOpenTargetExtraProfilesForRaffle(exportProfiles, currentUser.id);
+        }
 
         const rows = buildStellarProfileRows(exportProfiles);
 
@@ -13685,6 +13840,8 @@ app.get("/admin/export/profiles-shikari-csv", auth, admin, async (req, res) => {
         const activeOnly = String(req.query.active_only || "") === "1";
         const splitBotRequested = String(req.query.target_bot_split || '').trim();
         const splitBot = normalizeSplitBot(splitBotRequested);
+        const raffleExport = validateTargetRaffleExportRequest(req, res, currentUser, { group, userId: user_id, splitBot });
+        if (raffleExport === null) return;
         if (splitBotRequested && splitBot !== 'shikari') return res.status(400).json({ error: 'This export accepts only the Shikari Target split.' });
         if (splitBot && currentUser.role !== 'super_admin') return res.status(403).json({ error: 'Super admin only.' });
         if (splitBot && normalizeProfileAccountType(group || '') !== 'target') return res.status(400).json({ error: 'Bot split exports are Target-only.' });
@@ -13727,7 +13884,10 @@ app.get("/admin/export/profiles-shikari-csv", auth, admin, async (req, res) => {
         let exportProfiles = await attachAndFilterProfilesByStore(profiles || [], group || "");
         exportProfiles = await filterProfilesByActiveRunStatus(exportProfiles, group || "", activeOnly);
         if (splitBot) exportProfiles = await filterProfilesForOwnTargetBotSplit(currentUser.id, exportProfiles, splitBot);
-        else if (currentUser.role === 'super_admin') exportProfiles = await appendAssignedTargetExtraProfiles(exportProfiles, group || '');
+        else if (currentUser.role === 'super_admin') {
+            exportProfiles = await appendAssignedTargetExtraProfiles(exportProfiles, group || '');
+            if (raffleExport) exportProfiles = await appendOpenTargetExtraProfilesForRaffle(exportProfiles, currentUser.id);
+        }
 
         const headers = [
             "profile_name", "first_name", "last_name", "email", "phone_num",
@@ -13802,6 +13962,8 @@ app.get("/admin/export/accounts-txt", auth, admin, async (req, res) => {
         const { user_id, group } = req.query;
         const filename = (req.query.filename || "shikari-accounts").replace(/[^a-zA-Z0-9-_]/g, "");
         const activeOnly = String(req.query.active_only || "") === "1";
+        const raffleExport = validateTargetRaffleExportRequest(req, res, currentUser, { group, userId: user_id });
+        if (raffleExport === null) return;
 
         let query = supabase
             .from("profiles")
@@ -13839,7 +14001,10 @@ app.get("/admin/export/accounts-txt", auth, admin, async (req, res) => {
 
         let exportProfiles = await attachAndFilterProfilesByStore(profiles || [], group || "");
         exportProfiles = await filterProfilesByActiveRunStatus(exportProfiles, group || "", activeOnly);
-        if (currentUser.role === 'super_admin') exportProfiles = await appendAssignedTargetExtraProfiles(exportProfiles, group || '');
+        if (currentUser.role === 'super_admin') {
+            exportProfiles = await appendAssignedTargetExtraProfiles(exportProfiles, group || '');
+            if (raffleExport) exportProfiles = await appendOpenTargetExtraProfilesForRaffle(exportProfiles, currentUser.id);
+        }
 
         const rows = exportProfiles.map((profile) => {
             const account = accountForExport(profile, group || profile.account_type);
@@ -14081,6 +14246,13 @@ setInterval(() => {
 setTimeout(() => {
     replayWebhookFailoverQueue().catch((err) => console.error('Initial failover queue replay failed:', err));
 }, 15000);
+setTimeout(() => {
+    repairInterruptedCreditStoreRestorations().catch((err) => console.error('Initial credit-store restoration repair failed:', err));
+}, 25000);
+const creditRestoreRepairInterval = setInterval(() => {
+    repairInterruptedCreditStoreRestorations().catch((err) => console.error('Credit-store restoration repair interval failed:', err));
+}, 5 * 60 * 1000);
+creditRestoreRepairInterval.unref?.();
 startAnnouncementCatalogScheduler();
 
 registerSuccessNetwork({

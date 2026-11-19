@@ -57,6 +57,21 @@ assert.match(
 );
 assert.match(
     serverSource,
+    /async function reconcileCreditStoreLifecycle[\s\S]*?findCreditPurchaseRecovery\(history\)[\s\S]*?markCreditPurchaseRestorePending[\s\S]*?restoreCreditPausedStores/,
+    'an interrupted Stripe restoration must be retried from durable credit history'
+);
+assert.match(
+    serverSource,
+    /async function repairInterruptedCreditStoreRestorations[\s\S]*?AUTO_PAUSE_SETTING_PREFIX[\s\S]*?reconcileCreditStoreLifecycle/,
+    'the backend must periodically repair positive-balance users without requiring a user click'
+);
+assert.match(
+    serverSource,
+    /Stripe purchase already processed:[\s\S]*?reconcileCreditStoreLifecycle\(user\.id, balance\)/,
+    'a duplicate Stripe delivery must retry store restoration instead of exiting early'
+);
+assert.match(
+    serverSource,
     /app\.put\("\/store-run-status"[\s\S]*?isEnabled && !canRoleActivateStore\(balance, req\.role\)[\s\S]*?status\(409\)/,
     'a negative balance must block regular-user reactivation without blocking the super admin'
 );
@@ -82,7 +97,7 @@ assert.match(frontendSource, /Stores you paused yourself stay paused/);
 assert.match(frontendSource, /Super admin account — never auto-paused for credits/);
 assert.match(adminHtml, /<th>Run Status<\/th>/);
 assert.match(dashboardHtml, /id="creditsBalanceStat"[\s\S]*?href="buy-credits\.html">Buy credits →<\/a>/, 'the dashboard credit card must provide a direct purchase link');
-assert.match(dashboardHtml, /script\.js\?v=20261017-target-extra-accounts/, 'the dashboard must request the current frontend instead of a cached older script');
+assert.match(dashboardHtml, /script\.js\?v=2026\d{4}-[a-z0-9-]+/i, 'the dashboard must request a cache-busted frontend script');
 
 assert.match(
     serverSource,

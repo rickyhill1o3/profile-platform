@@ -52,7 +52,7 @@ function parseTargetItems(text,status){
   const joined=ls.join('\n');
   let start=0,end=ls.length;
   if(status==='canceled'){
-    const i=ls.findIndex(x=>/canceled item/i.test(x)); if(i>=0)start=i+1;
+    const i=ls.findIndex(x=>/(?:canceled|cancelled) items?|items? (?:have|has) been (?:canceled|cancelled)/i.test(x)); if(i>=0)start=i+1;
     const e=ls.findIndex((x,idx)=>idx>start && /would these work instead|perfect pairings|shop now/i.test(x)); if(e>=0)end=e;
   } else if(status==='delivered'){
     const i=ls.findIndex(x=>/^items? delivered$/i.test(x)); if(i>=0)start=i+1;
@@ -125,7 +125,7 @@ function targetCancellationScope(subject,text,status){
   if(status!=='canceled') return null;
   const hay=lower(`${subject}\n${text}`);
   if(/sorry,? we had to cancel (?:your )?order|your order has been canceled|order\s*#?\s*\d{10,20}\s+was canceled|we wanted to let you know that order\s*#?\s*\d{10,20}\s+was canceled|you haven['’]t been charged for any items/.test(hay)) return 'full_order';
-  if(/canceled an item|cancelled an item|canceled the item below|cancelled the item below|canceled item|cancelled item|your item has been canceled|your item has been cancelled/.test(hay)) return 'item';
+  if(/canceled an item|cancelled an item|canceled the items? below|cancelled the items? below|canceled items?|cancelled items?|your items? (?:has|have) been canceled|your items? (?:has|have) been cancelled|you['’]ve successfully canceled items? from your order ending in \d{4}|you['’]ve successfully cancelled items? from your order ending in \d{4}|as you requested,? we have canceled the items? below from your order|as you requested,? we have cancelled the items? below from your order/.test(hay)) return 'item';
   return 'unknown';
 }
 function parseSupremeCheckoutAt(text,eventAt=''){
@@ -285,6 +285,19 @@ function mainItemMatch(expected,item){
   const best=expected.reduce((m,e)=>Math.max(m,tokenScore(e.product_name||e.sku,item.product_name||item.sku)),0);
   return best>=.58;
 }
+function targetCancellationItemMatches(item,actual=[],cancellationText=''){
+  if(!item)return false;
+  if((Array.isArray(actual)?actual:[]).some(candidate=>mainItemMatch([item],candidate)))return true;
+  const raw=String(cancellationText||'');
+  const sectionMatch=raw.match(/(?:canceled|cancelled) items?([\s\S]*?)(?:\n\s*(?:help|returns|contact|find a store|terms of use|privacy|would these work instead|perfect pairings)\b|$)/i);
+  const section=norm(sectionMatch?.[1]||raw);
+  const title=norm(item.product_name||'');
+  const sku=norm(item.sku||'');
+  return Boolean(
+    (title.length>=8&&section.includes(title)) ||
+    (sku.length>=4&&section.includes(sku))
+  );
+}
 function targetSingleLineDeliveryAlias(expected=[],actual=[],existing=[]){
   if(expected.length!==1||actual.length!==1)return null;
   const main=existing.filter(item=>item.role==='main');
@@ -316,4 +329,4 @@ function deriveOverallStatus(items=[]){
   if(statuses.every(s=>s==='canceled'||s==='refunded'||s==='missing'))return statuses.some(s=>s==='refunded')?'refunded':'canceled';
   return 'waiting_confirmation';
 }
-module.exports={clean,lower,money,norm,tokenScore,parseRetailEmail,expectedWebhookItems,itemSetScore,matchScore,mainItemMatch,targetSingleLineDeliveryAlias,deriveOverallStatus,parseSupremeCheckoutAt,parseSupremeWebhookCheckoutAt};
+module.exports={clean,lower,money,norm,tokenScore,parseRetailEmail,expectedWebhookItems,itemSetScore,matchScore,mainItemMatch,targetCancellationItemMatches,targetSingleLineDeliveryAlias,deriveOverallStatus,parseSupremeCheckoutAt,parseSupremeWebhookCheckoutAt};

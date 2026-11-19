@@ -3858,6 +3858,8 @@ async function initCatalogTools() {
             let updated = 0;
             let unchanged = 0;
             let skippedGrouped = 0;
+            let pricesFound = 0;
+            let pricesUpdated = 0;
             const failures = [];
             targetCatalogRescanAllButton.disabled = true;
             targetCatalogRescanAllButton.textContent = resuming ? 'Resuming Target rescan...' : 'Rescanning Target catalog...';
@@ -3867,14 +3869,28 @@ async function initCatalogTools() {
                     if (targetCatalogRescanAllProgress) {
                         targetCatalogRescanAllProgress.textContent = `${resuming ? 'Resuming' : 'Scanning'} at product ${offset + 1}... Updated ${updated}; unchanged ${unchanged}; failed ${failures.length}.`;
                     }
-                    const data = await authJSON(API + '/admin/catalog-products/rescan-target-batch', {
-                        method: 'POST',
-                        body: JSON.stringify({ offset, limit: 6 })
-                    });
+                    let data;
+                    try {
+                        data = await authJSON(API + '/admin/catalog-products/rescan-target-batch', {
+                            method: 'POST',
+                            body: JSON.stringify({ offset, limit: 6 })
+                        });
+                    } catch (batchError) {
+                        if (/email scan|retry automatically|target requested priority/i.test(String(batchError?.message || ''))) {
+                            if (targetCatalogRescanAllProgress) {
+                                targetCatalogRescanAllProgress.textContent = `Target catalog is waiting for the current email scan to finish safely. Product ${offset + 1} will retry automatically…`;
+                            }
+                            await new Promise(resolve => setTimeout(resolve, 5000));
+                            continue;
+                        }
+                        throw batchError;
+                    }
                     added += Number(data.added || 0);
                     updated += Number(data.updated || 0);
                     unchanged += Number(data.unchanged || 0);
                     skippedGrouped += Number(data.skipped_grouped || 0);
+                    pricesFound += Number(data.prices_found || 0);
+                    pricesUpdated += Number(data.prices_updated || 0);
                     if (Array.isArray(data.failed)) failures.push(...data.failed);
                     offset = Number(data.next_offset || offset);
                     done = !!data.done || Number(data.processed || 0) === 0;
@@ -3888,7 +3904,7 @@ async function initCatalogTools() {
                     ? ` ${failures.length} need manual review: ${failures.slice(0, 8).map((row) => row.sku).join(', ')}${failures.length > 8 ? '…' : ''}.`
                     : '';
                 if (targetCatalogRescanAllProgress) {
-                    targetCatalogRescanAllProgress.textContent = `Target catalog rescan finished: ${added} added, ${updated} updated, ${unchanged} already current, ${skippedGrouped} grouped SKU rows skipped.${failureSuffix}`;
+                    targetCatalogRescanAllProgress.textContent = `Target catalog rescan finished: ${added} added, ${updated} updated, ${unchanged} already current, ${skippedGrouped} grouped SKU rows skipped. Target retail prices found for ${pricesFound} scanned products; ${pricesUpdated} saved prices changed.${failureSuffix}`;
                 }
                 message.textContent = `Target catalog rescan complete. ${updated} products updated and ${unchanged} left unchanged.`;
                 await loadCatalogProducts();
@@ -6730,6 +6746,7 @@ async function loadStoreRunStatusPanel() {
 
 async function initAdminStoreRunStatus() {
     const ALL_EXCEPT_CURRENT_USER = '__all_except_current_user__';
+    const RAFFLE_EXPORT = '__target_raffle_export__';
     const panel = document.getElementById('adminRunStatusPanel');
     const storeFilter = document.getElementById('adminRunStatusStoreFilter');
     const userFilter = document.getElementById('adminRunStatusUserFilter');
@@ -6769,7 +6786,7 @@ async function initAdminStoreRunStatus() {
             if (user && user.id && !byId.has(user.id)) byId.set(user.id, user);
         });
         const combinedOption = lastData?.current_user?.role === 'super_admin'
-            ? `<option value="${ALL_EXCEPT_CURRENT_USER}">All Admins + Users — Exclude My Profiles</option>`
+            ? `<option value="${ALL_EXCEPT_CURRENT_USER}">All Admins + Users — Exclude My Profiles</option><option value="${RAFFLE_EXPORT}">Raffle Export</option>`
             : '';
         userFilter.innerHTML = '<option value="">All Users</option>' + combinedOption + [...byId.values()].map((user) => {
             const relevantStores = (user.stores || []).filter((store) => !storeFilter.value || store.site === storeFilter.value);
@@ -6812,10 +6829,15 @@ async function initAdminStoreRunStatus() {
             alert('Select a specific store first, then export active profiles for that store.');
             return null;
         }
+        if (userFilter.value === RAFFLE_EXPORT && selectedStore !== 'target') {
+            alert('Raffle Export is Target-only. Select Target and try again.');
+            return null;
+        }
         const params = new URLSearchParams();
         params.set('group', selectedStore);
         params.set('active_only', '1');
         if (userFilter.value === ALL_EXCEPT_CURRENT_USER) params.set('exclude_current_user', '1');
+        else if (userFilter.value === RAFFLE_EXPORT) params.set('raffle_export', '1');
         else if (userFilter.value) params.set('user_id', userFilter.value);
         return params;
     };
@@ -6823,12 +6845,18 @@ async function initAdminStoreRunStatus() {
     const activeExportFilename = (prefix) => {
         const store = storeFilter.value || 'store';
         const date = new Date().toISOString().slice(0, 10);
-        const audience = userFilter.value === ALL_EXCEPT_CURRENT_USER ? '-admins-users-excluding-mine' : '';
+        const audience = userFilter.value === ALL_EXCEPT_CURRENT_USER
+            ? '-admins-users-excluding-mine'
+            : (userFilter.value === RAFFLE_EXPORT ? '-raffle-export' : '');
         return `${prefix}-${store}${audience}-active-${date}`;
     };
 
     const exportActive = async (endpoint, prefix, ext) => {
         try {
+            if (userFilter.value === RAFFLE_EXPORT && endpoint === '/admin/export/gmail-imap-txt') {
+                alert('Raffle Export includes Target profiles and Target account logins. Open extra Target accounts do not have separate IMAP credentials.');
+                return;
+            }
             const params = activeExportParams();
             if (!params) return;
             const filename = promptForExportFilename(activeExportFilename(prefix));
@@ -6842,6 +6870,10 @@ async function initAdminStoreRunStatus() {
 
     const exportActiveCostcoAccounts = async () => {
         try {
+            if (userFilter.value === RAFFLE_EXPORT) {
+                alert('Raffle Export is Target-only. Use one of the Target profile exports or Export Active Shikari Accounts.');
+                return;
+            }
             const params = new URLSearchParams({ group: 'costco', active_only: '1' });
             if (userFilter.value === ALL_EXCEPT_CURRENT_USER) params.set('exclude_current_user', '1');
             else if (userFilter.value) params.set('user_id', userFilter.value);
@@ -6857,6 +6889,10 @@ async function initAdminStoreRunStatus() {
 
     const exportActiveStellarAmazonAccounts = async () => {
         try {
+            if (userFilter.value === RAFFLE_EXPORT) {
+                alert('Raffle Export is Target-only. Use one of the Target profile exports or Export Active Shikari Accounts.');
+                return;
+            }
             const params = new URLSearchParams({ active_only: '1' });
             if (userFilter.value === ALL_EXCEPT_CURRENT_USER) params.set('exclude_current_user', '1');
             else if (userFilter.value) params.set('user_id', userFilter.value);
@@ -7023,6 +7059,10 @@ async function initAdminStoreRunStatus() {
         if (storeFilter.value) params.set('site', storeFilter.value);
         const selectedAudience = userFilter.value;
         if (selectedAudience === ALL_EXCEPT_CURRENT_USER) params.set('exclude_current_user', '1');
+        else if (selectedAudience === RAFFLE_EXPORT) {
+            // Raffle Export is an export audience, not a database user. Load the
+            // normal Target status table while keeping the special option selected.
+        }
         else if (selectedAudience) params.set('user_id', selectedAudience);
         try {
             const data = await authJSON(API + '/admin/store-run-status' + (params.toString() ? `?${params.toString()}` : ''));
@@ -7042,6 +7082,7 @@ async function initAdminStoreRunStatus() {
             lastUsers = users;
             renderUserOptions(optionUsers);
             if (params.get('exclude_current_user') === '1') userFilter.value = ALL_EXCEPT_CURRENT_USER;
+            else if (selectedAudience === RAFFLE_EXPORT) userFilter.value = RAFFLE_EXPORT;
             else if (params.get('user_id')) userFilter.value = params.get('user_id');
             const activeSummary = STORE_RUN_STATUS_OPTIONS.map((store) => `${store.label}: ${Number(data.summary?.[store.site] || 0)} active`).join(' • ');
             if (summary) summary.textContent = activeSummary;
@@ -7140,10 +7181,13 @@ async function initAdminStoreRunStatus() {
     };
 
     storeFilter.addEventListener('change', load);
-    userFilter.addEventListener('change', load);
+    userFilter.addEventListener('change', () => {
+        if (userFilter.value === RAFFLE_EXPORT) storeFilter.value = 'target';
+        load();
+    });
     if (acknowledgeButton) acknowledgeButton.addEventListener('click', async () => {
-        if (userFilter.value === ALL_EXCEPT_CURRENT_USER) {
-            alert('Choose one specific user before marking profiles updated. The combined export option does not acknowledge every user at once.');
+        if (userFilter.value === ALL_EXCEPT_CURRENT_USER || userFilter.value === RAFFLE_EXPORT) {
+            alert('Choose one specific user before marking profiles updated. Combined export options do not acknowledge every user at once.');
             return;
         }
         if (!storeFilter.value || !userFilter.value) {

@@ -199,6 +199,34 @@ function findLegacyRecoveryWindow(transactions = []) {
     return latestWindow;
 }
 
+function findCreditPurchaseRecovery(transactions = []) {
+    const rows = (Array.isArray(transactions) ? transactions : [])
+        .filter((row) => String(row?.reason || '').toLowerCase() === 'stripe_purchase')
+        .map((row) => ({
+            ...row,
+            amount_delta: Math.trunc(Number(row.amount_delta || 0)),
+            balance_after: Number(row.balance_after),
+            created_ms: new Date(row.created_at || 0).getTime()
+        }))
+        .filter((row) => row.amount_delta > 0
+            && Number.isFinite(row.balance_after)
+            && Number.isFinite(row.created_ms))
+        .sort((a, b) => a.created_ms - b.created_ms);
+    let latest = null;
+    for (const row of rows) {
+        const previousBalance = row.balance_after - row.amount_delta;
+        if (previousBalance < 0 && canActivateStore(row.balance_after)) {
+            latest = {
+                recovered_at: row.created_at,
+                transaction: String(row.id || row.created_at),
+                previous_balance: previousBalance,
+                balance_after: row.balance_after
+            };
+        }
+    }
+    return latest;
+}
+
 async function recoverLegacyAutomaticallyPausedStores(supabase, userId, balance, transactions = [], options = {}) {
     if (!canActivateStore(balance)) return { restored: false, restored_sites: [], legacy: true };
     const state = await loadCreditAutoPauseState(supabase, userId);
@@ -262,5 +290,6 @@ module.exports = {
     restoreAutomaticallyPausedStores,
     forgetAutomaticallyPausedStore,
     findLegacyRecoveryWindow,
+    findCreditPurchaseRecovery,
     recoverLegacyAutomaticallyPausedStores
 };

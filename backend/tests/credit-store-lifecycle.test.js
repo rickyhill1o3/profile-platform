@@ -7,6 +7,7 @@ const {
     markCreditPurchaseRestorePending,
     restoreAutomaticallyPausedStores,
     forgetAutomaticallyPausedStore,
+    findCreditPurchaseRecovery,
     findLegacyRecoveryWindow,
     recoverLegacyAutomaticallyPausedStores
 } = require('../credit-store-lifecycle');
@@ -122,6 +123,12 @@ function mockSupabase(seed = {}) {
         recovered_at: '2026-09-22T23:09:00.000Z',
         transaction: 'jose-purchase'
     });
+    assert.deepStrictEqual(findCreditPurchaseRecovery(legacyTransactions), {
+        recovered_at: '2026-09-22T23:09:00.000Z',
+        transaction: 'jose-purchase',
+        previous_balance: -31,
+        balance_after: 0
+    }, 'a successful Stripe recovery must be recognizable even if the first restore attempt was interrupted');
 
     const legacyDb = mockSupabase({
         user_store_run_status: [
