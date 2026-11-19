@@ -7301,9 +7301,15 @@ async function initTargetExtraAccountsAdmin() {
     const stats = document.getElementById('targetExtraAccountsStats');
     const usersPanel = document.getElementById('targetExtraAccountsUsers');
     const inventoryPanel = document.getElementById('targetExtraAccountsInventory');
+    const raffleAccountSelect = document.getElementById('targetRaffleAccountSelect');
+    const raffleUserSelect = document.getElementById('targetRaffleUserSelect');
+    const raffleLinkButton = document.getElementById('linkTargetRaffleCheckoutButton');
+    const raffleMessage = document.getElementById('targetRaffleCheckoutMessage');
+    const raffleLinksPanel = document.getElementById('targetRaffleCheckoutLinks');
+    const raffleRecentPanel = document.getElementById('targetRaffleCheckoutRecent');
     let savedProfileLimit = 3;
 
-    const setBusy = (busy) => [importButton, fillButton, cycleButton, saveLimitButton, refreshButton].forEach((button) => { if (button) button.disabled = busy; });
+    const setBusy = (busy) => [importButton, fillButton, cycleButton, saveLimitButton, refreshButton, raffleLinkButton].forEach((button) => { if (button) button.disabled = busy; });
     const render = (data) => {
         const counts = data?.counts || {};
         const settings = data?.settings || {};
@@ -7337,6 +7343,7 @@ async function initTargetExtraAccountsAdmin() {
                         method: 'PATCH', body: JSON.stringify({ status: button.dataset.targetExtraAccountStatus })
                     });
                     render(next);
+                    await loadRaffleCheckoutLinks();
                     message.textContent = 'Target account status updated.';
                 } catch (error) { message.textContent = error.message; }
                 finally { setBusy(false); }
@@ -7344,12 +7351,78 @@ async function initTargetExtraAccountsAdmin() {
         });
     };
 
+    const renderRaffleCheckoutLinks = (data) => {
+        const selectedAccount = raffleAccountSelect?.value || '';
+        const selectedUser = raffleUserSelect?.value || '';
+        const accounts = Array.isArray(data?.accounts) ? data.accounts : [];
+        const websiteUsers = Array.isArray(data?.users) ? data.users : [];
+        const activeLinks = Array.isArray(data?.active_links) ? data.active_links : [];
+        const recentLinks = Array.isArray(data?.recent_links) ? data.recent_links : [];
+
+        if (raffleAccountSelect) {
+            raffleAccountSelect.innerHTML = '<option value="">Choose a Target email</option>' + accounts.map((account) =>
+                `<option value="${escapeHTML(account.email || '')}">${escapeHTML(account.label || account.email || '')} · ${escapeHTML(account.current_owner || '')}</option>`
+            ).join('');
+            if (accounts.some((account) => account.email === selectedAccount)) raffleAccountSelect.value = selectedAccount;
+        }
+        if (raffleUserSelect) {
+            raffleUserSelect.innerHTML = '<option value="">Choose a website user</option>' + websiteUsers.map((user) =>
+                `<option value="${escapeHTML(user.id || '')}">${escapeHTML(user.display || user.email || 'Website user')} · ${escapeHTML(user.email || '')} (${escapeHTML(user.role || 'user')})</option>`
+            ).join('');
+            if (websiteUsers.some((user) => String(user.id) === selectedUser)) raffleUserSelect.value = selectedUser;
+        }
+
+        if (raffleLinksPanel) {
+            raffleLinksPanel.innerHTML = activeLinks.length
+                ? `<h3>Waiting for checkout</h3><table class="admin-table"><thead><tr><th>Winning Target Email</th><th>Website User</th><th>Linked</th><th>Action</th></tr></thead><tbody>${activeLinks.map((link) => `
+                    <tr><td>${escapeHTML(link.account_email || '')}</td><td>${escapeHTML(link.user_display || link.user_email || 'User')}<br><span class="subtle-text">${escapeHTML(link.user_email || '')}</span></td>
+                    <td>${link.linked_at ? escapeHTML(formatDateTimeShort(link.linked_at)) : '—'}</td><td><button class="btn btn-danger" type="button" data-release-target-raffle-link="${escapeHTML(link.account_email || '')}">Remove Link</button></td></tr>
+                `).join('')}</tbody></table>`
+                : '<div class="empty-card"><p>No raffle checkout links are waiting. Choose an account and user above before checkout.</p></div>';
+            raffleLinksPanel.querySelectorAll('[data-release-target-raffle-link]').forEach((button) => {
+                button.addEventListener('click', async () => {
+                    setBusy(true);
+                    if (raffleMessage) raffleMessage.textContent = 'Removing the one-time raffle checkout link...';
+                    try {
+                        const next = await authJSON(API + '/admin/target-raffle-checkout-links/release', {
+                            method: 'POST',
+                            body: JSON.stringify({ account_email: button.dataset.releaseTargetRaffleLink })
+                        });
+                        renderRaffleCheckoutLinks(next);
+                        if (raffleMessage) raffleMessage.textContent = 'Raffle checkout link removed. Normal account ownership will be used.';
+                    } catch (error) {
+                        if (raffleMessage) raffleMessage.textContent = error.message || 'Could not remove the raffle checkout link.';
+                    } finally { setBusy(false); }
+                });
+            });
+        }
+
+        if (raffleRecentPanel) {
+            raffleRecentPanel.innerHTML = recentLinks.length
+                ? `<details><summary>Recent completed or removed links (${recentLinks.length})</summary><table class="admin-table"><thead><tr><th>Target Email</th><th>User</th><th>Result</th><th>When</th></tr></thead><tbody>${recentLinks.map((link) => `
+                    <tr><td>${escapeHTML(link.account_email || '')}</td><td>${escapeHTML(link.user_display || link.user_email || 'User')}</td><td>${escapeHTML(link.status || '')}${link.consumed_external_order_id ? `<br><span class="subtle-text">Order ${escapeHTML(link.consumed_external_order_id)}</span>` : ''}</td>
+                    <td>${escapeHTML(formatDateTimeShort(link.consumed_at || link.released_at || link.linked_at || ''))}</td></tr>
+                `).join('')}</tbody></table></details>`
+                : '';
+        }
+    };
+
+    const loadRaffleCheckoutLinks = async () => {
+        const data = await authJSON(API + '/admin/target-raffle-checkout-links');
+        renderRaffleCheckoutLinks(data);
+        return data;
+    };
+
     const load = async () => {
         setBusy(true);
         message.textContent = 'Loading Target extra accounts...';
         try {
-            const data = await authJSON(API + '/admin/target-extra-accounts');
+            const [data, raffleData] = await Promise.all([
+                authJSON(API + '/admin/target-extra-accounts'),
+                authJSON(API + '/admin/target-raffle-checkout-links')
+            ]);
             render(data);
+            renderRaffleCheckoutLinks(raffleData);
             message.textContent = 'Target extra-account pool loaded. Passwords remain hidden.';
         } catch (error) { message.textContent = error.message || 'Could not load the Target account pool.'; }
         finally { setBusy(false); }
@@ -7362,6 +7435,7 @@ async function initTargetExtraAccountsAdmin() {
         try {
             const result = await authJSON(API + '/admin/target-extra-accounts/distribute', { method: 'POST', body: JSON.stringify({ mode }) });
             render(result.snapshot);
+            await loadRaffleCheckoutLinks();
             message.textContent = `Assigned ${Number(result.assigned || 0)}, preserved ${Number(result.preserved || 0)}, released ${Number(result.released || 0)}. Limit: ${Number(result.max_assignments_per_profile || profileLimit)} per profile. ${Number(result.unassigned || 0)} enabled accounts remain open.`;
         } catch (error) { message.textContent = error.message || 'Could not distribute Target accounts.'; }
         finally { setBusy(false); }
@@ -7372,6 +7446,23 @@ async function initTargetExtraAccountsAdmin() {
         refreshButton?.addEventListener('click', load);
         fillButton?.addEventListener('click', () => distribute('fill'));
         cycleButton?.addEventListener('click', () => distribute('new_cycle'));
+        raffleLinkButton?.addEventListener('click', async () => {
+            const accountEmail = String(raffleAccountSelect?.value || '').trim();
+            const userId = String(raffleUserSelect?.value || '').trim();
+            if (!accountEmail || !userId) return alert('Choose the winning Target email and the website user who should receive this checkout.');
+            setBusy(true);
+            if (raffleMessage) raffleMessage.textContent = 'Linking the next successful checkout...';
+            try {
+                const next = await authJSON(API + '/admin/target-raffle-checkout-links', {
+                    method: 'POST',
+                    body: JSON.stringify({ account_email: accountEmail, user_id: userId })
+                });
+                renderRaffleCheckoutLinks(next);
+                if (raffleMessage) raffleMessage.textContent = 'Ready. The next successful Target checkout on this email will charge and appear for the selected user, then the link will clear automatically.';
+            } catch (error) {
+                if (raffleMessage) raffleMessage.textContent = error.message || 'Could not link the raffle checkout.';
+            } finally { setBusy(false); }
+        });
         saveLimitButton?.addEventListener('click', async () => {
             const requestedLimit = Number.parseInt(limitInput?.value || '', 10);
             if (!Number.isInteger(requestedLimit) || requestedLimit < 1 || requestedLimit > 10) {
@@ -7384,6 +7475,7 @@ async function initTargetExtraAccountsAdmin() {
                     method: 'PATCH', body: JSON.stringify({ max_assignments_per_profile: requestedLimit })
                 });
                 render(next);
+                await loadRaffleCheckoutLinks();
                 message.textContent = `Assignment limit saved at ${requestedLimit} extra Target account${requestedLimit === 1 ? '' : 's'} per profile. Use Fill Open Spots or Start New Assignment Round to apply it.`;
             } catch (error) { message.textContent = error.message || 'Could not save the assignment limit.'; }
             finally { setBusy(false); }
@@ -7398,6 +7490,7 @@ async function initTargetExtraAccountsAdmin() {
                 });
                 if (importText) importText.value = '';
                 render(result.snapshot);
+                await loadRaffleCheckoutLinks();
                 const skipped = Number(result.skipped_existing_pool?.length || 0) + Number(result.skipped_existing_target_profiles?.length || 0) + Number(result.duplicate_input?.length || 0);
                 message.textContent = `Imported ${Number(result.inserted || 0)} account${Number(result.inserted || 0) === 1 ? '' : 's'}. Skipped ${skipped} duplicate${skipped === 1 ? '' : 's'} and ${Number(result.invalid?.length || 0)} invalid line${Number(result.invalid?.length || 0) === 1 ? '' : 's'}.`;
             } catch (error) { message.textContent = error.message || 'Could not import Target accounts.'; }

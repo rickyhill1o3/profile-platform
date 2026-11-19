@@ -646,6 +646,35 @@ placeholder="Enter one SKU per line&#10;12345678&#10;87654321"></textarea>
             <div id="targetExtraAccountsStats" class="stats-grid stats-grid--compact"></div>
           </section>
           <section class="panel">
+            <div class="panel-header">
+              <div>
+                <h2>Raffle Checkout Links</h2>
+                <p class="subtle-text">Before checking out a raffle win, link the winning Target email to the website user who should receive the order and credit charge. The link removes itself after the next successful Target checkout and does not permanently change profile or extra-account ownership.</p>
+              </div>
+            </div>
+            <div class="banner banner-soft">
+              <strong>One successful checkout only</strong>
+              <p class="subtle-text">Failed checkout webhooks do not use the link. After a success is recorded, later checkouts return to the account's normal owner.</p>
+            </div>
+            <div class="form-grid">
+              <div class="field">
+                <label for="targetRaffleAccountSelect">Winning Target account</label>
+                <select class="input" id="targetRaffleAccountSelect"><option value="">Choose a Target email</option></select>
+              </div>
+              <div class="field">
+                <label for="targetRaffleUserSelect">Charge and link to website user</label>
+                <select class="input" id="targetRaffleUserSelect"><option value="">Choose a website user</option></select>
+              </div>
+              <div class="field field-actions">
+                <label>&nbsp;</label>
+                <button class="btn btn-primary" type="button" id="linkTargetRaffleCheckoutButton">Link Next Checkout</button>
+              </div>
+            </div>
+            <div id="targetRaffleCheckoutMessage" class="subtle-text"></div>
+            <div id="targetRaffleCheckoutLinks" class="table-wrap"></div>
+            <div id="targetRaffleCheckoutRecent" class="table-wrap"></div>
+          </section>
+          <section class="panel">
             <div class="panel-header"><div><h2>Opted-in Users</h2><p class="subtle-text">Current user and address distribution. Each profile is capped separately, so users with more eligible profiles can safely receive more accounts without overloading one profile.</p></div></div>
             <div id="targetExtraAccountsUsers" class="table-wrap table-wrap--admin-scroll"></div>
           </section>
@@ -1252,7 +1281,7 @@ placeholder="Enter one SKU per line&#10;12345678&#10;87654321"></textarea>
     </div>
   </div>
   <script src="profile-sync-state.js?v=20260918-profile-sync-display"></script>
-  <script src="script.js?v=20261118-target-raffle-export"></script>
+  <script src="script.js?v=20261119-target-raffle-checkout-links"></script>
   <script src="products.js?v=20260930-pokemon-sku-groups"></script>
 
 

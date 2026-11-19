@@ -107,6 +107,15 @@ const { buildStellarAmazonAccountsText } = require("./stellar-amazon-account-exp
 const { buildValorProfileExport } = require("./valor-profile-export");
 const { applyExcludeCurrentUserFilter } = require("./admin-export-audience");
 const { validateTargetRaffleExport, buildTargetRaffleProfiles } = require("./target-raffle-export");
+const {
+    TARGET_RAFFLE_CHECKOUT_LINK_PREFIX,
+    normalizeTargetRaffleEmail,
+    targetRaffleCheckoutLinkKey,
+    buildTargetRaffleCheckoutLink,
+    targetRaffleCheckoutLinkIsActiveAt,
+    consumeTargetRaffleCheckoutLink,
+    releaseTargetRaffleCheckoutLink
+} = require("./target-raffle-checkout-links");
 const { buildStellarRowsFromImportedProfiles } = require("./shikari-pokemoncenter-stellar");
 const { registerMarketValueEngine } = require("./market-value-engine");
 const { registerMasterProductCatalog } = require("./master-product-catalog");
@@ -1843,6 +1852,31 @@ function targetExtraEventTime(payload = {}, normalized = {}) {
     return new Date().toISOString();
 }
 
+async function findTargetRaffleCheckoutOwnerAt(loginEmail, eventAt) {
+    const email = normalizeTargetRaffleEmail(loginEmail);
+    const key = targetRaffleCheckoutLinkKey(email);
+    if (!key) return null;
+    try {
+        const link = await getAppSetting(key, null);
+        if (!targetRaffleCheckoutLinkIsActiveAt(link, eventAt)) return null;
+        if (normalizeTargetRaffleEmail(link.target_login_email) !== email) return null;
+        const user = await getUserById(link.user_id);
+        if (!user || user.revoked) return null;
+        return {
+            ...user,
+            target_raffle_checkout_link: {
+                key,
+                target_login_email: email,
+                user_id: String(user.id),
+                linked_at: link.linked_at
+            }
+        };
+    } catch (error) {
+        console.warn('Target raffle checkout-link lookup failed', error.message || error);
+        return null;
+    }
+}
+
 async function findTargetExtraAccountOwnerAt(loginEmail, eventAt) {
     const email = normalizeTargetExtraEmail(loginEmail);
     if (!email) return null;
@@ -1884,6 +1918,19 @@ async function findTargetExtraAccountOwnerAt(loginEmail, eventAt) {
 
 async function findUserForWebhook(payload) {
     const normalized = normalizeIncomingOrderPayload(payload);
+    const normalizedEmail = String(normalized.account_email || '').trim().toLowerCase();
+    const normalizedSite = normalizeProfileAccountType(normalized.site || '');
+
+    // A super-admin raffle link is the authoritative owner for one Target success.
+    // Check it even before an incoming user_id so stale bot metadata cannot defeat the
+    // deliberate pre-checkout assignment made in the admin panel.
+    if (normalizedSite === 'target' && normalizedEmail) {
+        const raffleOwner = await findTargetRaffleCheckoutOwnerAt(
+            normalizedEmail,
+            targetExtraEventTime(payload, normalized)
+        );
+        if (raffleOwner) return raffleOwner;
+    }
 
     const candidates = [
         payload.user_id,
@@ -1897,18 +1944,15 @@ async function findUserForWebhook(payload) {
         if (user) return user;
     }
 
-    const normalizedEmail = String(normalized.account_email || '').trim().toLowerCase();
     const normalizedProfileName = String(normalized.profile_name || '').trim();
-    const normalizedSite = normalizeProfileAccountType(normalized.site || '');
     const normalizedSource = String(normalized.source || '').trim().toLowerCase();
     const hasAuthoritativeAccountEmail = !!normalizedEmail && (
         normalizedSource === 'shikari' ||
         !!buildFieldMapFromEmbeds(payload || {}).fields?.account
     );
 
-    // Extra Target accounts are owned by the user assigned at checkout time. The
-    // history lookup deliberately runs before profile/account matching because an
-    // account may be reassigned to another user in a later release cycle.
+    // Extra Target ownership remains ahead of profile matching because the same login
+    // may be assigned to a different user during a later distribution round.
     if (normalizedSite === 'target' && normalizedEmail) {
         const historicalOwner = await findTargetExtraAccountOwnerAt(
             normalizedEmail,
@@ -2370,6 +2414,32 @@ async function setAppSetting(key, value) {
     const { error } = await supabase.from('app_settings').upsert(payload, { onConflict: 'key' });
     if (error) throw new Error(error.message);
     return value;
+}
+
+async function consumeTargetRaffleCheckoutLinkForOrder(order = {}) {
+    const marker = order?.metadata?.target_raffle_checkout_link;
+    const key = String(marker?.key || '').trim();
+    if (!key || !marker?.user_id || !marker?.target_login_email || !marker?.linked_at) return false;
+
+    const current = await getAppSetting(key, null);
+    if (!current || current.status !== 'active') return false;
+
+    // A link may be replaced before a delayed duplicate webhook arrives. Requiring the
+    // exact creation timestamp prevents an older order from consuming the newer link.
+    if (
+        String(current.user_id || '') !== String(marker.user_id || '') ||
+        normalizeTargetRaffleEmail(current.target_login_email) !== normalizeTargetRaffleEmail(marker.target_login_email) ||
+        String(current.linked_at || '') !== String(marker.linked_at || '')
+    ) return false;
+
+    const consumed = consumeTargetRaffleCheckoutLink(current, {
+        userId: marker.user_id,
+        orderId: order.id || null,
+        externalOrderId: order.external_order_id || null
+    });
+    if (!consumed) return false;
+    await setAppSetting(key, consumed);
+    return true;
 }
 
 function getAdminWebhookSettingKey(userId) {
@@ -4925,11 +4995,16 @@ async function recordSuccessfulCheckout(payload, options = {}) {
     );
 
     if (existing?.id) {
+        await consumeTargetRaffleCheckoutLinkForOrder(existing).catch((error) => {
+            console.warn('Could not repair Target raffle checkout-link consumption for duplicate order', error.message || error);
+        });
         return { order: existing, duplicate: true };
     }
 
     // Find user
-    const user = await findUserForWebhook({ ...payload, ...normalized });
+    const user = options.matchedUser?.id
+        ? options.matchedUser
+        : await findUserForWebhook({ ...payload, ...normalized });
     if (!user?.id) {
         throw new Error("Could not match webhook payload to a user");
     }
@@ -4981,7 +5056,10 @@ async function recordSuccessfulCheckout(payload, options = {}) {
             projected_balance_after_charge: projectedBalance,
             balance_went_zero_or_negative: creditsToCharge > 0 && projectedBalance <= 0,
             balance_crossed_auto_pause_limit: willCrossAutoPauseThreshold,
-            pokemon_credit_items: resolvedCost.pokemonMultiItemMatch?.items || []
+            pokemon_credit_items: resolvedCost.pokemonMultiItemMatch?.items || [],
+            ...(user.target_raffle_checkout_link
+                ? { target_raffle_checkout_link: user.target_raffle_checkout_link }
+                : {})
         },
         raw_payload: payload,
         created_at:checkoutCreatedAt
@@ -5013,6 +5091,14 @@ async function recordSuccessfulCheckout(payload, options = {}) {
                 order
             });
         }
+    }
+
+    if (user.target_raffle_checkout_link) {
+        await consumeTargetRaffleCheckoutLinkForOrder(order).catch((error) => {
+            // The checkout is already safely recorded and charged. Leave the marker on
+            // the order so a duplicate webhook can retry consumption without double charge.
+            console.warn('Could not consume Target raffle checkout link after successful order', error.message || error);
+        });
     }
 
     return {
@@ -5652,7 +5738,7 @@ app.post(["/webhooks/orders", "/webhooks/orders/:token"], async (req, res) => {
                 let recordedCreditsCharged = null;
                 if (resolvedUser?.id) {
                     try {
-                        const result = await recordSuccessfulCheckout(assignmentEventPayload);
+                        const result = await recordSuccessfulCheckout(assignmentEventPayload, { matchedUser: resolvedUser });
                         recordedOrder = result?.order || null;
                         recordedCreditsCharged = result?.order?.credits_charged ?? result?.credits_charged ?? null;
                         if (recordedOrder?.id && logId && !result?.duplicate) {
@@ -9727,6 +9813,151 @@ async function loadTargetExtraAdminSnapshot() {
         })
     };
 }
+
+async function loadTargetRaffleCheckoutLinkSnapshot(currentUserId) {
+    const [profiles, poolResult, assignmentResult, userResult, linkResult] = await Promise.all([
+        loadOwnTargetProfilesForBotSplit(currentUserId),
+        fetchAllSupabaseRows(() => supabase
+            .from('target_extra_accounts')
+            .select('id, login_email, status')
+            .eq('status', 'available')
+            .order('login_email', { ascending: true })),
+        fetchAllSupabaseRows(() => supabase
+            .from('target_extra_account_assignments')
+            .select('account_id, user_id, assigned_at')
+            .is('released_at', null)),
+        fetchAllSupabaseRows(() => supabase
+            .from('users')
+            .select('id, email, role, revoked, discord_username, discord_display_name')
+            .order('email', { ascending: true })),
+        fetchAllSupabaseRows(() => supabase
+            .from('app_settings')
+            .select('key, value_json, updated_at')
+            .like('key', `${TARGET_RAFFLE_CHECKOUT_LINK_PREFIX}%`)
+            .order('updated_at', { ascending: false }))
+    ]);
+    const firstError = poolResult.error || assignmentResult.error || userResult.error || linkResult.error;
+    if (firstError) throw firstError;
+
+    const users = (userResult.data || [])
+        .filter((user) => !user.revoked && ['user', 'admin', 'super_admin'].includes(String(user.role || 'user')))
+        .map((user) => ({
+            id: user.id,
+            email: user.email || '',
+            role: user.role || 'user',
+            display: user.discord_display_name || user.discord_username || user.email || 'Website user'
+        }));
+    const userMap = new Map(users.map((user) => [String(user.id), user]));
+    const assignmentByAccount = new Map((assignmentResult.data || []).map((row) => [String(row.account_id), row]));
+    const accountsByEmail = new Map();
+
+    for (const profile of profiles || []) {
+        const email = normalizeTargetRaffleEmail(accountForExport(profile, 'target')?.login_email);
+        if (!email || accountsByEmail.has(email)) continue;
+        accountsByEmail.set(email, {
+            email,
+            source: 'personal_super_admin_profile',
+            label: `${profile.profile_name || 'My Target profile'} — ${email}`,
+            current_owner: 'Super admin profile'
+        });
+    }
+
+    for (const account of poolResult.data || []) {
+        const email = normalizeTargetRaffleEmail(account.login_email);
+        if (!email || accountsByEmail.has(email)) continue;
+        const assignment = assignmentByAccount.get(String(account.id));
+        const owner = assignment ? userMap.get(String(assignment.user_id)) : null;
+        accountsByEmail.set(email, {
+            email,
+            source: 'target_extra_account',
+            label: `Extra Target account — ${email}`,
+            current_owner: owner ? `Currently assigned to ${owner.display}` : 'Open extra account'
+        });
+    }
+
+    const links = (linkResult.data || []).map((row) => {
+        const value = row.value_json && typeof row.value_json === 'object' ? row.value_json : {};
+        const user = userMap.get(String(value.user_id || ''));
+        return {
+            key: row.key,
+            account_email: normalizeTargetRaffleEmail(value.target_login_email || String(row.key || '').slice(TARGET_RAFFLE_CHECKOUT_LINK_PREFIX.length)),
+            user_id: value.user_id || null,
+            user_display: user?.display || user?.email || 'Unknown or revoked user',
+            user_email: user?.email || '',
+            status: value.status || 'unknown',
+            linked_at: value.linked_at || null,
+            consumed_at: value.consumed_at || null,
+            consumed_order_id: value.consumed_order_id || null,
+            consumed_external_order_id: value.consumed_external_order_id || null,
+            released_at: value.released_at || null
+        };
+    });
+    const recentLinks = links
+        .filter((link) => link.status !== 'active')
+        .sort((a, b) => new Date(b.consumed_at || b.released_at || b.linked_at || 0) - new Date(a.consumed_at || a.released_at || a.linked_at || 0))
+        .slice(0, 20);
+
+    return {
+        accounts: [...accountsByEmail.values()].sort((a, b) => a.email.localeCompare(b.email)),
+        users: users.sort((a, b) => String(a.display).localeCompare(String(b.display))),
+        active_links: links.filter((link) => link.status === 'active'),
+        recent_links: recentLinks
+    };
+}
+
+app.get('/admin/target-raffle-checkout-links', auth, admin, async (req, res) => {
+    try {
+        const currentUser = await getCurrentUser(req);
+        if (currentUser.role !== 'super_admin') return res.status(403).json({ error: 'Super admin only' });
+        res.json(await loadTargetRaffleCheckoutLinkSnapshot(currentUser.id));
+    } catch (error) {
+        res.status(500).json({ error: error.message || 'Could not load Target raffle checkout links.' });
+    }
+});
+
+app.post('/admin/target-raffle-checkout-links', auth, admin, async (req, res) => {
+    try {
+        const currentUser = await getCurrentUser(req);
+        if (currentUser.role !== 'super_admin') return res.status(403).json({ error: 'Super admin only' });
+        const accountEmail = normalizeTargetRaffleEmail(req.body?.account_email);
+        const userId = String(req.body?.user_id || '').trim();
+        if (!accountEmail || !userId) return res.status(400).json({ error: 'Choose a winning Target account and website user.' });
+
+        const snapshot = await loadTargetRaffleCheckoutLinkSnapshot(currentUser.id);
+        if (!snapshot.accounts.some((account) => account.email === accountEmail)) {
+            return res.status(400).json({ error: 'That Target email is not one of your profiles or an enabled extra account.' });
+        }
+        const selectedUser = snapshot.users.find((user) => String(user.id) === userId);
+        if (!selectedUser) return res.status(400).json({ error: 'That website user is unavailable or revoked.' });
+
+        const link = buildTargetRaffleCheckoutLink({
+            accountEmail,
+            userId,
+            linkedBy: currentUser.id
+        });
+        await setAppSetting(targetRaffleCheckoutLinkKey(accountEmail), link);
+        res.json(await loadTargetRaffleCheckoutLinkSnapshot(currentUser.id));
+    } catch (error) {
+        res.status(500).json({ error: error.message || 'Could not link the next Target raffle checkout.' });
+    }
+});
+
+app.post('/admin/target-raffle-checkout-links/release', auth, admin, async (req, res) => {
+    try {
+        const currentUser = await getCurrentUser(req);
+        if (currentUser.role !== 'super_admin') return res.status(403).json({ error: 'Super admin only' });
+        const accountEmail = normalizeTargetRaffleEmail(req.body?.account_email);
+        const key = targetRaffleCheckoutLinkKey(accountEmail);
+        if (!key) return res.status(400).json({ error: 'Choose a Target account link to remove.' });
+        const current = await getAppSetting(key, null);
+        const released = releaseTargetRaffleCheckoutLink(current, { releasedBy: currentUser.id });
+        if (!released) return res.status(404).json({ error: 'That raffle checkout link is no longer active.' });
+        await setAppSetting(key, released);
+        res.json(await loadTargetRaffleCheckoutLinkSnapshot(currentUser.id));
+    } catch (error) {
+        res.status(500).json({ error: error.message || 'Could not remove the Target raffle checkout link.' });
+    }
+});
 
 app.get('/admin/target-extra-accounts', auth, admin, async (req, res) => {
     try {
