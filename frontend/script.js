@@ -4570,6 +4570,61 @@ async function recheckWebhookAccountUser(id, button) {
     }
 }
 
+async function recheckWebhookRaffleUser(id, button) {
+    if (!id) return;
+    const originalText = button ? button.textContent : '';
+    const confirmed = window.confirm(
+        'Reassign this saved Target checkout using its active Raffle Checkout Link?\n\n' +
+        'The system will refund the currently charged user, charge the user selected in the raffle link, move the Order Tracker entry, and then clear the one-time link.'
+    );
+    if (!confirmed) return;
+    try {
+        if (button) {
+            button.disabled = true;
+            button.textContent = 'Rechecking raffle...';
+        }
+        const data = await authJSON(API + `/admin/webhooks/logs/${encodeURIComponent(id)}/recheck-account-user`, {
+            method: 'POST',
+            body: JSON.stringify({ use_raffle_link: true })
+        });
+        const trackerLabel = data.tracked_order_action === 'created'
+            ? 'Created under selected user'
+            : data.tracked_order_action === 'moved'
+                ? 'Moved to selected user'
+                : data.tracked_order_action === 'merged'
+                    ? 'Merged into selected user order'
+                    : data.tracked_order_action === 'linked'
+                        ? 'Linked to selected user'
+                        : (data.tracked_order_moved ? 'Updated for selected user' : 'No tracker change');
+        if (data.changed) {
+            alert(
+                `Raffle checkout reassigned successfully.\n\n` +
+                `From: ${data.previous_user_email || data.previous_user_id || 'unknown'}\n` +
+                `To: ${data.correct_user_email || data.correct_user_id || 'unknown'}\n` +
+                `Credits refunded: ${Number(data.refunded_credits || 0)}\n` +
+                `Credits charged: ${Number(data.charged_credits || 0)}\n` +
+                `Order Tracker: ${trackerLabel}\n` +
+                `Raffle link cleared: ${data.raffle_link_consumed ? 'Yes' : 'No'}`
+            );
+        } else {
+            alert(
+                `Raffle account recheck complete. ${data.message || 'This checkout is already assigned to the selected user.'}\n\n` +
+                `Order Tracker: ${trackerLabel}\n` +
+                `Raffle link cleared: ${data.raffle_link_consumed ? 'Yes' : 'No'}`
+            );
+        }
+        await loadWebhookLogs();
+        return data;
+    } catch (err) {
+        alert(err.message || 'Failed to recheck the raffle checkout user.');
+    } finally {
+        if (button) {
+            button.disabled = false;
+            button.textContent = originalText || 'Recheck raffle user';
+        }
+    }
+}
+
 async function recheckWebhookCredits(id, button) {
     if (!id) return;
     const originalText = button ? button.textContent : '';
@@ -4679,6 +4734,9 @@ async function loadWebhookLogs() {
             const amazonImapAction = isPendingAmazonCheckout && item.order_id
                 ? `<button class="secondary" type="button" onclick="recheckAmazonWebhookImap('${escapeHtml(item.order_id)}', this)">Check Amazon IMAP</button>`
                 : '';
+            const raffleRecheckAction = String(item.type || '').toLowerCase() === 'checkout' && String(item.site || '').toLowerCase() === 'target'
+                ? `<button class="secondary" type="button" onclick="recheckWebhookRaffleUser('${escapeHtml(item.id || '')}', this)">Recheck raffle user</button>`
+                : '';
             return `
             <tr>
               <td class="webhook-log-time" title="Stored UTC: ${escapeHtml(item.created_at || '')}">${escapeHtml(formatWebhookEasternTime(item.created_at))}</td>
@@ -4693,7 +4751,7 @@ async function loadWebhookLogs() {
               <td class="webhook-log-product">${productCell}</td>
               <td class="webhook-log-sku"><span class="webhook-log-truncate" title="${escapeHtml(item.sku || '-')}">${escapeHtml(item.sku || '-')}</span></td>
               <td class="webhook-log-debug"><div class="webhook-log-error">${escapeHtml(item.error || '')}</div>${details}${targetDetails}${payloadDetails}</td>
-              <td class="webhook-log-actions"><div class="webhook-log-action-buttons"><button class="secondary" type="button" onclick="resendWebhookLog('${escapeHtml(item.id || '')}', this)">Resend</button>${amazonImapAction}<button class="secondary" type="button" onclick="recheckWebhookCredits('${escapeHtml(item.id || '')}', this)">Recheck credits</button>${String(item.type || '').toLowerCase()==='checkout' ? `<button class="secondary" type="button" onclick="recheckWebhookAccountUser('${escapeHtml(item.id || '')}', this)">Recheck account user</button>` : ''}${String(item.type || '').toLowerCase()==='checkout' && productValue !== '-' && !isProductUrl ? `<button class="secondary" type="button" onclick='hideHomepageCheckoutProduct(${JSON.stringify(productValue)}, this)'>Hide from homepage</button>` : ''}</div></td>
+              <td class="webhook-log-actions"><div class="webhook-log-action-buttons"><button class="secondary" type="button" onclick="resendWebhookLog('${escapeHtml(item.id || '')}', this)">Resend</button>${amazonImapAction}<button class="secondary" type="button" onclick="recheckWebhookCredits('${escapeHtml(item.id || '')}', this)">Recheck credits</button>${String(item.type || '').toLowerCase()==='checkout' ? `<button class="secondary" type="button" onclick="recheckWebhookAccountUser('${escapeHtml(item.id || '')}', this)">Recheck account user</button>` : ''}${raffleRecheckAction}${String(item.type || '').toLowerCase()==='checkout' && productValue !== '-' && !isProductUrl ? `<button class="secondary" type="button" onclick='hideHomepageCheckoutProduct(${JSON.stringify(productValue)}, this)'>Hide from homepage</button>` : ''}</div></td>
             </tr>`;
         }).join('');
         container.innerHTML = `

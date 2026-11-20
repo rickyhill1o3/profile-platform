@@ -7329,6 +7329,7 @@ app.post('/admin/webhooks/logs/:id/recheck-account-user', auth, admin, async (re
     try {
         const currentUser = await getCurrentUser(req);
         if (currentUser.role !== 'super_admin') return res.status(403).json({ error: 'Only super admin can recheck checkout account ownership.' });
+        const useRaffleLink = req.body?.use_raffle_link === true;
 
         const rows = await getWebhookLogEntries({ limit: 50000 });
         const row = (rows || []).find((item) => String(item.id) === String(req.params.id));
@@ -7340,9 +7341,15 @@ app.post('/admin/webhooks/logs/:id/recheck-account-user', auth, admin, async (re
         const accountEmail = String(normalized.account_email || '').trim().toLowerCase();
         if (!accountEmail) return res.status(400).json({ error: 'The webhook does not contain an Account email, so the user cannot be reassigned safely.' });
 
-        // This uses the hardened authoritative-account matcher. For Shikari, an Account
-        // email that cannot resolve uniquely is NOT allowed to fall back to profile name.
-        const correctUser = await findUserForWebhook(row.payload || {});
+        // A retroactive raffle correction is deliberately evaluated at the time the
+        // super admin presses the button. The original checkout happened before the link
+        // was created, so its historical embed timestamp must not reject this explicit fix.
+        const correctUser = useRaffleLink
+            ? await findTargetRaffleCheckoutOwnerAt(accountEmail, new Date().toISOString())
+            : await findUserForWebhook(row.payload || {});
+        if (useRaffleLink && !correctUser?.target_raffle_checkout_link) {
+            return res.status(409).json({ error: `No active raffle checkout link exists for ${accountEmail}. Create the link under Target Extra Accounts, then press Recheck raffle user again.` });
+        }
         if (!correctUser?.id) return res.status(409).json({ error: `No unique user could be matched to checkout account ${accountEmail}. No credits or orders were changed.` });
 
         const externalOrderId = String(normalized.external_order_id || normalized.order_number || normalized.order_id || '').trim();
@@ -7361,7 +7368,21 @@ app.post('/admin/webhooks/logs/:id/recheck-account-user', auth, admin, async (re
         if (!previousUser?.id) return res.status(404).json({ error: 'The currently assigned user could not be loaded.' });
 
         if (String(previousUser.id) === String(correctUser.id)) {
+            if (correctUser.target_raffle_checkout_link) {
+                const metadata = {
+                    ...(serviceOrder.metadata || {}),
+                    target_raffle_checkout_link: correctUser.target_raffle_checkout_link,
+                    raffle_account_rechecked_at: new Date().toISOString(),
+                    raffle_account_rechecked_by: currentUser.id
+                };
+                const updateResult = await supabase.from('orders').update({ metadata }).eq('id', serviceOrder.id).select('*').single();
+                if (updateResult.error) throw new Error(updateResult.error.message);
+                serviceOrder = updateResult.data;
+            }
             const trackerResult = await moveTrackedOrderToCorrectUser({ serviceOrder, fromUser: previousUser, toUser: correctUser, accountEmail });
+            const raffleLinkConsumed = correctUser.target_raffle_checkout_link
+                ? await consumeTargetRaffleCheckoutLinkForOrder(serviceOrder)
+                : false;
             await updateWebhookLogEntry(row.id, {
                 status: 'processed',
                 error: '',
@@ -7378,7 +7399,8 @@ app.post('/admin/webhooks/logs/:id/recheck-account-user', auth, admin, async (re
                 tracked_order_action: trackerResult.action || 'none',
                 tracked_order_created: !!trackerResult.created,
                 refunded_credits: 0,
-                charged_credits: 0
+                charged_credits: 0,
+                raffle_link_consumed: raffleLinkConsumed
             });
         }
 
@@ -7433,7 +7455,12 @@ app.post('/admin/webhooks/logs/:id/recheck-account-user', auth, admin, async (re
             account_reassigned_from_email: previousUser.email || '',
             account_reassigned_to_user_id: correctUser.id,
             account_reassigned_to_email: correctUser.email || '',
-            account_reassignment_key: reassignmentKey
+            account_reassignment_key: reassignmentKey,
+            ...(correctUser.target_raffle_checkout_link ? {
+                target_raffle_checkout_link: correctUser.target_raffle_checkout_link,
+                raffle_account_rechecked_at: new Date().toISOString(),
+                raffle_account_rechecked_by: currentUser.id
+            } : {})
         };
         const updatedOrderResult = await supabase.from('orders').update({ user_id: correctUser.id, metadata: updatedMetadata }).eq('id', serviceOrder.id).select('*').single();
         if (updatedOrderResult.error) throw new Error(updatedOrderResult.error.message);
@@ -7441,6 +7468,9 @@ app.post('/admin/webhooks/logs/:id/recheck-account-user', auth, admin, async (re
 
         const trackerResult = await moveTrackedOrderToCorrectUser({ serviceOrder, fromUser: previousUser, toUser: correctUser, accountEmail });
         const discordResults = await sendAccountReassignmentNotices({ serviceOrder, previousUser, correctUser, credits, accountEmail });
+        const raffleLinkConsumed = correctUser.target_raffle_checkout_link
+            ? await consumeTargetRaffleCheckoutLinkForOrder(serviceOrder)
+            : false;
 
         await updateWebhookLogEntry(row.id, {
             status: 'processed_reassigned',
@@ -7467,6 +7497,7 @@ app.post('/admin/webhooks/logs/:id/recheck-account-user', auth, admin, async (re
             tracked_order_action: trackerResult.action || 'none',
             tracked_order_created: !!trackerResult.created,
             tracked_order_id: trackerResult.tracked_order_id || null,
+            raffle_link_consumed: raffleLinkConsumed,
             discord_results: discordResults
         });
     } catch (err) {

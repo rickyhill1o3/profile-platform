@@ -63,8 +63,13 @@ assert.match(adminSource, /Raffle Checkout Links/);
 assert.match(adminSource, /id="targetRaffleAccountSelect"/);
 assert.match(adminSource, /id="targetRaffleUserSelect"/);
 assert.match(adminSource, /id="linkTargetRaffleCheckoutButton"/);
-assert.match(adminSource, /script\.js\?v=20261119-target-raffle-checkout-links/);
+assert.match(adminSource, /script\.js\?v=20261120-target-raffle-recheck/);
 assert.match(scriptSource, /The next successful Target checkout/);
 assert.match(scriptSource, /target-raffle-checkout-links\/release/);
+assert.match(scriptSource, /Recheck raffle user/);
+assert.match(scriptSource, /use_raffle_link:\s*true/);
+assert.match(serverSource, /const useRaffleLink = req\.body\?\.use_raffle_link === true/);
+assert.match(serverSource, /No active raffle checkout link exists/);
+assert.match(serverSource, /raffle_link_consumed:\s*raffleLinkConsumed/);
 
 console.log('Target raffle checkout-link tests passed.');

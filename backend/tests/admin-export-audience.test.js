@@ -53,6 +53,6 @@ assert.match(serverSource, /appendOpenTargetExtraProfilesForRaffle/);
 assert.match(serverSource, /current_user:\s*\{\s*id:\s*currentUser\.id,\s*role:\s*currentUser\.role\s*\}/);
 assert.ok((serverSource.match(/applyRequestedCurrentUserExclusion\(/g) || []).length >= 11,
     'store status and every active export route must use the same exclusion rule');
-assert.match(adminSource, /script\.js\?v=20261119-target-raffle-checkout-links/);
+assert.match(adminSource, /script\.js\?v=20261120-target-raffle-recheck/);
 
 console.log('Admin export audience tests passed.');
