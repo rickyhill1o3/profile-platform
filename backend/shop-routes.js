@@ -32,6 +32,10 @@ const {
   hasAddress,
   shippingAddressLines
 } = require('./storefront-shipping-address');
+const {
+  allocateCustomRefundCents,
+  parseCustomRefundAmountCents
+} = require('./storefront-custom-refund');
 
 function dollarsToCents(value) {
   const num = Number(value);
@@ -1197,7 +1201,10 @@ function mapSalesToOrder(rows = []) {
     tax: centsToDollars(rows.reduce((sum, row) => sum + Number(row.tax_cents || 0), 0)),
     total: centsToDollars(rows.reduce((sum, row) => sum + Number(row.total_cents || 0), 0)),
     refunded_total: centsToDollars(rows.reduce((sum, row) => sum + Number(row.metadata?.refunded_amount_cents || 0), 0)),
-    remaining_total: centsToDollars(rows.reduce((sum, row) => sum + Math.max(0, Number(row.total_cents || 0) - Number(row.metadata?.refunded_amount_cents || 0)), 0)),
+    remaining_total: centsToDollars(Math.max(0,
+      rows.reduce((sum, row) => sum + Number(row.total_cents || 0), 0)
+      - rows.reduce((sum, row) => sum + Number(row.metadata?.refunded_amount_cents || 0), 0)
+    )),
     payment_intent: metadata.stripe_payment_intent || metadata.raw_session?.payment_intent || '',
     status: metadata.fulfillment_status || 'paid',
     tracking_number: metadata.tracking_number || '',
@@ -1885,15 +1892,17 @@ function registerShopRoutes({
     return restoredByReceipt;
   }
 
-  async function sendStorefrontRefundEmail({ sales, refundAmountCents, reasonLabel, refundedItems, fullOrder }) {
+  async function sendStorefrontRefundEmail({ sales, refundAmountCents, reasonLabel, refundedItems, fullOrder, customAmount }) {
     const order = mapSalesToOrder(sales);
     const to = String(order?.customer_email || '').trim();
     if (!to) return { attempted: false, success: false, error: 'No customer email was supplied by Stripe.' };
     const amount = `$${(Number(refundAmountCents || 0) / 100).toFixed(2)}`;
     const itemLines = (refundedItems || []).map((item) => `${item.title} × ${item.quantity}`).join('\n');
-    const subject = `${fullOrder ? 'Order refund' : 'Partial refund'} — ${order.order_number || order.session_id}`;
+    const refundLabel = customAmount ? 'Refund adjustment' : (fullOrder ? 'Order refund' : 'Partial refund');
+    const refundDescription = customAmount ? 'refund adjustment' : (fullOrder ? 'full refund' : 'partial refund');
+    const subject = `${refundLabel} — ${order.order_number || order.session_id}`;
     const text = [
-      `We issued a ${fullOrder ? 'full' : 'partial'} refund for your Shore Shack order.`,
+      `We issued a ${refundDescription} for your Shore Shack order.`,
       '',
       `Order: ${order.order_number || order.session_id}`,
       `Refund amount: ${amount}`,
@@ -1903,7 +1912,7 @@ function registerShopRoutes({
       'The refund has been submitted to your original payment method. Your bank may take several business days to post it.'
     ].filter(Boolean).join('\n');
     const htmlItems = (refundedItems || []).map((item) => `<li>${htmlEscape(item.title)} × ${Number(item.quantity || 0)}</li>`).join('');
-    const html = `<h2>${fullOrder ? 'Order refund' : 'Partial refund'} issued</h2><p><strong>Order:</strong> ${htmlEscape(order.order_number || order.session_id)}</p><p><strong>Refund amount:</strong> ${htmlEscape(amount)}</p><p><strong>Reason:</strong> ${htmlEscape(reasonLabel)}</p>${htmlItems ? `<p><strong>Refunded items:</strong></p><ul>${htmlItems}</ul>` : ''}<p>The refund was submitted to your original payment method. Your bank may take several business days to post it.</p>`;
+    const html = `<h2>${htmlEscape(refundLabel)} issued</h2><p><strong>Order:</strong> ${htmlEscape(order.order_number || order.session_id)}</p><p><strong>Refund amount:</strong> ${htmlEscape(amount)}</p><p><strong>Reason:</strong> ${htmlEscape(reasonLabel)}</p>${htmlItems ? `<p><strong>Refunded items:</strong></p><ul>${htmlItems}</ul>` : ''}<p>The refund was submitted to your original payment method. Your bank may take several business days to post it.</p>`;
     try {
       await sendEmail({ to, subject, text, html });
       return { attempted: true, success: true, to, subject, preview: text };
@@ -1971,10 +1980,19 @@ function registerShopRoutes({
       if (!stripe) return res.status(400).json({ error: 'Stripe is not configured yet' });
       const sessionId = String(req.params.sessionId || '').trim();
       const fullOrder = req.body?.full_order === true;
+      const customRefundAmountCents = parseCustomRefundAmountCents(req.body?.custom_refund_amount);
+      const customAmountMode = customRefundAmountCents !== null;
+      if (customAmountMode && !Number.isFinite(customRefundAmountCents)) {
+        return res.status(400).json({ error: 'Enter a valid custom refund amount with no more than two decimal places' });
+      }
       const reasonCode = String(req.body?.reason_code || 'other').trim();
       const customReason = normalizeText(req.body?.custom_reason);
       const reasonLabel = reasonCode === 'other' && customReason ? customReason : (REFUND_REASON_LABELS[reasonCode] || customReason || REFUND_REASON_LABELS.other);
       const requestedItems = Array.isArray(req.body?.items) ? req.body.items : [];
+      const hasRequestedItemQuantities = requestedItems.some((item) => Number(item?.quantity || 0) > 0);
+      if (customAmountMode && (fullOrder || hasRequestedItemQuantities)) {
+        return res.status(400).json({ error: 'Use the custom refund amount by itself, without selecting item quantities or the full-order option' });
+      }
       const sales = await loadHydratedStorefrontOrder(sessionId);
       if (!sales.length) return res.status(404).json({ error: 'Order not found' });
       const paymentIntent = sales[0]?.metadata?.stripe_payment_intent || sales[0]?.metadata?.raw_session?.payment_intent;
@@ -1992,6 +2010,11 @@ function registerShopRoutes({
         : null;
       const amountAlreadyRefundedCents = Math.max(0, Number(latestCharge?.amount_refunded || 0));
       const stripeRemainingRefundableCents = Math.max(0, amountPaidCents - amountAlreadyRefundedCents);
+      if (customAmountMode && customRefundAmountCents > stripeRemainingRefundableCents) {
+        return res.status(400).json({
+          error: `Custom refund cannot exceed the remaining Stripe balance of $${(stripeRemainingRefundableCents / 100).toFixed(2)}`
+        });
+      }
 
       const requestedBySale = new Map(requestedItems.map((item) => [String(item.sale_id || ''), Math.max(0, Number(item.quantity || 0) || 0)]));
       const calculations = [];
@@ -1999,7 +2022,7 @@ function registerShopRoutes({
         const originalQty = Number(sale.quantity || 0);
         const alreadyRefundedQty = Number(sale.metadata?.refunded_quantity || 0);
         const refundableQty = Math.max(0, originalQty - alreadyRefundedQty);
-        const qty = fullOrder ? refundableQty : Math.min(refundableQty, requestedBySale.get(String(sale.id)) || 0);
+        const qty = customAmountMode ? 0 : (fullOrder ? refundableQty : Math.min(refundableQty, requestedBySale.get(String(sale.id)) || 0));
         if (!qty) continue;
         const subtotal = fullOrder && qty === refundableQty
           ? Math.max(0, Number(sale.sale_subtotal_cents || 0) - Number(sale.metadata?.refunded_subtotal_cents || 0))
@@ -2010,12 +2033,12 @@ function registerShopRoutes({
         const shipping = fullOrder ? Math.max(0, Number(sale.shipping_cents || 0) - Number(sale.metadata?.refunded_shipping_cents || 0)) : 0;
         calculations.push({ sale, qty, subtotal, tax, shipping, amount: subtotal + tax + shipping });
       }
-      if (!calculations.length && !fullOrder) return res.status(400).json({ error: 'Select at least one refundable item quantity' });
+      if (!calculations.length && !fullOrder && !customAmountMode) return res.status(400).json({ error: 'Select at least one refundable item quantity or enter a custom refund amount' });
 
       const calculatedItemRefundCents = calculations.reduce((sum, row) => sum + row.amount, 0);
-      const refundAmountCents = fullOrder
-        ? stripeRemainingRefundableCents
-        : Math.min(calculatedItemRefundCents, stripeRemainingRefundableCents);
+      const refundAmountCents = customAmountMode
+        ? customRefundAmountCents
+        : (fullOrder ? stripeRemainingRefundableCents : Math.min(calculatedItemRefundCents, stripeRemainingRefundableCents));
 
       if (refundAmountCents <= 0) return res.status(400).json({ error: 'This order has no refundable Stripe balance remaining' });
 
@@ -2030,7 +2053,12 @@ function registerShopRoutes({
         payment_intent: paymentIntent,
         amount: refundAmountCents,
         reason: reasonCode === 'customer_request' ? 'requested_by_customer' : undefined,
-        metadata: { storefront_session_id: sessionId, reason_code: reasonCode, reason: reasonLabel.slice(0, 450) }
+        metadata: {
+          storefront_session_id: sessionId,
+          reason_code: reasonCode,
+          reason: reasonLabel.slice(0, 450),
+          refund_mode: customAmountMode ? 'custom_amount' : (fullOrder ? 'full_order' : 'item_quantity')
+        }
       });
       const now = new Date().toISOString();
       const refundedItems = [];
@@ -2067,6 +2095,40 @@ function registerShopRoutes({
         await recalculateProductInventory(supabase, sale.storefront_product_id);
       }
 
+      // A custom-dollar refund is an order-level payment adjustment. It must never
+      // change item quantities or restore inventory, even when it exhausts the payment.
+      if (customAmountMode) {
+        const customAllocations = allocateCustomRefundCents(sales, refundAmountCents);
+        const closesStripePayment = refundAmountCents >= stripeRemainingRefundableCents;
+        for (const allocation of customAllocations) {
+          const sale = allocation.sale;
+          const historyEntry = {
+            at: now,
+            stripe_refund_id: refund.id,
+            quantity: 0,
+            subtotal_cents: 0,
+            tax_cents: 0,
+            shipping_cents: 0,
+            order_level_adjustment_cents: allocation.amount,
+            amount_cents: allocation.amount,
+            reason_code: reasonCode,
+            reason: reasonLabel,
+            full_order: false,
+            custom_amount: true
+          };
+          const metadata = {
+            ...(sale.metadata || {}),
+            refunded_amount_cents: Number(sale.metadata?.refunded_amount_cents || 0) + allocation.amount,
+            refunded_order_adjustment_cents: Number(sale.metadata?.refunded_order_adjustment_cents || 0) + allocation.amount,
+            refund_history: [...(Array.isArray(sale.metadata?.refund_history) ? sale.metadata.refund_history : []), historyEntry],
+            fulfillment_status: closesStripePayment ? 'refunded' : 'partially_refunded'
+          };
+          const { error: customUpdateError } = await supabase.from('storefront_sales').update({ metadata }).eq('id', sale.id);
+          if (customUpdateError) throw new Error(customUpdateError.message);
+          sale.metadata = metadata;
+        }
+      }
+
       // Record any order-level residual refund exactly once without restoring inventory again.
       if (fullOrder && unallocatedFullRefundCents > 0 && sales[0]) {
         const sale = sales[0];
@@ -2097,7 +2159,7 @@ function registerShopRoutes({
       }
 
       // Ensure every row reflects the final order status after a full Stripe refund.
-      if (fullOrder) {
+      if (fullOrder || (customAmountMode && refundAmountCents >= stripeRemainingRefundableCents)) {
         for (const sale of sales) {
           if (sale.metadata?.fulfillment_status === 'refunded') continue;
           const metadata = { ...(sale.metadata || {}), fulfillment_status: 'refunded' };
@@ -2107,7 +2169,7 @@ function registerShopRoutes({
         }
       }
 
-      const email = await sendStorefrontRefundEmail({ sales, refundAmountCents, reasonLabel, refundedItems, fullOrder });
+      const email = await sendStorefrontRefundEmail({ sales, refundAmountCents, reasonLabel, refundedItems, fullOrder, customAmount: customAmountMode });
       await updateSalesEmailMetadata(sales, {
         refund_email_status: email.success ? 'sent' : 'failed',
         refund_email_sent_at: email.success ? now : null,
@@ -2115,7 +2177,7 @@ function registerShopRoutes({
         refund_email_subject: email.subject || null,
         refund_email_preview: email.preview || null
       });
-      res.json({ success: true, refund: { id: refund.id, amount: centsToDollars(refundAmountCents), status: refund.status }, email, order: mapSalesToOrder(sales) });
+      res.json({ success: true, refund: { id: refund.id, amount: centsToDollars(refundAmountCents), status: refund.status, mode: customAmountMode ? 'custom_amount' : (fullOrder ? 'full_order' : 'item_quantity') }, email, order: mapSalesToOrder(sales) });
     } catch (err) {
       res.status(500).json({ error: err.message });
     }

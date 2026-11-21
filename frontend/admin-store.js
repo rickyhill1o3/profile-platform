@@ -353,15 +353,33 @@ function countEffectiveSkus(product) {
     const custom = $('storeRefundCustomReason').value.trim();
     const reason = code === 'other' ? (custom || '[enter your reason]') : refundReasonText(code);
     const full = $('storeRefundFullOrder').checked;
+    const customAmount = Number($('storeRefundCustomAmount').value || 0);
+    const isCustomAmount = Number.isFinite(customAmount) && customAmount > 0;
     const order = state.activeOrder || {};
     const lines = [];
     document.querySelectorAll('[data-refund-qty]').forEach((input) => { const qty = Number(input.value || 0); if (qty > 0) lines.push(`${input.dataset.itemTitle} × ${qty}`); });
-    $('storeRefundEmailPreview').textContent = [`We issued a ${full ? 'full' : 'partial'} refund for your Shore Shack order.`, '', `Order: ${order.order_number || order.session_id || ''}`, 'Refund amount: calculated when submitted', `Reason: ${reason}`, lines.length ? `Refunded items:\n${lines.join('\n')}` : '', '', 'The refund has been submitted to your original payment method. Your bank may take several business days to post it.'].filter(Boolean).join('\n');
+    const description = isCustomAmount ? 'refund adjustment' : (full ? 'full refund' : 'partial refund');
+    const amountText = isCustomAmount ? money(customAmount) : 'calculated when submitted';
+    $('storeRefundEmailPreview').textContent = [`We issued a ${description} for your Shore Shack order.`, '', `Order: ${order.order_number || order.session_id || ''}`, `Refund amount: ${amountText}`, `Reason: ${reason}`, !isCustomAmount && lines.length ? `Refunded items:\n${lines.join('\n')}` : '', '', 'The refund has been submitted to your original payment method. Your bank may take several business days to post it.'].filter(Boolean).join('\n');
   }
+
+  function syncCustomRefundMode() {
+    const amount = Number($('storeRefundCustomAmount').value || 0);
+    const customAmountActive = Number.isFinite(amount) && amount > 0;
+    if (customAmountActive) $('storeRefundFullOrder').checked = false;
+    document.querySelectorAll('[data-refund-qty]').forEach((input) => {
+      if (customAmountActive) input.value = 0;
+      input.disabled = customAmountActive || $('storeRefundFullOrder').checked || Number(input.max || 0) <= 0;
+    });
+    updateRefundPreview();
+  }
+
   function openRefund(order) {
     state.activeOrder = order;
     $('storeRefundOrderLabel').textContent = order.order_number || order.session_id || 'Order';
     $('storeRefundFullOrder').checked = false;
+    $('storeRefundCustomAmount').value = '';
+    $('storeRefundCustomAmountHelp').textContent = `Enter an exact dollar amount up to ${money(order.remaining_total || 0)}. This does not refund an item or change inventory.`;
     $('storeRefundReason').value = 'out_of_stock';
     $('storeRefundCustomReason').value = '';
     $('storeRefundCustomReasonWrap').hidden = true;
@@ -598,18 +616,38 @@ function countEffectiveSkus(product) {
     });
     $('storeRefundReason')?.addEventListener('change', () => { $('storeRefundCustomReasonWrap').hidden = $('storeRefundReason').value !== 'other'; updateRefundPreview(); });
     $('storeRefundCustomReason')?.addEventListener('input', updateRefundPreview);
-    $('storeRefundFullOrder')?.addEventListener('change', () => { document.querySelectorAll('[data-refund-qty]').forEach((input) => { input.disabled = $('storeRefundFullOrder').checked || Number(input.max || 0) <= 0; input.value = $('storeRefundFullOrder').checked ? input.max : 0; }); updateRefundPreview(); });
-    $('storeRefundItems')?.addEventListener('input', updateRefundPreview);
+    $('storeRefundCustomAmount')?.addEventListener('input', syncCustomRefundMode);
+    $('storeRefundFullOrder')?.addEventListener('change', () => {
+      if ($('storeRefundFullOrder').checked) $('storeRefundCustomAmount').value = '';
+      document.querySelectorAll('[data-refund-qty]').forEach((input) => { input.disabled = $('storeRefundFullOrder').checked || Number(input.max || 0) <= 0; input.value = $('storeRefundFullOrder').checked ? input.max : 0; });
+      updateRefundPreview();
+    });
+    $('storeRefundItems')?.addEventListener('input', (event) => {
+      if (event.target?.matches?.('[data-refund-qty]') && Number(event.target.value || 0) > 0) {
+        $('storeRefundCustomAmount').value = '';
+        $('storeRefundFullOrder').checked = false;
+        document.querySelectorAll('[data-refund-qty]').forEach((input) => { input.disabled = Number(input.max || 0) <= 0; });
+      }
+      updateRefundPreview();
+    });
     $('storeRefundSubmit')?.addEventListener('click', async () => {
       const order = state.activeOrder; if (!order) return;
       const fullOrder = $('storeRefundFullOrder').checked;
+      const customAmountText = $('storeRefundCustomAmount').value.trim();
+      const customAmount = Number(customAmountText);
+      const hasCustomAmount = customAmountText !== '';
+      if (hasCustomAmount && (!Number.isFinite(customAmount) || customAmount <= 0)) return alert('Enter a custom refund amount greater than $0.00.');
+      if (hasCustomAmount && customAmount > Number(order.remaining_total || 0) + 0.001) return alert(`The custom refund cannot exceed the remaining order balance of ${money(order.remaining_total || 0)}.`);
       const items = Array.from(document.querySelectorAll('[data-refund-qty]')).map((input) => ({ sale_id: input.dataset.refundQty, quantity: Number(input.value || 0) })).filter((item) => item.quantity > 0);
-      if (!fullOrder && !items.length) return alert('Select at least one item quantity to refund.');
+      if (!fullOrder && !items.length && !hasCustomAmount) return alert('Select item quantities, the full order, or enter a custom refund amount.');
       const reasonCode = $('storeRefundReason').value; const customReason = $('storeRefundCustomReason').value.trim();
       if (reasonCode === 'other' && !customReason) return alert('Enter the custom refund reason.');
-      if (!confirm(`Submit this ${fullOrder ? 'full' : 'partial'} refund through Stripe? This cannot be undone.`)) return;
+      const confirmation = hasCustomAmount
+        ? `Submit a ${money(customAmount)} refund adjustment through Stripe? No item quantities or inventory will be changed. This cannot be undone.`
+        : `Submit this ${fullOrder ? 'full' : 'partial'} refund through Stripe? This cannot be undone.`;
+      if (!confirm(confirmation)) return;
       const button = $('storeRefundSubmit'); button.disabled = true;
-      try { const result = await authJSON(API + '/admin/store/orders/' + encodeURIComponent(order.session_id) + '/refund', { method: 'POST', body: JSON.stringify({ full_order: fullOrder, items, reason_code: reasonCode, custom_reason: customReason }) }); closeStoreModal('storeRefundModal'); showMessage('storeOrdersMessage', `Refunded ${money(result.refund?.amount)}. ${result.email?.success ? 'Customer refund email sent.' : `Refund completed, but email failed: ${result.email?.error || 'unknown error'}`}`, !result.email?.success); await refreshAll(); }
+      try { const result = await authJSON(API + '/admin/store/orders/' + encodeURIComponent(order.session_id) + '/refund', { method: 'POST', body: JSON.stringify({ full_order: fullOrder, custom_refund_amount: hasCustomAmount ? customAmount.toFixed(2) : null, items, reason_code: reasonCode, custom_reason: customReason }) }); closeStoreModal('storeRefundModal'); showMessage('storeOrdersMessage', `Refunded ${money(result.refund?.amount)}. ${result.email?.success ? 'Customer refund email sent.' : `Refund completed, but email failed: ${result.email?.error || 'unknown error'}`}`, !result.email?.success); await refreshAll(); }
       catch (error) { showMessage('storeOrdersMessage', error.message || 'Could not process refund.', true); } finally { button.disabled = false; }
     });
     await refreshAll();

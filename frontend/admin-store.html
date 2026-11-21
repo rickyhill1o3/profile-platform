@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Storefront Admin</title>
-  <link rel="stylesheet" href="styles.css" />
+  <link rel="stylesheet" href="styles.css?v=20261120-custom-refund" />
 </head>
 <body class="app-page">
   <div class="app-shell storefront-admin-shell">
@@ -540,13 +540,17 @@
     <section class="store-modal__panel store-modal__panel--wide" role="dialog" aria-modal="true" aria-labelledby="storeRefundTitle">
       <div class="panel-header"><div><h2 id="storeRefundTitle">Refund Order</h2><p class="subtle-text" id="storeRefundOrderLabel"></p></div><button class="btn" type="button" data-close-store-modal="storeRefundModal">Close</button></div>
       <label class="refund-full-toggle"><input type="checkbox" id="storeRefundFullOrder" /> Refund the entire remaining order, including remaining shipping and taxes</label>
+      <div class="refund-custom-amount">
+        <div class="field"><label for="storeRefundCustomAmount">Custom refund amount (no item refund)</label><input class="input" id="storeRefundCustomAmount" type="number" min="0.01" step="0.01" inputmode="decimal" placeholder="5.00" /></div>
+        <p class="subtle-text" id="storeRefundCustomAmountHelp">Enter an exact dollar amount to return without changing item quantities or inventory.</p>
+      </div>
       <div class="refund-items" id="storeRefundItems"></div>
       <div class="form-grid">
         <div class="field"><label for="storeRefundReason">Refund reason</label><select class="input" id="storeRefundReason"><option value="out_of_stock">Ran out of product</option><option value="pricing_error">Wrong price entered too low</option><option value="damaged_inventory">Inventory damaged or unavailable</option><option value="customer_request">Customer requested cancellation</option><option value="duplicate_order">Duplicate order</option><option value="cannot_fulfill">Unable to fulfill order</option><option value="other">Other</option></select></div>
         <div class="field" id="storeRefundCustomReasonWrap" hidden><label for="storeRefundCustomReason">Custom reason</label><input class="input" id="storeRefundCustomReason" /></div>
       </div>
       <div class="field"><label>Customer refund email preview</label><pre class="store-refund-preview" id="storeRefundEmailPreview"></pre></div>
-      <div class="banner">Partial refunds include the selected items and their proportional sales tax. Shipping is refunded only when you select the full remaining order.</div>
+      <div class="banner">A custom dollar refund is a payment adjustment only: it does not refund an item, change item quantities, or restore inventory. Item refunds include proportional sales tax. Shipping is refunded only with the full remaining order.</div>
       <div class="panel-actions"><button class="btn btn-danger" type="button" id="storeRefundSubmit">Submit Refund Through Stripe + Email Customer</button></div>
     </section>
   </div>
@@ -602,6 +606,6 @@ function removeDuplicateSingleSkuProducts(products) {
 }
 
 </script>
-  <script src="admin-store.js"></script>
+  <script src="admin-store.js?v=20261120-custom-refund"></script>
 </body>
 </html>
