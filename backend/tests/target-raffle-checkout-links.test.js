@@ -63,7 +63,7 @@ assert.match(adminSource, /Raffle Checkout Links/);
 assert.match(adminSource, /id="targetRaffleAccountSelect"/);
 assert.match(adminSource, /id="targetRaffleUserSelect"/);
 assert.match(adminSource, /id="linkTargetRaffleCheckoutButton"/);
-assert.match(adminSource, /script\.js\?v=20261120-target-raffle-recheck/);
+assert.match(adminSource, /script\.js\?v=20261124-amazon-catalog-replace/);
 assert.match(scriptSource, /The next successful Target checkout/);
 assert.match(scriptSource, /target-raffle-checkout-links\/release/);
 assert.match(scriptSource, /Recheck raffle user/);

@@ -222,6 +222,22 @@ h1,h2,h3,h4,p{margin:0}
 .banner-soft{background:#f8fafc}
 .sku-request-form{display:grid;grid-template-columns:180px 1fr auto;gap:10px;margin-top:12px}
 .stack-list{display:grid;gap:10px;margin-top:14px}
+.amazon-catalog-replace-heading{margin-top:18px;border-color:#f0b7b7;background:#fff7f7}
+.amazon-catalog-replace-input{min-height:300px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.84rem;line-height:1.45}
+.amazon-catalog-replace-preview{display:grid;gap:12px;padding:14px;border:1px solid #b8c9df;border-radius:12px;background:#f8fbff}
+.amazon-catalog-replace-preview[hidden]{display:none}
+.amazon-catalog-replace-summary{display:grid;gap:10px}
+.amazon-catalog-replace-summary>div:first-child{display:flex;gap:8px;align-items:baseline;justify-content:space-between;flex-wrap:wrap}
+.amazon-catalog-replace-summary span{color:#52627a;font-size:.82rem}
+.amazon-catalog-category-list{display:flex;gap:7px;flex-wrap:wrap}
+.amazon-catalog-category-list span{padding:5px 8px;border:1px solid #cbd8e8;border-radius:999px;background:#fff;color:#334155}
+.amazon-catalog-product-preview{display:grid;gap:5px;max-height:360px;overflow:auto;padding-right:4px}
+.amazon-catalog-product-preview>div{display:grid;grid-template-columns:34px 94px minmax(0,1fr) 82px;gap:8px;align-items:center;padding:7px 9px;border-radius:8px;background:#fff;border:1px solid #e2e8f0}
+.amazon-catalog-product-preview>div>span{color:#64748b;text-align:right;font-size:.75rem;font-weight:800}
+.amazon-catalog-product-preview code{font-size:.78rem;color:#1d4ed8}
+.amazon-catalog-product-preview strong{font-size:.82rem;line-height:1.25}
+.amazon-catalog-product-preview em{font-style:normal;font-weight:800;text-align:right;color:#166534}
+@media(max-width:720px){.amazon-catalog-product-preview>div{grid-template-columns:30px 1fr 72px}.amazon-catalog-product-preview strong{grid-column:2/4}.amazon-catalog-product-preview code{grid-column:2}.amazon-catalog-product-preview em{grid-column:3;grid-row:1}}
 .stack-item{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;padding:14px;border:1px solid var(--line);border-radius:16px;background:#fff}
 .stack-item-meta{display:grid;gap:6px}
 .countdown-admin-actions{display:flex;gap:8px;flex-wrap:wrap}

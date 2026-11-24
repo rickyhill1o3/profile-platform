@@ -65,6 +65,7 @@ const {
     isEmailHeavyWorkActive,
     requestTargetCatalogPriority
 } = require('./runtime-workload');
+const { parseAmazonCatalogPaste } = require('./amazon-catalog-paste');
 
 const SUPPORTED_SITES = new Set(["amazon", "target", "walmart", "samsclub", "crunchyroll", "general", "supreme", "pokemon"]);
 const REQUESTABLE_SITES = new Set(["amazon", "target", "walmart", "samsclub", "crunchyroll", "general", "supreme", "pokemon"]);
@@ -803,6 +804,111 @@ function parseImportedCatalogList(input) {
     if (Array.isArray(input)) return input;
     if (input && Array.isArray(input.products)) return input.products;
     return [];
+}
+
+function amazonCatalogPastePreview(rawText) {
+    const parsed = parseAmazonCatalogPaste(rawText);
+    const fingerprint = crypto.createHash('sha256').update(String(rawText || '').replace(/\r/g, '')).digest('hex');
+    return { ...parsed, fingerprint };
+}
+
+async function runInIdChunks(ids, callback, chunkSize = 200) {
+    const cleanIds = [...new Set((ids || []).map((id) => String(id || '').trim()).filter(Boolean))];
+    for (let offset = 0; offset < cleanIds.length; offset += chunkSize) {
+        await callback(cleanIds.slice(offset, offset + chunkSize));
+    }
+}
+
+async function replaceAmazonCatalogFromPaste(supabase, rawText) {
+    const preview = amazonCatalogPastePreview(rawText);
+    if (preview.errors.length) throw new Error(preview.errors.join(' '));
+
+    const catalog = await getActiveCatalog(supabase, 'amazon');
+    if (!catalog?.id) throw new Error('No active Amazon catalog was found.');
+
+    const { data: existingRows, error: existingError } = await fetchAllSupabaseRows(() => supabase
+        .from('catalog_products')
+        .select('*')
+        .eq('site', 'amazon')
+        .order('created_at', { ascending: false }));
+    if (existingError) throw new Error(existingError.message);
+
+    const existingBySku = new Map();
+    (existingRows || []).forEach((row) => {
+        const sku = String(row.sku || '').trim().toUpperCase();
+        if (sku && !existingBySku.has(sku)) existingBySku.set(sku, row);
+    });
+
+    const importedAt = new Date().toISOString();
+    const desiredRows = preview.products.map((entry) => {
+        const existing = existingBySku.get(entry.sku);
+        const metadata = {
+            ...(existing?.metadata || {}),
+            source: 'amazon_catalog_paste_replace',
+            amazon_category: entry.category,
+            catalog_replaced_at: importedAt,
+            virtual: false
+        };
+        const payload = {
+            catalog_id: catalog.id,
+            site: 'amazon',
+            sku: entry.sku,
+            product_name: entry.product_name,
+            brand: existing?.brand || 'Amazon',
+            image_url: existing?.image_url || '',
+            product_url: `https://www.amazon.com/dp/${entry.sku}`,
+            default_max_price: entry.default_max_price,
+            credit_cost: Number(existing?.credit_cost || 0),
+            release_mode_default: 'current',
+            is_enabled: true,
+            metadata
+        };
+        return existing?.id ? { ...payload, id: existing.id } : payload;
+    });
+
+    const rowsToUpdate = desiredRows.filter((row) => row.id);
+    const rowsToInsert = desiredRows.filter((row) => !row.id);
+    let savedRows = [];
+
+    if (rowsToUpdate.length) {
+        const { data, error } = await supabase.from('catalog_products').upsert(rowsToUpdate, { onConflict: 'id' }).select('id, sku');
+        if (error) throw new Error(`Amazon replacement could not update existing products: ${error.message}`);
+        savedRows.push(...(data || []));
+    }
+    if (rowsToInsert.length) {
+        const { data, error } = await supabase.from('catalog_products').insert(rowsToInsert).select('id, sku');
+        if (error) throw new Error(`Amazon replacement could not add new products. The existing catalog was not cleared: ${error.message}`);
+        savedRows.push(...(data || []));
+    }
+
+    const keepIds = new Set(savedRows.map((row) => String(row.id)));
+    const oldIds = (existingRows || []).map((row) => row.id).filter(Boolean);
+    const staleIds = (existingRows || []).filter((row) => !keepIds.has(String(row.id))).map((row) => row.id).filter(Boolean);
+
+    // A full catalog replacement intentionally resets Amazon selections so users must
+    // choose from the new catalog instead of retaining stale or changed product rules.
+    await runInIdChunks(oldIds, async (ids) => {
+        const { error } = await supabase.from('user_product_preferences').delete().in('catalog_product_id', ids);
+        if (error) throw new Error(`Amazon products were saved, but old user selections could not be cleared: ${error.message}`);
+    });
+
+    await runInIdChunks(staleIds, async (ids) => {
+        const { error: countdownError } = await supabase.from('countdown_products').delete().in('product_id', ids);
+        if (countdownError && !/does not exist|column/i.test(String(countdownError.message || ''))) {
+            throw new Error(`Amazon products were saved, but old countdown links could not be cleared: ${countdownError.message}`);
+        }
+        const { error } = await supabase.from('catalog_products').delete().in('id', ids);
+        if (error) throw new Error(`Amazon products were saved, but ${ids.length} old catalog rows could not be removed: ${error.message}`);
+    });
+
+    return {
+        imported: preview.products.length,
+        updated: rowsToUpdate.length,
+        added: rowsToInsert.length,
+        removed: staleIds.length,
+        cleared_user_selections: oldIds.length > 0,
+        categories: preview.categories
+    };
 }
 
 function isPlaceholderPrice(value) {
@@ -1669,6 +1775,51 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
             res.json({ success: true, imported: items.length, items, message: `Imported ${items.length} ${site} products.` });
         } catch (err) {
             res.status(400).json({ error: err.message });
+        }
+    });
+
+    app.post('/admin/catalog-products/preview-amazon-replacement', auth, admin, async (req, res) => {
+        if (!requireSuperAdmin(req, res)) return;
+        try {
+            const rawText = String(req.body?.text || '');
+            if (rawText.length > 500000) return res.status(400).json({ error: 'The pasted catalog is too large.' });
+            const preview = amazonCatalogPastePreview(rawText);
+            if (preview.errors.length) {
+                return res.status(400).json({ error: preview.errors.join(' '), errors: preview.errors });
+            }
+            res.json({
+                success: true,
+                preview_token: preview.fingerprint,
+                total: preview.products.length,
+                categories: preview.categories,
+                products: preview.products
+            });
+        } catch (err) {
+            res.status(400).json({ error: String(err?.message || err) });
+        }
+    });
+
+    app.post('/admin/catalog-products/replace-amazon', auth, admin, async (req, res) => {
+        if (!requireSuperAdmin(req, res)) return;
+        try {
+            const rawText = String(req.body?.text || '');
+            if (rawText.length > 500000) return res.status(400).json({ error: 'The pasted catalog is too large.' });
+            const preview = amazonCatalogPastePreview(rawText);
+            if (preview.errors.length) return res.status(400).json({ error: preview.errors.join(' '), errors: preview.errors });
+            if (String(req.body?.preview_token || '') !== preview.fingerprint) {
+                return res.status(409).json({ error: 'The pasted list changed after preview. Preview it again before replacing the catalog.' });
+            }
+            if (String(req.body?.confirmation || '') !== 'REPLACE AMAZON CATALOG') {
+                return res.status(400).json({ error: 'Amazon catalog replacement was not confirmed.' });
+            }
+            const result = await replaceAmazonCatalogFromPaste(supabase, rawText);
+            res.json({
+                success: true,
+                ...result,
+                message: `Amazon catalog replaced with ${result.imported} products. Added ${result.added}, updated ${result.updated}, and removed ${result.removed} old catalog rows.`
+            });
+        } catch (err) {
+            res.status(400).json({ error: String(err?.message || err) });
         }
     });
 

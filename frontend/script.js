@@ -3743,9 +3743,17 @@ async function initCatalogTools() {
     const targetBulkSkuLookupProgress = document.getElementById('targetBulkSkuLookupProgress');
     const targetCatalogRescanAllButton = document.getElementById('targetCatalogRescanAllButton');
     const targetCatalogRescanAllProgress = document.getElementById('targetCatalogRescanAllProgress');
+    const amazonCatalogReplaceForm = document.getElementById('amazonCatalogReplaceForm');
+    const amazonCatalogReplaceInput = document.getElementById('amazonCatalogReplaceInput');
+    const amazonCatalogPreviewButton = document.getElementById('amazonCatalogPreviewButton');
+    const amazonCatalogReplaceButton = document.getElementById('amazonCatalogReplaceButton');
+    const amazonCatalogReplaceStatus = document.getElementById('amazonCatalogReplaceStatus');
+    const amazonCatalogReplacePreview = document.getElementById('amazonCatalogReplacePreview');
     const exportForm = document.getElementById('catalogExportForm');
     const exportResults = document.getElementById('catalogExportResults');
     const superAdmin = canManageCatalog();
+    let amazonCatalogPreviewToken = '';
+    let amazonCatalogPreviewCount = 0;
     if (controls) controls.style.display = superAdmin ? 'block' : 'none';
     if (notice) notice.style.display = superAdmin ? 'none' : 'block';
     if (form && superAdmin) {
@@ -3945,6 +3953,96 @@ async function initCatalogTools() {
             }
         });
     }
+
+    if (amazonCatalogReplaceForm && superAdmin) {
+        amazonCatalogReplaceForm.addEventListener('submit', (event) => event.preventDefault());
+
+        const invalidateAmazonPreview = () => {
+            amazonCatalogPreviewToken = '';
+            amazonCatalogPreviewCount = 0;
+            if (amazonCatalogReplaceButton) amazonCatalogReplaceButton.disabled = true;
+            if (amazonCatalogReplacePreview) {
+                amazonCatalogReplacePreview.hidden = true;
+                amazonCatalogReplacePreview.innerHTML = '';
+            }
+        };
+
+        amazonCatalogReplaceInput?.addEventListener('input', () => {
+            invalidateAmazonPreview();
+            if (amazonCatalogReplaceStatus) amazonCatalogReplaceStatus.textContent = 'List changed. Preview it again before replacing the Amazon catalog.';
+        });
+
+        amazonCatalogPreviewButton?.addEventListener('click', async () => {
+            const text = String(amazonCatalogReplaceInput?.value || '').trim();
+            invalidateAmazonPreview();
+            if (!text) {
+                if (amazonCatalogReplaceStatus) amazonCatalogReplaceStatus.textContent = 'Paste the complete Amazon catalog list first.';
+                return;
+            }
+            amazonCatalogPreviewButton.disabled = true;
+            if (amazonCatalogReplaceStatus) amazonCatalogReplaceStatus.textContent = 'Checking product names, ASINs, prices, duplicates, and category counts...';
+            try {
+                const data = await authJSON(API + '/admin/catalog-products/preview-amazon-replacement', {
+                    method: 'POST',
+                    body: JSON.stringify({ text })
+                });
+                amazonCatalogPreviewToken = String(data.preview_token || '');
+                amazonCatalogPreviewCount = Number(data.total || 0);
+                const categories = Array.isArray(data.categories) ? data.categories : [];
+                const products = Array.isArray(data.products) ? data.products : [];
+                if (amazonCatalogReplacePreview) {
+                    amazonCatalogReplacePreview.innerHTML = `
+                      <div class="amazon-catalog-replace-summary">
+                        <div><strong>${amazonCatalogPreviewCount} Amazon products ready</strong><span>${categories.length} categor${categories.length === 1 ? 'y' : 'ies'} detected</span></div>
+                        <div class="amazon-catalog-category-list">${categories.map((category) => `<span>${escapeHTML(category.name)} <strong>${Number(category.count || 0)}</strong></span>`).join('')}</div>
+                      </div>
+                      <div class="amazon-catalog-product-preview">${products.map((product, index) => `<div><span>${index + 1}</span><code>${escapeHTML(product.sku)}</code><strong>${escapeHTML(product.product_name)}</strong><em>${escapeHTML(formatMoney(product.default_max_price))}</em></div>`).join('')}</div>`;
+                    amazonCatalogReplacePreview.hidden = false;
+                }
+                if (amazonCatalogReplaceStatus) amazonCatalogReplaceStatus.textContent = `${amazonCatalogPreviewCount} products parsed successfully. Review the preview, then use Clear and replace Amazon catalog.`;
+                if (amazonCatalogReplaceButton) amazonCatalogReplaceButton.disabled = !amazonCatalogPreviewToken || amazonCatalogPreviewCount < 1;
+            } catch (err) {
+                if (amazonCatalogReplaceStatus) amazonCatalogReplaceStatus.textContent = `Preview stopped: ${err.message}`;
+            } finally {
+                amazonCatalogPreviewButton.disabled = false;
+            }
+        });
+
+        amazonCatalogReplaceButton?.addEventListener('click', async () => {
+            const text = String(amazonCatalogReplaceInput?.value || '').trim();
+            if (!amazonCatalogPreviewToken || !amazonCatalogPreviewCount) {
+                if (amazonCatalogReplaceStatus) amazonCatalogReplaceStatus.textContent = 'Preview the pasted list before replacing the catalog.';
+                return;
+            }
+            const approved = confirm(`Replace the entire Amazon catalog with these ${amazonCatalogPreviewCount} products?\n\nProducts not in this list will be removed and every user's saved Amazon product selections will be cleared. This cannot be undone.`);
+            if (!approved) return;
+
+            amazonCatalogReplaceButton.disabled = true;
+            if (amazonCatalogPreviewButton) amazonCatalogPreviewButton.disabled = true;
+            if (amazonCatalogReplaceStatus) amazonCatalogReplaceStatus.textContent = `Replacing the Amazon catalog with ${amazonCatalogPreviewCount} products... Do not close this page.`;
+            try {
+                const data = await authJSON(API + '/admin/catalog-products/replace-amazon', {
+                    method: 'POST',
+                    body: JSON.stringify({
+                        text,
+                        preview_token: amazonCatalogPreviewToken,
+                        confirmation: 'REPLACE AMAZON CATALOG'
+                    })
+                });
+                amazonCatalogPreviewToken = '';
+                if (amazonCatalogReplaceStatus) amazonCatalogReplaceStatus.textContent = data.message || `Amazon catalog replaced with ${data.imported || 0} products.`;
+                if (filterSite) filterSite.value = 'amazon';
+                if (filterSearch) filterSearch.value = '';
+                await loadCatalogProducts();
+            } catch (err) {
+                if (amazonCatalogReplaceStatus) amazonCatalogReplaceStatus.textContent = `Replacement stopped: ${err.message}`;
+                if (amazonCatalogReplaceButton) amazonCatalogReplaceButton.disabled = false;
+            } finally {
+                if (amazonCatalogPreviewButton) amazonCatalogPreviewButton.disabled = false;
+            }
+        });
+    }
+
     if (exportForm) {
         exportForm.addEventListener('submit', async (event) => {
             event.preventDefault();
