@@ -9007,8 +9007,30 @@ function findDuplicateAcrossAssignedStores(profiles, currentProfileId, stores, p
     return null;
 }
 
+async function fetchProfileExportRows(scopedQuery, group = "") {
+    if (normalizeProfileAccountType(group) !== "raffle") return scopedQuery;
+
+    // Raffle is a saved profile type, not a store assignment. Filter before
+    // paginating, and keep the caller's user scope and any existing sort.
+    const raffleQuery = scopedQuery.eq("account_type", "raffle").order("id", { ascending: true });
+    return fetchAllSupabaseRows(() => raffleQuery);
+}
+
 async function attachAndFilterProfilesByStore(profiles, group = "") {
-    const items = Array.isArray(profiles) ? profiles : [];
+    const allProfiles = Array.isArray(profiles) ? profiles : [];
+    const cleanGroup = group ? normalizeProfileAccountType(group) : "";
+    const isRaffle = (profile) => normalizeProfileAccountType(profile.account_type) === "raffle";
+    if (cleanGroup === "raffle") {
+        return allProfiles.filter(isRaffle).map((profile) => ({
+            ...profile,
+            store_assignments: ["raffle"],
+            store_credentials: {}
+        }));
+    }
+
+    // Raffle Builder's default General credential row does not make the
+    // profile eligible for General or other retailer-specific exports.
+    const items = cleanGroup ? allProfiles.filter((profile) => !isRaffle(profile)) : allProfiles;
     const users = [...new Set(items.map((profile) => profile.user_id).filter(Boolean))];
     const assignmentMaps = new Map();
 
@@ -9032,9 +9054,8 @@ async function attachAndFilterProfilesByStore(profiles, group = "") {
         };
     });
 
-    if (!group) return attached;
+    if (!cleanGroup) return attached;
 
-    const cleanGroup = normalizeProfileAccountType(group);
     const storeProfiles = attached.filter((profile) => profileAssignedStores(profile).includes(cleanGroup));
     if (cleanGroup !== 'target') return storeProfiles;
 
@@ -13326,7 +13347,7 @@ app.get("/admin/export/count", auth, admin, async (req, res) => {
 
         query = applyRequestedCurrentUserExclusion(query, req, currentUser, user_id);
 
-        const { data, error } = await query;
+        const { data, error } = await fetchProfileExportRows(query, group);
 
         if (error) {
             return res.status(500).json({ error: error.message });
@@ -13387,7 +13408,7 @@ app.get("/admin/export/profiles-json", auth, admin, async (req, res) => {
 
         query = applyRequestedCurrentUserExclusion(query, req, currentUser, user_id);
 
-        const { data: profiles, error } = await query;
+        const { data: profiles, error } = await fetchProfileExportRows(query, group);
 
         if (error) {
             return res.status(500).json({ error: error.message });
@@ -13856,7 +13877,7 @@ app.get("/admin/export/profiles-polar-json", auth, admin, async (req, res) => {
 
         query = applyRequestedCurrentUserExclusion(query, req, currentUser, user_id);
 
-        const { data: profiles, error } = await query;
+        const { data: profiles, error } = await fetchProfileExportRows(query, group);
         if (error) return res.status(500).json({ error: error.message });
 
         let exportProfiles = await attachAndFilterProfilesByStore(profiles || [], group || "");
@@ -13987,7 +14008,7 @@ app.get("/admin/export/profiles-valor-json", auth, admin, async (req, res) => {
 
         query = applyRequestedCurrentUserExclusion(query, req, currentUser, user_id);
 
-        const { data: profiles, error } = await query;
+        const { data: profiles, error } = await fetchProfileExportRows(query, group);
         if (error) return res.status(500).json({ error: error.message });
 
         let exportProfiles = await attachAndFilterProfilesByStore(profiles || [], group || "");
@@ -14074,7 +14095,7 @@ app.get("/admin/export/profiles-stellar-json", auth, admin, async (req, res) => 
 
         query = applyRequestedCurrentUserExclusion(query, req, currentUser, user_id);
 
-        const { data: profiles, error } = await query;
+        const { data: profiles, error } = await fetchProfileExportRows(query, group);
 
         if (error) {
             return res.status(500).json({ error: error.message });
@@ -14142,7 +14163,7 @@ app.get("/admin/export/profiles-shikari-csv", auth, admin, async (req, res) => {
 
         query = applyRequestedCurrentUserExclusion(query, req, currentUser, user_id);
 
-        const { data: profiles, error } = await query;
+        const { data: profiles, error } = await fetchProfileExportRows(query, group);
 
         if (error) {
             return res.status(500).json({ error: error.message });
@@ -14260,7 +14281,7 @@ app.get("/admin/export/accounts-txt", auth, admin, async (req, res) => {
 
         query = applyRequestedCurrentUserExclusion(query, req, currentUser, user_id);
 
-        const { data: profiles, error } = await query;
+        const { data: profiles, error } = await fetchProfileExportRows(query, group);
 
         if (error) {
             return res.status(500).json({ error: error.message });
@@ -14401,7 +14422,7 @@ app.get("/admin/export/gmail-imap-txt", auth, admin, async (req, res) => {
 
         query = applyRequestedCurrentUserExclusion(query, req, currentUser, user_id);
 
-        const { data: profiles, error } = await query;
+        const { data: profiles, error } = await fetchProfileExportRows(query, group);
 
         if (error) {
             return res.status(500).json({ error: error.message });
