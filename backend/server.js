@@ -101,6 +101,7 @@ const {
     buildReleaseRecapGif,
     buildReleaseRecapCaption
 } = require("./release-success-recap");
+const { loadAstralCheckoutActivity, isAstralActivity, removeDuplicateAstralActivity } = require('./astral-checkout-activity');
 const { registerOrderTracker, notifyCheckoutForOrderTracker } = require("./order-tracker");
 const { buildShikariAccountsCsv, buildShikariImapCsv } = require("./shikari-credential-exports");
 const { buildStellarAmazonAccountsText } = require("./stellar-amazon-account-export");
@@ -7766,12 +7767,14 @@ async function loadReleaseRecapTrackedTotals(events, from, to) {
 }
 
 async function buildReleaseRecapData(range) {
-    const [events, catalogRows, routes] = await Promise.all([
+    const [recordedEvents, catalogRows, routes, astral] = await Promise.all([
         loadReleaseRecapEvents(range.from, range.to),
         loadReleaseRecapCatalogRows(),
-        getAnnouncementRoutes()
+        getAnnouncementRoutes(),
+        loadAstralCheckoutActivity(supabase, range)
     ]);
-    const trackedTotalsByEventId = await loadReleaseRecapTrackedTotals(events, range.from, range.to);
+    const events = removeDuplicateAstralActivity([...recordedEvents, ...astral]);
+    const trackedTotalsByEventId = await loadReleaseRecapTrackedTotals(events.filter(event => !isAstralActivity(event)), range.from, range.to);
     const summary = buildReleaseRecapSummary({
         events,
         catalogRows,
@@ -7784,6 +7787,7 @@ async function buildReleaseRecapData(range) {
         from: range.from,
         to: range.to,
         checkout_count: summary.checkout_count,
+        bot_reported_checkout_count: summary.bot_reported_checkout_count,
         item_count: summary.item_count,
         total_spend: summary.total_spend,
         retailer_confirmed_spend: summary.retailer_confirmed_spend,
@@ -7805,6 +7809,7 @@ function releaseRecapEmbed(summary, animationUrl) {
             { name: 'Retailer-confirmed', value: `${money(summary.retailer_confirmed_spend)} • ${summary.retailer_confirmed_checkout_count} checkout${summary.retailer_confirmed_checkout_count === 1 ? '' : 's'}`, inline: true },
             { name: 'Catalog-estimated', value: `${money(summary.catalog_estimated_spend)} • ${summary.catalog_estimated_checkout_count} checkout${summary.catalog_estimated_checkout_count === 1 ? '' : 's'}`, inline: true },
             { name: 'Release window', value: summary.range_label || 'Selected release window', inline: false },
+            ...(summary.bot_reported_checkout_count ? [{ name: 'Astral activity', value: `${summary.bot_reported_checkout_count} bot-reported checkout(s) counted; not included in spend.`, inline: false }] : []),
             ...(summary.unresolved_checkout_count ? [{ name: 'Still missing a total', value: `${summary.unresolved_checkout_count} checkout${summary.unresolved_checkout_count === 1 ? '' : 's'} could not yet be fully priced.`, inline: false }] : [])
         ],
         image: { url: animationUrl },

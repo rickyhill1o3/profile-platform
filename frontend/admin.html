@@ -5,7 +5,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Admin Panel</title>
-  <link rel="stylesheet" href="styles.css?v=20261124-amazon-catalog-replace" />
+  <link rel="stylesheet" href="styles.css?v=20261124-amazon-catalog-sync" />
 </head>
 
 <body class="app-page">
@@ -259,8 +259,8 @@ placeholder="Enter one SKU per line&#10;12345678&#10;87654321"></textarea>
                 <div class="field field--full"><div class="subtle-text" id="targetCatalogRescanAllProgress"></div></div>
               </form>
 
-              <div class="banner banner-soft amazon-catalog-replace-heading"><strong>Replace entire Amazon catalog from pasted list</strong>
-                <p class="subtle-text">Paste a list containing category headings, product names with ASINs, and <code>$0.00max</code> price lines. Previewing does not change the database. Replacing removes products that are not in the pasted list and clears all saved Amazon product selections.</p>
+              <div class="banner banner-soft amazon-catalog-replace-heading"><strong>Sync Amazon catalog from pasted list</strong>
+                <p class="subtle-text">Paste the complete list containing category headings, product names with ASINs, and <code>$0.00max</code> price lines. Existing ASINs keep the same database record and every user's selections. New products are added unselected, and products missing from the new list are removed.</p>
               </div>
               <form id="amazonCatalogReplaceForm" class="form-grid">
                 <div class="field field--full"><label for="amazonCatalogReplaceInput">New Amazon catalog</label>
@@ -268,9 +268,9 @@ placeholder="Enter one SKU per line&#10;12345678&#10;87654321"></textarea>
                 </div>
                 <div class="field field--full panel-actions">
                   <button class="btn" type="button" id="amazonCatalogPreviewButton">Preview pasted Amazon catalog</button>
-                  <button class="btn btn-danger" type="button" id="amazonCatalogReplaceButton" disabled>Clear and replace Amazon catalog</button>
+                  <button class="btn btn-primary" type="button" id="amazonCatalogReplaceButton" disabled>Sync Amazon catalog</button>
                 </div>
-                <div class="field field--full"><div class="subtle-text" id="amazonCatalogReplaceStatus">Paste the complete list, then preview it before replacing anything.</div></div>
+                <div class="field field--full"><div class="subtle-text" id="amazonCatalogReplaceStatus">Paste the complete list, then preview it before syncing anything.</div></div>
                 <div class="field field--full amazon-catalog-replace-preview" id="amazonCatalogReplacePreview" hidden></div>
               </form>
 
@@ -1296,7 +1296,7 @@ placeholder="Enter one SKU per line&#10;12345678&#10;87654321"></textarea>
     </div>
   </div>
   <script src="profile-sync-state.js?v=20260918-profile-sync-display"></script>
-  <script src="script.js?v=20261124-amazon-catalog-replace"></script>
+  <script src="script.js?v=20261124-astral-checkout-counts"></script>
   <script src="products.js?v=20260930-pokemon-sku-groups"></script>
 
 

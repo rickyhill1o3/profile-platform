@@ -45,6 +45,6 @@ assert.match(frontendSource, /'\/admin\/export\/stellar-amazon-accounts-txt\?'/)
 assert.match(frontendSource, /filename \+ '\.txt'/);
 assert.match(frontendSource, /stellar-accounts-amazon-active-/);
 assert.match(adminHtml, /Export Active Stellar Amazon Accounts TXT/);
-assert.match(adminHtml, /script\.js\?v=20261124-amazon-catalog-replace/);
+assert.match(adminHtml, /script\.js\?v=20261124-astral-checkout-counts/);
 
 console.log('Stellar Amazon account export tests passed');

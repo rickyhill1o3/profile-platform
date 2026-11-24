@@ -421,15 +421,16 @@ function renderDiscordRecoveryPreview(result={}){
     `Messages scanned: ${Number(result.messages_scanned||0).toLocaleString()}`,
     `Amazon successful-checkout embeds: ${Number(result.supported_checkouts||0).toLocaleString()}`,
     `Missed checkouts ready to recover: ${Number(result.importable||0).toLocaleString()}`,
+    `Astral checkouts ready to count on the homepage and recap: ${Number(result.astral_activity_ready||0).toLocaleString()}`,
     `Already recorded / duplicate: ${Number(result.duplicates||0).toLocaleString()}`,
     `Skipped because ownership is unsafe: ${Number(result.unsafe||0).toLocaleString()}`,
     ...channelLines,
     ...warnings.map(warning=>`Warning: ${warning}`)
   ].join('\n');
   const entries=Array.isArray(result.entries)?result.entries:[];
-  $('discordRecoveryRows').innerHTML=entries.length?entries.map(entry=>`<tr class="${entry.action==='recover'?'':'skip-row'}"><td>${esc(new Date(entry.checkout_at).toLocaleString())}</td><td>${esc(entry.guild_name||'Discord')} / #${esc(entry.channel_name||'-')}</td><td>${esc(entry.checkout_account_email||'Missing')}</td><td>${esc(entry.retailer_order_number||entry.order_number||'-')}</td><td>${esc(entry.sku||'-')}<br>${esc(entry.product_name||'-')}</td><td>${esc(entry.quantity||1)}</td><td>${entry.action==='recover'?'Recover as pending':`Skip · ${esc(entry.duplicate_reason||'already exists')}`}</td></tr>`).join(''):'<tr><td colspan="7">No direct-to-Discord Amazon successful checkout embeds were found in this range.</td></tr>';
+  $('discordRecoveryRows').innerHTML=entries.length?entries.map(entry=>`<tr class="${['recover','count_activity'].includes(entry.action)?'':'skip-row'}"><td>${esc(new Date(entry.checkout_at).toLocaleString())}</td><td>${esc(entry.guild_name||'Discord')} / #${esc(entry.channel_name||'-')}</td><td>${esc(entry.checkout_account_email||(entry.activity_group?`Astral group: ${entry.activity_group}`:'Missing'))}</td><td>${esc(entry.retailer_order_number||entry.order_number||'-')}</td><td>${esc(entry.sku||'-')}<br>${esc(entry.product_name||'-')}</td><td>${esc(entry.quantity||1)}</td><td>${entry.action==='recover'?'Recover as pending':entry.action==='count_activity'?'Count checkout only':`Skip · ${esc(entry.duplicate_reason||'already exists')}`}</td></tr>`).join(''):'<tr><td colspan="7">No direct-to-Discord Amazon successful checkout embeds were found in this range.</td></tr>';
   $('discordRecoveryResults').hidden=false;
-  $('importDiscordRecovery').disabled=Number(result.importable||0)<1;
+  $('importDiscordRecovery').disabled=Number(result.importable||0)+Number(result.astral_activity_ready||0)<1;
 }
 
 async function pollDiscordRecoveryJob(jobId,readyStates){
@@ -479,15 +480,18 @@ if($('previewDiscordRecovery'))$('previewDiscordRecovery').onclick=async()=>{
 
 if($('importDiscordRecovery'))$('importDiscordRecovery').onclick=async()=>{
   const count=Number(discordRecoveryPreview?.importable||0);
-  if(!discordRecoveryJobId||count<1)return;
-  if(!confirm(`Recover ${count} missed Amazon checkout${count===1?'':'s'} as pending, then search the matching IMAP account for confirmation emails? No credits or public pings occur without email verification.`))return;
+  const activityCount=Number(discordRecoveryPreview?.astral_activity_ready||0);
+  if(!discordRecoveryJobId||count+activityCount<1)return;
+  const confirmLines=[count?`Recover ${count} pending Amazon order(s) and check their mailboxes. Credits and Discord notifications still need email verification.`:'',activityCount?`Count ${activityCount} Astral checkout(s) on the homepage and in the recap. This does not create orders, charge credits or send Discord notifications.`:''];
+  if(!confirm(confirmLines.filter(Boolean).join('\n\n')))return;
   const button=$('importDiscordRecovery');button.disabled=true;$('previewDiscordRecovery').disabled=true;
   try{
-    setDiscordRecoveryStatus('Recovering pending checkouts and queueing original-time IMAP searches…',{progress:90});
+    setDiscordRecoveryStatus('Saving Astral counts and recovering eligible Amazon orders…',{progress:90});
     await api('/orders/discord-checkout-recovery/import',{method:'POST',body:JSON.stringify({job_id:discordRecoveryJobId})});
     const job=await pollDiscordRecoveryJob(discordRecoveryJobId,['complete']);
     const result=job.import_result||{};
-    setDiscordRecoveryStatus(`History checker recovery accepted ${result.recovered_orders||0} pending checkout(s), skipped ${result.duplicates_skipped||0} duplicate(s), and queued ${result.mailbox_scans_queued||0} mailbox check(s) across ${result.affected_users||0} user(s). ${result.failed_orders||0} failed. Confirmed emails will charge the exact catalog SKU once and publish the checkout; unconfirmed checkouts remain uncharged.`,{error:Number(result.failed_orders||0)>0,progress:100});
+    const failed=Array.isArray(result.failures)?result.failures.slice(0,5).map(row=>row.error).filter(Boolean):[];
+    setDiscordRecoveryStatus(`Counted ${result.astral_activity_added||0} Astral checkout(s). Recovered ${result.recovered_orders||0} pending order(s), skipped ${result.duplicates_skipped||0} duplicate(s), and queued ${result.mailbox_scans_queued||0} mailbox check(s). ${result.failed_orders||0} failed.${failed.length?'\n'+failed.join('\n'):''}`,{error:Number(result.failed_orders||0)>0,progress:100});
     $('importDiscordRecovery').disabled=true;
     await wait(7000);await loadOrders();
   }catch(error){setDiscordRecoveryStatus(error.message||'Checkout recovery failed.',{error:true,progress:0});button.disabled=false}

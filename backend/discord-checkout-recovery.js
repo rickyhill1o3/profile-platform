@@ -1,5 +1,6 @@
 const crypto = require('crypto');
 const { __test: discordHistoryHelpers, getHistoryCheckerBotConfig, discordGet } = require('./discord-history-import');
+const { parseAstralCheckout, saveAstralCheckoutActivity, existingAstralActivityKeys } = require('./astral-checkout-activity');
 const RECOVERY_STORES = new Set(['amazon']);
 const PREVIEW_TTL_MS = 60 * 60 * 1000;
 const MAX_RANGE_MS = 14 * 24 * 60 * 60 * 1000;
@@ -62,7 +63,8 @@ async function loadChannelRange(token, channelId, startAt, endAt, progress = nul
       const embeds = Array.isArray(message.embeds) ? message.embeds : [];
       if (!embeds.length && message.webhook_id && !clean(message.content)) emptyWebhookEmbeds++;
       embeds.forEach((embed, index) => {
-        const parsed = discordHistoryHelpers.parseCheckoutEmbed(message, embed, index, channelInfo, { allowedStores:RECOVERY_STORES });
+        const parsed = parseAstralCheckout(message, embed, index, channelInfo)
+          ?? discordHistoryHelpers.parseCheckoutEmbed(message, embed, index, channelInfo, { allowedStores:RECOVERY_STORES });
         if (parsed.skip_reason) skipped[parsed.skip_reason] = (skipped[parsed.skip_reason] || 0) + 1;
         else {
           entries.push(parsed);
@@ -122,6 +124,7 @@ function publicEntry(entry = {}) {
     order_number:entry.order_number,
     retailer_order_number:entry.retailer_order_number,
     checkout_account_email:entry.checkout_account_email,
+    activity_group:entry.activity_group,
     profile_name:entry.profile_name,
     product_name:entry.product_name,
     sku:entry.sku,
@@ -186,12 +189,24 @@ async function preparePreview(supabase, token, channelIds, range, job) {
 
   job.phase = 'checking_duplicates';
   job.progress_message = 'Checking Discord message IDs and checkout references for duplicates…';
-  const existing = await existingRecoveryKeys(supabase, entries);
+  const standard = entries.filter(entry => !entry.activity_only);
+  const existing = standard.length ? await existingRecoveryKeys(supabase, standard) : null;
+  const counted = await existingAstralActivityKeys(supabase, entries.filter(entry => entry.activity_only));
   let importable = 0;
   let duplicates = 0;
   let unsafe = 0;
+  let activityReady = 0;
   for (const entry of entries) {
-    if (existing.sourceKeys.has(entry.source_key)) {
+    if (entry.activity_only) {
+      if (counted.has(entry.activity_id)) {
+        entry.action = 'skip_existing';
+        entry.duplicate_reason = 'same Astral message already counted';
+        duplicates++;
+      } else {
+        entry.action = 'count_activity';
+        activityReady++;
+      }
+    } else if (existing.sourceKeys.has(entry.source_key)) {
       entry.action = 'skip_existing';
       entry.duplicate_reason = 'same Discord message already recovered';
       duplicates++;
@@ -215,9 +230,10 @@ async function preparePreview(supabase, token, channelIds, range, job) {
     messages_scanned:Number(job.messages_scanned || 0),
     supported_checkouts:entries.length,
     importable,
+    astral_activity_ready:activityReady,
     duplicates,
     unsafe,
-    missing_account_email:entries.filter(entry => !entry.checkout_account_email).length,
+    missing_account_email:standard.filter(entry => !entry.checkout_account_email).length,
     truncated:reports.some(report => report.truncated),
     message_content_warning:reports.some(report => report.empty_webhook_embeds > 0 && report.checkout_matches === 0),
     entries
@@ -225,8 +241,10 @@ async function preparePreview(supabase, token, channelIds, range, job) {
 }
 
 async function recoverEntries(supabase, entries, recoverDiscordCheckout) {
-  const existing = await existingRecoveryKeys(supabase, entries);
-  const fresh = entries.filter(entry =>
+  const astral = await saveAstralCheckoutActivity(supabase, entries.filter(entry => entry.activity_only));
+  const standard = entries.filter(entry => !entry.activity_only);
+  const existing = standard.length ? await existingRecoveryKeys(supabase, standard) : null;
+  const fresh = standard.filter(entry =>
     entry.checkout_account_email &&
     !existing.sourceKeys.has(entry.source_key) &&
     !existing.externalIds.has(normalizeOrderRef(entry.order_number))
@@ -242,7 +260,8 @@ async function recoverEntries(supabase, entries, recoverDiscordCheckout) {
   }
   return {
     recovered_orders:results.filter(result => !result?.duplicate).length,
-    duplicates_skipped:(entries.length - fresh.length) + results.filter(result => result?.duplicate).length,
+    astral_activity_added:astral.added,
+    duplicates_skipped:astral.duplicates + (standard.length - fresh.length) + results.filter(result => result?.duplicate).length,
     failed_orders:failures.length,
     failures:failures.slice(0, 100),
     mailbox_scans_queued:results.filter(result => result?.mailbox_scan_queued).length,
@@ -335,7 +354,7 @@ function registerDiscordCheckoutRecovery({ app, supabase, auth, recoverDiscordCh
         job.status = 'preview_ready';
         job.phase = 'awaiting_approval';
         job.finished_at = new Date().toISOString();
-        job.progress_message = `Preview ready: ${result.importable} missed checkout(s) can be recovered; ${result.duplicates} duplicate(s) will be skipped.`;
+        job.progress_message = `Preview ready: ${result.importable} can be recovered as orders; ${result.astral_activity_ready} can be counted as Astral activity; ${result.duplicates} duplicate(s) will be skipped.`;
       } catch (error) {
         job.status = 'error';
         job.phase = 'preview_failed';
@@ -363,17 +382,17 @@ function registerDiscordCheckoutRecovery({ app, supabase, auth, recoverDiscordCh
     job.status = 'running';
     job.phase = 'recovering';
     job.finished_at = null;
-    job.progress_message = 'Creating pending Amazon checkouts and queueing exact mailbox checks…';
+    job.progress_message = 'Saving Astral activity and recovering eligible Amazon orders…';
     res.status(202).json({ success:true, job:jobView(job) });
 
     setImmediate(async () => {
       try {
-        const candidates = job.entries.filter(entry => entry.action === 'recover');
+        const candidates = job.entries.filter(entry => entry.action === 'recover' || entry.action === 'count_activity');
         job.import_result = await recoverEntries(supabase, candidates, recoverDiscordCheckout);
         job.status = 'complete';
         job.phase = 'complete';
         job.finished_at = new Date().toISOString();
-        job.progress_message = `Recovered ${job.import_result.recovered_orders} pending checkout(s). IMAP checks are running; only confirmed orders will post publicly and charge credits.`;
+        job.progress_message = `Counted ${job.import_result.astral_activity_added} Astral checkout(s) and recovered ${job.import_result.recovered_orders} pending order(s).`;
       } catch (error) {
         job.status = 'error';
         job.phase = 'recovery_failed';
@@ -428,6 +447,6 @@ function registerDiscordCheckoutRecovery({ app, supabase, auth, recoverDiscordCh
 
 module.exports = {
   registerDiscordCheckoutRecovery,
-  __test:{ safeRange, publicEntry, normalizeOrderRef, loadChannelRange, existingRecoveryKeys }
+  __test:{ safeRange, publicEntry, normalizeOrderRef, loadChannelRange, existingRecoveryKeys, recoverEntries }
 };
 

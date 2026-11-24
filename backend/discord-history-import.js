@@ -183,6 +183,8 @@ function parseCheckoutEmbed(message = {}, embed = {}, embedIndex = 0, channel = 
     : null;
   const purchasePrice = explicitTotal ?? calculatedTotal ?? money(firstField(fields, [/^price$/, /^product price$/]));
   const checkoutAccount = lower(firstField(fields, [/^account$/, /^email$/, /^checkout email$/, /^login email$/]));
+  const rawAccount = (Array.isArray(embed.fields) ? embed.fields : []).find(field => /^(?:account|email|checkout email|login email)$/.test(normalizedFieldName(field?.name)))?.value;
+  const maskedAmazonEmail = store === 'amazon' && /[*\\•]/.test(String(rawAccount || ''));
   const profileName = firstField(fields, [/^profile$/, /^profile name$/]);
   const sku = items.find(item => item.sku)?.sku || firstField(fields, [/^sku$/, /^product sku$/]);
   const productName = items.find(item => item.product_name)?.product_name || firstField(fields, [/^product$/, /^product name$/]) || `${store} checkout`;
@@ -208,7 +210,7 @@ function parseCheckoutEmbed(message = {}, embed = {}, embedIndex = 0, channel = 
     order_number:externalOrderId,
     retailer_order_number:orderNumber || null,
     has_retailer_order_number:Boolean(orderNumber),
-    checkout_account_email:checkoutAccount.includes('@') ? checkoutAccount : null,
+    checkout_account_email:!maskedAmazonEmail && checkoutAccount.includes('@') ? checkoutAccount : null,
     profile_name:clean(profileName, 300) || null,
     product_name:clean(productName, 500),
     sku:clean(sku, 200) || null,

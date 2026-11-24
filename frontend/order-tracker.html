@@ -90,19 +90,19 @@
     </section>
 
     <section class="tracker-panel discord-history" id="discordRecoveryPanel" hidden>
-      <div class="order-head"><div><h2>Recover Amazon checkouts with the history checker bot</h2><p class="subtle-text">Use the history checker bot that already has access to your private super-admin checkout channel. It rebuilds missing Amazon website checkouts with their original times and searches the matching IMAP account. Credits and public pings stay blocked until a distinct Amazon confirmation email is found.</p></div><span class="discord-history-badge">Existing bot</span></div>
+      <div class="order-head"><div><h2>Recover Amazon checkouts with the history checker bot</h2><p class="subtle-text">Recover eligible orders or count Astral successes from your private checkout channel. Astral counts go to the homepage and recap without creating orders. Credits and public pings stay blocked until a distinct Amazon confirmation email is found.</p></div><span class="discord-history-badge">Existing bot</span></div>
       <div class="discord-history-grid">
         <div class="discord-history-form">
           <label>Private super-admin checkout channel IDs — one per line<textarea id="discordRecoveryChannels" spellcheck="false" placeholder="123456789012345678"></textarea></label>
           <div class="discord-recovery-times"><label>Checkout start time<input id="discordRecoveryStart" type="datetime-local"></label><label>Checkout end time<input id="discordRecoveryEnd" type="datetime-local"></label></div>
-          <label class="discord-auto-toggle"><input id="discordRecoveryAuto" type="checkbox"><span>Enable the automatic safety net. Every minute, the existing history checker bot checks the last two hours and recovers only direct-to-Discord Amazon successes the website has not already recorded.</span></label>
-          <div class="aycd-buttons"><button class="btn" id="saveDiscordRecovery">Save channel / safety net</button><button class="btn btn-primary" id="previewDiscordRecovery">Preview missed checkouts</button><button class="btn" id="importDiscordRecovery" disabled>Recover and check IMAP</button><button class="btn" id="recheckPendingAmazon">Recheck all pending Amazon IMAP</button></div>
+          <label class="discord-auto-toggle"><input id="discordRecoveryAuto" type="checkbox"><span>Enable the automatic safety net. Every minute the existing bot checks the last two hours for missing Amazon orders and Astral activity to count.</span></label>
+          <div class="aycd-buttons"><button class="btn" id="saveDiscordRecovery">Save channel / safety net</button><button class="btn btn-primary" id="previewDiscordRecovery">Preview missed checkouts</button><button class="btn" id="importDiscordRecovery" disabled>Apply recovery and counts</button><button class="btn" id="recheckPendingAmazon">Recheck all pending Amazon IMAP</button></div>
           <div class="discord-history-progress"><div id="discordRecoveryProgressBar"></div></div>
           <p class="discord-history-status" id="discordRecoveryStatus">Checking the existing history checker bot…</p>
           <p class="discord-history-status" id="amazonPendingRecheckStatus">Pending Amazon confirmations are also retried automatically in the background.</p>
         </div>
         <div>
-          <div class="one-time-security"><b>No new bot required:</b> this uses the same history checker bot and token already assigned to this private channel. Importing creates a pending Amazon checkout with 0 credits charged. Email verification then re-reads the exact SKU’s current catalog credit cost, charges once, and sends the sanitized public checkout.</div>
+          <div class="one-time-security"><b>No new bot required:</b> eligible orders start pending with 0 credits charged. Astral rows marked <b>Count checkout only</b> use the original timestamp and quantity. They do not create orders, assign a user, charge credits or send Discord pings.</div>
           <ol class="discord-history-steps">
             <li>The existing <b>history checker</b> role already needs <b>View Channel</b> and <b>Read Message History</b> in this private channel.</li>
             <li>Preview the incident time range first. Duplicate Discord message IDs and checkout references are skipped.</li>
@@ -162,6 +162,6 @@
       <div class="diag-foot">This window does not truncate the response. Use Ctrl+F inside the log after copying it, or download the complete text file.</div>
     </section>
   </div>
-<script src="order-tracker.js?v=20261114-amazon-imap-recheck"></script>
+<script src="order-tracker.js?v=20261124-astral-checkout-counts"></script>
 </body>
 </html>

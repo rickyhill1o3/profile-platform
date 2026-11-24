@@ -819,7 +819,7 @@ async function runInIdChunks(ids, callback, chunkSize = 200) {
     }
 }
 
-async function replaceAmazonCatalogFromPaste(supabase, rawText) {
+async function syncAmazonCatalogFromPaste(supabase, rawText) {
     const preview = amazonCatalogPastePreview(rawText);
     if (preview.errors.length) throw new Error(preview.errors.join(' '));
 
@@ -844,9 +844,9 @@ async function replaceAmazonCatalogFromPaste(supabase, rawText) {
         const existing = existingBySku.get(entry.sku);
         const metadata = {
             ...(existing?.metadata || {}),
-            source: 'amazon_catalog_paste_replace',
+            source: 'amazon_catalog_paste_sync',
             amazon_category: entry.category,
-            catalog_replaced_at: importedAt,
+            catalog_synced_at: importedAt,
             virtual: false
         };
         const payload = {
@@ -882,14 +882,14 @@ async function replaceAmazonCatalogFromPaste(supabase, rawText) {
     }
 
     const keepIds = new Set(savedRows.map((row) => String(row.id)));
-    const oldIds = (existingRows || []).map((row) => row.id).filter(Boolean);
     const staleIds = (existingRows || []).filter((row) => !keepIds.has(String(row.id))).map((row) => row.id).filter(Boolean);
 
-    // A full catalog replacement intentionally resets Amazon selections so users must
-    // choose from the new catalog instead of retaining stale or changed product rules.
-    await runInIdChunks(oldIds, async (ids) => {
+    // Keep preferences attached to retained product IDs. A pasted catalog is a sync:
+    // existing ASIN rows are updated in place, new ASINs start unselected, and only
+    // preferences belonging to products removed from the pasted list are deleted.
+    await runInIdChunks(staleIds, async (ids) => {
         const { error } = await supabase.from('user_product_preferences').delete().in('catalog_product_id', ids);
-        if (error) throw new Error(`Amazon products were saved, but old user selections could not be cleared: ${error.message}`);
+        if (error) throw new Error(`Amazon products were saved, but selections for removed products could not be cleared: ${error.message}`);
     });
 
     await runInIdChunks(staleIds, async (ids) => {
@@ -906,7 +906,8 @@ async function replaceAmazonCatalogFromPaste(supabase, rawText) {
         updated: rowsToUpdate.length,
         added: rowsToInsert.length,
         removed: staleIds.length,
-        cleared_user_selections: oldIds.length > 0,
+        preserved_existing_products: rowsToUpdate.length,
+        retained_user_selections: true,
         categories: preview.categories
     };
 }
@@ -1812,11 +1813,11 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
             if (String(req.body?.confirmation || '') !== 'REPLACE AMAZON CATALOG') {
                 return res.status(400).json({ error: 'Amazon catalog replacement was not confirmed.' });
             }
-            const result = await replaceAmazonCatalogFromPaste(supabase, rawText);
+            const result = await syncAmazonCatalogFromPaste(supabase, rawText);
             res.json({
                 success: true,
                 ...result,
-                message: `Amazon catalog replaced with ${result.imported} products. Added ${result.added}, updated ${result.updated}, and removed ${result.removed} old catalog rows.`
+                message: `Amazon catalog synced to ${result.imported} products. Kept ${result.preserved_existing_products} existing products and their user selections, added ${result.added}, and removed ${result.removed}.`
             });
         } catch (err) {
             res.status(400).json({ error: String(err?.message || err) });

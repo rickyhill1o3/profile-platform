@@ -1,6 +1,7 @@
 const net = require('net');
 const dns = require('dns').promises;
 const sharp = require('sharp');
+const { isAstralActivity } = require('./astral-checkout-activity');
 
 const RECAP_TIME_ZONE = 'America/New_York';
 const FRAME_WIDTH = 800;
@@ -64,6 +65,7 @@ function firstField(fields, names) {
 }
 
 function checkoutEventIsSuccessful(row = {}) {
+  if (isAstralActivity(row)) return true;
   const status = normalize(row.status);
   const payload = row.payload && typeof row.payload === 'object' ? row.payload : {};
   const { embed, fields } = embedFields(payload);
@@ -129,6 +131,7 @@ function eventItems(row = {}) {
     product: itemNameFromRow(row, item, payload, fields, embed),
     sku: itemSkuFromRow(row, item, payload, fields),
     quantity: positiveQuantity(item?.quantity ?? item?.qty ?? (parsed.length === 1 ? globalQuantity : 1)),
+    bot_reported: isAstralActivity(row),
     webhook_price: positivePrice(item?.price ?? item?.priceNumber ?? (parsed.length === 1 ? globalPrice : null)),
     image: cleanText(
       item?.image || item?.image_url || item?.thumbnail || item?.thumbnail_url
@@ -192,14 +195,14 @@ function buildReleaseRecapSummary({ events = [], catalogRows = [], trackedTotals
   const resolvedItems = successfulEvents.flatMap(eventItems).map((item) => {
     const catalog = findCatalogRow(item, maps);
     const catalogPrice = positivePrice(catalog?.default_max_price ?? catalog?.price ?? catalog?.retail_price);
-    const unitPrice = item.webhook_price || catalogPrice;
+    const unitPrice = item.bot_reported ? null : (item.webhook_price || catalogPrice);
     return {
       ...item,
       product: cleanText(catalog?.product_name || item.product, 500),
       sku: cleanText(item.sku || catalog?.sku, 160),
       image: cleanText(item.image || catalog?.image_url || catalog?.image, 2000),
       unit_price: unitPrice,
-      price_source: item.webhook_price ? 'webhook' : (catalogPrice ? 'catalog' : 'unresolved'),
+      price_source: item.bot_reported ? 'bot_reported' : (item.webhook_price ? 'webhook' : (catalogPrice ? 'catalog' : 'unresolved')),
       line_total: unitPrice ? Math.round(unitPrice * item.quantity * 100) / 100 : null
     };
   });
@@ -230,7 +233,7 @@ function buildReleaseRecapSummary({ events = [], catalogRows = [], trackedTotals
     if (item.line_total !== null) {
       existing.total_spend += item.line_total;
       existing.resolved_item_count += item.quantity;
-    } else {
+    } else if (!item.bot_reported) {
       existing.unresolved_item_count += item.quantity;
     }
     if (!existing.image && item.image) existing.image = item.image;
@@ -268,6 +271,7 @@ function buildReleaseRecapSummary({ events = [], catalogRows = [], trackedTotals
   let unresolvedCheckoutCount = 0;
   let canceledCheckoutCount = 0;
   for (const event of successfulEvents) {
+    if (isAstralActivity(event)) continue;
     const tracked = trackedEntryFor(event.id);
     if (['canceled', 'cancelled', 'refunded'].includes(tracked.status)) {
       canceledCheckoutCount += 1;
@@ -291,7 +295,7 @@ function buildReleaseRecapSummary({ events = [], catalogRows = [], trackedTotals
   catalogEstimatedSpend = Math.round(catalogEstimatedSpend * 100) / 100;
   const totalSpend = Math.round((retailerConfirmedSpend + catalogEstimatedSpend) * 100) / 100;
   const resolvedItemCount = resolvedItems.reduce((sum, item) => sum + (item.line_total !== null ? item.quantity : 0), 0);
-  const unresolvedItems = resolvedItems.filter(item => item.line_total === null).map(item => ({
+  const unresolvedItems = resolvedItems.filter(item => !item.bot_reported && item.line_total === null).map(item => ({
     site: item.site,
     sku: item.sku,
     product: item.product,
@@ -310,6 +314,7 @@ function buildReleaseRecapSummary({ events = [], catalogRows = [], trackedTotals
     time_zone: timeZone,
     range_label: rangeLabel,
     checkout_count: checkoutCount,
+    bot_reported_checkout_count: successfulEvents.filter(isAstralActivity).length,
     item_count: itemCount,
     unique_product_count: products.length,
     total_spend: totalSpend,
@@ -320,7 +325,7 @@ function buildReleaseRecapSummary({ events = [], catalogRows = [], trackedTotals
     unresolved_checkout_count: unresolvedCheckoutCount,
     canceled_checkout_count: canceledCheckoutCount,
     resolved_item_count: resolvedItemCount,
-    unresolved_item_count: Math.max(0, itemCount - resolvedItemCount),
+    unresolved_item_count: unresolvedItems.reduce((sum, item) => sum + item.quantity, 0),
     unresolved_items: unresolvedItems,
     products
   };
@@ -453,6 +458,7 @@ function buildReleaseRecapCaption(summary = {}, animationUrl = '') {
     summary.range_label || ''
   ];
   if (summary.unresolved_checkout_count > 0) lines.push(`Price note: ${summary.unresolved_checkout_count} checkout${summary.unresolved_checkout_count === 1 ? '' : 's'} did not yet have an IMAP-confirmed order total or a complete saved catalog estimate and ${summary.unresolved_checkout_count === 1 ? 'is' : 'are'} not included in the spend total.`);
+  if (summary.bot_reported_checkout_count > 0) lines.push(`Includes ${summary.bot_reported_checkout_count} Astral-reported checkout(s), excluded from spend.`);
   if (animationUrl) lines.push(animationUrl);
   return lines.filter(Boolean).join('\n');
 }

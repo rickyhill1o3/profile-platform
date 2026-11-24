@@ -89,9 +89,13 @@ const adminJs = fs.readFileSync(path.join(root, 'frontend', 'script.js'), 'utf8'
 
 assert.match(routes, /\/admin\/catalog-products\/preview-amazon-replacement/);
 assert.match(routes, /\/admin\/catalog-products\/replace-amazon/);
-assert.match(routes, /user_product_preferences'[\s\S]*delete\(\)[\s\S]*catalog_product_id/);
+assert.match(routes, /runInIdChunks\(staleIds[\s\S]*user_product_preferences'[\s\S]*delete\(\)[\s\S]*catalog_product_id/);
+assert.doesNotMatch(routes, /runInIdChunks\(oldIds[\s\S]*user_product_preferences/);
+assert.match(routes, /retained_user_selections:\s*true/);
 assert.match(adminHtml, /id="amazonCatalogReplaceInput"/);
-assert.match(adminHtml, /Clear and replace Amazon catalog/);
+assert.match(adminHtml, /Sync Amazon catalog/);
+assert.match(adminHtml, /every user's selections/);
 assert.match(adminJs, /confirmation:\s*'REPLACE AMAZON CATALOG'/);
+assert.match(adminJs, /all user selections for them will be kept/);
 
 console.log('amazon catalog paste replacement tests passed');

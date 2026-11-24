@@ -1,6 +1,7 @@
 const { Client, GatewayIntentBits, Partials, ChannelType, EmbedBuilder, PermissionsBitField } = require('discord.js');
 const jwt = require('jsonwebtoken');
 const { mergeManageableGuilds, removeManageableGuild, fallbackDiscordUserId } = require('./success-network-ownership');
+const { loadAstralCheckoutActivity, isAstralActivity, removeDuplicateAstralActivity } = require('./astral-checkout-activity');
 
 function cleanText(v, n = 2000) { return String(v || '').replace(/\u0000/g, '').slice(0, n); }
 function isSuper(user, superEmail) { return user?.role === 'super_admin' || String(user?.email || '').toLowerCase() === String(superEmail || '').toLowerCase(); }
@@ -846,7 +847,7 @@ module.exports = function registerSuccessNetwork({ app, supabase, auth, admin, g
     // Read a wide history window. Busy releases can generate hundreds of checkout and
     // decline events, so a small newest-row limit can accidentally hide valid products.
     const { data, error } = await supabase.from('webhook_events')
-      .select('id,site,product,product_name,sku,parsed_items,payload,created_at,status,type,webhook_type,error,error_message')
+      .select('id,site,product,product_name,sku,parsed_items,payload,created_at,status,type,webhook_type,error,error_message,external_order_id')
       .order('created_at', { ascending: false }).limit(10000);
     if (error) return res.json([]);
 
@@ -878,6 +879,8 @@ module.exports = function registerSuccessNetwork({ app, supabase, auth, admin, g
     ).replace(/^\|\||\|\|$/g, '').trim();
 
     const publicSuccessOnly = (row = {}) => {
+      const status = String(row.status || '').trim().toLowerCase();
+      if (['duplicate_skipped', 'received', 'processing'].includes(status)) return false;
       const payload = row.payload && typeof row.payload === 'object' ? row.payload : {};
       const embeds = Array.isArray(payload.embeds) ? payload.embeds : [];
       const embed = embeds[0] || payload.embed || {};
@@ -896,10 +899,14 @@ module.exports = function registerSuccessNetwork({ app, supabase, auth, admin, g
 
       // Stellar and similar bots commonly use "Successful Checkout!" in the embed title.
       return /successful checkout|checkout success|successfully checked out|order confirmed|confirmed order|status success|status confirmed/.test(haystack)
-        || ['success', 'successful', 'confirmed', 'completed', 'processed'].includes(String(row.status || '').trim().toLowerCase());
+        || ['success', 'successful', 'confirmed', 'completed', 'processed'].includes(status);
     };
 
-    const normalizedRows = (data || []).filter(publicSuccessOnly).map(r => {
+    const astral = await loadAstralCheckoutActivity(supabase, { limit:1000 }).catch(error => {
+      console.warn('[public checkout feed]', error.message);
+      return [];
+    });
+    const normalizedRows = removeDuplicateAstralActivity([...(data || []).filter(publicSuccessOnly), ...astral]).map(r => {
       const item = Array.isArray(r.parsed_items) ? (r.parsed_items[0] || {}) : {};
       const payload = r.payload && typeof r.payload === 'object' ? r.payload : {};
       const firstEmbed = Array.isArray(payload.embeds) ? (payload.embeds[0] || {}) : (payload.embed || {});
@@ -915,7 +922,8 @@ module.exports = function registerSuccessNetwork({ app, supabase, auth, admin, g
         product: productFromRow(r, item, payload, firstEmbed, fields),
         sku: skuFromRow(r, item, payload, fields),
         created_at: r.created_at,
-        image: cleanText(image, 2000)
+        image: cleanText(image, 2000),
+        bot_reported_checkout_count: isAstralActivity(r) ? 1 : 0
       };
     });
 
@@ -955,6 +963,7 @@ module.exports = function registerSuccessNetwork({ app, supabase, auth, admin, g
         continue;
       }
       existing.checkout_count += 1;
+      existing.bot_reported_checkout_count += row.bot_reported_checkout_count;
       existing.first_checkout_at = new Date(row.created_at) < new Date(existing.first_checkout_at) ? row.created_at : existing.first_checkout_at;
       if (new Date(row.created_at) > new Date(existing.latest_checkout_at)) {
         existing.latest_checkout_at = row.created_at;

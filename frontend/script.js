@@ -3999,7 +3999,7 @@ async function initCatalogTools() {
                       <div class="amazon-catalog-product-preview">${products.map((product, index) => `<div><span>${index + 1}</span><code>${escapeHTML(product.sku)}</code><strong>${escapeHTML(product.product_name)}</strong><em>${escapeHTML(formatMoney(product.default_max_price))}</em></div>`).join('')}</div>`;
                     amazonCatalogReplacePreview.hidden = false;
                 }
-                if (amazonCatalogReplaceStatus) amazonCatalogReplaceStatus.textContent = `${amazonCatalogPreviewCount} products parsed successfully. Review the preview, then use Clear and replace Amazon catalog.`;
+                if (amazonCatalogReplaceStatus) amazonCatalogReplaceStatus.textContent = `${amazonCatalogPreviewCount} products parsed successfully. Review the preview, then sync the Amazon catalog.`;
                 if (amazonCatalogReplaceButton) amazonCatalogReplaceButton.disabled = !amazonCatalogPreviewToken || amazonCatalogPreviewCount < 1;
             } catch (err) {
                 if (amazonCatalogReplaceStatus) amazonCatalogReplaceStatus.textContent = `Preview stopped: ${err.message}`;
@@ -4011,15 +4011,15 @@ async function initCatalogTools() {
         amazonCatalogReplaceButton?.addEventListener('click', async () => {
             const text = String(amazonCatalogReplaceInput?.value || '').trim();
             if (!amazonCatalogPreviewToken || !amazonCatalogPreviewCount) {
-                if (amazonCatalogReplaceStatus) amazonCatalogReplaceStatus.textContent = 'Preview the pasted list before replacing the catalog.';
+                if (amazonCatalogReplaceStatus) amazonCatalogReplaceStatus.textContent = 'Preview the pasted list before syncing the catalog.';
                 return;
             }
-            const approved = confirm(`Replace the entire Amazon catalog with these ${amazonCatalogPreviewCount} products?\n\nProducts not in this list will be removed and every user's saved Amazon product selections will be cleared. This cannot be undone.`);
+            const approved = confirm(`Sync the Amazon catalog to these ${amazonCatalogPreviewCount} products?\n\nExisting products with the same ASIN and all user selections for them will be kept. New products will be added unselected. Only products missing from this list, and selections for those removed products, will be deleted.`);
             if (!approved) return;
 
             amazonCatalogReplaceButton.disabled = true;
             if (amazonCatalogPreviewButton) amazonCatalogPreviewButton.disabled = true;
-            if (amazonCatalogReplaceStatus) amazonCatalogReplaceStatus.textContent = `Replacing the Amazon catalog with ${amazonCatalogPreviewCount} products... Do not close this page.`;
+            if (amazonCatalogReplaceStatus) amazonCatalogReplaceStatus.textContent = `Syncing the Amazon catalog to ${amazonCatalogPreviewCount} products... Do not close this page.`;
             try {
                 const data = await authJSON(API + '/admin/catalog-products/replace-amazon', {
                     method: 'POST',
@@ -4030,12 +4030,12 @@ async function initCatalogTools() {
                     })
                 });
                 amazonCatalogPreviewToken = '';
-                if (amazonCatalogReplaceStatus) amazonCatalogReplaceStatus.textContent = data.message || `Amazon catalog replaced with ${data.imported || 0} products.`;
+                if (amazonCatalogReplaceStatus) amazonCatalogReplaceStatus.textContent = data.message || `Amazon catalog synced to ${data.imported || 0} products.`;
                 if (filterSite) filterSite.value = 'amazon';
                 if (filterSearch) filterSearch.value = '';
                 await loadCatalogProducts();
             } catch (err) {
-                if (amazonCatalogReplaceStatus) amazonCatalogReplaceStatus.textContent = `Replacement stopped: ${err.message}`;
+                if (amazonCatalogReplaceStatus) amazonCatalogReplaceStatus.textContent = `Catalog sync stopped: ${err.message}`;
                 if (amazonCatalogReplaceButton) amazonCatalogReplaceButton.disabled = false;
             } finally {
                 if (amazonCatalogPreviewButton) amazonCatalogPreviewButton.disabled = false;
@@ -4193,6 +4193,7 @@ function renderReleaseRecapSummary(summary = {}, { sent = false, targetCount = n
         <strong>${sent ? 'Latest sent recap' : 'Preview'} • ${escapeHTML(summary.range_label || 'Selected release window')}</strong>
         ${targetCount === null ? '' : `<div class="subtle-text">${Number(targetCount || 0)} announcement channel${Number(targetCount || 0) === 1 ? '' : 's'} will receive this recap.</div>`}
         ${pricingNote}
+        ${Number(summary.bot_reported_checkout_count || 0) ? `<div class="subtle-text">Includes ${Number(summary.bot_reported_checkout_count)} Astral-reported checkout(s) in the counts, not in spend.</div>` : ''}
         <div class="release-recap-products">${productCards}</div>
         ${products.length > 10 ? `<div class="subtle-text" style="margin-top:8px">The animation also includes ${products.length - 10} more product${products.length - 10 === 1 ? '' : 's'}.</div>` : ''}`;
 }
