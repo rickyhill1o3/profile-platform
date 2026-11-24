@@ -39,11 +39,31 @@ function parseAmazonCatalogPaste(input) {
   const sections = [{ header: '', products: [] }];
   let section = sections[0];
   let pendingProduct = null;
+  const lines = text.split('\n').map((rawLine, index) => ({
+    line: decodeTextEntities(rawLine),
+    lineNumber: index + 1
+  }));
 
-  text.split('\n').forEach((rawLine, index) => {
-    const lineNumber = index + 1;
-    const line = decodeTextEntities(rawLine);
+  lines.forEach((entry, index) => {
+    const { line, lineNumber } = entry;
     if (!line || /^select\s+all$/i.test(line)) return;
+
+    // Exported catalog text places "Select all" directly below every category.
+    // Some category labels (for example PRISMATIC9) are exactly 10 letters/digits,
+    // so they otherwise look indistinguishable from an ASIN. The surrounding
+    // export structure is authoritative: a line immediately before "Select all"
+    // is always a category header.
+    const nextMeaningfulLine = lines.slice(index + 1).find((candidate) => candidate.line);
+    const isCategoryHeader = /^select\s+all$/i.test(nextMeaningfulLine?.line || '');
+    if (isCategoryHeader) {
+      if (pendingProduct && pendingProduct.max_price === null) {
+        errors.push(`Line ${pendingProduct.line}: ${pendingProduct.sku} is missing its maximum price.`);
+        pendingProduct = null;
+      }
+      section = { header: line, products: [] };
+      sections.push(section);
+      return;
+    }
 
     const priceMatch = line.match(MAX_PRICE_LINE);
     if (priceMatch) {
