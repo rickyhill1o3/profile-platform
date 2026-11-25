@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 const { createClient } = require('@supabase/supabase-js');
-const { fillAmazonCatalogImageBatch, lookupAmazonCatalogImage } = require('../amazon-catalog-images');
+const { fillAmazonCatalogImageBatch, lookupAmazonCatalogImage, saveManualAmazonCatalogImage } = require('../amazon-catalog-images');
 const registerCatalogRoutes = require('../product-catalog-routes');
 
 const poster = 'B0H77W4411';
@@ -66,7 +66,7 @@ function product(id, sku, options = {}) {
     };
 }
 
-function makeDatabase(rows) {
+function makeDatabase(rows, { storefront = [], history = [] } = {}) {
     const writes = [];
     const supabase = createClient('https://catalog-test.example', 'test-key', {
         global: {
@@ -77,10 +77,33 @@ function makeDatabase(rows) {
                     assert.equal(url.searchParams.get('is_active'), 'eq.true');
                     return Response.json([{ id: 'current' }]);
                 }
-                assert.ok(url.pathname.endsWith('/catalog_products'), 'no other tables are accessed');
+                const ilike = (column) => url.searchParams.get(column)?.slice('ilike.'.length).toUpperCase();
+                if (url.pathname.endsWith('/storefront_products')) {
+                    assert.equal(method, 'GET');
+                    assert.equal(url.searchParams.get('primary_site'), 'eq.amazon');
+                    return Response.json(storefront.filter((row) => row.primary_site === 'amazon' && row.primary_sku === ilike('primary_sku')));
+                }
+                if (url.pathname.endsWith('/webhook_events')) {
+                    assert.equal(method, 'GET');
+                    assert.equal(url.searchParams.get('type'), 'eq.checkout');
+                    assert.equal(url.searchParams.get('site'), 'eq.amazon');
+                    assert.equal(url.searchParams.get('select'), 'parsed_items');
+                    return Response.json(history.filter((row) => row.sku === ilike('sku')));
+                }
+                assert.ok(url.pathname.endsWith('/catalog_products'), 'no other tables are accessed or updated');
                 assert.equal(url.searchParams.get('site'), 'eq.amazon');
+                if (url.searchParams.get('select') === 'image_url') {
+                    assert.equal(method, 'GET');
+                    return Response.json(rows.filter((row) =>
+                        row.site === 'amazon' && row.sku.toUpperCase() === ilike('sku') && row.image_url));
+                }
                 assert.equal(url.searchParams.get('catalog_id'), 'eq.current');
                 assert.equal(url.searchParams.get('is_enabled'), 'eq.true');
+                if (url.searchParams.get('sku')?.startsWith('ilike.')) {
+                    assert.equal(method, 'GET');
+                    return Response.json(rows.filter((row) => row.catalog_id === 'current' &&
+                        row.site === 'amazon' && row.is_enabled && row.sku.toUpperCase() === ilike('sku')).slice(0, 2));
+                }
                 assert.equal(url.searchParams.get('or'), '(image_url.is.null,image_url.eq.)');
                 const filters = [...url.searchParams.entries()].filter(([, value]) => /^(?:eq|gt)\./.test(value));
                 const matches = rows.filter((row) => {
@@ -151,9 +174,67 @@ async function testBatch() {
     assert.equal(remaining.checked, 0);
     const paused = await fillAmazonCatalogImageBatch(supabase, '', (asin) =>
         lookupAmazonCatalogImage(asin, async () => new Response('', { status: 503 })));
-    assert.equal(paused.checked, 1);
+    assert.equal(paused.checked, 2);
     assert.equal(paused.done, true);
+    assert.equal(paused.saved_only, true);
     assert.match(paused.paused, /HTTP 503/);
+}
+
+async function testSavedFallbackAndManualImage() {
+    const noImage = 'B0DDYZX1TB';
+    const fromCatalog = 'B123456789';
+    const fromShop = 'B111111111';
+    const fromHistory = 'B222222222';
+    const badHistory = 'B333333333';
+    const rows = [
+        product('01', noImage), product('02', fromShop), product('03', fromCatalog),
+        product('04', fromHistory), product('05', badHistory),
+        product('06', fromCatalog, { catalog_id: 'archived', image_url: existingImage })
+    ];
+    const { supabase, writes } = makeDatabase(rows, {
+        storefront: [{ primary_sku: fromShop, primary_site: 'amazon', image_url: secondImage }],
+        history: [
+            { sku: fromHistory, parsed_items: [{ sku: fromHistory, image }] },
+            { sku: badHistory, parsed_items: [{ sku: badHistory, image }, { sku: fromHistory, image }] },
+            { sku: badHistory, parsed_items: [{ sku: fromHistory, image }] }
+        ]
+    });
+    let liveRequests = 0;
+    const first = await fillAmazonCatalogImageBatch(supabase, '', (asin) =>
+        lookupAmazonCatalogImage(asin, async () => {
+            assert.equal(asin, noImage);
+            liveRequests++;
+            return new Response('', { status: 503 });
+        }));
+    assert.equal(first.checked, 3);
+    assert.equal(first.updated, 2, 'a 503 must not stop the same batch');
+    assert.equal(first.done, false);
+    assert.equal(first.saved_only, true);
+    assert.deepEqual(first.failed.map((row) => row.asin), [noImage]);
+    assert.equal(liveRequests, 1);
+    const second = await fillAmazonCatalogImageBatch(supabase, first.next_after_id, () => {
+        assert.fail('later batches must not call Amazon again after a 503');
+    }, first.saved_only);
+    assert.equal(second.checked, 2);
+    assert.equal(second.updated, 1);
+    assert.equal(second.done, true);
+    assert.deepEqual(second.failed.map((row) => row.asin), [badHistory]);
+    assert.deepEqual(writes, ['02', '03', '04']);
+    assert.equal(rows[0].image_url, null);
+    assert.equal(rows[1].image_url, secondImage);
+    assert.equal(rows[2].image_url, existingImage);
+    assert.equal(rows[3].image_url, image);
+    assert.equal(rows[4].image_url, null);
+
+    assert.equal((await saveManualAmazonCatalogImage(supabase, noImage, `https://www.amazon.com/dp/${noImage}`)).status, 400);
+    assert.equal((await saveManualAmazonCatalogImage(supabase, noImage, 'https://m.media-amazon.com.example/images/I/fake.jpg')).status, 400);
+    assert.equal((await saveManualAmazonCatalogImage(supabase, 'B444444444', image)).status, 404);
+    assert.deepEqual(await saveManualAmazonCatalogImage(supabase, noImage.toLowerCase(), image), { status: 200, asin: noImage });
+    assert.equal((await saveManualAmazonCatalogImage(supabase, noImage, secondImage)).status, 409);
+    assert.equal(rows[0].image_url, image);
+    assert.equal(rows[0].default_max_price, 22);
+    assert.equal(rows[0].credit_cost, 5);
+    assert.deepEqual(writes, ['02', '03', '04', '01']);
 }
 
 async function testRouteAndButton() {
@@ -168,22 +249,26 @@ async function testRouteAndButton() {
     const [auth, admin, route] = routes.get(`post ${routePath}`);
     assert.equal(auth, identity);
     assert.equal(admin, identity);
-    async function request(role, body = {}) {
+    async function request(role, body = {}, handler = route) {
         const res = { code: 200, status(code) { this.code = code; return this; }, json(data) { this.data = data; } };
-        await route({ role, body }, res);
+        await handler({ role, body }, res);
         return res;
     }
     assert.equal((await request('admin')).code, 403);
     assert.equal((await request('super_admin', { after_id: '01,or()' })).code, 400);
     assert.equal((await request('super_admin')).data.done, true);
+    const manualRoute = routes.get('post /admin/catalog-products/save-amazon-image').at(-1);
+    assert.equal((await request('admin', { asin: poster, image_url: image }, manualRoute)).code, 403);
+    assert.equal((await request('super_admin', { asin: poster, image_url: image }, manualRoute)).code, 409);
 
     const script = fs.readFileSync(path.join(__dirname, '../../frontend/script.js'), 'utf8');
     const html = fs.readFileSync(path.join(__dirname, '../../frontend/admin.html'), 'utf8');
     const start = script.indexOf('    if (fillAmazonCatalogImagesButton && superAdmin) {');
-    const end = script.indexOf('    if (bulkImportForm && superAdmin) {', start);
+    const end = script.indexOf('    if (amazonCatalogManualImageForm && superAdmin) {', start);
     assert.ok(start > 0 && end > start);
     assert.match(html, /id="fillAmazonCatalogImagesButton">Fill Missing Amazon Images/);
-    assert.match(html, /script\.js\?v=.*-amazon-images/);
+    assert.match(html, /id="saveAmazonCatalogImageButton">Save Image Only/);
+    assert.match(html, /script\.js\?v=.*-amazon-images-503/);
     const button = { addEventListener(event, handler) { assert.equal(event, 'click'); this.click = handler; } };
     const status = {};
     const failures = {};
@@ -192,20 +277,22 @@ async function testRouteAndButton() {
     vm.runInNewContext(script.slice(start, end), {
         superAdmin: true, fillAmazonCatalogImagesButton: button,
         amazonCatalogImageStatus: status, amazonCatalogImageFailures: failures, amazonCatalogImageFailureList: list,
-        document: { createElement: () => ({}) }, API: '',
+        amazonCatalogSavedImagesOnly: { checked: false },
+        document: { createElement: () => ({ dataset: {} }) }, API: '',
         authJSON: async (url, { method, body }) => {
             assert.equal(url, routePath);
             assert.equal(method, 'POST');
             assert.equal(button.disabled, true);
             queries.push(JSON.parse(body));
             return queries.length === 1
-                ? { checked: 3, updated: 3, done: false, next_after_id: '03' }
+                ? { checked: 3, updated: 3, done: false, next_after_id: '03', paused: 'HTTP 503', saved_only: true }
                 : { checked: 2, updated: 1, done: true, failed: [{ asin: cat, reason: 'No matching product image found' }] };
         }
     });
     await button.click();
-    assert.deepEqual(queries, [{ after_id: '' }, { after_id: '03' }]);
+    assert.deepEqual(queries, [{ after_id: '', saved_only: false }, { after_id: '03', saved_only: true }]);
     assert.match(status.textContent, /4 images added\. 5 products checked/);
+    assert.match(status.textContent, /rest of the scan used saved images only/);
     assert.equal(failures.hidden, false);
     assert.match(list.children[0].textContent, new RegExp(cat));
     assert.equal(button.disabled, false);
@@ -214,6 +301,7 @@ async function testRouteAndButton() {
 (async () => {
     await testLookup();
     await testBatch();
+    await testSavedFallbackAndManualImage();
     await testRouteAndButton();
     console.log('Amazon image-only lookup, batch safety, permissions, and button tests passed.');
 })().catch((error) => {

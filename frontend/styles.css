@@ -237,6 +237,13 @@ h1,h2,h3,h4,p{margin:0}
 .amazon-catalog-product-preview code{font-size:.78rem;color:#1d4ed8}
 .amazon-catalog-product-preview strong{font-size:.82rem;line-height:1.25}
 .amazon-catalog-product-preview em{font-style:normal;font-weight:800;text-align:right;color:#166534}
+.target-image-matches{display:grid;gap:8px;max-height:520px;overflow:auto;margin:12px 0;padding:4px}
+.target-image-matches[hidden]{display:none}
+.target-image-match{display:grid;grid-template-columns:auto minmax(0,1fr) minmax(0,1fr);gap:12px;align-items:start;padding:12px;border:1px solid var(--line);border-radius:12px;background:#fff;cursor:pointer}
+.target-image-match input{margin-top:4px}
+.target-image-match__product{display:flex;gap:10px;align-items:flex-start;overflow-wrap:anywhere}
+.target-image-match__product img{width:64px;height:64px;object-fit:contain;border:1px solid var(--line);border-radius:8px;background:#fff}
+@media(max-width:680px){.target-image-match{grid-template-columns:auto minmax(0,1fr)}.target-image-match__product--target{grid-column:2}}
 @media(max-width:720px){.amazon-catalog-product-preview>div{grid-template-columns:30px 1fr 72px}.amazon-catalog-product-preview strong{grid-column:2/4}.amazon-catalog-product-preview code{grid-column:2}.amazon-catalog-product-preview em{grid-column:3;grid-row:1}}
 .stack-item{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;padding:14px;border:1px solid var(--line);border-radius:16px;background:#fff}
 .stack-item-meta{display:grid;gap:6px}

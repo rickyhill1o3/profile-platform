@@ -5,7 +5,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Admin Panel</title>
-  <link rel="stylesheet" href="styles.css?v=20261124-amazon-catalog-sync" />
+  <link rel="stylesheet" href="styles.css?v=20261124-amazon-catalog-sync-target-image-matches" />
 </head>
 
 <body class="app-page">
@@ -276,14 +276,42 @@ placeholder="Enter one SKU per line&#10;12345678&#10;87654321"></textarea>
 
               <div class="banner banner-soft">
                 <strong>Amazon product images</strong>
-                <p class="subtle-text">Fill blank images on active Amazon products by ASIN. Existing images, prices, credit costs, and user selections stay unchanged.</p>
+                <p class="subtle-text">Fill blank images by ASIN using saved images or Amazon's product pages. If Amazon is unavailable, the scan continues with saved images. Prices, credit costs, and selections stay unchanged.</p>
                 <div class="panel-actions">
                   <button class="btn" type="button" id="fillAmazonCatalogImagesButton">Fill Missing Amazon Images</button>
+                  <label class="checkbox-inline"><input type="checkbox" id="amazonCatalogSavedImagesOnly" /><span>Use saved images only</span></label>
                 </div>
                 <div class="subtle-text" id="amazonCatalogImageStatus" role="status"></div>
                 <details id="amazonCatalogImageFailures" hidden>
                   <summary>ASINs that still need an image</summary>
                   <ul id="amazonCatalogImageFailureList"></ul>
+                </details>
+                <form id="amazonCatalogManualImageForm" class="form-grid">
+                  <div class="field"><label for="amazonCatalogImageAsin">Amazon ASIN</label>
+                    <input class="input" id="amazonCatalogImageAsin" required maxlength="10" placeholder="B0ABC12345" />
+                  </div>
+                  <div class="field"><label for="amazonCatalogImageUrl">Direct Amazon image URL</label>
+                    <input class="input" id="amazonCatalogImageUrl" type="url" required placeholder="https://m.media-amazon.com/images/I/..." />
+                  </div>
+                  <div class="field field--full panel-actions">
+                    <button class="btn" type="submit" id="saveAmazonCatalogImageButton">Save Image Only</button>
+                    <span class="subtle-text" id="saveAmazonCatalogImageStatus" role="status"></span>
+                  </div>
+                </form>
+              </div>
+
+              <div class="banner banner-soft">
+                <strong>Copy matching Target images to Amazon</strong>
+                <p class="subtle-text">Compare products that are missing an Amazon photo against saved Target photos. Check each match you want to copy. This never changes prices, credits, selections, or existing photos.</p>
+                <div class="panel-actions">
+                  <button class="btn" type="button" id="previewTargetImageMatchesButton">Preview Target Image Matches</button>
+                  <button class="btn btn-primary" type="button" id="applyTargetImageMatchesButton" disabled>Copy Selected Images</button>
+                </div>
+                <p class="subtle-text" id="targetImageMatchesStatus" role="status"></p>
+                <div id="targetImageMatchesList" class="target-image-matches" hidden></div>
+                <details id="targetImageMatchesUnmatched" hidden>
+                  <summary>Amazon products without a clear match</summary>
+                  <ul id="targetImageMatchesUnmatchedList"></ul>
                 </details>
               </div>
 
@@ -1309,7 +1337,7 @@ placeholder="Enter one SKU per line&#10;12345678&#10;87654321"></textarea>
     </div>
   </div>
   <script src="profile-sync-state.js?v=20260918-profile-sync-display"></script>
-  <script src="script.js?v=20261124-astral-checkout-counts-amazon-images"></script>
+  <script src="script.js?v=20261124-astral-checkout-counts-amazon-images-503-target-matches"></script>
   <script src="products.js?v=20260930-pokemon-sku-groups"></script>
 
 

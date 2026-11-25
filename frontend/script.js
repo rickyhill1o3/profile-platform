@@ -3728,6 +3728,99 @@ async function loadCatalogProducts() {
     }
 }
 
+function initTargetImageMatches() {
+    const preview = document.getElementById('previewTargetImageMatchesButton');
+    const apply = document.getElementById('applyTargetImageMatchesButton');
+    const list = document.getElementById('targetImageMatchesList');
+    const status = document.getElementById('targetImageMatchesStatus');
+    const unmatched = document.getElementById('targetImageMatchesUnmatched');
+    const unmatchedList = document.getElementById('targetImageMatchesUnmatchedList');
+    if (!preview || !apply || !list || !status || !unmatched || !unmatchedList) return;
+
+    const methodLabel = { upc: 'Matching product code', title: 'Matching title', similar_title: 'Similar title — check the version' };
+    const picked = () => [...list.querySelectorAll('input[type="checkbox"]:checked')];
+    const refreshButton = () => {
+        const count = picked().length;
+        apply.disabled = preview.disabled || !count;
+        apply.textContent = count ? `Copy Selected Images (${count})` : 'Copy Selected Images';
+    };
+    list.addEventListener('change', refreshButton);
+
+    preview.addEventListener('click', async () => {
+        preview.disabled = true;
+        list.hidden = true;
+        list.replaceChildren();
+        unmatched.hidden = true;
+        unmatchedList.replaceChildren();
+        refreshButton();
+        status.textContent = 'Comparing saved catalog products…';
+        try {
+            const data = await authJSON(API + '/admin/catalog-products/amazon-target-image-matches', { cache: 'no-store' });
+            const matches = Array.isArray(data.matches) ? data.matches : [];
+            const noMatch = Array.isArray(data.unmatched) ? data.unmatched : [];
+            list.innerHTML = matches.map(({ amazon, target, method, match_token: token }) => `
+                <label class="target-image-match">
+                    <input type="checkbox" data-amazon-id="${escapeHTML(amazon.id)}" value="${escapeHTML(token)}"
+                        aria-label="Copy Target photo to ${escapeHTML(amazon.name || amazon.asin)}">
+                    <span class="target-image-match__product"><span>
+                        <small>Amazon · ${escapeHTML(amazon.asin)}</small><br><strong>${escapeHTML(amazon.name || amazon.asin)}</strong>
+                    </span></span>
+                    <span class="target-image-match__product target-image-match__product--target">
+                        <img src="${escapeHTML(target.image_url)}" alt="Target product photo" loading="lazy" referrerpolicy="no-referrer">
+                        <span><small>Target · ${escapeHTML(target.sku)}</small><br><strong>${escapeHTML(target.name || target.sku)}</strong>
+                        <br><small>${escapeHTML(methodLabel[method] || 'Review match')}</small></span>
+                    </span>
+                </label>`).join('');
+            list.hidden = matches.length === 0;
+            unmatchedList.innerHTML = noMatch.map((item) => `<li>${escapeHTML(item.asin)} · ${escapeHTML(item.name)} — ${item.reason === 'multiple_matches' ? 'Multiple possible matches' : 'No clear match'}</li>`).join('');
+            unmatched.hidden = noMatch.length === 0;
+            status.textContent = matches.length
+                ? `${matches.length} suggested matches. Review and check the images to copy. ${noMatch.length} without a clear match.`
+                : noMatch.length ? `No clear Target matches for ${noMatch.length} Amazon products. No images changed.`
+                    : 'No active Amazon products with missing images were found.';
+        } catch (err) {
+            status.textContent = err.message;
+        } finally {
+            preview.disabled = false;
+            refreshButton();
+        }
+    });
+
+    apply.addEventListener('click', async () => {
+        const selected = picked();
+        if (!selected.length || preview.disabled) return;
+        preview.disabled = true;
+        const inputs = [...list.querySelectorAll('input[type="checkbox"]')];
+        for (const input of inputs) input.disabled = true;
+        refreshButton();
+        let updated = 0;
+        let skipped = 0;
+        let failed = 0;
+        const byId = new Map(selected.map((input) => [input.dataset.amazonId, input]));
+        try {
+            for (let i = 0; i < selected.length; i += 50) {
+                status.textContent = `Copying selected images… ${updated} saved so far.`;
+                const batch = selected.slice(i, i + 50).map((input) => ({ amazon_id: input.dataset.amazonId, match_token: input.value }));
+                const data = await authJSON(API + '/admin/catalog-products/apply-amazon-target-images', {
+                    method: 'POST', body: JSON.stringify({ matches: batch })
+                });
+                updated += data.updated.length;
+                skipped += data.skipped.length;
+                failed += data.failed.length;
+                for (const id of [...data.updated, ...data.skipped]) byId.get(id)?.closest('.target-image-match')?.remove();
+            }
+            status.textContent = `${updated} images copied. ${skipped ? `${skipped} skipped because an image or match changed. Preview again to review. ` : ''}${failed ? `${failed} could not be saved. Try again. ` : ''}Prices and selections were not changed.`;
+        } catch (err) {
+            status.textContent = `${updated} images copied before the request stopped: ${err.message} Preview again to check what remains.`;
+        } finally {
+            for (const input of inputs) input.disabled = false;
+            list.hidden = !list.querySelector('input[type="checkbox"]');
+            preview.disabled = false;
+            refreshButton();
+        }
+    });
+}
+
 async function initCatalogTools() {
     const form = document.getElementById('adminSkuUpsertForm');
     const manualForm = document.getElementById('adminManualProductForm');
@@ -3753,6 +3846,12 @@ async function initCatalogTools() {
     const amazonCatalogImageStatus = document.getElementById('amazonCatalogImageStatus');
     const amazonCatalogImageFailures = document.getElementById('amazonCatalogImageFailures');
     const amazonCatalogImageFailureList = document.getElementById('amazonCatalogImageFailureList');
+    const amazonCatalogSavedImagesOnly = document.getElementById('amazonCatalogSavedImagesOnly');
+    const amazonCatalogManualImageForm = document.getElementById('amazonCatalogManualImageForm');
+    const amazonCatalogImageAsin = document.getElementById('amazonCatalogImageAsin');
+    const amazonCatalogImageUrl = document.getElementById('amazonCatalogImageUrl');
+    const saveAmazonCatalogImageButton = document.getElementById('saveAmazonCatalogImageButton');
+    const saveAmazonCatalogImageStatus = document.getElementById('saveAmazonCatalogImageStatus');
     const exportForm = document.getElementById('catalogExportForm');
     const exportResults = document.getElementById('catalogExportResults');
     const superAdmin = canManageCatalog();
@@ -3760,6 +3859,7 @@ async function initCatalogTools() {
     let amazonCatalogPreviewCount = 0;
     if (controls) controls.style.display = superAdmin ? 'block' : 'none';
     if (notice) notice.style.display = superAdmin ? 'none' : 'block';
+    if (superAdmin) initTargetImageMatches();
     if (form && superAdmin) {
         form.addEventListener('submit', async (event) => {
             event.preventDefault();
@@ -3934,6 +4034,8 @@ async function initCatalogTools() {
     if (fillAmazonCatalogImagesButton && superAdmin) {
         fillAmazonCatalogImagesButton.addEventListener('click', async () => {
             let afterId = '';
+            let savedOnly = !!amazonCatalogSavedImagesOnly.checked;
+            let pausedMessage = '';
             let checked = 0;
             let updated = 0;
             let skipped = 0;
@@ -3947,19 +4049,19 @@ async function initCatalogTools() {
                 while (true) {
                     const batch = await authJSON(API + '/admin/catalog-products/fill-amazon-images', {
                         method: 'POST',
-                        body: JSON.stringify({ after_id: afterId })
+                        body: JSON.stringify({ after_id: afterId, saved_only: savedOnly })
                     });
                     checked += Number(batch.checked || 0);
                     updated += Number(batch.updated || 0);
                     skipped += Number(batch.skipped || 0);
                     if (Array.isArray(batch.failed)) failures.push(...batch.failed);
                     if (batch.paused) {
-                        amazonCatalogImageStatus.textContent = `${batch.paused} ${summary()}`;
-                        break;
+                        pausedMessage = batch.paused;
+                        savedOnly = true;
                     }
                     if (batch.done) {
                         amazonCatalogImageStatus.textContent = checked
-                            ? `Finished. ${summary()}`
+                            ? `Finished. ${summary()}${pausedMessage ? ` ${pausedMessage} The rest of the scan used saved images only.` : ''}`
                             : 'No missing images found on active Amazon products.';
                         break;
                     }
@@ -3967,18 +4069,43 @@ async function initCatalogTools() {
                         throw new Error('The scan could not advance to the next product.');
                     }
                     afterId = batch.next_after_id;
-                    amazonCatalogImageStatus.textContent = `Checking Amazon images… ${summary()}`;
+                    amazonCatalogImageStatus.textContent = `${pausedMessage ? `${pausedMessage} Checking saved images…` : 'Checking Amazon images…'} ${summary()}`;
                 }
             } catch (err) {
                 amazonCatalogImageStatus.textContent = `Scan stopped: ${err.message} ${summary()} Click again to check the remaining products.`;
             } finally {
                 for (const { asin, reason } of failures) {
                     const item = document.createElement('li');
+                    item.dataset.asin = asin;
                     item.textContent = `${asin}: ${reason}`;
                     amazonCatalogImageFailureList.appendChild(item);
                 }
                 amazonCatalogImageFailures.hidden = failures.length === 0;
                 fillAmazonCatalogImagesButton.disabled = false;
+            }
+        });
+    }
+
+    if (amazonCatalogManualImageForm && superAdmin) {
+        amazonCatalogManualImageForm.addEventListener('submit', async (event) => {
+            event.preventDefault();
+            saveAmazonCatalogImageButton.disabled = true;
+            saveAmazonCatalogImageStatus.textContent = 'Saving image…';
+            try {
+                const data = await authJSON(API + '/admin/catalog-products/save-amazon-image', {
+                    method: 'POST',
+                    body: JSON.stringify({ asin: amazonCatalogImageAsin.value, image_url: amazonCatalogImageUrl.value })
+                });
+                saveAmazonCatalogImageStatus.textContent = data.message;
+                amazonCatalogImageUrl.value = '';
+                for (const item of [...amazonCatalogImageFailureList.children]) {
+                    if (item.dataset.asin === data.asin) item.remove();
+                }
+                amazonCatalogImageFailures.hidden = !amazonCatalogImageFailureList.children.length;
+            } catch (err) {
+                saveAmazonCatalogImageStatus.textContent = err.message;
+            } finally {
+                saveAmazonCatalogImageButton.disabled = false;
             }
         });
     }

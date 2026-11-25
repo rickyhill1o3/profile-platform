@@ -66,7 +66,8 @@ const {
     requestTargetCatalogPriority
 } = require('./runtime-workload');
 const { parseAmazonCatalogPaste } = require('./amazon-catalog-paste');
-const { fillAmazonCatalogImageBatch } = require('./amazon-catalog-images');
+const { fillAmazonCatalogImageBatch, saveManualAmazonCatalogImage } = require('./amazon-catalog-images');
+const { loadTargetImageMatches, parseTargetImageSelections, applyTargetImageMatches } = require('./catalog-target-image-matches');
 
 const SUPPORTED_SITES = new Set(["amazon", "target", "walmart", "samsclub", "crunchyroll", "general", "supreme", "pokemon"]);
 const REQUESTABLE_SITES = new Set(["amazon", "target", "walmart", "samsclub", "crunchyroll", "general", "supreme", "pokemon"]);
@@ -1787,8 +1788,41 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
             if (afterId && !/^[a-zA-Z0-9_-]{1,80}$/.test(afterId)) {
                 return res.status(400).json({ error: 'Invalid Amazon image refresh position.' });
             }
-            const result = await fillAmazonCatalogImageBatch(supabase, afterId);
+            const result = await fillAmazonCatalogImageBatch(supabase, afterId, undefined, req.body?.saved_only === true);
             res.json({ success: true, ...result });
+        } catch (err) {
+            res.status(500).json({ error: String(err?.message || err) });
+        }
+    });
+
+    app.post('/admin/catalog-products/save-amazon-image', auth, admin, async (req, res) => {
+        if (!requireSuperAdmin(req, res)) return;
+        try {
+            const result = await saveManualAmazonCatalogImage(supabase, req.body?.asin, req.body?.image_url);
+            if (result.error) return res.status(result.status).json({ error: result.error });
+            res.json({ success: true, asin: result.asin, message: `Image saved for ${result.asin}. Pricing was not changed.` });
+        } catch (err) {
+            res.status(500).json({ error: String(err?.message || err) });
+        }
+    });
+
+    app.get('/admin/catalog-products/amazon-target-image-matches', auth, admin, async (req, res) => {
+        if (!requireSuperAdmin(req, res)) return;
+        try {
+            const { matches, unmatched } = await loadTargetImageMatches(supabase);
+            res.set('Cache-Control', 'no-store');
+            res.json({ matches, unmatched });
+        } catch (err) {
+            res.status(500).json({ error: String(err?.message || err) });
+        }
+    });
+
+    app.post('/admin/catalog-products/apply-amazon-target-images', auth, admin, async (req, res) => {
+        if (!requireSuperAdmin(req, res)) return;
+        const selections = parseTargetImageSelections(req.body?.matches);
+        if (!selections) return res.status(400).json({ error: 'Select between 1 and 50 matches from the preview.' });
+        try {
+            res.json(await applyTargetImageMatches(supabase, selections));
         } catch (err) {
             res.status(500).json({ error: String(err?.message || err) });
         }
