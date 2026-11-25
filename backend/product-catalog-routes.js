@@ -66,6 +66,7 @@ const {
     requestTargetCatalogPriority
 } = require('./runtime-workload');
 const { parseAmazonCatalogPaste } = require('./amazon-catalog-paste');
+const { fillAmazonCatalogImageBatch } = require('./amazon-catalog-images');
 
 const SUPPORTED_SITES = new Set(["amazon", "target", "walmart", "samsclub", "crunchyroll", "general", "supreme", "pokemon"]);
 const REQUESTABLE_SITES = new Set(["amazon", "target", "walmart", "samsclub", "crunchyroll", "general", "supreme", "pokemon"]);
@@ -1776,6 +1777,20 @@ module.exports = function registerProductCatalogRoutes({ app, supabase, auth, ad
             res.json({ success: true, imported: items.length, items, message: `Imported ${items.length} ${site} products.` });
         } catch (err) {
             res.status(400).json({ error: err.message });
+        }
+    });
+
+    app.post('/admin/catalog-products/fill-amazon-images', auth, admin, async (req, res) => {
+        if (!requireSuperAdmin(req, res)) return;
+        try {
+            const afterId = String(req.body?.after_id ?? '').trim();
+            if (afterId && !/^[a-zA-Z0-9_-]{1,80}$/.test(afterId)) {
+                return res.status(400).json({ error: 'Invalid Amazon image refresh position.' });
+            }
+            const result = await fillAmazonCatalogImageBatch(supabase, afterId);
+            res.json({ success: true, ...result });
+        } catch (err) {
+            res.status(500).json({ error: String(err?.message || err) });
         }
     });
 

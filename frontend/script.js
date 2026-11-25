@@ -3749,6 +3749,10 @@ async function initCatalogTools() {
     const amazonCatalogReplaceButton = document.getElementById('amazonCatalogReplaceButton');
     const amazonCatalogReplaceStatus = document.getElementById('amazonCatalogReplaceStatus');
     const amazonCatalogReplacePreview = document.getElementById('amazonCatalogReplacePreview');
+    const fillAmazonCatalogImagesButton = document.getElementById('fillAmazonCatalogImagesButton');
+    const amazonCatalogImageStatus = document.getElementById('amazonCatalogImageStatus');
+    const amazonCatalogImageFailures = document.getElementById('amazonCatalogImageFailures');
+    const amazonCatalogImageFailureList = document.getElementById('amazonCatalogImageFailureList');
     const exportForm = document.getElementById('catalogExportForm');
     const exportResults = document.getElementById('catalogExportResults');
     const superAdmin = canManageCatalog();
@@ -3923,6 +3927,58 @@ async function initCatalogTools() {
             } finally {
                 targetCatalogRescanAllButton.disabled = false;
                 targetCatalogRescanAllButton.textContent = 'Rescan all Target catalog products';
+            }
+        });
+    }
+
+    if (fillAmazonCatalogImagesButton && superAdmin) {
+        fillAmazonCatalogImagesButton.addEventListener('click', async () => {
+            let afterId = '';
+            let checked = 0;
+            let updated = 0;
+            let skipped = 0;
+            const failures = [];
+            fillAmazonCatalogImagesButton.disabled = true;
+            amazonCatalogImageFailures.hidden = true;
+            amazonCatalogImageFailureList.replaceChildren();
+            amazonCatalogImageStatus.textContent = 'Looking up missing images. Keep this tab open until it finishes.';
+            const summary = () => `${updated} images added. ${checked} products checked.${skipped ? ` ${skipped} skipped.` : ''}${failures.length ? ` ${failures.length} could not be filled.` : ''}`;
+            try {
+                while (true) {
+                    const batch = await authJSON(API + '/admin/catalog-products/fill-amazon-images', {
+                        method: 'POST',
+                        body: JSON.stringify({ after_id: afterId })
+                    });
+                    checked += Number(batch.checked || 0);
+                    updated += Number(batch.updated || 0);
+                    skipped += Number(batch.skipped || 0);
+                    if (Array.isArray(batch.failed)) failures.push(...batch.failed);
+                    if (batch.paused) {
+                        amazonCatalogImageStatus.textContent = `${batch.paused} ${summary()}`;
+                        break;
+                    }
+                    if (batch.done) {
+                        amazonCatalogImageStatus.textContent = checked
+                            ? `Finished. ${summary()}`
+                            : 'No missing images found on active Amazon products.';
+                        break;
+                    }
+                    if (!batch.next_after_id || batch.next_after_id === afterId) {
+                        throw new Error('The scan could not advance to the next product.');
+                    }
+                    afterId = batch.next_after_id;
+                    amazonCatalogImageStatus.textContent = `Checking Amazon images… ${summary()}`;
+                }
+            } catch (err) {
+                amazonCatalogImageStatus.textContent = `Scan stopped: ${err.message} ${summary()} Click again to check the remaining products.`;
+            } finally {
+                for (const { asin, reason } of failures) {
+                    const item = document.createElement('li');
+                    item.textContent = `${asin}: ${reason}`;
+                    amazonCatalogImageFailureList.appendChild(item);
+                }
+                amazonCatalogImageFailures.hidden = failures.length === 0;
+                fillAmazonCatalogImagesButton.disabled = false;
             }
         });
     }

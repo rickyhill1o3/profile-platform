@@ -274,6 +274,19 @@ placeholder="Enter one SKU per line&#10;12345678&#10;87654321"></textarea>
                 <div class="field field--full amazon-catalog-replace-preview" id="amazonCatalogReplacePreview" hidden></div>
               </form>
 
+              <div class="banner banner-soft">
+                <strong>Amazon product images</strong>
+                <p class="subtle-text">Fill blank images on active Amazon products by ASIN. Existing images, prices, credit costs, and user selections stay unchanged.</p>
+                <div class="panel-actions">
+                  <button class="btn" type="button" id="fillAmazonCatalogImagesButton">Fill Missing Amazon Images</button>
+                </div>
+                <div class="subtle-text" id="amazonCatalogImageStatus" role="status"></div>
+                <details id="amazonCatalogImageFailures" hidden>
+                  <summary>ASINs that still need an image</summary>
+                  <ul id="amazonCatalogImageFailureList"></ul>
+                </details>
+              </div>
+
               <div class="banner banner-soft"><strong>Bulk import lists</strong>
                 <p class="subtle-text">Import Amazon or Target JSON exports into the live catalog. Target items will try to pull live retail price before saving.</p>
               </div>
@@ -1296,7 +1309,7 @@ placeholder="Enter one SKU per line&#10;12345678&#10;87654321"></textarea>
     </div>
   </div>
   <script src="profile-sync-state.js?v=20260918-profile-sync-display"></script>
-  <script src="script.js?v=20261124-astral-checkout-counts"></script>
+  <script src="script.js?v=20261124-astral-checkout-counts-amazon-images"></script>
   <script src="products.js?v=20260930-pokemon-sku-groups"></script>
 
 
